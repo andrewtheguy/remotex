@@ -3042,6 +3042,11 @@ async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &
     };
     if first {
         info!("vnc: the picture is now the Mac's HEVC media stream, passed to the browser");
+        // A passed unit never reaches the shadow, so it goes on holding the screen
+        // from before the stream. Forgotten, the ZRLE after the stream is all new
+        // and switches the browser back to video encoded here, even where the
+        // screen has returned to exactly those pixels.
+        shared.shadow.lock().unwrap().forget();
         // As in `show_picture`: the Mac would otherwise go on pushing ZRLE.
         send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
     }
@@ -9409,6 +9414,45 @@ mod tests {
         let held = shadow.lock().unwrap().copy_out(Rect::from_size(0, 0, 2, 2).unwrap());
         let first: Vec<u8> = bgrx.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
         assert_eq!(held, Some(first), "five encodings of one picture, one picture");
+    }
+
+    /// A passed HEVC stream never reaches the shadow, so the screen from before it
+    /// must not suppress the ZRLE after it: a Mac back on exactly those pixels still
+    /// has to take the picture back from the stream, or the browser keeps showing
+    /// the stream's last unit.
+    #[tokio::test]
+    async fn the_screen_after_a_passed_stream_takes_the_picture_back_unchanged() {
+        let bgrx = [0x30, 0x20, 0x10, 0].repeat(4);
+        let rgb = [0x10, 0x20, 0x30].repeat(4);
+        let (uplink, _sent) = test_uplink();
+        let (sink, _rx) = sized_sink((2, 2)).await;
+        let shadow = test_shadow((2, 2));
+        let desktop = shared_desktop((2, 2), None, None);
+        let shared = test_shared(uplink, Arc::clone(&desktop), Arc::clone(&shadow));
+        // What the browser was sent before the stream.
+        shadow.lock().unwrap().accept(Rect::from_size(0, 0, 2, 2).unwrap(), &rgb);
+
+        let addr = "127.0.0.1:5900".parse().unwrap();
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true).0));
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
+        pass_unit(&shared, unit, &sink, &media).await.unwrap();
+        assert!(sink.passing());
+
+        // The stream stops, and the Mac repaints the screen it had before it.
+        desktop.lock().unwrap().media_live = false;
+        let mut raw = geometry(0, 0, 2, 2, ENCODING_RAW);
+        raw.extend_from_slice(&bgrx);
+        let err = read_loop(
+            std::io::Cursor::new(update(&[raw])),
+            shared,
+            ReadFlags { clipboard: false, poll: false },
+            None,
+            sink.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
+        assert!(!sink.passing(), "the Mac's rectangles carry the picture again");
     }
 
     /// CopyRect saves the VNC link its pixels: the source is read back out of the
