@@ -279,3 +279,14 @@ strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# A gateway for QA, `cargo build --profile qa` into `target/qa`: optimised as
+# release is, which a High Performance session needs to keep up with the Mac,
+# without the link-time optimisation and single codegen unit that only the shipped
+# binary is worth waiting for, and rebuilt incrementally.
+[profile.qa]
+inherits = "release"
+strip = false
+lto = false
+codegen-units = 16
+incremental = true

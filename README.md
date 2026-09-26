@@ -411,3 +411,8 @@ bash packaging/build-native-packages.sh
 Local Cargo builds automatically rebuild the frontend when its sources change,
 and the binary carries it. The native package builder consumes the tarball so
 every artifact contains the same gateway binary.
+
+A gateway for QA is built with `cargo build --profile qa` into `target/qa`:
+optimised as a release build is, without its link-time optimisation, so a
+change rebuilds in seconds rather than minutes. Artifacts are always built
+`--release`.
