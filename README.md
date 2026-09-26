@@ -189,7 +189,9 @@ after the first layout the gateway offers the Mac's media stream, and the Mac
 then sends the screen as HEVC 4:4:4 and its sound as AAC-ELD, over UDP with
 SRTP, to the gateway's ports 5900 and 5901. The gateway authenticates and
 decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
-target uses; ZRLE carries the picture only until the stream does, and a stream
+target uses — or, with `hevc_passthrough = true` and a browser that decodes it
+(Chrome and Safari; not Firefox), sends the HEVC on as the Mac sent it, for a LAN;
+ZRLE carries the picture only until the stream does, and a stream
 that fails ends the session, as it does in Apple's viewer. A playing
 video does not delay the Mac's reading of the input, as RFB pixels' deflate does. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound, and

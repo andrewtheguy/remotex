@@ -129,56 +129,29 @@ frame at, which its desktop clients want for their own throughput readout too. I
 is one change to the wire, to be made with the desktop clients' throughput support
 rather than ahead of it.
 
-### Apple's HEVC, passed through on a LAN
+### The rate of Apple's passed HEVC
 
-`ard-high-performance` decodes the Mac's HEVC here, on FFmpeg's decoder and a
-conversion to RGB, and encodes every picture again as VP9. The plan is an opt-in
-key on the target that passes the stream through to a browser that decodes it, for
-a LAN of 100 Mbit/s or more. High Performance is a LAN mode in the Mac's own terms:
-its rate control works between 20 and 60 Mbit/s and cannot go below
-([Rate control](apple-vnc-889.md#rate-control)), so a passed stream is not made to
-serve a slow link. Without the key, and for every browser that cannot take the
-stream, the session stays as it is.
+A passed High Performance stream
+([Apple's HEVC, passed through](architecture.md#apples-hevc-passed-through)) is
+offered what a decoded one is: every bitrate entry capped at 12 Mbit/s, on a
+virtual display refreshed 30 times a second. That cap sits below the 20 Mbit/s
+floor of the Mac's rate control ([Rate control](apple-vnc-889.md#rate-control)),
+so the offer is the only thing that bounds the stream, and nothing adapts it.
 
-- **Which browsers take it.** A capture of macwork's stream (`hev1.4.10.L150.BE.8`:
-  Range Extensions 4:4:4, 8-bit, full-range BT.709, 1600×1000, Annex B) was decoded
-  picture for picture by WebCodecs' `VideoDecoder` in current Chrome and Safari,
-  desktop and mobile. Firefox decoded none of it. Chrome on macOS takes it in
-  hardware only: `isConfigSupported` refuses it under `prefer-software`.
-- **The key opts in; the browser selects.** With the key set, the page states on
-  the session socket whether its decoder takes that configuration, beside the chroma
-  it already states. A browser that says no is sent VP9 as today, and no session is
-  refused for the answer. The choice is fixed for an engine, and a takeover by a
-  browser that answers otherwise rebuilds it, as a chroma change does.
-- **The offer.** A passed session offers what Apple's viewer offers, up to
-  100 Mbit/s, which the Mac caps at 60, in place of the 12 Mbit/s that bounds the
-  decode and re-encode here. With no rate reports the Mac's controller is expected
-  to hold at its 20 Mbit/s floor, as it does when no report arrives, which a LAN
-  carries; `RCTL` reports with a low delay would take it to about 58 Mbit/s, as
-  Apple's viewer does. Neither has been measured with the raised cap. With no
-  decode here, the display's refresh can be 60 Hz rather than 30.
-- **What passes.** The depacketized access units, behind a `VideoFormat` naming the
-  stream's configuration and colour space. A lost picture is already a PLI that the
-  Mac answers with an IDR; with no decoder here, dropping to that IDR moves to the
-  queue towards the browser, and the browser's own decode error has to come back as
-  the same PLI.
-- **The gaps are the Mac's rectangles.** ZRLE carries the picture until the stream
-  is up and across every display change. In a passed session each of those ZRLE
-  rectangles goes to the browser as one PNG tile at the Mac's place and size, as
-  All Displays past the ceiling already does
-  ([tiles past the ceiling](architecture.md#tiles-past-the-ceiling)). The browser
-  then sees HEVC and tiles only, and the session needs neither the HEVC decoder nor
-  the VP9 encoder here. The sound still needs the AAC-ELD decoder, so the key stays
-  behind `apple-hp-media`.
-- **The dial does not reach it.** The target's `video_quality` and the adaptive
-  walk govern only the VP9 path, as with wlshare's stream.
-- **The rules change with it.** AGENTS.md and [The codec](architecture.md#the-codec)
-  say video is VP9 only, with no codec key and no fallback, and limit PNG tiles to a
-  desktop past the ceiling on a target without `resize`. This is a codec key, a
-  second codec with VP9 behind it, and tiles on a target with `resize`. The rules
-  are rewritten together with the code, as narrowly as the work: HEVC for
-  `ard-high-performance`'s media stream alone, passed and never transcoded, opted
-  into per target, with the Mac's own rectangles filling its gaps.
+The plan for a LAN of 100 Mbit/s or more is what Apple's viewer does:
+
+- **The offer.** Apple's entries, up to 100 Mbit/s, which the Mac caps at 60. With
+  no rate reports the Mac's controller is expected to hold at its 20 Mbit/s floor,
+  as it does when no report arrives.
+- **Rate reports.** `RCTL` reports on the picture's leg, with the one-way delay the
+  receiver measures, which take the Mac to about 58 Mbit/s on a clear link and walk
+  it down towards the floor as the delay grows. For a passed stream the delay that
+  matters includes the browser's queue, which the gateway knows from its paint
+  window (`src/feedback.rs`).
+- **60 Hz.** A virtual display refreshed 60 times a second, which a passed stream
+  can carry since nothing here decodes it.
+
+None of it has been measured with the raised cap.
 
 ### Source payloads the gateway decodes instead of forwarding
 

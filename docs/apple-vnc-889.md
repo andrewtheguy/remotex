@@ -572,6 +572,12 @@ delivers and across display changes. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
+Remotex decodes the picture and encodes it as VP9, unless the target sets
+`hevc_passthrough` and the browser decodes the Mac's HEVC: then each access unit
+goes to the browser as it came, described by the stream's own sequence parameter
+set, and ZRLE's rectangles fill the gaps as PNG tiles. A PLI is its repaint. See
+[Apple's HEVC, passed through](architecture.md#apples-hevc-passed-through).
+
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
 no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
 LGPL-2.1-or-later, linked statically) and Fraunhofer's AAC-ELD decoder for the
@@ -682,7 +688,8 @@ other failures (see [Liveness](#the-stream)).
   FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, when
   a stream starts without an IDR (the first packets can arrive before the socket
   is bound), and when the decoder falls eight pictures behind, which it warns
-  about. It sends none of the rate reports described under
+  about; for a passed stream, when the browser's link falls 15 behind and when
+  the browser has to start over. It sends none of the rate reports described under
   [Rate control](#rate-control), because its cap sits below the range they act in.
 - **Liveness.** Every offer owes its answer, its display's first picture and
   the first sound packet within 10 s, and the running stream an authentic
