@@ -677,6 +677,16 @@ other failures (see [Liveness](#the-stream)).
   sends none for as long as it stays still: 75 s without a picture on macvm,
   while the Mac's sender reports went on. The receiver's debug log reports the
   pictures a second every 10 seconds.
+- **Receiving.** The Mac sends each picture as one burst at the link's speed. On
+  macvm at 3200×2000, over 40 s of video with two display changes, a socket with
+  Linux's default 208 KB receive buffer lost 9% of a passed stream's datagrams and
+  56% of a decoded one's, keyframe fragments among them, until a display never had
+  its first picture and the session ended. A receiver on a thread of its own,
+  apart from the RFB connection's, still lost 16–23% and ended the same way, so
+  the burst outruns the buffer however promptly it is read. Remotex asks for 4 MB
+  on the video's socket, and with it granted the same runs lost none, the receiver
+  sharing the engine's thread. Linux grants no more than `net.core.rmem_max`, and
+  the log warns when it grants less.
 - **SRTP.** AES-256 counter mode with an HMAC-SHA1-80 tag, keyed by RFC 3711 from
   the 46-byte masters in the offer. Received packets use the server-to-viewer
   key; this side's SRTCP uses viewer-to-server. The Mac's own reports are SRTCP

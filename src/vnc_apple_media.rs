@@ -1759,6 +1759,14 @@ const PLI_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 #[cfg(feature = "apple-hp-media")]
 const RATE_REPORT: u32 = 10;
 
+/// The receive buffer the screen video's socket asks for. The Mac sends a picture
+/// as one burst at the link's speed, and on a 3200×2000 display a burst overflowed
+/// Linux's default 208 KB, however promptly it was read: keyframes lost fragments,
+/// and a display never had its first picture. Linux grants at most
+/// `net.core.rmem_max`.
+#[cfg(feature = "apple-hp-media")]
+const VIDEO_RECEIVE_BUFFER: usize = 4 << 20;
+
 /// How long the Mac may name its ports without a packet arriving before the log
 /// says so, naming the port. A firewall or NAT between it and this gateway's UDP
 /// ports is what that looks like, and the session ends at [`STREAM_START`].
@@ -1798,7 +1806,7 @@ impl Receiver {
     /// binds them too: address and port reuse let both, and each socket being
     /// connected is what has the kernel hand each gateway its own Mac's packets.
     fn bind(media: &MediaStream, (audio_port, video_port): (u16, u16)) -> anyhow::Result<Self> {
-        let bind = |port: u16| -> anyhow::Result<tokio::net::UdpSocket> {
+        let bind = |port: u16, buffer: Option<usize>| -> anyhow::Result<tokio::net::UdpSocket> {
             let at = std::net::SocketAddr::new(media.local, port);
             let to = std::net::SocketAddr::new(media.peer, port);
             let socket = socket2::Socket::new(
@@ -1809,6 +1817,19 @@ impl Receiver {
             socket.set_reuse_address(true)?;
             #[cfg(unix)]
             socket.set_reuse_port(true)?;
+            if let Some(buffer) = buffer {
+                socket
+                    .set_recv_buffer_size(buffer)
+                    .with_context(|| format!("size UDP {at}'s receive buffer"))?;
+                let granted = socket.recv_buffer_size()?;
+                if granted < buffer {
+                    log::warn!(
+                        "vnc: UDP {port} was given a {granted}-byte receive buffer of the \
+                         {buffer} asked for, so a keyframe of the Mac's screen video can \
+                         overflow it; raise net.core.rmem_max to {buffer} on Linux"
+                    );
+                }
+            }
             socket
                 .bind(&at.into())
                 .with_context(|| format!("bind UDP {at} for the Mac's media stream"))?;
@@ -1817,8 +1838,8 @@ impl Receiver {
             Ok(tokio::net::UdpSocket::from_std(socket.into())?)
         };
         Ok(Self {
-            audio: bind(audio_port)?,
-            video: bind(video_port)?,
+            audio: bind(audio_port, None)?,
+            video: bind(video_port, Some(VIDEO_RECEIVE_BUFFER))?,
             video_port,
             video_srtp: SrtpReceiver::new(&media.offers.video_keys.1),
             audio_srtp: SrtpReceiver::new(&media.offers.audio_keys.1),
