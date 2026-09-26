@@ -176,8 +176,7 @@ with the same authentication error as incorrect credentials. See
 Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
 show one screen or all of them, reports each screen's pixel density, keeps pixels
 at full fidelity, and supports the native Apple pasteboard. Every Apple subtype
-asks the Mac for zlib rectangles from the start (around fifty times fewer bytes
-than raw on a static desktop).
+asks the Mac for ZRLE rectangles from the start.
 
 High Performance (`ard-high-performance`) takes the same credentials and the same
 encrypted protocol revision. It requests one virtual display at the
@@ -190,9 +189,9 @@ after the first layout the gateway offers the Mac's media stream, and the Mac
 then sends the screen as HEVC 4:4:4 and its sound as AAC-ELD, over UDP with
 SRTP, to the gateway's ports 5900 and 5901. The gateway authenticates and
 decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
-target uses; zlib carries the picture only until the stream does, and a stream
+target uses; ZRLE carries the picture only until the stream does, and a stream
 that fails ends the session, as it does in Apple's viewer. A playing
-video does not delay the Mac's reading of the input, as zlib's deflate does. The Mac refuses the picture without the sound, and
+video does not delay the Mac's reading of the input, as RFB pixels' deflate does. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound, and
 nothing reaches an AirPlay speaker the Mac plays to. It is **experimental** and needs a gateway built with
 `--features apple-hp-media`, which links FFmpeg's HEVC decoder (LGPL) and Fraunhofer's

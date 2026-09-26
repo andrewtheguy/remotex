@@ -1,5 +1,5 @@
 //! Apple High Performance's picture and sound, the way Apple's viewer takes them:
-//! HEVC and AAC-ELD over the media stream, not zlib over RFB.
+//! HEVC and AAC-ELD over the media stream, not ZRLE over RFB.
 //!
 //! A High Performance viewer that advertises encoding **1010**
 //! ([`ENCODING_MEDIA_STREAM`]) and sends message **`0x1c`**
@@ -29,7 +29,7 @@
 //! sound within [`STREAM_START`] of its offer, one that sends neither for
 //! [`STREAM_SILENCE`], and one whose receiver fails ([`MediaStream::overdue`],
 //! [`MediaStream::failure`]).
-//! Zlib rectangles carry the picture only until the first one and across display
+//! ZRLE rectangles carry the picture only until the first one and across display
 //! changes, which stop the stream until the next offer.
 //!
 //! Every packet in is authenticated before it is decrypted — AES-256 counter mode

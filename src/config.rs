@@ -52,13 +52,13 @@ pub enum Subtype {
     ///
     /// The Mac's metadata extension lists every attached display, permits selecting
     /// one or their combined desktop, and supplies each display's pixel density.
-    /// Apple's native pasteboard is available, and the rectangles are zlib.
+    /// Apple's native pasteboard is available, and the rectangles are ZRLE.
     Ard,
     /// The same Mac in High Performance Screen Sharing, as Apple's viewer has it:
     /// the same wire as [`Subtype::Ard`] on a virtual display, with the picture as
     /// HEVC and the sound as AAC-ELD over the media
     /// stream Screen Sharing negotiates on the RFB connection and sends over UDP
-    /// with SRTP ([`crate::vnc_apple_media`]). Zlib rectangles carry the picture
+    /// with SRTP ([`crate::vnc_apple_media`]). ZRLE rectangles carry the picture
     /// only until the stream does and across display changes; a stream that fails
     /// ends the session, as it ends Apple's viewer's.
     ///

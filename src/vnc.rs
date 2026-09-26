@@ -9,10 +9,10 @@
 //! Apple's control messages ([`crate::vnc_apple`]) and its pasteboard protocol.
 //! The mode follows ServerInit, as it does there. `subtype = "ard"` is Standard
 //! mode: the Mac's physical displays, with their list, selection and density, in
-//! zlib rectangles. `subtype = "ard-high-performance"` is High Performance mode:
+//! ZRLE rectangles. `subtype = "ard-high-performance"` is High Performance mode:
 //! one virtual display at the target's pinned `width` and `height`, or at the
 //! connecting client's screen resolution when no size is pinned, with the picture
-//! and sound from the Mac's media stream ([`crate::vnc_apple_media`]) and zlib
+//! and sound from the Mac's media stream ([`crate::vnc_apple_media`]) and ZRLE
 //! rectangles carrying the picture until it is up. See docs/apple-vnc-889.md.
 //!
 //! The transport difference is contained in three places and nowhere else:
@@ -100,13 +100,11 @@ const ENCODING_RRE: i32 = 2;
 const ENCODING_HEXTILE: i32 = 5;
 /// ZRLE: 64x64 tiles, run-length encoded or palettised, inside a deflate stream.
 /// The best of the lossless standard encodings and the one RFC 6143 defines for the
-/// job.
-const ENCODING_ZRLE: i32 = 16;
+/// job. Also the one codec a Mac is offered — see [`vnc_apple::ENCODINGS`].
+pub(crate) const ENCODING_ZRLE: i32 = 16;
 /// Standard RFB zlib: `u32 length` then that many bytes of one deflate stream
-/// shared by every rectangle on the connection. Not a vendor encoding and not
-/// Apple's alone, though Apple's High Performance mode is where it arrived here
-/// first — see [`vnc_apple::ENCODINGS`].
-pub(crate) const ENCODING_ZLIB: i32 = 6;
+/// shared by every rectangle on the connection.
+const ENCODING_ZLIB: i32 = 6;
 /// Cursor pseudo-encoding: the server hands over the pointer shape (pixels +
 /// a 1-bit mask, the rect's x/y being the hotspot) instead of drawing it into
 /// the framebuffer.
@@ -598,7 +596,7 @@ struct DesktopState {
     /// The picture comes from the media stream ([`vnc_apple_media`]): a decoded
     /// picture of the current size has been shown since the last display change.
     /// Pixel polling then holds to [`HP_HOLD_REQUEST`], which still brings the
-    /// cursor shapes and layouts, and zlib pixels are decoded but not shown.
+    /// cursor shapes and layouts, and ZRLE pixels are decoded but not shown.
     media_live: bool,
 }
 
@@ -1319,9 +1317,8 @@ type SharedDisplay = Arc<std::sync::Mutex<DisplayState>>;
 /// Apple's display/cursor decoding state, owned by the read loop.
 ///
 /// Not in [`Shared`]: the cursor cache is touched by nothing else, and a lock on
-/// the pixel path to say so would be a lock that never contends. The zlib stream
-/// used to live here too; it moved to [`vnc_encodings::Decoders`] when encoding 6
-/// stopped being the Apple dialect's alone.
+/// the pixel path to say so would be a lock that never contends. The ZRLE stream
+/// is not here either: it is [`vnc_encodings::Decoders`]', as for any server.
 #[derive(Default)]
 struct Apple {
     cursors: CursorCache,
@@ -1597,7 +1594,7 @@ struct Flags {
     /// file (Standard `ard` exposes physical displays).
     pinned: Option<(u16, u16)>,
     /// Whether this is Apple's revision, 003.889, with the metadata encodings both
-    /// Apple subtypes negotiate: the read loop's zlib stream, cursor cache and
+    /// Apple subtypes negotiate: the read loop's ZRLE stream, cursor cache and
     /// display list, and the Mac's reading of the pointer mask.
     apple: bool,
     /// Whether this is Apple's High Performance mode. It requests a virtual display
@@ -2073,7 +2070,7 @@ async fn apple_preface(
     let high_performance = config.subtype == Some(Subtype::ArdHighPerformance);
     // Apple's viewer checks this before it sends a byte of the session, and turns a
     // Mac without it into a Standard session after asking. With no one to ask, it is
-    // refused here rather than run on the physical display over zlib, a combination
+    // refused here rather than run on the physical display over ZRLE, a combination
     // Apple's viewer never makes.
     anyhow::ensure!(
         !high_performance
@@ -2117,7 +2114,7 @@ async fn apple_preface(
     }
     uplink.send(&set_pixel_format()).await?;
     // The same list in both modes: the display layout that names the Mac's screens,
-    // or the one virtual display, and zlib for their pixels.
+    // or the one virtual display, and ZRLE for their pixels.
     uplink.send(&set_encodings(vnc_apple::ENCODINGS)).await?;
     if high_performance {
         // Arm the server's sender. Cursor shapes above all depend on it across a
@@ -2917,7 +2914,7 @@ async fn offer_media(
 /// Show a picture the media stream decoded: the whole display, through the shadow
 /// like any rectangle, so only what changed reaches the browser. A picture of
 /// another size is the old display's last or the new one's before its layout, and
-/// is dropped. The first one of a display takes the picture over from zlib —
+/// is dropped. The first one of a display takes the picture over from ZRLE —
 /// see [`DesktopState::media_live`].
 async fn show_picture(
     shared: &Shared,
@@ -2933,7 +2930,7 @@ async fn show_picture(
     };
     if first {
         info!("vnc: the picture now comes from the Mac's HEVC media stream");
-        // The armed region too, or the Mac would go on pushing zlib for every
+        // The armed region too, or the Mac would go on pushing ZRLE for every
         // change on screen — and it reads nothing from this side while it writes.
         send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
     }
@@ -4223,8 +4220,8 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 .await
                 .map(RectEffect::resized);
         }
-        // Ungated, like [`ENCODING_RAW`]: every generic target is offered zlib too,
-        // and an Apple server cannot send what its own list omits.
+        // Ungated, like [`ENCODING_RAW`]: an Apple server cannot send what its own
+        // list omits.
         ENCODING_ZLIB => payload = Payload::Zlib,
         vnc_apple::ENCODING_CURSOR_IMAGE if apple.is_some() => {
             read_cursor_image(reader, apple, cursor, (x, y), (w, h), sink).await?;
@@ -4296,7 +4293,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // The Mac's replies to a media-stream offer ([`vnc_apple_media`]): a `u16`
         // saying how much follows, then the reply. A refusal ends the session, as it
         // ends Apple's viewer's. A stream the Mac took down with a display change of
-        // its own hands the picture to zlib until the next offer, and zlib has sent
+        // its own hands the picture to ZRLE until the next offer, and ZRLE has sent
         // nothing while the stream ran, so the whole desktop is asked for.
         vnc_apple_media::ENCODING_MEDIA_STREAM if shared.media.is_some() => {
             let len = reader.read_u16().await?;
@@ -4341,7 +4338,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // one full request makes the source known instead.
         Decoded::Unavailable => return Ok(RectEffect::FULL_REPAINT),
     };
-    // While the media stream carries the picture, zlib is decoded only to keep its
+    // While the media stream carries the picture, ZRLE is decoded only to keep its
     // deflate stream in step: the Mac still answers the one-pixel polls, and pushes
     // a whole screen on its own at a login.
     if desktop.lock().unwrap().media_live {
@@ -4943,7 +4940,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         d.hp.layout(resized, tokio::time::Instant::now());
         d.laid_out = true;
         // A new display stopped the media stream, whoever asked for it: the
-        // picture is zlib's until the stream is offered for it and delivers.
+        // picture is ZRLE's until the stream is offered for it and delivers.
         if resized {
             d.media_live = false;
             if let Some(media) = &shared.media {
@@ -6381,15 +6378,16 @@ mod tests {
         }
     }
 
-    /// Both Apple modes ask for the display layout and zlib, and for none of the
+    /// Both Apple modes ask for the display layout and ZRLE, and for none of the
     /// generic extensions: the pasteboard is Apple's own protocol, the only sound
     /// is the media stream's, and a Mac reports its densities and screens in the
     /// layout.
     #[test]
-    fn a_mac_is_asked_for_its_layout_and_zlib_and_no_generic_extension() {
+    fn a_mac_is_asked_for_its_layout_and_zrle_and_no_generic_extension() {
         let encodings = vnc_apple::ENCODINGS;
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
-        assert!(encodings.contains(&ENCODING_ZLIB));
+        assert!(encodings.contains(&ENCODING_ZRLE));
+        assert!(!encodings.contains(&ENCODING_ZLIB));
         for generic in [
             vnc_clipboard::ENCODING,
             vnc_audio::ENCODING,
@@ -6627,7 +6625,7 @@ mod tests {
     /// docs/wlshare-density.md and docs/wlshare-outputs.md rather than through
     /// the encoder's own eyes. Both are asked of every generic server, after
     /// every encoding that decides pixels, and of no Mac (see
-    /// `a_mac_is_asked_for_its_layout_and_zlib_and_no_generic_extension`).
+    /// `a_mac_is_asked_for_its_layout_and_zrle_and_no_generic_extension`).
     #[test]
     fn the_wlshare_extensions_are_asked_of_every_generic_server() {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
