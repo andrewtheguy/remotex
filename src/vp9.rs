@@ -245,6 +245,10 @@ impl Stream {
         // No fixed keyframe interval; every keyframe is one somebody asked for — a repaint, a
         // resize, a client coming back.
         cfg.kf_mode = vpx::vpx_kf_mode_VPX_KF_DISABLED;
+        // Disabling them is not enough: libvpx 1.16's one-pass rate control still counts
+        // down `kf_max_dist`, 128 by default, and codes a keyframe when it runs out.
+        // Measured, at frames 128 and 256 of a changing picture. Out of reach instead.
+        cfg.kf_max_dist = i32::MAX as u32;
         // Constant quality with the quantizer pinned top and bottom. `VPX_Q` plus the `CQ_LEVEL`
         // control below is what decides it; min == max is what makes that a guarantee rather
         // than a preference, and it is why nothing here sets a bitrate — the quantizer *is* the
@@ -788,6 +792,21 @@ mod tests {
     /// with no keyframe. Were libvpx to skip blocks whose source had not moved, a desktop sent
     /// coarse under congestion would stay coarse until it next changed, and the settle in
     /// [`crate::encode`] would have to spend a keyframe instead.
+    #[test]
+    fn no_keyframe_comes_unasked() {
+        let (w, h) = (64u16, 48u16);
+        for chroma in [Chroma::Subsampled, Chroma::Full] {
+            let mut mirror = Mirror::new(w, h).expect("a mirror");
+            let mut stream = Stream::new(mirror.coded(), 60, chroma).expect("a stream");
+            for step in 0..300u32 {
+                let colour = [step as u8, (step * 7) as u8, (step * 13) as u8];
+                mirror.blit(rect(((step * 3) % 48) as u16, 8, 16, 16), &flat(16, 16, colour)).expect("a blit");
+                let unit = stream.encode(&mirror).expect("an encode").expect("a unit");
+                assert_eq!(unit.keyframe, step == 0, "{chroma:?} frame {step}");
+            }
+        }
+    }
+
     #[test]
     fn a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe() {
         let (w, h) = (320u16, 240u16);
