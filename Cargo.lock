@@ -1855,7 +1855,7 @@ dependencies = [
 [[package]]
 name = "openh264-sys2"
 version = "0.9.8"
-source = "git+https://github.com/andrewtheguy/openh264-prebuilt?tag=v2.6.0-20260926170220-e070a14#e070a1436311de40d47b2603724258f4ee132757"
+source = "git+https://github.com/andrewtheguy/openh264-prebuilt?tag=v2.6.0-20260926174449-d069f50#d069f50ef66b4de16c116b77ef01ad6c42385d12"
 
 [[package]]
 name = "option-ext"
