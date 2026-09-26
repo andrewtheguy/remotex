@@ -245,6 +245,58 @@ is size: a PNG of a changing region is far larger than a delta frame of it — a
 591×433 animation measured 157 KB a tile — and one rectangle larger than a batch's
 256 KB goes out as a batch of its own.
 
+#### wlshare's stream, passed through
+
+wlshare has a VP9 encoding of its own, `WLSV` (`0x574c5356`), made for its desktop
+clients: every update one rectangle over the whole desktop, a `u32` length and one
+frame of a single stream. That stream is the one this gateway encodes for a browser
+that decodes profile 1 — 8-bit 4:4:4, BT.601 at studio swing declared in its
+keyframes, libvpx at the same speed and screen tuning, the same dial mapped onto the
+same quantizers — so for such a browser the gateway lists it, and each frame goes to
+the browser as it came: no ZRLE on either side, and no encode here.
+
+- **Listed when the plan is 4:4:4.** `render_chroma` resolving to `444`, by the
+  browser's answer or the target's, puts the encoding at the head of a generic
+  server's `SetEncodings`; `420` never lists it, and that browser is sent the stream
+  encoded here from ZRLE as before. The plan is fixed for an engine, and a takeover
+  by a browser that resolves otherwise rebuilds the engine
+  ([choosing a chroma](#choosing-a-chroma)), so a session never changes carriage
+  mid-stream. wlshare announces nothing: it sends the encoding in place of ZRLE, and
+  any other server ignores it and sends what it always did.
+- **Passed as it came** (`VideoSink::pass`). The frame's opening bits are read for
+  its profile, which must be 1, and whether it is a keyframe; the configuration
+  announced ahead of it is the 4:4:4 string for its size. Its bytes take their share
+  of `QUEUE_BUDGET` and go out in order with the messages around them. The mirror,
+  the rounds, the interval, the quality walk and the settle do not run: wlshare
+  paces, codes, walks and settles its stream itself.
+- **A restart waits for a keyframe.** A reattach, a takeover and a resize reset the
+  render as always. On a reattach or a takeover the full update the engine asks for
+  is what makes wlshare send a keyframe; after a resize it asks for none, because
+  wlshare starts the stream at the new size with one, and a full request would have
+  it send a second that no shadow is there to skip. Until the keyframe arrives the
+  frames still coded against the old picture are dropped, and it goes out behind a
+  fresh `VideoFormat`.
+- **The fence carries the browser's queue.** wlshare keeps one frame in flight and
+  walks its quality by each fence's round trip. Echoed at once, as for any other
+  server, it would time the hop to this gateway alone, which is never behind; on a
+  session that may be sent the encoding each echo instead waits until everything
+  queued towards the browser has given its budget back (`VideoSink::drained`) —
+  immediately on a link with room, and once the browser has taken it on one that is
+  behind — so the queueing is inside the round trip wlshare reads. Echoes wait in
+  one queue, in order, raced against the next server message rather than in front of
+  it, and none waits longer than 500 ms (`FENCE_HOLD_LIMIT`), the grace a window
+  that is not drawing gets: such a window acknowledges nothing, its budget comes
+  back only with a pong, and wlshare, which sends nothing until the echo, would
+  otherwise run at one frame a heartbeat.
+- **Past the ceiling it is tiles.** A frame is the whole desktop, which past the
+  ceiling is not video: on a target without `resize` a frame at such a size is
+  dropped and the encoding taken off the list, which wlshare answers with the whole
+  desktop in ZRLE for [tiles](#tiles-past-the-ceiling); back within it, the encoding
+  is listed again and wlshare starts over at a keyframe.
+
+The target's quality keys do not reach a passed stream, which is coded at wlshare's
+`vp9_quality` and `vp9_quality_min` — see the [roadmap](roadmap.md#the-targets-quality-keys-on-wlshares-own-stream).
+
 ### Choosing a chroma
 
 The key takes three answers: the default resolves per browser, and the other two

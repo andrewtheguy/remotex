@@ -157,6 +157,38 @@ pub fn codec_string(w: u16, h: u16, chroma: Chroma) -> Option<String> {
     Some(format!("vp09.{profile}.{level:02}.08.{sampling}.06.06.06.00"))
 }
 
+/// What the opening bits of a VP9 frame say about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHeader {
+    /// 0 for 4:2:0, 1 for 4:4:4 at the eight bits every stream here has.
+    pub profile: u8,
+    /// Whether a decoder that has seen nothing before this frame can start here.
+    pub keyframe: bool,
+}
+
+/// Read the first fields of a frame's uncompressed header (VP9 bitstream §6.2):
+/// `frame_marker` (two bits, always 2), `profile_low_bit`, `profile_high_bit`, a
+/// reserved zero bit on profile 3, `show_existing_frame`, and `frame_type`, where 0 is
+/// a keyframe. A frame that only shows an earlier one is not a keyframe.
+///
+/// For a stream this gateway did not encode, whose keyframe bit is therefore not the
+/// encoder's to report. `None` for bytes that do not start a VP9 frame.
+pub fn frame_header(frame: &[u8]) -> Option<FrameHeader> {
+    let mut bits = frame.iter().take(2).flat_map(|byte| (0..8).rev().map(move |i| byte >> i & 1));
+    let mut bit = || bits.next();
+    if (bit()? << 1 | bit()?) != 2 {
+        return None;
+    }
+    let low = bit()?;
+    let profile = bit()? << 1 | low;
+    if profile == 3 && bit()? != 0 {
+        return None;
+    }
+    let show_existing = bit()? == 1;
+    let keyframe = !show_existing && bit()? == 0;
+    Some(FrameHeader { profile, keyframe })
+}
+
 /// One VP9 stream over a [`Mirror`]'s coded picture.
 ///
 /// The picture size is fixed for the stream's whole life, and that is what makes an inter-frame
@@ -805,6 +837,29 @@ mod tests {
                 assert_eq!(unit.keyframe, step == 0, "{chroma:?} frame {step}");
             }
         }
+    }
+
+    #[test]
+    fn a_frame_header_says_what_the_encoder_made() {
+        let (w, h) = (320u16, 240u16);
+        for (chroma, profile) in [(Chroma::Subsampled, 0), (Chroma::Full, 1)] {
+            let mut mirror = Mirror::new(w, h).expect("a mirror");
+            let mut stream = Stream::new(mirror.coded(), 60, chroma).expect("a stream");
+            mirror.blit(rect(0, 0, w, h), &flat(w, h, [200, 40, 40])).expect("a blit");
+            let first = stream.encode(&mirror).expect("an encode").expect("a unit");
+            mirror.blit(rect(10, 10, 40, 40), &flat(40, 40, [20, 200, 20])).expect("a blit");
+            let second = stream.encode(&mirror).expect("an encode").expect("a unit");
+            for unit in [&first, &second] {
+                assert_eq!(
+                    frame_header(&unit.data),
+                    Some(FrameHeader { profile, keyframe: unit.keyframe }),
+                    "{chroma:?}"
+                );
+            }
+            assert!(first.keyframe && !second.keyframe);
+        }
+        assert_eq!(frame_header(&[]), None);
+        assert_eq!(frame_header(&[0x00, 0x00]), None, "no frame marker");
     }
 
     #[test]

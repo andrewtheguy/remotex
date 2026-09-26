@@ -424,6 +424,31 @@ pub struct Produced {
     pub unit: Option<VideoUnit>,
 }
 
+/// An access unit the remote encoded itself, as the browser is told about it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Passed {
+    /// The configuration string a decoder for it is built with.
+    pub decode: String,
+    pub keyframe: bool,
+}
+
+/// Check a `w`×`h` frame of wlshare's VP9 encoding, which is the 4:4:4 stream this
+/// gateway would otherwise have encoded from the same pixels: profile 1, BT.601 at
+/// studio swing, declared in its keyframes. The profile is read and held to that, so
+/// the configuration announced for it is the one the frame needs.
+pub fn pass_444(w: u16, h: u16, frame: &[u8]) -> anyhow::Result<Passed> {
+    let header = crate::vp9::frame_header(frame)
+        .ok_or_else(|| anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header"))?;
+    anyhow::ensure!(
+        header.profile == 1,
+        "the server's VP9 frame is profile {}, not the 4:4:4 profile 1 this session announces",
+        header.profile
+    );
+    let decode = crate::vp9::codec_string(w, h, Chroma::Full)
+        .ok_or_else(|| anyhow::anyhow!("no VP9 level covers a {w}x{h} picture"))?;
+    Ok(Passed { decode, keyframe: header.keyframe })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

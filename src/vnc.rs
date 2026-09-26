@@ -20,7 +20,7 @@
 //! ServerInit, and the optional record wrapper. One read loop, one input path, one
 //! Apple metadata path and one tile path serve both.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,7 +36,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::{RenderPlan, Subtype, TargetConfig};
+use crate::config::{Chroma, RenderPlan, Subtype, TargetConfig};
 use crate::encode::{TileSupport, VideoSink};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
@@ -159,6 +159,25 @@ const MSG_WLSHARE_DENSITY: u8 = 0xE0;
 /// framebuffer is one output, so a two-monitor desktop has to be asked which one
 /// to send. See docs/wlshare-outputs.md.
 const ENCODING_WLSHARE_OUTPUTS: i32 = 0x574c_534f;
+/// wlshare's VP9 encoding, `WLSV`: every update one rectangle over the whole
+/// desktop, a `u32` length and one frame of a single 4:4:4 VP9 stream — the stream
+/// this gateway would encode from the same pixels for a browser that decodes profile
+/// 1, which it then passes through untouched ([`VideoSink::pass`]). Listed only for
+/// such a browser. wlshare sends it in place of ZRLE wherever it is listed and
+/// announces nothing; any other server ignores it and sends what it always did.
+const ENCODING_WLSHARE_VP9: i32 = 0x574c_5356;
+/// The largest `WLSV` frame read rather than refused. A 4:4:4 keyframe of the largest
+/// desktop the ceiling admits at the finest quantizer is a few megabytes; a length
+/// past this is a server that has lost its framing.
+const MAX_WLSHARE_VP9_FRAME: u32 = 64 << 20;
+/// The longest a passed stream's fence echo waits for the browser to take what came
+/// before it ([`VideoSink::drained`]). A client that is not drawing acknowledges
+/// nothing, and its batches' budget comes back only with a pong, so an unbounded
+/// wait would stop wlshare, which sends nothing until the echo, at one frame a
+/// heartbeat. The paint window's own grace for such a window, and the one wlshare's
+/// desktop client gives its own: past it the echo goes, and a client that is only
+/// slow still holds the engine where it always did, at the budget.
+const FENCE_HOLD_LIMIT: Duration = Duration::from_millis(500);
 /// The extension's one message type, used in both directions: the server's
 /// `OutputList` and the client's `SelectOutput`. Outside every registered RFB
 /// message type.
@@ -1471,14 +1490,19 @@ pub async fn run(
     } else {
         TileSupport::Rects
     };
+    // A browser whose decoder takes 4:4:4 is sent wlshare's own VP9 as it comes, when
+    // the server is wlshare; every other browser is sent the stream encoded here.
+    let pass_444 = plan.chroma == Chroma::Full;
     let sink = VideoSink::new("vnc", frame_tx, plan, feedback, tiles);
-    session(config, display, input_rx, audio, camera, microphone, &sink).await;
+    session(config, display, pass_444, input_rx, audio, camera, microphone, &sink).await;
     sink.finish().await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn session(
     config: TargetConfig,
     display: Option<HostDisplay>,
+    pass_444: bool,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<crate::audio::AudioBridge>>,
     camera: Option<Arc<crate::camera::CameraBridge>>,
@@ -1495,14 +1519,14 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        |stream| connect(&config, display, stream),
+        |stream| connect(&config, display, pass_444, stream),
     )
     .await
     else {
         return;
     };
 
-    let Connected { downlink, uplink, width, height, macos, apple, poll, media } = connected;
+    let Connected { downlink, uplink, width, height, macos, apple, poll, media, passthrough } = connected;
     info!("vnc: connected, desktop {width}x{height} px (macos={macos})");
     if sink
         .msg(ServerMsg::Resize {
@@ -1546,6 +1570,7 @@ async fn session(
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
             media,
+            passthrough,
         },
         input_rx,
         sink.clone(),
@@ -1624,6 +1649,8 @@ struct Flags {
     poll: bool,
     /// High Performance's media stream — see [`Connected::media`].
     media: Option<(MediaStream, Pictures)>,
+    /// See [`Connected::passthrough`].
+    passthrough: Option<Arc<[i32]>>,
 }
 
 /// What the read loop needs to know about the dialect it is reading. Two bools
@@ -1655,6 +1682,11 @@ struct Connected {
     /// up ([`vnc_apple_media`]), and the pictures it decodes: every High
     /// Performance session has one, and every other session `None`.
     media: Option<(MediaStream, Pictures)>,
+    /// The encodings listed beside [`ENCODING_WLSHARE_VP9`] when the preface listed it,
+    /// for a browser that decodes 4:4:4 on a generic server: what the read loop lists
+    /// on its own while the desktop is past the video ceiling, and with it again once
+    /// it is back. `None` where it was not listed.
+    passthrough: Option<Arc<[i32]>>,
 }
 
 /// ServerInit, as much of it as anything here uses.
@@ -1686,6 +1718,7 @@ impl ServerInit {
 async fn connect(
     config: &TargetConfig,
     display: Option<HostDisplay>,
+    pass_444: bool,
     stream: tokio::net::TcpStream,
 ) -> anyhow::Result<Connected> {
     let dialect = Dialect::of(config.subtype);
@@ -1732,7 +1765,7 @@ async fn connect(
             read_security_result(&mut downlink).await?;
             uplink.send(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut downlink).await?;
-            rfb38_preface(downlink, uplink, server, macos, config).await
+            rfb38_preface(downlink, uplink, server, macos, config, pass_444).await
         }
         Dialect::Apple889 => {
             let Secured::Apple(wrap_key) = secured else {
@@ -1908,16 +1941,12 @@ async fn rfb38_preface(
     server: ServerInit,
     macos: bool,
     config: &TargetConfig,
+    pass_444: bool,
 ) -> anyhow::Result<Connected> {
     uplink.send(&set_pixel_format()).await?;
-    uplink
-        .send(&set_encodings(&rfb38_encoding_list(
-            config.clipboard,
-            config.audio,
-            config.camera,
-            config.microphone,
-        )))
-        .await?;
+    let encodings = rfb38_encoding_list(config.clipboard, config.audio, config.camera, config.microphone);
+    let listed = if pass_444 { with_wlshare_vp9(&encodings) } else { encodings.clone() };
+    uplink.send(&set_encodings(&listed)).await?;
 
     Ok(Connected {
         downlink,
@@ -1928,7 +1957,14 @@ async fn rfb38_preface(
         apple: false,
         poll: true,
         media: None,
+        passthrough: pass_444.then(|| encodings.into()),
     })
+}
+
+/// `encodings` with wlshare's VP9 encoding ahead of them, where a list read as a
+/// preference puts what it would rather have. wlshare takes it wherever it is.
+fn with_wlshare_vp9(encodings: &[i32]) -> Vec<i32> {
+    std::iter::once(ENCODING_WLSHARE_VP9).chain(encodings.iter().copied()).collect()
 }
 
 fn rfb38_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone: bool) -> Vec<i32> {
@@ -2134,6 +2170,7 @@ async fn apple_preface(
         apple: true,
         poll: true,
         media: high_performance.then(|| MediaStream::new(peer, local)),
+        passthrough: None,
     })
 }
 
@@ -2229,6 +2266,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         host_density,
         poll,
         media,
+        passthrough,
     } = flags;
     let (media, pictures) = match media {
         Some((media, pictures)) => (Some(Arc::new(std::sync::Mutex::new(media))), Some(pictures)),
@@ -2297,6 +2335,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         camera: camera.clone(),
         microphone: microphone.clone(),
         media: media.clone(),
+        passthrough,
     };
 
     // A resizing High Performance session opens covered — see [`HpResize::opening`].
@@ -3032,6 +3071,9 @@ struct Shared {
     /// offer it: the read loop at an update boundary, the input loop when a
     /// resize's cover comes down.
     media: Option<SharedMedia>,
+    /// See [`Connected::passthrough`]. `Some` is a session that may be sent
+    /// [`ENCODING_WLSHARE_VP9`], and the only one that reads it.
+    passthrough: Option<Arc<[i32]>>,
 }
 
 /// Read server messages forever, forwarding framebuffer updates as tiles.
@@ -3047,7 +3089,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
 ) -> anyhow::Result<()> {
     let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
     let Shared {
-        uplink, desktop, clipboard, display, hp_wake, audio, camera, microphone, media, ..
+        uplink, desktop, clipboard, display, hp_wake, audio, camera, microphone, media, passthrough, ..
     } = &shared;
     // Where the audio extension stands here. `Off` on a session with no bridge
     // to feed, which is also a session that never listed the encoding, so
@@ -3074,6 +3116,16 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let mut continuous_supported = false;
     // High Performance's signal that an offer went out — see [`MediaStream::offered`].
     let offers = media.as_ref().map(|m| m.lock().unwrap().offered());
+    // Whether wlshare's VP9 is on the list the server holds: from the preface where
+    // it was listed, and off while the desktop is past the video ceiling.
+    let mut vp9_listed = passthrough.is_some();
+    // The fences owed an echo, in order, on a session that may be sent wlshare's VP9.
+    // While the picture is that stream each waits for the browser to have taken what
+    // came before it ([`VideoSink::drained`]): wlshare holds one frame in flight and
+    // walks its quality by the fence's round trip, which an immediate echo would
+    // make the round trip to this gateway alone. Every fence waits in the one queue,
+    // so none overtakes another.
+    let mut held_fences: VecDeque<Vec<u8>> = VecDeque::new();
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
         // video stream still hands over pixels the mirror is holding when the remote
@@ -3119,8 +3171,19 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 None => std::future::pending().await,
             }
         };
+        let fence_due = async {
+            if sink.passing() {
+                let _ = tokio::time::timeout(FENCE_HOLD_LIMIT, sink.drained()).await;
+            }
+        };
         let read = tokio::select! {
             byte = reader.read_u8() => byte,
+
+            () = fence_due, if !held_fences.is_empty() => {
+                let echo = held_fences.pop_front().expect("guarded");
+                send(uplink, &echo).await?;
+                continue;
+            }
 
             picture = next_picture(&mut apple) => {
                 match picture {
@@ -3282,6 +3345,18 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // has. After the loop rather than inside it, so a `LastRect` breaking
                 // out still reaches it.
                 sink.frame().await?;
+                // wlshare's VP9 is a picture of the whole desktop, which past the
+                // ceiling is not video: off the list there, so wlshare sends the
+                // desktop again as ZRLE for tiles, and back on the list within it,
+                // where wlshare starts its stream again at a keyframe.
+                if let Some(encodings) = passthrough {
+                    let wanted = !sink.tiling();
+                    if wanted != vp9_listed {
+                        vp9_listed = wanted;
+                        let listed = if wanted { with_wlshare_vp9(encodings) } else { encodings.to_vec() };
+                        send(uplink, &set_encodings(&listed)).await?;
+                    }
+                }
                 let size = {
                     let mut d = desktop.lock().unwrap();
                     if resized {
@@ -3376,7 +3451,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
                                 tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
                             );
                         } else {
-                            send(uplink, &update_request(poll && !resized, size)).await?;
+                            // A passed stream is owed no repaint by a resize: wlshare
+                            // starts it again at the new size with a keyframe of the
+                            // whole desktop, and a full request would only have it
+                            // send a second one, which no shadow is there to skip.
+                            let full = resized && !sink.passing();
+                            send(uplink, &update_request(!full, size)).await?;
                         }
                     }
                 }
@@ -3636,9 +3716,11 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 send(uplink, &enable_continuous_updates(true, size)).await?;
             }
             // ServerFence: a marker the server sends down the stream and asks back,
-            // which is how it measures this end and paces itself. Echoed here, on the
+            // which is how it measures this end and paces itself. Echoed from the
             // read task, so the answer is not queued behind anything the input side is
-            // doing — a fence that waited would report a link slower than it is.
+            // doing — a fence that waited would report a link slower than it is. On a
+            // session that may be sent wlshare's VP9 the link it should report is
+            // the browser's, so there it waits in `held_fences` for that.
             MSG_FENCE => {
                 let mut padding = [0u8; 3];
                 reader.read_exact(&mut padding).await?;
@@ -3658,7 +3740,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // `SyncNext` in particular is not implemented and must not be echoed
                 // as though it were.
                 let flags = flags & (FENCE_BLOCK_BEFORE | FENCE_BLOCK_AFTER);
-                send(uplink, &client_fence(flags, &payload)).await?;
+                let echo = client_fence(flags, &payload);
+                if passthrough.is_some() {
+                    held_fences.push_back(echo);
+                } else {
+                    send(uplink, &echo).await?;
+                }
             }
             // Apple's pasteboard status. `cmd = 2` says the remote clipboard
             // changed and must be fetched; `cmd = 3` asks for the browser's last
@@ -4303,6 +4390,31 @@ async fn read_rect<R: AsyncRead + Unpin>(
             let down = media.lock().unwrap().on_reply(&body)?;
             let was_live = down && std::mem::take(&mut desktop.lock().unwrap().media_live);
             return Ok(if was_live { RectEffect::FULL_REPAINT } else { RectEffect::NOTHING });
+        }
+        // A frame of wlshare's VP9, which is the whole desktop: passed to the browser
+        // untouched, or dropped while the desktop is past the ceiling, until the list
+        // the read loop sends without the encoding brings the desktop again as ZRLE.
+        ENCODING_WLSHARE_VP9 if shared.passthrough.is_some() => {
+            let len = reader.read_u32().await?;
+            anyhow::ensure!(
+                len <= MAX_WLSHARE_VP9_FRAME,
+                "server sent a {len}-byte VP9 frame, past the {MAX_WLSHARE_VP9_FRAME} bytes one can be"
+            );
+            let mut frame = vec![0u8; len as usize];
+            reader.read_exact(&mut frame).await?;
+            let size = desktop.lock().unwrap().size;
+            anyhow::ensure!(
+                (x, y, w, h) == (0, 0, size.0, size.1),
+                "server sent a VP9 frame of {w}x{h}+{x}+{y}, not the whole {}x{} desktop",
+                size.0,
+                size.1
+            );
+            if sink.tiling() {
+                debug!("vnc: dropping a {w}x{h} VP9 frame past the video ceiling");
+                return Ok(RectEffect::NOTHING);
+            }
+            sink.pass(w, h, frame).await?;
+            return Ok(Rect::from_size(x, y, w, h).map_or(RectEffect::NOTHING, RectEffect::pixels));
         }
         other => {
             let label = encoding_label(other);
@@ -7625,6 +7737,7 @@ mod tests {
             camera: None,
             microphone: None,
             media: None,
+            passthrough: None,
         }
     }
 
@@ -9928,6 +10041,123 @@ mod tests {
         .await;
 
         assert_eq!(written(&sent), client_fence(FENCE_BLOCK_BEFORE, b"marker"));
+    }
+
+    /// One FramebufferUpdate of a `w`×`h` wlshare VP9 frame whose opening byte is
+    /// `first`, then a fence asking for `marker` back.
+    fn wlshare_vp9_update(w: u16, h: u16, first: u8, marker: &[u8]) -> Vec<u8> {
+        let mut msg = vec![0u8, 0];
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        for field in [0, 0, w, h] {
+            msg.extend_from_slice(&field.to_be_bytes());
+        }
+        msg.extend_from_slice(&ENCODING_WLSHARE_VP9.to_be_bytes());
+        let mut frame = vec![0u8; 100];
+        frame[0] = first;
+        msg.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+        msg.extend_from_slice(&frame);
+        msg.extend_from_slice(&server_fence(FENCE_REQUEST, marker));
+        msg
+    }
+
+    /// A read loop over a connection that stays open, so a held echo is not cut off by
+    /// the end of the stream.
+    fn open_read_loop(wire: Vec<u8>, shared: Shared, sink: VideoSink) -> tokio::task::JoinHandle<()> {
+        let (mut server, client) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            server.write_all(&wire).await.unwrap();
+            let _ = read_loop(client, shared, ReadFlags { clipboard: false, poll: false }, None, sink).await;
+            drop(server);
+        })
+    }
+
+    /// wlshare's VP9 goes to the browser as it came, and the fence behind a frame is
+    /// echoed only once the browser's side has let go of it: wlshare walks its
+    /// quality by that round trip, and must see the browser's queue in it.
+    #[tokio::test]
+    async fn a_passed_frames_fence_waits_for_the_browser_to_take_it() {
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((64, 32)).await;
+        let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
+        shared.passthrough = Some(rfb38_encoding_list(false, false, false, false).into());
+        let task = open_read_loop(wlshare_vp9_update(64, 32, 0xa0, b"f1"), shared, sink);
+
+        assert!(matches!(rx.recv().await, Some(ServerMsg::VideoFormat { .. })));
+        let Some(ServerMsg::Video(unit)) = rx.recv().await else {
+            panic!("the frame was not passed");
+        };
+        assert!(unit.keyframe && unit.data.len() == 100 && unit.data[0] == 0xa0);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(written(&sent).is_empty(), "the fence was echoed while the browser held the frame");
+
+        drop(unit);
+        let echo = client_fence(0, b"f1");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while written(&sent) != echo {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the fence was echoed once the frame was taken");
+        task.abort();
+    }
+
+    /// A browser that never acknowledges holds a fence no longer than the grace a
+    /// window that is not drawing gets, so wlshare, which sends nothing until the
+    /// echo, is not stopped by it.
+    #[tokio::test]
+    async fn a_passed_frames_fence_is_held_no_longer_than_the_limit() {
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((64, 32)).await;
+        let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
+        shared.passthrough = Some(rfb38_encoding_list(false, false, false, false).into());
+        let started = tokio::time::Instant::now();
+        let task = open_read_loop(wlshare_vp9_update(64, 32, 0xa0, b"f1"), shared, sink);
+
+        assert!(matches!(rx.recv().await, Some(ServerMsg::VideoFormat { .. })));
+        let _kept = rx.recv().await;
+        let echo = client_fence(0, b"f1");
+        tokio::time::timeout(FENCE_HOLD_LIMIT * 4, async {
+            while written(&sent) != echo {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the fence was echoed with the frame still held");
+        assert!(started.elapsed() >= FENCE_HOLD_LIMIT, "echoed before the limit");
+        task.abort();
+    }
+
+    /// Past the ceiling a frame of the whole desktop is not video: it is dropped, and
+    /// the encoding comes off the list so wlshare sends the desktop again for tiles.
+    #[tokio::test]
+    async fn a_passed_frame_past_the_ceiling_takes_the_encoding_off_the_list() {
+        let (w, h) = (5376, 2288);
+        let (uplink, sent) = test_uplink();
+        let (frame_tx, mut rx) = mpsc::channel(8);
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: None, chroma: Chroma::Full };
+        let feedback = Arc::new(crate::feedback::LinkFeedback::new());
+        let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::Rects);
+        sink.msg(ServerMsg::Resize { w, h, scale: UNSCALED }).await.unwrap();
+        let mut shared = test_shared(uplink, shared_desktop((w, h), None, None), test_shadow((w, h)));
+        let encodings = rfb38_encoding_list(false, false, false, false);
+        shared.passthrough = Some(encodings.clone().into());
+        let task = open_read_loop(wlshare_vp9_update(w, h, 0xa0, b"f1"), shared, sink);
+
+        let mut expected = set_encodings(&encodings);
+        expected.extend_from_slice(&client_fence(0, b"f1"));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while written(&sent).len() < expected.len() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the list and the echo went out");
+        assert_eq!(written(&sent), expected);
+        task.abort();
+        while let Ok(msg) = rx.try_recv() {
+            assert!(!matches!(msg, ServerMsg::Video(_) | ServerMsg::VideoFormat { .. }), "{msg:?}");
+        }
     }
 
     /// A payload past what the extension defines is echoed back cut to length, and

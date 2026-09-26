@@ -108,6 +108,27 @@ delivered bytes and arrival timing added to that contract, for example — plus 
 explicit upper-bound policy. It is a separate feature whose value should be argued
 from `video`'s measurements rather than assumed.
 
+### The target's quality keys on wlshare's own stream
+
+A browser that decodes 4:4:4 watching wlshare is sent wlshare's VP9 as it comes
+([wlshare's stream, passed through](architecture.md#wlshares-stream-passed-through)),
+and that stream is coded at wlshare's `vp9_quality` and `vp9_quality_min`: the
+target's `video_quality`, `render_adaptive` and `render_adaptive_min` do not reach
+it. The plan is one message of wlshare's VP9 encoding, client to server, naming the
+dial's ceiling and floor, which the gateway sends from the target's keys when it
+lists the encoding, so that the keys mean on a passed stream what they mean on one
+coded here.
+
+### How a passed-through stream is doing
+
+A passed stream is coded and walked in wlshare, so the gateway knows each frame's
+size and whether it is a keyframe and nothing about the quality it went out at: the
+encode totals of such a session count its units, keyframes and bytes, and report no
+round coarsened and a lowest quality of 100 whatever wlshare did. Reporting it wants wlshare to say what it coded each
+frame at, which its desktop clients want for their own throughput readout too. It
+is one change to the wire, to be made with the desktop clients' throughput support
+rather than ahead of it.
+
 ### Source payloads the gateway decodes instead of forwarding
 
 Three places where a remote could hand this gateway something closer to what the

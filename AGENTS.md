@@ -109,6 +109,11 @@ documentation.
   in the gateway, or give them to a source with `resize` or without rectangles,
   which still ends on the ceiling's refusal. See
   [Tiles past the ceiling](docs/architecture.md#tiles-past-the-ceiling).
+- A generic VNC target whose plan resolves to 4:4:4 lists wlshare's VP9
+  encoding and passes its frames to the browser untouched; 4:2:0 is always
+  encoded here from ZRLE. Do not transcode a passed frame, pass one to a 4:2:0
+  browser or from another server, or add a key that selects it. See
+  [wlshare's stream, passed through](docs/architecture.md#wlshares-stream-passed-through).
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
   the subscription. Do not put audio on the session socket. Remote audio is Opus
   only; there is no codec key, and do not add another encoder or a passthrough.
