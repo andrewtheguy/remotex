@@ -71,6 +71,7 @@
 //!
 //! [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 
+pub mod avc;
 pub mod bitmap;
 pub mod capabilities;
 pub mod channel;

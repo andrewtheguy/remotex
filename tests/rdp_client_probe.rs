@@ -28,6 +28,21 @@
 //! set [`DUMP_ENV`] to a directory to get the framebuffer as PNG at each stage, for
 //! the check only eyes can make.
 //!
+//! ## Video, in H.264
+//!
+//! A Windows host that finds the client able to take H.264 hands it the parts of the
+//! desktop that move like video, in AVC420 or AVC444, beside the other codecs. So with
+//! a video playing on the remote, [`AVC_ENV`] set to `1` asserts that the host chose
+//! AVC for something and that every AVC stream it sent decoded: both are read from
+//! the pipeline's own tally and faults, which it says in the log and this probe keeps
+//! a copy of. A host with nothing moving on it draws no AVC, which is why the
+//! assertion is opt-in; the tally is printed either way.
+//!
+//! ```sh
+//! REMOTEX_UAT_TARGET=<rdp target> REMOTEX_UAT_AVC=1 REMOTEX_UAT_DUMP=tmp/avc-probe \
+//!   cargo test --test rdp_client_probe a_real_host_paints_and_resizes -- --ignored --nocapture
+//! ```
+//!
 //! ## The clipboard
 //!
 //! Both directions of MS-RDPECLIP are lazy — a copy announces which formats it can be
@@ -87,8 +102,8 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use remotex::rdp_client::proto::{rdpeai, rdpecam, rdpsnd};
@@ -118,6 +133,11 @@ const CAMERA_ENV: &str = "REMOTEX_UAT_CAMERA";
 /// Windows host that allows it. A policy can turn audio input off, so the negotiation
 /// is asserted only when this says it will be, and printed otherwise.
 const MICROPHONE_ENV: &str = "REMOTEX_UAT_MICROPHONE";
+
+/// Whether a video is playing on the remote for this run — set it to `1` when one is.
+/// The host then draws it in H.264, and the probe asserts that it did and that every
+/// such stream decoded here; otherwise what the host chose is printed.
+const AVC_ENV: &str = "REMOTEX_UAT_AVC";
 
 /// Whether the probe asks for sound at all: anything but `0` or `false` does. Off, it
 /// shows that the host opens audio input without it — measured against a Windows
@@ -171,6 +191,71 @@ const KEY_V: u8 = 0x2F;
 const ENTER: u8 = 0x1C;
 const LALT: u8 = 0x38;
 const F4: u8 = 0x3E;
+
+/// Whether this run was told a video is playing on the remote — see [`AVC_ENV`].
+fn video_playing() -> bool {
+    matches!(std::env::var(AVC_ENV).as_deref(), Ok("1") | Ok("true"))
+}
+
+/// What the RDP client said at `info` and above, kept beside whatever `RUST_LOG`
+/// prints: the pipeline's codec tally and its faults are log lines, and they are the
+/// measurement [`AVC_ENV`] asserts on.
+static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+struct Keep(env_logger::Logger);
+
+impl log::Log for Keep {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        self.0.enabled(metadata) || (metadata.target().starts_with("remotex") && metadata.level() <= log::Level::Info)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if record.target().starts_with("remotex") && record.level() <= log::Level::Info {
+            SAID.lock().unwrap().push(format!("{}", record.args()));
+        }
+        if self.0.enabled(record.metadata()) {
+            self.0.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
+/// [`common::init_logging`], with the client's own lines kept — once, for every case
+/// in this binary.
+fn logging() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let inner = env_logger::Builder::from_default_env().build();
+        let level = inner.filter().max(log::LevelFilter::Info);
+        if log::set_boxed_logger(Box::new(Keep(inner))).is_ok() {
+            log::set_max_level(level);
+        }
+    });
+}
+
+/// The pipeline's codec tally as it said it — `codecs [AVC420 12, ClearCodec 40]` —
+/// as counts by name, and the AVC streams it left unpainted.
+fn avc_measured() -> (Vec<(String, u64)>, Vec<String>) {
+    let said = SAID.lock().unwrap();
+    let codecs = said
+        .iter()
+        .rev()
+        .find_map(|line| line.split_once("codecs [").map(|(_, rest)| rest.trim_end_matches(']').to_string()))
+        .map(|list| {
+            list.split(", ")
+                .filter_map(|entry| {
+                    let (name, count) = entry.rsplit_once(' ')?;
+                    Some((name.to_string(), count.parse().ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let faults = said.iter().filter(|line| line.contains("AVC") && line.contains("unpainted")).cloned().collect();
+    (codecs, faults)
+}
 
 /// Whether this run offers the graphics pipeline — see [`EGFX_ENV`].
 fn egfx() -> bool {
@@ -335,7 +420,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
 /// format it chose, and closes the dialog. What is asserted under [`MICROPHONE_ENV`] is
 /// the negotiation; the rest is printed, and the session surviving all of it is the claim.
 async fn record_microphone() {
-    common::init_logging();
+    logging();
     let (session, mut events, _ear, _eye, voice) = connect_with_voice();
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
@@ -565,7 +650,7 @@ async fn resize_to(
 }
 
 async fn case() {
-    common::init_logging();
+    logging();
     let (session, mut events, ear, eye) = connect();
 
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
@@ -708,6 +793,19 @@ async fn case() {
     }
     println!("  ended: {ended:?}");
     assert!(matches!(ended, Some(Ok(()))), "a disconnect this end asked for is an orderly end");
+
+    // The session's last word was its codec tally. Under the pipeline a host with a
+    // video playing hands it to AVC, and every such stream has to have decoded.
+    let (codecs, faults) = avc_measured();
+    let avc: u64 = codecs.iter().filter(|(name, _)| name.starts_with("AVC")).map(|(_, count)| count).sum();
+    println!("  codecs: {codecs:?}; {avc} AVC streams, {} left unpainted", faults.len());
+    if video_playing() {
+        assert!(egfx, "{AVC_ENV} is a claim about the graphics pipeline");
+        assert!(avc > 0, "the host drew no H.264, though {AVC_ENV} says a video is playing on the remote: {codecs:?}");
+        assert!(faults.is_empty(), "AVC streams were left unpainted: {faults:?}");
+    } else if egfx && avc == 0 {
+        println!("  (no H.264: a still desktop gets none; set {AVC_ENV}=1 with a video playing to assert it)");
+    }
 }
 
 /// Tap one key, with modifiers held around it.
@@ -743,7 +841,7 @@ fn chord(input: &Input, modifiers: &[(u8, bool)], key: u8, extended: bool) {
 /// - the copy makes the host announce a format list, which this end asks for and
 ///   reads, and the bytes that come back are the bytes that went out.
 async fn round_trip() {
-    common::init_logging();
+    logging();
     let (session, mut events, _ear, _eye) = connect();
     let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
@@ -854,7 +952,7 @@ fn access_units(stream: &[u8]) -> Vec<(Vec<u8>, bool)> {
 /// and starts a second stream that runs until the app closes. So what is asserted is that
 /// a stream was running when the samples ran out, not that none stopped before.
 async fn stream_camera() {
-    common::init_logging();
+    logging();
     let path = std::env::var(CAMERA_STREAM_ENV).unwrap_or_else(|_| {
         panic!("set {CAMERA_STREAM_ENV} to an Annex B H.264 file at 640x480, 30 frames a second")
     });

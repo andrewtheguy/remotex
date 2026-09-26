@@ -34,7 +34,10 @@
 //! [`Connect::egfx`] chooses. With the graphics pipeline (MS-RDPEGFX), the server
 //! draws through surfaces on a dynamic channel — [`gfx`](self::gfx) composes them
 //! into the framebuffer — marks its frames ([`Event::Frame`]), and answers a monitor
-//! layout with a graphics reset, which surfaces here as one [`Event::Resize`].
+//! layout with a graphics reset, which surfaces here as one [`Event::Resize`]. Its
+//! codecs are decoded here, the H.264 a host draws video with included
+//! ([`avc`](self::avc), over OpenH264): the framebuffer is always pixels, whatever
+//! the wire carried.
 //! Without it, the server sends plain bitmap updates on the share and the desktop
 //! keeps its opening size: Display Control is the pipeline's alone.
 //!
@@ -68,8 +71,6 @@
 //! # What this does not do
 //!
 //! - **No touch.** MS-RDPEI is never asked for.
-//! - **No H.264.** The graphics pipeline is offered with AVC disabled, so a server
-//!   draws with the codecs this module decodes in Rust.
 //! - **NLA and nothing else.** The security negotiation offers `HYBRID` alone, so a
 //!   server that cannot do CredSSP is refused rather than logged on to some other
 //!   way.
@@ -81,6 +82,7 @@
 //! - **No Kerberos.** CredSSP runs NTLM with the target's user name and password.
 //! - **One monitor.** [`Input::resize`] sends a layout of exactly one.
 
+mod avc;
 mod camera;
 mod connect;
 mod error;
