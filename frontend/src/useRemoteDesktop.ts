@@ -21,6 +21,7 @@ import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import { HeldModifiers, modifierFlags } from "./heldModifiers.ts";
 import { type MicSender, startMicSender } from "./micSender.ts";
 import "./keyboardLock.ts";
+import { decodesAppleHevc } from "./appleHevc.ts";
 import {
   isMacHost,
   MacKeyboardTranslator,
@@ -1123,13 +1124,14 @@ export function useRemoteDesktop(
 
     const open = (sessionId: string) => {
       session = sessionId;
-      // The URL names this window's screen and the chroma its decoder takes, so a
+      // The URL names this window's screen and what its decoder takes, so a
       // takeover's attach can reconnect the selected target for it — the attach
       // happens before this client could send anything.
       const socket = new WebSocket(
         gatewaySocketUrl("/ws", sessionId, {
           screen: hostDisplayMsg(),
           chroma: videoChroma(),
+          hevc: decodesAppleHevc(),
         }),
       );
       const generation = advancePaintGeneration(paintGenerationRef);

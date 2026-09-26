@@ -47,7 +47,7 @@ use crate::protocol::{
 };
 use crate::shadow::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
-use crate::vnc_apple_media::{self, MediaStream, Pictures};
+use crate::vnc_apple_media::{self, MediaStream, PassedUnit, Pictures};
 use crate::vnc_audio::{self, FrameDecoder, ServerAudio};
 use crate::vnc_encodings::{Decoded, Decoders, Payload};
 use crate::vnc_apple_clipboard;
@@ -1485,24 +1485,39 @@ pub async fn run(
     // for every size and holds each under the ceiling, and a remote that answers
     // past it is refused. Never High Performance's, whose picture is the media
     // stream's.
-    let tiles = if config.resize || config.subtype == Some(Subtype::ArdHighPerformance) {
+    // A passed High Performance stream is the one other exception: the Mac's ZRLE
+    // fills its gaps as tiles at any size, since nothing here encodes video for it.
+    let tiles = if plan.apple_hevc {
+        TileSupport::Gaps
+    } else if config.resize || config.subtype == Some(Subtype::ArdHighPerformance) {
         TileSupport::None
     } else {
         TileSupport::Rects
     };
     // A browser whose decoder takes 4:4:4 is sent wlshare's own VP9 as it comes, when
-    // the server is wlshare; every other browser is sent the stream encoded here.
-    let pass_444 = plan.chroma == Chroma::Full;
+    // the server is wlshare; every other browser is sent the stream encoded here. A
+    // browser that takes the Mac's HEVC is sent that, on a target that passes it.
+    let passing = Passing { wlshare_vp9: plan.chroma == Chroma::Full, apple_hevc: plan.apple_hevc };
     let sink = VideoSink::new("vnc", frame_tx, plan, feedback, tiles);
-    session(config, display, pass_444, input_rx, audio, camera, microphone, &sink).await;
+    session(config, display, passing, input_rx, audio, camera, microphone, &sink).await;
     sink.finish().await;
+}
+
+/// The streams a remote codes itself that this session passes to the browser as they
+/// come, from the resolved plan.
+#[derive(Clone, Copy)]
+struct Passing {
+    /// wlshare's VP9 encoding, listed for a browser that takes 4:4:4.
+    wlshare_vp9: bool,
+    /// A High Performance Mac's HEVC ([`crate::config::RenderPlan::apple_hevc`]).
+    apple_hevc: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn session(
     config: TargetConfig,
     display: Option<HostDisplay>,
-    pass_444: bool,
+    passing: Passing,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<crate::audio::AudioBridge>>,
     camera: Option<Arc<crate::camera::CameraBridge>>,
@@ -1519,7 +1534,7 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        |stream| connect(&config, display, pass_444, stream),
+        |stream| connect(&config, display, passing, stream),
     )
     .await
     else {
@@ -1718,7 +1733,7 @@ impl ServerInit {
 async fn connect(
     config: &TargetConfig,
     display: Option<HostDisplay>,
-    pass_444: bool,
+    passing: Passing,
     stream: tokio::net::TcpStream,
 ) -> anyhow::Result<Connected> {
     let dialect = Dialect::of(config.subtype);
@@ -1765,7 +1780,7 @@ async fn connect(
             read_security_result(&mut downlink).await?;
             uplink.send(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut downlink).await?;
-            rfb38_preface(downlink, uplink, server, macos, config, pass_444).await
+            rfb38_preface(downlink, uplink, server, macos, config, passing.wlshare_vp9).await
         }
         Dialect::Apple889 => {
             let Secured::Apple(wrap_key) = secured else {
@@ -1777,7 +1792,8 @@ async fn connect(
             read_security_result(&mut reader).await?;
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
-            apple_preface(reader, sock, server, macos, wrap_key, config, display, addresses).await
+            let pass_hevc = passing.apple_hevc;
+            apple_preface(reader, sock, server, macos, wrap_key, config, display, addresses, pass_hevc).await
         }
     }
 }
@@ -2115,6 +2131,7 @@ async fn apple_preface(
     config: &TargetConfig,
     display: Option<HostDisplay>,
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
+    pass_hevc: bool,
 ) -> anyhow::Result<Connected> {
     let high_performance = config.subtype == Some(Subtype::ArdHighPerformance);
     // Apple's viewer checks this before it sends a byte of the session, and turns a
@@ -2182,7 +2199,7 @@ async fn apple_preface(
         macos,
         apple: true,
         poll: true,
-        media: high_performance.then(|| MediaStream::new(peer, local)),
+        media: high_performance.then(|| MediaStream::new(peer, local, pass_hevc)),
         passthrough: None,
     })
 }
@@ -2624,14 +2641,15 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     // While the media stream carries the picture, the request below
                     // is for one pixel, and the repaint is its newest picture: the
                     // Mac sends one whenever its screen changes, so the newest is
-                    // the screen as it is.
+                    // the screen as it is. A passed stream's repaint is an IDR
+                    // from the Mac, which the browser's decoder starts over at.
                     let latest = {
                         let d = desktop.lock().unwrap();
-                        media
-                            .as_ref()
-                            .filter(|_| d.media_live)
-                            .and_then(|m| m.lock().unwrap().latest())
-                            .filter(|picture| picture.size == d.size)
+                        let live = media.as_ref().filter(|_| d.media_live).map(|m| m.lock().unwrap());
+                        if let Some(media) = &live {
+                            media.want_keyframe();
+                        }
+                        live.and_then(|m| m.latest()).filter(|picture| picture.size == d.size)
                     };
                     if let Some(picture) = latest
                         && let Err(e) = blit_picture(&shadow, &picture, &sink).await
@@ -3011,16 +3029,61 @@ async fn blit_picture(
     sink.frame().await
 }
 
-/// The next picture the media stream decoded, on a session that has one;
-/// otherwise never. `None` is the stream's receiver saying it has stopped.
-async fn next_picture(apple: &mut Option<Apple>) -> Option<Arc<vnc_apple_media::Picture>> {
+/// Pass a unit of the Mac's HEVC to the browser, as [`show_picture`] shows a
+/// decoded picture: one of another size, or one that comes while a resize holds
+/// the display, is dropped, and the first one of a display takes the picture over
+/// from ZRLE. A dropped unit is one the next ones predict from, so the browser
+/// starts over at a keyframe, which the Mac is asked for as soon as a unit is held
+/// back waiting for one.
+async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &SharedMedia) -> anyhow::Result<()> {
+    let first = {
+        let mut d = shared.desktop.lock().unwrap();
+        if unit.size != d.size || d.hp.holds_pixels() {
+            sink.reset_render();
+            return Ok(());
+        }
+        !std::mem::replace(&mut d.media_live, true)
+    };
+    if first {
+        info!("vnc: the picture is now the Mac's HEVC media stream, passed to the browser");
+        // As in `show_picture`: the Mac would otherwise go on pushing ZRLE.
+        send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
+    }
+    let (w, h) = unit.size;
+    let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
+    if !sink.pass_hevc(w, h, unit.data, passed).await? {
+        media.lock().unwrap().want_keyframe();
+    }
+    Ok(())
+}
+
+/// What the media stream handed the read loop next.
+enum FromStream {
+    Picture(Arc<vnc_apple_media::Picture>),
+    Unit(PassedUnit),
+    /// The stream's receiver has stopped.
+    Stopped,
+}
+
+/// The next picture the media stream decoded, or unit it passes, on a session that
+/// has one; otherwise never.
+async fn next_picture(apple: &mut Option<Apple>) -> FromStream {
     let Some(pictures) = apple.as_mut().and_then(|a| a.pictures.as_mut()) else {
         return std::future::pending().await;
     };
-    if pictures.changed().await.is_err() {
-        return std::future::pending().await;
+    match pictures {
+        Pictures::Decoded(pictures) => {
+            if pictures.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+            pictures.borrow_and_update().clone().map_or(FromStream::Stopped, FromStream::Picture)
+        }
+        Pictures::Passed(units) => match units.recv().await {
+            Some(Some(unit)) => FromStream::Unit(unit),
+            Some(None) => FromStream::Stopped,
+            None => std::future::pending().await,
+        },
     }
-    pictures.borrow_and_update().clone()
 }
 
 /// Resolves when a High Performance resize has something due — at
@@ -3206,16 +3269,21 @@ async fn read_loop<R: AsyncRead + Unpin>(
 
             picture = next_picture(&mut apple) => {
                 match picture {
-                    Some(picture) => {
+                    FromStream::Picture(picture) => {
                         if let Some(media) = media {
                             media.lock().unwrap().pictured(picture.size);
                         }
                         show_picture(&shared, &picture, &sink).await?;
                     }
+                    FromStream::Unit(unit) => {
+                        let media = media.as_ref().expect("a passed unit comes from the media stream");
+                        media.lock().unwrap().pictured(unit.size);
+                        pass_unit(&shared, unit, &sink, media).await?;
+                    }
                     // The receiver failed. Apple's viewer has no way back to RFB
                     // pixels from a failed stream and ends the session, and so does
                     // this one.
-                    None => {
+                    FromStream::Stopped => {
                         let failure = media.as_ref().map_or_else(
                             || anyhow::anyhow!("its receiver stopped"),
                             |m| m.lock().unwrap().failure(),
@@ -7789,6 +7857,7 @@ mod tests {
             quality: 60,
             adaptive: None,
             chroma: crate::config::Chroma::Subsampled,
+            apple_hevc: false,
         };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::None);
@@ -10199,7 +10268,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: None, chroma: Chroma::Full };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: None, chroma: Chroma::Full, apple_hevc: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::Rects);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();

@@ -397,6 +397,15 @@ password = "change-me"
 # links the two decoders — FFmpeg's HEVC decoder (LGPL) and Fraunhofer's AAC-ELD decoder, whose
 # licence is not OSI-approved — and is therefore in no release artifact. Any other
 # build refuses the subtype. See docs/apple-vnc-889.md, "The media stream".
+#
+# `hevc_passthrough = true` sends the Mac's HEVC to the browser as the Mac sent it,
+# for a LAN of 100 Mbit/s or more, rather than decoding it here and encoding VP9 —
+# every picture the Mac sends, up to 30 a second, at the Mac's own quality, and
+# while the stream is not flowing (before it starts, and across a display change)
+# the Mac's zlib rectangles as PNG tiles. Nothing adapts it to the link: the video
+# keys below do not reach it. Only a browser whose decoder takes the stream gets it
+# — Chrome and Safari, desktop and mobile, measured; not Firefox — and every other
+# browser is sent VP9 as without the key.
 # [[targets]]
 # name = "mac-high-performance"
 # protocol = "vnc"
@@ -406,6 +415,7 @@ password = "change-me"
 # password = "the-account-password"
 # clipboard = true
 # resize = true
+# hevc_passthrough = true
 
 # How this target's desktop is streamed to the browser: the whole framebuffer as one
 # VP9 video stream, for every protocol. Every key below is per target, so it belongs

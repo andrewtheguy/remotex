@@ -290,6 +290,10 @@ pub enum TileSupport {
     /// The source's updates are rectangles, which it hands to [`VideoSink::damage`]
     /// whole while [`VideoSink::tiling`] says so.
     Rects,
+    /// The picture is the remote's own stream passed through ([`VideoSink::pass_hevc`]),
+    /// and the source's rectangles fill its gaps — before it flows and across a display
+    /// change — as tiles, whatever the desktop's size: nothing here encodes video.
+    Gaps,
 }
 
 /// One item in the ordered queue.
@@ -395,10 +399,10 @@ struct Shared {
 
 impl Shared {
     fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>, tile_support: TileSupport) -> Self {
-        let RenderPlan { quality, adaptive, chroma } = plan;
+        let RenderPlan { quality, adaptive, chroma, .. } = plan;
         Self {
             tile_support,
-            tiling: AtomicBool::new(false),
+            tiling: AtomicBool::new(tile_support == TileSupport::Gaps),
             rects: Mutex::default(),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
@@ -685,12 +689,39 @@ impl VideoSink {
     /// and the keyframe goes out behind a fresh announcement.
     pub async fn pass(&self, w: u16, h: u16, frame: Vec<u8>) -> anyhow::Result<()> {
         let passed = crate::stream::pass_444(w, h, &frame)?;
+        self.forward(w, h, frame, passed).await.map(drop)
+    }
+
+    /// Queue one access unit of a High Performance Mac's HEVC, `w`×`h`, as the next
+    /// unit, untouched: an Annex B picture that `passed` describes, read from the
+    /// stream's own parameter sets ([`crate::vnc_apple_media`]).
+    ///
+    /// As [`Self::pass`] in everything the queue does — the budget, the order, the
+    /// restart at a keyframe behind a fresh announcement — and nothing else: the Mac
+    /// paces and codes its stream, and the browser's queueing reaches it as no
+    /// report, so there is no fence to echo. A browser that must start over is sent
+    /// nothing until an IDR, and `false` says this unit was dropped for one: only the
+    /// Mac can send it, and a screen that stays still would never bring one unasked.
+    pub async fn pass_hevc(
+        &self,
+        w: u16,
+        h: u16,
+        frame: Vec<u8>,
+        passed: crate::stream::Passed,
+    ) -> anyhow::Result<bool> {
+        video::check_picture((w, h))?;
+        self.forward(w, h, frame, passed).await
+    }
+
+    /// Queue a checked, passed unit: see [`Self::pass`]. `false` when it was dropped
+    /// while the browser waits for a keyframe.
+    async fn forward(&self, w: u16, h: u16, frame: Vec<u8>, passed: crate::stream::Passed) -> anyhow::Result<bool> {
         self.shared.passing.store(true, Ordering::Relaxed);
         let restart = if passed.keyframe {
             self.shared.pass_restart.swap(false, Ordering::Relaxed)
         } else if self.shared.pass_restart.load(Ordering::Relaxed) {
             debug!("{}: dropping a passed frame until the keyframe a restart needs", self.engine);
-            return Ok(());
+            return Ok(false);
         } else {
             false
         };
@@ -713,7 +744,8 @@ impl VideoSink {
             self.push(Pending::Msg(ServerMsg::VideoFormat { decode })).await?;
         }
         let unit = VideoUnit { w, h, keyframe: passed.keyframe, data: frame, held };
-        self.push(Pending::Msg(ServerMsg::Video(unit))).await
+        self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
+        Ok(true)
     }
 
     /// Whether the picture is the remote's stream passed through ([`Self::pass`]).
@@ -774,8 +806,11 @@ impl VideoSink {
         }
         if let ServerMsg::Resize { w, h, .. } = &msg {
             let (w, h) = (*w, *h);
-            let tiling = self.shared.tile_support == TileSupport::Rects
-                && !video::within_ceiling((u32::from(w), u32::from(h)));
+            let tiling = match self.shared.tile_support {
+                TileSupport::None => false,
+                TileSupport::Rects => !video::within_ceiling((u32::from(w), u32::from(h))),
+                TileSupport::Gaps => true,
+            };
             if self.shared.tiling.swap(tiling, Ordering::Relaxed) != tiling {
                 if tiling {
                     self.shared.passing.store(false, Ordering::Relaxed);
@@ -1200,7 +1235,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: None, chroma: Chroma::Subsampled };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: None, chroma: Chroma::Subsampled, apple_hevc: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1279,6 +1314,37 @@ mod tests {
         assert!(matches!(&out[0], ServerMsg::VideoFormat { .. }), "{:?}", out[0]);
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 20));
         assert!(frame_rx.try_recv().is_err());
+    }
+
+    /// A passed High Performance stream: the Mac's rectangles are tiles whatever the
+    /// desktop's size, with no `tiling` said, since the picture is still the stream;
+    /// its units go out as passed ones do, and one dropped for a keyframe says so,
+    /// for the engine to ask the Mac.
+    #[tokio::test]
+    async fn the_gaps_around_a_passed_hevc_stream_are_tiles() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(64);
+        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), TileSupport::Gaps);
+        assert!(sink.tiling(), "tiles from the start, before any resize");
+        sink.msg(ServerMsg::Resize { w: 1600, h: 1000, scale: UNSCALED }).await.unwrap();
+        let rect = Rect::from_size(0, 0, 2, 2).unwrap();
+        sink.damage(rect, &[7; 12]).await.unwrap();
+        sink.frame().await.unwrap();
+        let hevc = |keyframe| crate::stream::Passed { decode: "hev1.4.10.L150.BE.8".to_owned(), keyframe };
+        assert!(!sink.pass_hevc(1600, 1000, vec![1; 30], hevc(false)).await.unwrap(), "dropped for a keyframe");
+        assert!(sink.pass_hevc(1600, 1000, vec![2; 900], hevc(true)).await.unwrap());
+        sink.flush().await;
+
+        let out = drain(&mut frame_rx, 4).await;
+        assert!(matches!(&out[0], ServerMsg::Resize { .. }), "{:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Tiles(tiles) if tiles.len() == 1), "{:?}", out[1]);
+        assert!(
+            matches!(&out[2], ServerMsg::VideoFormat { decode } if decode == "hev1.4.10.L150.BE.8"),
+            "{:?}",
+            out[2]
+        );
+        assert!(matches!(&out[3], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 900));
+        assert!(frame_rx.try_recv().is_err(), "no `tiling` message and nothing else");
+        assert!(sink.tiling(), "a resize leaves the gaps as tiles");
     }
 
     /// Only the 4:4:4 stream the announcement describes is passed.
@@ -1775,7 +1841,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: Some(10), chroma: Chroma::Subsampled };
+        let plan = RenderPlan { quality: 60, adaptive: Some(10), chroma: Chroma::Subsampled, apple_hevc: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), TileSupport::None);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2030,7 +2096,7 @@ mod tests {
     /// the dial.
     #[test]
     fn an_adaptive_plan_carries_its_floor_into_the_walk() {
-        let plan = RenderPlan { quality: 60, adaptive: Some(25), chroma: Chroma::Subsampled };
+        let plan = RenderPlan { quality: 60, adaptive: Some(25), chroma: Chroma::Subsampled, apple_hevc: false };
         let shared = Shared::new(plan, feedback(), TileSupport::None);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware, "the walk ignores lag");

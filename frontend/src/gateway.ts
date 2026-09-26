@@ -39,8 +39,8 @@ export function gatewayFetch(
 /// `wss:` whether or not the page itself was loaded over TLS.
 ///
 /// The session socket also names what only this window knows about itself: its
-/// `screen` (the same numbers `connect` carries) and the chroma its video decoder
-/// takes. Both are here for one reason — a gateway holding a target whose engine a
+/// `screen` (the same numbers `connect` carries), the chroma its video decoder
+/// takes, and whether that decoder takes a High Performance Mac's HEVC. All are here for one reason — a gateway holding a target whose engine a
 /// claim change ended reconnects it at attach time, before any message this client
 /// could send, and it must build that session for this browser rather than the
 /// previous one. The media sockets carry the claim and nothing else.
@@ -50,6 +50,7 @@ export function gatewaySocketUrl(
   client?: {
     screen: { w: number; h: number; scale: number; fit: boolean };
     chroma: VideoChroma;
+    hevc: boolean;
   },
 ): string {
   const url = new URL(gatewayUrl(path));
@@ -61,6 +62,7 @@ export function gatewaySocketUrl(
     url.searchParams.set("scale", String(client.screen.scale));
     url.searchParams.set("fit", String(client.screen.fit));
     url.searchParams.set("chroma", client.chroma);
+    url.searchParams.set("hevc", String(client.hevc));
   }
   return url.toString();
 }

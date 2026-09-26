@@ -984,6 +984,169 @@ impl Depacketizer {
 }
 
 // ---------------------------------------------------------------------------
+// Passing the stream through
+// ---------------------------------------------------------------------------
+
+/// NAL unit type of a sequence parameter set.
+const NAL_SPS: u8 = 33;
+
+/// An access unit passed to the browser as the Mac sent it: one picture, as the
+/// Annex B stream a `VideoDecoder` configured with [`Self::decode`] takes.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PassedUnit {
+    /// The display's size, from the stream's parameter sets.
+    pub size: (u16, u16),
+    /// The configuration string, from the same.
+    pub decode: String,
+    /// An IRAP picture, which a decoder can start at.
+    pub keyframe: bool,
+    pub data: Vec<u8>,
+}
+
+/// What a sequence parameter set says about the pictures after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamParams {
+    /// The cropped picture: the coded size less the conformance window.
+    pub size: (u16, u16),
+    /// The configuration string, `hev1` for parameter sets in band, per ISO/IEC
+    /// 14496-15 Annex E: `hev1.4.10.L150.BE.8` for the Mac's 4:4:4 stream.
+    pub decode: String,
+}
+
+/// The access units of a stream, turned into [`PassedUnit`]s: each unit's
+/// parameter sets update what the next ones are described with, and a unit before
+/// the first is dropped, since nothing could configure a decoder for it.
+#[derive(Default)]
+pub struct Passer {
+    params: Option<StreamParams>,
+}
+
+impl Passer {
+    pub fn pass(&mut self, unit: &AccessUnit) -> Option<PassedUnit> {
+        for nal in unit.iter().filter(|nal| nal_type(nal[0]) == NAL_SPS) {
+            match parse_sps(nal) {
+                Some(params) => self.params = Some(params),
+                None => log::warn!("vnc: the Mac's HEVC carried a sequence parameter set this side cannot read"),
+            }
+        }
+        let params = self.params.as_ref()?;
+        let mut data = Vec::with_capacity(unit.iter().map(|nal| nal.len() + 4).sum());
+        for nal in unit {
+            data.extend_from_slice(&[0, 0, 0, 1]);
+            data.extend_from_slice(nal);
+        }
+        Some(PassedUnit {
+            size: params.size,
+            decode: params.decode.clone(),
+            keyframe: unit.iter().any(|nal| (16..=23).contains(&nal_type(nal[0]))),
+            data,
+        })
+    }
+}
+
+/// Bits out of an RBSP, most significant first.
+struct Bits<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl Bits<'_> {
+    fn bit(&mut self) -> Option<u32> {
+        let byte = self.data.get(self.at / 8)?;
+        let bit = (byte >> (7 - self.at % 8)) & 1;
+        self.at += 1;
+        Some(u32::from(bit))
+    }
+
+    fn bits(&mut self, n: u32) -> Option<u64> {
+        (0..n).try_fold(0u64, |value, _| Some((value << 1) | u64::from(self.bit()?)))
+    }
+
+    fn skip(&mut self, n: usize) -> Option<()> {
+        self.at += n;
+        (self.at <= self.data.len() * 8).then_some(())
+    }
+
+    /// `ue(v)`: unsigned Exp-Golomb.
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while self.bit()? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        u32::try_from((1u64 << zeros) - 1 + self.bits(zeros)?).ok()
+    }
+}
+
+/// A NAL unit's payload with its emulation-prevention bytes taken out.
+fn rbsp(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len());
+    let mut zeros = 0;
+    for &byte in payload {
+        if zeros >= 2 && byte == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+        out.push(byte);
+    }
+    out
+}
+
+/// The picture size and configuration string a sequence parameter set NAL unit
+/// (its two-byte header included) describes (H.265 7.3.2.2).
+pub fn parse_sps(nal: &[u8]) -> Option<StreamParams> {
+    let data = rbsp(nal.get(2..)?);
+    let mut r = Bits { data: &data, at: 0 };
+    r.skip(4)?; // sps_video_parameter_set_id
+    let sub_layers = r.bits(3)? as usize; // sps_max_sub_layers_minus1
+    r.skip(1)?; // sps_temporal_id_nesting_flag
+    // profile_tier_level(1, sps_max_sub_layers_minus1)
+    let space = r.bits(2)?;
+    let tier = r.bit()?;
+    let profile = r.bits(5)?;
+    let compatibility = (0..32).try_fold(0u32, |flags, j| Some(flags | (r.bit()? << j)))?;
+    let constraints: Vec<u8> = (0..6).map(|_| r.bits(8).map(|b| b as u8)).collect::<Option<_>>()?;
+    let level = r.bits(8)?;
+    let present: Vec<(u32, u32)> = (0..sub_layers).map(|_| Some((r.bit()?, r.bit()?))).collect::<Option<_>>()?;
+    if sub_layers > 0 {
+        r.skip(2 * (8 - sub_layers))?;
+    }
+    for (profile_present, level_present) in present {
+        r.skip(88 * profile_present as usize + 8 * level_present as usize)?;
+    }
+    r.ue()?; // sps_seq_parameter_set_id
+    let chroma_format = r.ue()?;
+    let separate_planes = chroma_format == 3 && r.bit()? == 1;
+    let width = r.ue()?;
+    let height = r.ue()?;
+    let (mut crop_w, mut crop_h) = (0, 0);
+    if r.bit()? == 1 {
+        let (left, right, top, bottom) = (r.ue()?, r.ue()?, r.ue()?, r.ue()?);
+        // SubWidthC and SubHeightC: 2 where chroma is halved on that axis.
+        let (sub_w, sub_h) = match (chroma_format, separate_planes) {
+            (1, _) => (2, 2),
+            (2, _) => (2, 1),
+            _ => (1, 1),
+        };
+        crop_w = sub_w * left.checked_add(right)?;
+        crop_h = sub_h * top.checked_add(bottom)?;
+    }
+    let size = (
+        u16::try_from(width.checked_sub(crop_w)?).ok()?,
+        u16::try_from(height.checked_sub(crop_h)?).ok()?,
+    );
+    let space = ["", "A", "B", "C"][space as usize];
+    let tier = if tier == 1 { 'H' } else { 'L' };
+    let kept = constraints.iter().rposition(|&b| b != 0).map_or(0, |last| last + 1);
+    let constraints: String = constraints[..kept].iter().map(|b| format!(".{b:X}")).collect();
+    let decode = format!("hev1.{space}{profile}.{compatibility:X}.{tier}{level}{constraints}");
+    Some(StreamParams { size, decode })
+}
+
+// ---------------------------------------------------------------------------
 // The decoder
 // ---------------------------------------------------------------------------
 
@@ -1181,10 +1344,31 @@ unsafe fn to_rgb(frame: &avcodec_hevc_sys::AVFrame) -> anyhow::Result<Picture> {
 // The session's media stream
 // ---------------------------------------------------------------------------
 
-/// The newest decoded picture, for the read loop to show. A picture is the whole
-/// display, so an unshown one is simply replaced. `None` after a picture means
-/// the receiver has stopped.
-pub type Pictures = tokio::sync::watch::Receiver<Option<std::sync::Arc<Picture>>>;
+/// What the receiver hands the read loop.
+pub enum Pictures {
+    /// The newest decoded picture, to show. A picture is the whole display, so an
+    /// unshown one is simply replaced. `None` after a picture means the receiver has
+    /// stopped.
+    Decoded(tokio::sync::watch::Receiver<Option<std::sync::Arc<Picture>>>),
+    /// Every access unit, in order, to pass to the browser: a unit depends on the
+    /// ones before it, so none is replaced. `None` means the receiver has stopped.
+    Passed(tokio::sync::mpsc::Receiver<Option<PassedUnit>>),
+}
+
+/// The sending half of [`Pictures`], which each receiver the stream binds is handed.
+#[derive(Clone)]
+enum Outlet {
+    Decoded(tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>),
+    #[cfg_attr(not(feature = "apple-hp-media"), allow(dead_code))]
+    Passed(tokio::sync::mpsc::Sender<Option<PassedUnit>>),
+}
+
+/// Access units the read loop may be behind by in passing them to the browser.
+/// Reaching it drops to the next keyframe, as the decoder's queue does: the loop
+/// waits on the browser's link ([`crate::encode::VideoSink::pass_hevc`]), so this is
+/// where a link that cannot carry the stream sheds it. Half a second of the virtual
+/// display's 30 Hz ([`vnc_apple::DISPLAY_HZ`]).
+const PASS_QUEUE: usize = 15;
 
 /// One session's media stream: its offers, and once the Mac names its ports, the
 /// receiver. Shared between the engine's two loops, which each decide on offers.
@@ -1214,7 +1398,10 @@ pub struct MediaStream {
     offer_made: std::sync::Arc<tokio::sync::Notify>,
     /// The ports the receiver is bound to, and the receiver.
     receiver: Option<((u16, u16), tokio::task::JoinHandle<()>)>,
-    pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
+    pictures: Outlet,
+    /// Signalled by [`MediaStream::want_keyframe`], for the receiver to ask the Mac.
+    #[cfg_attr(not(feature = "apple-hp-media"), allow(dead_code))]
+    keyframe_wanted: std::sync::Arc<tokio::sync::Notify>,
     /// Why the receiver stopped, which it leaves here before the `None` that says
     /// so — see [`MediaStream::failure`].
     failed: Failure,
@@ -1271,8 +1458,16 @@ fn leg_due(offered: std::time::Instant, last: Option<std::time::Instant>) -> std
 }
 
 impl MediaStream {
-    pub fn new(peer: std::net::SocketAddr, local: std::net::SocketAddr) -> (Self, Pictures) {
-        let (pictures, rx) = tokio::sync::watch::channel(None);
+    /// `pass` hands the read loop the Mac's access units rather than pictures
+    /// decoded from them — see [`Pictures`].
+    pub fn new(peer: std::net::SocketAddr, local: std::net::SocketAddr, pass: bool) -> (Self, Pictures) {
+        let (pictures, rx) = if pass {
+            let (tx, rx) = tokio::sync::mpsc::channel(PASS_QUEUE);
+            (Outlet::Passed(tx), Pictures::Passed(rx))
+        } else {
+            let (tx, rx) = tokio::sync::watch::channel(None);
+            (Outlet::Decoded(tx), Pictures::Decoded(rx))
+        };
         let media = Self {
             offers: Offers::new(),
             peer: peer.ip(),
@@ -1284,6 +1479,7 @@ impl MediaStream {
             offer_made: std::sync::Arc::default(),
             receiver: None,
             pictures,
+            keyframe_wanted: std::sync::Arc::default(),
             failed: Failure::default(),
             picture_heard: Heard::default(),
             sound_heard: Heard::default(),
@@ -1316,8 +1512,22 @@ impl MediaStream {
     }
 
     /// The newest decoded picture, for a browser that needs the whole desktop again.
+    /// A passed stream has none: [`Self::want_keyframe`] is its repaint.
     pub fn latest(&self) -> Option<std::sync::Arc<Picture>> {
-        self.pictures.borrow().clone()
+        match &self.pictures {
+            Outlet::Decoded(pictures) => pictures.borrow().clone(),
+            Outlet::Passed(_) => None,
+        }
+    }
+
+    /// Ask the Mac for an IDR, with a PLI on the picture's leg: a passed stream's
+    /// browser has to start over, after a reattach, a takeover or its own decoder's
+    /// failure. The Mac answers within tens of milliseconds. A decoded stream asks
+    /// nothing: its repaint is [`Self::latest`].
+    pub fn want_keyframe(&self) {
+        if matches!(self.pictures, Outlet::Passed(_)) {
+            self.keyframe_wanted.notify_one();
+        }
     }
 
     /// Whether an offer is out that the Mac has not answered: no display change may
@@ -1571,7 +1781,8 @@ struct Receiver {
     audio_reports: SrtcpReceiver,
     audio_ssrc: u32,
     video_ssrc: u32,
-    pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
+    pictures: Outlet,
+    keyframe_wanted: std::sync::Arc<tokio::sync::Notify>,
     failed: Failure,
     picture_heard: Heard,
     sound_heard: Heard,
@@ -1618,6 +1829,7 @@ impl Receiver {
             audio_ssrc: media.offers.audio_ssrc,
             video_ssrc: media.offers.video_ssrc,
             pictures: media.pictures.clone(),
+            keyframe_wanted: std::sync::Arc::clone(&media.keyframe_wanted),
             failed: std::sync::Arc::clone(&media.failed),
             picture_heard: std::sync::Arc::clone(&media.picture_heard),
             sound_heard: std::sync::Arc::clone(&media.sound_heard),
@@ -1628,11 +1840,18 @@ impl Receiver {
 
     async fn run(mut self) {
         let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (units, decoder) = spawn_decoder(
-            self.pictures.clone(),
-            std::sync::Arc::clone(&keyframe),
-            std::sync::Arc::clone(&self.failed),
-        );
+        let mut onward = match &self.pictures {
+            Outlet::Decoded(pictures) => {
+                let (units, decoder) = spawn_decoder(
+                    pictures.clone(),
+                    std::sync::Arc::clone(&keyframe),
+                    std::sync::Arc::clone(&self.failed),
+                );
+                Onward::Decoder(units, decoder)
+            }
+            Outlet::Passed(units) => Onward::Browser(Passer::default(), units.clone()),
+        };
+        let keyframe_wanted = std::sync::Arc::clone(&self.keyframe_wanted);
         let mut sound = self.sound.take().map(|bridge| Sound::start(bridge, std::sync::Arc::clone(&self.failed)));
         let mut depacketizer = Depacketizer::default();
         let mut rtcp = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -1658,8 +1877,9 @@ impl Receiver {
                     if ticks % RATE_REPORT == 0 && pictures > 0 {
                         log::debug!(
                             "vnc: {:.1} pictures a second from the Mac over the last {RATE_REPORT}s, \
-                             {behind} dropped behind the decoder so far, {plis} keyframes asked for",
-                            pictures as f64 / f64::from(RATE_REPORT)
+                             {behind} dropped behind {} so far, {plis} keyframes asked for",
+                            pictures as f64 / f64::from(RATE_REPORT),
+                            onward.name()
                         );
                         pictures = 0;
                     }
@@ -1741,24 +1961,28 @@ impl Receiver {
                     match depacketizer.push(&header, payload) {
                         Depacketized::Pending => {}
                         Depacketized::Lost => want_keyframe = true,
-                        Depacketized::Unit(unit) => match units.try_send(unit) {
-                            Ok(()) => pictures += 1,
-                            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        Depacketized::Unit(unit) => match onward.send(unit) {
+                            Sent::Queued => pictures += 1,
+                            Sent::Full(depth) => {
                                 behind += 1;
                                 if behind <= 3 {
                                     log::warn!(
-                                        "vnc: the HEVC decoder fell {DECODE_QUEUE} pictures behind the Mac; \
-                                         dropping to its next keyframe"
+                                        "vnc: {} fell {depth} pictures behind the Mac; \
+                                         dropping to its next keyframe",
+                                        onward.name()
                                     );
                                 }
                                 depacketizer.resync();
                                 want_keyframe = true;
                             }
-                            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                                break anyhow::anyhow!("the HEVC decoder stopped");
-                            }
+                            Sent::Unready => want_keyframe = true,
+                            Sent::Stopped => break anyhow::anyhow!("{} stopped", onward.name()),
                         },
                     }
+                }
+                () = keyframe_wanted.notified() => {
+                    depacketizer.resync();
+                    want_keyframe = true;
                 }
             }
             if keyframe.swap(false, std::sync::atomic::Ordering::Relaxed) {
@@ -1780,9 +2004,71 @@ impl Receiver {
         // decoder's last picture, or that picture would be the last word.
         log::warn!("vnc: the Mac's media receiver stopped: {failure:#}");
         fail(&self.failed, failure);
-        drop(units);
-        let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
-        self.pictures.send_replace(None);
+        match onward {
+            Onward::Decoder(units, decoder) => {
+                drop(units);
+                let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
+                if let Outlet::Decoded(pictures) = &self.pictures {
+                    pictures.send_replace(None);
+                }
+            }
+            Onward::Browser(_, units) => {
+                let _ = units.send(None).await;
+            }
+        }
+    }
+}
+
+/// Where the receiver sends each access unit it reassembles.
+#[cfg(feature = "apple-hp-media")]
+enum Onward {
+    /// The decoder thread, whose pictures the session encodes as VP9.
+    Decoder(std::sync::mpsc::SyncSender<AccessUnit>, std::thread::JoinHandle<()>),
+    /// The read loop, which passes each unit to the browser as it came.
+    Browser(Passer, tokio::sync::mpsc::Sender<Option<PassedUnit>>),
+}
+
+/// What became of one access unit sent [`Onward`].
+#[cfg(feature = "apple-hp-media")]
+enum Sent {
+    Queued,
+    /// Its queue, this deep, is full: dropped, and the stream is dropped to its next
+    /// keyframe.
+    Full(usize),
+    /// No parameter set has come to describe it yet: dropped, and a keyframe, which
+    /// carries them, asked for.
+    Unready,
+    Stopped,
+}
+
+#[cfg(feature = "apple-hp-media")]
+impl Onward {
+    fn send(&mut self, unit: AccessUnit) -> Sent {
+        match self {
+            Self::Decoder(units, _) => match units.try_send(unit) {
+                Ok(()) => Sent::Queued,
+                Err(std::sync::mpsc::TrySendError::Full(_)) => Sent::Full(DECODE_QUEUE),
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Sent::Stopped,
+            },
+            Self::Browser(passer, units) => {
+                let Some(passed) = passer.pass(&unit) else {
+                    return Sent::Unready;
+                };
+                match units.try_send(Some(passed)) {
+                    Ok(()) => Sent::Queued,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Sent::Full(PASS_QUEUE),
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Sent::Stopped,
+                }
+            }
+        }
+    }
+
+    /// What the units go to, for the log.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Decoder(..) => "the HEVC decoder",
+            Self::Browser(..) => "the browser's link",
+        }
     }
 }
 
@@ -2320,28 +2606,7 @@ mod tests {
     #[test]
     #[cfg(feature = "apple-hp-media")]
     fn a_444_stream_decodes_to_the_colours_ffmpeg_converts_it_to() {
-        let stream = include_bytes!("../tests/fixtures/hevc-444-64x48.h265");
-        let mut nals: Vec<Vec<u8>> = Vec::new();
-        let mut rest = &stream[..];
-        while let Some(at) = rest.windows(3).position(|w| w == [0, 0, 1]) {
-            rest = &rest[at + 3..];
-            let end = rest.windows(3).position(|w| w == [0, 0, 1]).unwrap_or(rest.len());
-            let mut nal = rest[..end].to_vec();
-            while nal.last() == Some(&0) {
-                nal.pop();
-            }
-            nals.push(nal);
-        }
-        // One access unit per picture: a VCL unit closes one.
-        let mut units: Vec<AccessUnit> = vec![Vec::new()];
-        for nal in nals {
-            let vcl = nal_type(nal[0]) < 32;
-            units.last_mut().unwrap().push(nal);
-            if vcl {
-                units.push(Vec::new());
-            }
-        }
-        units.retain(|unit| !unit.is_empty());
+        let units = fixture_units();
         assert_eq!(units.len(), 3);
 
         let mut hevc = Hevc::new().unwrap();
@@ -2366,10 +2631,77 @@ mod tests {
         }
     }
 
+    /// The 64×48 4:4:4 fixture's access units, one per picture.
+    fn fixture_units() -> Vec<AccessUnit> {
+        let stream = include_bytes!("../tests/fixtures/hevc-444-64x48.h265");
+        let mut nals: Vec<Vec<u8>> = Vec::new();
+        let mut rest = &stream[..];
+        while let Some(at) = rest.windows(3).position(|w| w == [0, 0, 1]) {
+            rest = &rest[at + 3..];
+            let end = rest.windows(3).position(|w| w == [0, 0, 1]).unwrap_or(rest.len());
+            let mut nal = rest[..end].to_vec();
+            while nal.last() == Some(&0) {
+                nal.pop();
+            }
+            nals.push(nal);
+        }
+        // One access unit per picture: a VCL unit closes one.
+        let mut units: Vec<AccessUnit> = vec![Vec::new()];
+        for nal in nals {
+            let vcl = nal_type(nal[0]) < 32;
+            units.last_mut().unwrap().push(nal);
+            if vcl {
+                units.push(Vec::new());
+            }
+        }
+        units.retain(|unit| !unit.is_empty());
+        units
+    }
+
+    /// The sequence parameter set macwork's stream opened with: 1600×1000, 4:4:4.
+    const MACWORK_SPS: &str = "420101040800000300be080000030000969000641007e3e2710087722904173f89f85fd0d\
+        fa87fd5047eaa09fd55057eaaa0bfd555067eaaaa0dfd5555077eaaaaa0ffd55555021faaaaaa94dc30340402";
+
+    /// The configuration string is read from the stream's own parameter sets, as a
+    /// passed stream's announcement needs: the string WebCodecs decoded macwork's
+    /// capture with in Chrome and Safari, and the picture's size.
+    #[test]
+    fn a_sequence_parameter_set_names_its_configuration_and_size() {
+        let sps: Vec<u8> = (0..MACWORK_SPS.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&MACWORK_SPS[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(
+            parse_sps(&sps),
+            Some(StreamParams { size: (1600, 1000), decode: "hev1.4.10.L150.BE.8".to_owned() })
+        );
+        assert_eq!(parse_sps(&sps[..12]), None, "a truncated one says nothing");
+    }
+
+    /// Each unit goes to the browser as Annex B behind the configuration its
+    /// parameter sets give, the first one a keyframe that carries them.
+    #[test]
+    fn access_units_pass_as_annex_b_described_by_their_parameter_sets() {
+        let units = fixture_units();
+        let mut passer = Passer::default();
+        let passed: Vec<PassedUnit> = units.iter().map(|unit| passer.pass(unit).unwrap()).collect();
+        assert_eq!(passed.len(), 3);
+        assert!(passed[0].keyframe, "the stream opens on an IDR");
+        assert!(!passed[1].keyframe && !passed[2].keyframe);
+        for (unit, passed) in units.iter().zip(&passed) {
+            assert_eq!(passed.size, (64, 48));
+            assert_eq!(passed.decode, "hev1.4.10.L30.9E.8");
+            let annex_b: Vec<u8> = unit.iter().flat_map(|nal| [&[0, 0, 0, 1][..], nal].concat()).collect();
+            assert_eq!(passed.data, annex_b);
+        }
+        // A unit before any parameter set has nothing to be configured by.
+        assert_eq!(Passer::default().pass(&units[1]), None);
+    }
+
     fn media() -> MediaStream {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
-        MediaStream::new(peer, local).0
+        MediaStream::new(peer, local, false).0
     }
 
     /// One offer out at a time, one per display, and the encodings ahead of the

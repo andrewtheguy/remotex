@@ -239,6 +239,12 @@ async def main() -> int:
         "display list, which a generic VNC server never sends",
     )
     parser.add_argument(
+        "--hevc",
+        action="store_true",
+        help="state that this client's decoder takes a High Performance Mac's HEVC, "
+        "which a target with hevc_passthrough then passes it in place of VP9",
+    )
+    parser.add_argument(
         "--records",
         action="store_true",
         help="print each screen batch's records: TILE rectangles and VIDEO units",
@@ -260,9 +266,11 @@ async def main() -> int:
     token = claim.json()["sessionId"]
     print(f"  logged in, session {token[:12]}…")
 
-    # The session socket requires the browser's chroma answer; the probe stands in
-    # for a decoder that takes VP9 profile 1, as a desktop browser does.
-    url = f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444"
+    # The session socket requires the browser's decoder answers; the probe stands in
+    # for a decoder that takes VP9 profile 1, as a desktop browser does, and takes the
+    # Mac's HEVC only with --hevc.
+    hevc = "true" if args.hevc else "false"
+    url = f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444&hevc={hevc}"
     async with websockets.connect(
         url, additional_headers={"Cookie": f"remotex_session={cookie}"}
     ) as socket:
