@@ -78,15 +78,28 @@ pub const CODEC_AVC444_V2: u16 = 0x000F;
 pub const PIXEL_XRGB_8888: u8 = 0x20;
 pub const PIXEL_ARGB_8888: u8 = 0x21;
 
-/// The capability sets this client advertises — [MS-RDPEGFX] 2.2.3.1 and 2.2.3.3 —
-/// and the flags on them.
+/// The capability sets this client advertises — [MS-RDPEGFX] 2.2.3 — and the
+/// flags on them.
 pub const CAPVERSION_8: u32 = 0x0008_0004;
+pub const CAPVERSION_81: u32 = 0x0008_0105;
 pub const CAPVERSION_10: u32 = 0x000A_0002;
+pub const CAPVERSION_101: u32 = 0x000A_0100;
+pub const CAPVERSION_102: u32 = 0x000A_0200;
+pub const CAPVERSION_103: u32 = 0x000A_0301;
+pub const CAPVERSION_104: u32 = 0x000A_0400;
+pub const CAPVERSION_105: u32 = 0x000A_0502;
+pub const CAPVERSION_106: u32 = 0x000A_0600;
+pub const CAPVERSION_107: u32 = 0x000A_0701;
 /// The client keeps the smaller bitmap cache: 4096 slots and 16 MiB, rather than
-/// 25600 and 100 MiB.
+/// 25600 and 100 MiB. Version 10.3 has no such flag; choosing it implies the same.
 pub const CAPS_SMALL_CACHE: u32 = 0x0000_0002;
-/// The server is not to send H.264 in either of its shapes. Version 10 and later.
-pub const CAPS_AVC_DISABLED: u32 = 0x0000_0020;
+/// The client takes H.264 in YUV420 mode. Version 8.1's flag; from version 10 on
+/// H.264 in every mode is implied unless `AVC_DISABLED` (0x20) says otherwise,
+/// which this client never sets.
+pub const CAPS_AVC420_ENABLED: u32 = 0x0000_0010;
+/// The host is not to map surfaces to a scaled output or window, which this client
+/// would ignore. Version 10.7.
+pub const CAPS_SCALEDMAP_DISABLE: u32 = 0x0000_0080;
 
 /// `queueDepth` in a frame acknowledgement: this client does not report how many
 /// frames it holds undrawn, which the server takes as "send as you like".
@@ -293,7 +306,7 @@ impl<'a> Messages<'a> {
     }
 }
 
-fn rect16(r: &mut Reader<'_>) -> Result<Rect16, Malformed> {
+pub(super) fn rect16(r: &mut Reader<'_>) -> Result<Rect16, Malformed> {
     let rect = Rect16 { left: r.u16_le()?, top: r.u16_le()?, right: r.u16_le()?, bottom: r.u16_le()? };
     if rect.left >= rect.right {
         return Err(r.refuse("a rectangle whose right edge is not past its left, at", rect.right));
@@ -320,23 +333,48 @@ pub(crate) fn pdu(command: u16, body: &[u8]) -> Vec<u8> {
     w.finish()
 }
 
-/// What this client can take: version 8 and version 10, the small cache, and no
-/// H.264.
+/// What this client can take: every capability set from version 8 to 10.7, with
+/// the small cache, and H.264 in every mode.
 ///
-/// Version 8 alone would have a Windows host draw with RemoteFX Progressive and
-/// planar; version 10 adds nothing this client has to decode — its point is
-/// `AVC_DISABLED`, which is a version-10 flag, so that a host which would otherwise
-/// choose H.264 is told not to. `THINCLIENT` is deliberately not set: a current host
-/// ignores it, and an older one would answer it with RemoteFX rather than the
-/// progressive form.
+/// The host confirms the newest set it knows, and what the sets add over version 8
+/// is H.264: 8.1 with the YUV420 mode flagged on, 10 implying the YUV444 mode as
+/// well, 10.1 the second YUV444 layout, and 10.4 H.264 in the same frame as the
+/// other codecs — which is how a current Windows host draws a desktop with video
+/// playing on it, the video in AVC and the rest in ClearCodec and Progressive, and
+/// why every set up to 10.7 is here. `AVC_THINCLIENT`, which would ask for the
+/// whole desktop in AVC444, is not set: the host's own choice by region is the
+/// better picture for text. `THINCLIENT` is deliberately not set either: a current
+/// host ignores it, and an older one would answer it with RemoteFX rather than the
+/// progressive form. 10.7's `SCALEDMAP_DISABLE` is set, since the scaled mappings
+/// are commands this client ignores.
 pub fn caps_advertise() -> Vec<u8> {
-    let sets = [(CAPVERSION_8, CAPS_SMALL_CACHE), (CAPVERSION_10, CAPS_SMALL_CACHE | CAPS_AVC_DISABLED)];
-    let mut w = Writer::with_capacity(2 + sets.len() * 12);
-    w.u16_le(u16::try_from(sets.len()).expect("two"));
+    let sets = [
+        (CAPVERSION_8, Some(CAPS_SMALL_CACHE)),
+        (CAPVERSION_81, Some(CAPS_SMALL_CACHE | CAPS_AVC420_ENABLED)),
+        (CAPVERSION_10, Some(CAPS_SMALL_CACHE)),
+        // 10.1 carries sixteen reserved bytes in place of flags.
+        (CAPVERSION_101, None),
+        (CAPVERSION_102, Some(CAPS_SMALL_CACHE)),
+        (CAPVERSION_103, Some(0)),
+        (CAPVERSION_104, Some(CAPS_SMALL_CACHE)),
+        (CAPVERSION_105, Some(CAPS_SMALL_CACHE)),
+        (CAPVERSION_106, Some(CAPS_SMALL_CACHE)),
+        (CAPVERSION_107, Some(CAPS_SMALL_CACHE | CAPS_SCALEDMAP_DISABLE)),
+    ];
+    let mut w = Writer::with_capacity(2 + sets.len() * 12 + 12);
+    w.u16_le(u16::try_from(sets.len()).expect("ten"));
     for (version, flags) in sets {
         w.u32_le(version);
-        w.u32_le(4); // capsDataLength
-        w.u32_le(flags);
+        match flags {
+            Some(flags) => {
+                w.u32_le(4); // capsDataLength
+                w.u32_le(flags);
+            }
+            None => {
+                w.u32_le(16);
+                w.zeros(16);
+            }
+        }
     }
     pdu(CMD_CAPS_ADVERTISE, &w.finish())
 }
@@ -571,15 +609,20 @@ mod tests {
         assert_eq!(r.u16_le().unwrap(), CMD_CAPS_ADVERTISE);
         assert_eq!(r.u16_le().unwrap(), 0);
         assert_eq!(r.u32_le().unwrap() as usize, caps.len());
-        assert_eq!(r.u16_le().unwrap(), 2);
-        assert_eq!(
-            (r.u32_le().unwrap(), r.u32_le().unwrap(), r.u32_le().unwrap()),
-            (CAPVERSION_8, 4, CAPS_SMALL_CACHE)
-        );
-        assert_eq!(
-            (r.u32_le().unwrap(), r.u32_le().unwrap(), r.u32_le().unwrap()),
-            (CAPVERSION_10, 4, CAPS_SMALL_CACHE | CAPS_AVC_DISABLED)
-        );
+        assert_eq!(r.u16_le().unwrap(), 10);
+        let mut set = || (r.u32_le().unwrap(), r.u32_le().unwrap(), r.u32_le().unwrap());
+        assert_eq!(set(), (CAPVERSION_8, 4, CAPS_SMALL_CACHE));
+        assert_eq!(set(), (CAPVERSION_81, 4, CAPS_SMALL_CACHE | CAPS_AVC420_ENABLED));
+        assert_eq!(set(), (CAPVERSION_10, 4, CAPS_SMALL_CACHE));
+        assert_eq!((r.u32_le().unwrap(), r.u32_le().unwrap()), (CAPVERSION_101, 16));
+        assert_eq!(r.bytes(16).unwrap(), &[0; 16]);
+        let mut set = || (r.u32_le().unwrap(), r.u32_le().unwrap(), r.u32_le().unwrap());
+        assert_eq!(set(), (CAPVERSION_102, 4, CAPS_SMALL_CACHE));
+        assert_eq!(set(), (CAPVERSION_103, 4, 0));
+        assert_eq!(set(), (CAPVERSION_104, 4, CAPS_SMALL_CACHE));
+        assert_eq!(set(), (CAPVERSION_105, 4, CAPS_SMALL_CACHE));
+        assert_eq!(set(), (CAPVERSION_106, 4, CAPS_SMALL_CACHE));
+        assert_eq!(set(), (CAPVERSION_107, 4, CAPS_SMALL_CACHE | CAPS_SCALEDMAP_DISABLE));
         assert!(r.is_empty());
 
         assert_eq!(frame_acknowledge(7, 3), vec![

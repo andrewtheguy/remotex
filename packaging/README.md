@@ -116,9 +116,20 @@ binary's global CPU floor.
 
 Release builds link `opus-prebuilt` and `libvpx-prebuilt`. Their sys crates
 download static archives instead of building vendored C and C++, so this project
-needs no CMake, assembler, pkg-config, libclang, vcpkg, or system copies of
-those libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally
-built archives.
+needs no CMake, pkg-config, libclang, vcpkg, or system copies of those
+libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally built
+archives.
+
+The one native library built from source is OpenH264, the RDP client's H.264
+decoder: the `openh264-sys2` crate compiles Cisco's vendored C++ with `cc`, so a
+build host needs a C++ compiler (the ones the runners and CI boxes already carry
+for `cc`). On x86-64 it also assembles OpenH264's SIMD with `nasm` when one is on
+the PATH, and falls back to the portable C++ — a slower decoder, and the crate's
+build output says which it did — when none is; the release workflow installs
+`nasm` on its x86-64 runners so the shipped decoder is the fast one. The assembly
+picks its SSE and AVX paths at run time, so the x86-64 floor above holds. arm64
+gets NEON through `cc` with no assembler. Setting `OPENH264_NO_ASM` builds the
+portable C++ on purpose.
 
 The non-default `apple-hp-media` feature, which `ard-high-performance` targets
 need, adds two decoders and is in no release artifact because of their

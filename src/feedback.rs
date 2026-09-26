@@ -143,15 +143,17 @@ mod tests {
     #[test]
     fn lag_is_the_owed_age_beyond_the_baseline() {
         let feedback = LinkFeedback::new();
-        let sent = Instant::now();
+        // Sent a millisecond after the epoch, not "now": the epoch is set by
+        // whichever test touches it first, and one on tokio's paused clock sets it
+        // ahead of the real one, where a real `now` would saturate to it.
+        let sent = epoch() + Duration::from_millis(1);
         feedback.baseline(40);
         feedback.owed_since(Some(sent));
-        // 100 ms owed on a 40 ms link: 60 ms of queueing. A small tolerance for
-        // the microsecond the store rounds and the instants between the `now()`
-        // above and the epoch.
+        // 100 ms owed on a 40 ms link: 60 ms of queueing, to the microsecond the
+        // store rounds.
         let lag = feedback.lag(sent + Duration::from_millis(100));
         assert!(
-            (Duration::from_millis(55)..=Duration::from_millis(65)).contains(&lag),
+            (Duration::from_millis(59)..=Duration::from_millis(61)).contains(&lag),
             "expected ~60ms, got {lag:?}"
         );
 

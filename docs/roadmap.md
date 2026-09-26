@@ -180,12 +180,14 @@ has an answer rather than being rediscovered.
 - **RDP EGFX.** The RDP client carries the pipeline again — the channel, ZGFX,
   the surface compositor with its caches and copies, the frame marks, and the
   decoders a current Windows host draws with: ClearCodec with NSCodec inside it,
-  RemoteFX Progressive, planar and uncompressed ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
+  RemoteFX Progressive, planar, uncompressed, and the H.264 it hands video to
+  ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
   describes each). Beyond the decoders lies AVC420
   pass-through — handing the host's H.264 to the browser
   rather than decoding it and encoding VP9. What makes that large is that it is a
   second graphics pipeline beside the one every engine shares, not an option on
-  it.
+  it, and that the host masks each picture by rectangles and mixes it with the
+  other codecs on one surface, which a passed stream cannot show.
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
@@ -213,9 +215,8 @@ beside it. That crash is the risk now, and stage 2 starts with its backtrace.
 
 ### `THINCLIENT` in the graphics capability advertise
 
-`caps_advertise` in `proto/gfx.rs` sends versions 8 and 10 with the small cache
-and, on version 10, `AVC_DISABLED`, and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
-unset. A current Windows host, the only host this client targets, ignores the
+`caps_advertise` in `proto/gfx.rs` sends every version from 8 to 10.7 with the
+small cache and leaves `RDPGFX_CAPS_FLAG_THINCLIENT` unset. A current Windows host, the only host this client targets, ignores the
 flag; the hosts that acted on it, choosing the classic RemoteFX codec over the
 progressive form, are not supported, so there is nothing for the flag to change.
 The decision is recorded in
