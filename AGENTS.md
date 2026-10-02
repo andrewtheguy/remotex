@@ -43,6 +43,12 @@ belong in the linked documentation.
   nothing the message does not.
 - Keep end-to-end tests under `tests/`; dummy RDP/VNC servers may use Docker or
   Podman.
+- For an RDP protocol detail, read the Microsoft specification in
+  [ms-rdp-specs](https://github.com/andrewtheguy/ms-rdp-specs) (`../ms-rdp-specs`)
+  rather than recalling it: search the `MS-XXX.md` copy and cite the PDF. When
+  the work needs a spec that is not kept there, add it as that repository's
+  README describes, PDF, Markdown copy and table row together, before relying
+  on it.
 
 ## Design rules
 
