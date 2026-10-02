@@ -284,11 +284,12 @@ impl AudioListener {
                     // rather than a broken stream.
                     Err(broadcast::error::RecvError::Lagged(dropped)) => {
                         debug!("audio: listener fell behind, {dropped} buffer(s) dropped");
-                        // The queue only laggs when the sender stopped draining it,
+                        // The queue only lags when the sender stopped draining it,
                         // which is the link behind by the whole queue's depth — no
-                        // send measurement needed to know shedding should be on.
+                        // send measurement needed to know shedding should be on,
+                        // and the walk is told at the sender's next send.
                         if let Some(signals) = &state.signals {
-                            signals.set_behind(true);
+                            signals.note_lag();
                         }
                         continue;
                     }
@@ -604,6 +605,10 @@ pub struct AudioSignals {
     desired_bps: AtomicI32,
     /// Whether the link is currently behind — the state that sheds silence.
     behind: AtomicBool,
+    /// Whether the encoder's queue lagged since the walk last heard: evidence
+    /// of the link behind that the sending side did not measure, for the
+    /// walk to take up at its next send ([`AudioWalk::sent`]).
+    lagged: AtomicBool,
 }
 
 impl AudioSignals {
@@ -611,6 +616,7 @@ impl AudioSignals {
         Self {
             desired_bps: AtomicI32::new(bitrate_bps),
             behind: AtomicBool::new(false),
+            lagged: AtomicBool::new(false),
         }
     }
 
@@ -628,6 +634,17 @@ impl AudioSignals {
 
     fn set_behind(&self, behind: bool) {
         self.behind.store(behind, Ordering::Relaxed);
+    }
+
+    /// The encoder's queue lagged: the link is behind from now, whatever the
+    /// walk last said, and the walk hears of it at the next send.
+    fn note_lag(&self) {
+        self.behind.store(true, Ordering::Relaxed);
+        self.lagged.store(true, Ordering::Relaxed);
+    }
+
+    fn take_lagged(&self) -> bool {
+        self.lagged.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -657,10 +674,13 @@ impl AudioWalk {
 
     /// Record how long one send blocked, publish the verdicts, and return the
     /// new bitrate when it moved (for the caller's log line). Behind is the
-    /// walk's word on its sends; the encoder side raises the flag on its own
-    /// evidence too, a queue that lagged, and the walk's next clear second
-    /// lowers it.
+    /// walk's word; a queue that lagged on the encoder side is handed to the
+    /// walk first, so the link stays behind for the clear second the walk
+    /// asks for rather than until this send.
     pub fn sent(&mut self, blocked: Duration, now: Instant) -> Option<i32> {
+        if self.signals.take_lagged() {
+            self.walk.dropped();
+        }
         let moved = self.walk.sent(blocked, now).map(|bps| bps as i32);
         self.signals.set_behind(self.walk.behind());
         if let Some(bps) = moved {
@@ -1107,6 +1127,25 @@ mod tests {
             at += cooldown;
         }
         assert_eq!(signals.desired_bps(), 96_000);
+    }
+
+    /// A lag the encoder side saw, with no slow send to show for it, is
+    /// behind until a clear second has followed, not until the next send.
+    #[test]
+    fn a_lagged_queue_keeps_the_link_behind_for_a_clear_second() {
+        let signals = Arc::new(AudioSignals::new(96_000));
+        let mut walk = AudioWalk::new(96_000, Arc::clone(&signals));
+        let mut at = Instant::now();
+        signals.note_lag();
+        assert!(signals.behind(), "shed from the moment the lag is seen");
+        assert_eq!(walk.sent(Duration::ZERO, at), None);
+        assert!(signals.behind(), "one clear send is not relief");
+        for _ in 0..6 {
+            at += Duration::from_millis(200);
+            walk.sent(Duration::ZERO, at);
+        }
+        assert!(!signals.behind());
+        assert_eq!(signals.desired_bps(), 96_000, "a lag moves no rate by itself");
     }
 
     /// While the link is behind, silent buffers are shed before the encoder —
