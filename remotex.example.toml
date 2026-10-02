@@ -361,19 +361,16 @@ password = "change-me"
 #audio_bitrate = 96
 
 # Let that bitrate follow the audio socket's own backpressure — on by default,
-# like `render_adaptive`. Sustained slow sends walk the bitrate down toward
-# `audio_adaptive_min`, sustained clear sends walk it back up to `audio_bitrate`,
-# and, where the sound is encoded here, silence is shed while the link is behind
-# so old sound does not accumulate; a "wlshare" target's packets are passed as
-# they came, and only the rate moves. `false` holds `audio_bitrate` whatever the
+# like `render_adaptive`. Sustained slow sends walk the bitrate down, sustained
+# clear sends walk it back up to `audio_bitrate`, and, where the sound is
+# encoded here, silence is shed while the link is behind so old sound does not
+# accumulate; a "wlshare" target's packets are passed as they came, and only the
+# rate moves. Where the walk stops giving rate up is built into the sound
+# coding, as in every adaptive stream, so there is no floor to set: 32 kbit/s,
+# degraded but continuous, which is the point of giving bitrate up; a lower
+# `audio_bitrate` is simply held. `false` holds `audio_bitrate` whatever the
 # link does. Either value is refused on a target without such sound.
 #audio_adaptive = true
-
-# Floor for that walk in kbit/s, default 32: degraded, but continuous, which is
-# the point of giving bitrate up. An explicit floor must be 6–510 and below
-# `audio_bitrate`; the default one is held to `audio_bitrate` where that sits
-# lower. Refused beside `audio_adaptive = false`.
-#audio_adaptive_min = 32
 
 # Camera redirection: offer the remote a virtual webcam whose frames are this
 # browser's, over MS-RDPECAM on "rdp" — or, on a "wlshare" target, over

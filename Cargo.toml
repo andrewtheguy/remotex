@@ -114,7 +114,7 @@ avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://gi
 # for this gateway and for wlshare, its own repository pinned at a release tag by
 # both, so a passed wlshare packet and one encoded here are the same stream by
 # construction and an encoder setting changes in one place.
-sound-opus = { git = "https://github.com/andrewtheguy/sound-opus", tag = "v0.0.2" }
+sound-opus = { git = "https://github.com/andrewtheguy/sound-opus", tag = "v0.0.3" }
 # libopus itself, for the microphone's decoder (src/mic.rs) and for the tests
 # that read the encoder's packets back; sound-opus links the same crate at the
 # same tag, so there is one libopus in the binary.

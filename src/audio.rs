@@ -24,12 +24,13 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use bytes::Bytes;
 use futures_util::Stream;
 use log::{debug, info, warn};
+use sound_opus::walk::BitrateWalk;
 use tokio::sync::{broadcast, watch};
 
 use crate::config::AudioPlan;
@@ -44,34 +45,6 @@ use crate::opus_stream::{OpusStream, OPUS_CODEC};
 /// that survives to playback. A remote that sends smaller buffers gets a shorter
 /// retained interval from the same fixed depth.
 pub const AUDIO_QUEUE_DEPTH: usize = 16;
-
-/// How long sending one packet batch to the audio socket may block before it
-/// counts as one the link could not keep up with — the audio walk's analogue of
-/// the video walk's `BEHIND_BLOCK` (`screen_vp9::walk`), and the same reasoning: the socket's queue
-/// is deliberately two deep ([`crate::session::AUDIO_SOCKET_BUFFER`]), so this
-/// stays at zero while the link has room and becomes obvious the moment it does
-/// not.
-const BEHIND_SEND: Duration = Duration::from_millis(20);
-
-/// Consecutive slow sends before bitrate is given up. Two rather than one, so a
-/// single unlucky send — a scheduler hiccup, a heartbeat mid-write — is not a
-/// verdict about the link.
-const BEHIND_SENDS: u32 = 2;
-
-/// Consecutive clear sends before bitrate is taken back. Sends arrive at the
-/// remote's wave-buffer cadence — roughly five a second on the tested Windows
-/// host — so this is seconds of proven headroom, deliberately far more than
-/// [`BEHIND_SENDS`]: quick to give up, slow to reclaim, like the video walk.
-const CLEAR_SENDS: u32 = 25;
-
-/// Consecutive clear sends before the link stops counting as *behind* — the
-/// state that sheds silence. Much shorter than [`CLEAR_SENDS`]: shedding exists
-/// to drain a backlog, and a second of clear sends means it has drained.
-const RELIEF_SENDS: u32 = 5;
-
-/// The least time between two bitrate moves, so a burst of slow sends is one
-/// decision rather than one per wave buffer.
-const AUDIO_ADJUST_COOLDOWN: Duration = Duration::from_secs(2);
 
 /// Linear PCM parameters: the only kind of audio this path carries.
 ///
@@ -291,9 +264,7 @@ impl AudioListener {
         let (encoder, head) = OpusStream::new(format, plan.bitrate_bps)
             .with_context(|| format!("cannot carry {format:?} as opus"))?;
         let packet_frames = encoder.packet_frames();
-        let signals = plan
-            .adaptive_floor_bps
-            .map(|_| Arc::new(AudioSignals::new(plan.bitrate_bps)));
+        let signals = plan.adaptive.then(|| Arc::new(AudioSignals::new(plan.bitrate_bps)));
 
         let state = State {
             encoder,
@@ -413,9 +384,7 @@ impl AudioListener {
     /// never saw them. [`EncodedAudio::gap`] is raised when that happens, for
     /// the sender to tell the client before the next batch.
     pub fn into_passed(self, format: PassedFormat, plan: Option<AudioPlan>) -> EncodedAudio<impl Stream<Item = Vec<Bytes>>> {
-        let signals = plan
-            .filter(|plan| plan.adaptive_floor_bps.is_some())
-            .map(|plan| Arc::new(AudioSignals::new(plan.bitrate_bps)));
+        let signals = plan.filter(|plan| plan.adaptive).map(|plan| Arc::new(AudioSignals::new(plan.bitrate_bps)));
         let gap = Arc::new(AtomicBool::new(false));
         // The flag, and whether units were lost after the batch last yielded,
         // which is a gap before the next one rather than before that one.
@@ -593,7 +562,7 @@ pub struct EncodedAudio<S> {
     /// than coded here: what the session card says of the stream.
     pub passthrough: bool,
     /// `Some` exactly when the plan is adaptive: the sender's handle for
-    /// reporting how its sends went ([`AudioCongestion`] writes through it) and
+    /// reporting how its sends went ([`AudioWalk`] writes through it) and
     /// the encoder's source of truth for the rate it should be at. A passed
     /// stream's encoder is the remote's, which the sender tells itself.
     pub signals: Option<Arc<AudioSignals>>,
@@ -627,7 +596,8 @@ impl<S: Stream<Item = Vec<Bytes>> + Send + 'static> EncodedAudio<S> {
 /// blocking is measurable, and read on the encoding side, which owns the
 /// encoder. Two atomics rather than a channel because neither side may wait on
 /// the other: the encoder reads whatever verdict is current when a wave buffer
-/// arrives.
+/// arrives. The walk itself is sound-opus's ([`AudioWalk`]); this is only how
+/// its word crosses between the two tasks.
 #[derive(Debug)]
 pub struct AudioSignals {
     /// The bitrate the walk wants the encoder at, in bits per second.
@@ -661,93 +631,42 @@ impl AudioSignals {
     }
 }
 
-/// What the audio link will bear — the video walk (`screen_vp9::walk`) for sound,
-/// owned by whatever task sends the packets, with the verdicts published
-/// through [`AudioSignals`].
-///
-/// One-directional by construction for the same reason as the video walk:
-/// `ceiling` is the configured bitrate, so this only ever sends *less* than the
-/// operator asked for and climbs back no higher. The signal is how long the
-/// send waited — the audio socket's queue is two deep, so two consecutive waits
-/// of at least `BEHIND_SEND` mean the browser is not draining sound as fast as
-/// the remote produces it.
-///
-/// Pure in the same way too: it takes `now` rather than reading a clock, so
-/// every decision is testable without waiting for one.
-pub struct AudioCongestion {
-    /// The configured bitrate: the finest this will ever ask for.
-    ceiling: i32,
-    /// The configured floor ([`crate::config::TargetConfig::audio_adaptive_min`]).
-    floor: i32,
-    /// The bitrate in force.
-    bitrate: i32,
-    /// Consecutive sends that blocked, and consecutive sends that did not. Only
-    /// one is ever non-zero.
-    behind_sends: u32,
-    clear_sends: u32,
-    /// When the bitrate last moved, for [`AUDIO_ADJUST_COOLDOWN`].
-    changed_at: Option<tokio::time::Instant>,
+/// What the audio link will bear: sound-opus's walk (`sound_opus::walk`), the
+/// one both this gateway and wlshare code from, owned by whatever task sends
+/// the packets, with its verdicts published through [`AudioSignals`] to the
+/// side that holds the encoder — or, for a passed stream, to the engine that
+/// tells the remote ([`AudioBridge::ask_rate`]). The signal is how long the
+/// send waited: the audio socket's queue is deliberately two deep
+/// ([`crate::session::AUDIO_SOCKET_BUFFER`]), so a wait means the browser is
+/// not draining sound as fast as the remote produces it. The ceiling is the
+/// configured bitrate, the floor the crate's, and the steps, the cooldowns and
+/// the hold on a refused rate are the crate's too, so a card and a log line
+/// here state what the stream does and nothing adaptive is this gateway's own.
+pub struct AudioWalk {
+    walk: BitrateWalk,
     signals: Arc<AudioSignals>,
 }
 
-impl AudioCongestion {
-    /// `ceiling` and `floor` in bits per second, already resolved and validated
-    /// by [`crate::config`]; `signals` is the [`EncodedAudio`]'s.
-    pub fn new(ceiling: i32, floor: i32, signals: Arc<AudioSignals>) -> Self {
-        Self {
-            ceiling,
-            floor: floor.min(ceiling),
-            bitrate: ceiling,
-            behind_sends: 0,
-            clear_sends: 0,
-            changed_at: None,
-            signals,
-        }
+impl AudioWalk {
+    /// A walk from `ceiling` bits per second, the plan's rate, already
+    /// validated by [`crate::config`]; `signals` is the [`EncodedAudio`]'s,
+    /// which an adaptive plan has.
+    pub fn new(ceiling: i32, signals: Arc<AudioSignals>) -> Self {
+        Self { walk: BitrateWalk::new(u32::try_from(ceiling).unwrap_or(0), true), signals }
     }
 
     /// Record how long one send blocked, publish the verdicts, and return the
-    /// new bitrate when it moved (for the caller's log line).
-    ///
-    /// Down by a third per step and up by an eighth: 96 kbit/s reaches the
-    /// default 32 floor in three steps (seconds, under sustained blocking) and
-    /// takes half a minute of proven headroom to climb back — quick to give up,
-    /// slow to reclaim, like every other walk in this gateway.
-    pub fn observe(&mut self, blocked: Duration, now: tokio::time::Instant) -> Option<i32> {
-        if blocked >= BEHIND_SEND {
-            self.behind_sends += 1;
-            self.clear_sends = 0;
-            self.signals.set_behind(true);
-        } else {
-            self.clear_sends += 1;
-            self.behind_sends = 0;
-            if self.clear_sends >= RELIEF_SENDS {
-                self.signals.set_behind(false);
-            }
+    /// new bitrate when it moved (for the caller's log line). Behind is the
+    /// walk's word on its sends; the encoder side raises the flag on its own
+    /// evidence too, a queue that lagged, and the walk's next clear second
+    /// lowers it.
+    pub fn sent(&mut self, blocked: Duration, now: Instant) -> Option<i32> {
+        let moved = self.walk.sent(blocked, now).map(|bps| bps as i32);
+        self.signals.set_behind(self.walk.behind());
+        if let Some(bps) = moved {
+            self.signals.set_desired_bps(bps);
         }
-        if self
-            .changed_at
-            .is_some_and(|at| now.saturating_duration_since(at) < AUDIO_ADJUST_COOLDOWN)
-        {
-            return None;
-        }
-        let wanted = if self.behind_sends >= BEHIND_SENDS {
-            (self.bitrate * 2 / 3).max(self.floor)
-        } else if self.clear_sends >= CLEAR_SENDS {
-            // Stops at the ceiling, never above it: headroom does not earn a
-            // better rate than the one that was configured.
-            (self.bitrate + self.bitrate / 8).min(self.ceiling)
-        } else {
-            return None;
-        };
-        if wanted == self.bitrate {
-            return None;
-        }
-        self.bitrate = wanted;
-        self.behind_sends = 0;
-        self.clear_sends = 0;
-        self.changed_at = Some(now);
-        self.signals.set_desired_bps(wanted);
-        Some(wanted)
+        moved
     }
 }
 
@@ -953,10 +872,10 @@ mod tests {
 
         let mut asked = bridge.asked_rate();
         assert_eq!(*asked.borrow_and_update(), None, "nothing asked until a walk does");
-        let mut walk = AudioCongestion::new(plan.bitrate_bps, plan.adaptive_floor_bps.unwrap(), signals);
-        let now = tokio::time::Instant::now();
-        assert_eq!(walk.observe(BEHIND_SEND, now), None);
-        let lower = walk.observe(BEHIND_SEND, now).expect("two slow sends give up rate");
+        let mut walk = AudioWalk::new(plan.bitrate_bps, signals);
+        let now = Instant::now();
+        assert_eq!(walk.sent(SLOW, now), None);
+        let lower = walk.sent(SLOW, now).expect("two slow sends give up rate");
         bridge.ask_rate(lower);
         assert!(asked.has_changed().unwrap());
         assert_eq!(*asked.borrow_and_update(), Some(64_000));
@@ -1124,13 +1043,13 @@ mod tests {
         pcm
     }
 
-    /// The adaptive plan every walk test runs on: default Opus rate, default floor.
+    /// The adaptive plan every walk test runs on: the default Opus rate, walked.
     fn adaptive_plan() -> AudioPlan {
-        AudioPlan {
-            bitrate_bps: 96_000,
-            adaptive_floor_bps: Some(32_000),
-        }
+        AudioPlan { bitrate_bps: 96_000, adaptive: true }
     }
+
+    /// A send that blocked a packet's length: behind, to the walk.
+    const SLOW: Duration = Duration::from_millis(20);
 
     #[test]
     fn silence_is_recognized_and_a_tone_is_not() {
@@ -1143,44 +1062,49 @@ mod tests {
         assert!(!is_silence(&one_frame_of_tone()));
     }
 
-    /// The walk's whole arithmetic: quick to give up, slow to reclaim, bounded
-    /// on both ends, and the behind flag rises with the first block and clears
-    /// after [`RELIEF_SENDS`] clean sends.
+    /// The walk is sound-opus's, and its word reaches the signals: the rate it
+    /// arrives at, bounded by the crate's floor and the plan's ceiling, and
+    /// whether the link is behind, which rises with the first slow send and
+    /// clears after a second of clear ones, well before any rate returns.
     #[test]
-    fn the_audio_walk_gives_up_bitrate_and_takes_it_back() {
+    fn the_audio_walk_publishes_through_the_signals() {
         let signals = Arc::new(AudioSignals::new(96_000));
-        let mut walk = AudioCongestion::new(96_000, 32_000, Arc::clone(&signals));
-        let start = tokio::time::Instant::now();
+        let mut walk = AudioWalk::new(96_000, Arc::clone(&signals));
+        let start = Instant::now();
+        let cooldown = Duration::from_secs(2);
+        let send = Duration::from_millis(200);
 
         // One slow send is not a verdict — but it does mark the link behind.
-        assert_eq!(walk.observe(BEHIND_SEND, start), None);
+        assert_eq!(walk.sent(SLOW, start), None);
         assert!(signals.behind());
-        assert_eq!(walk.observe(BEHIND_SEND, start), Some(64_000));
+        assert_eq!(walk.sent(SLOW, start), Some(64_000));
         assert_eq!(signals.desired_bps(), 64_000);
 
-        // Sustained blocking bottoms out on the floor, never below.
+        // Sustained blocking bottoms out on the crate's floor, never below.
         let mut at = start;
         for _ in 0..20 {
-            at += AUDIO_ADJUST_COOLDOWN;
-            for _ in 0..BEHIND_SENDS {
-                walk.observe(BEHIND_SEND, at);
-            }
+            at += cooldown;
+            walk.sent(SLOW, at);
+            walk.sent(SLOW, at);
         }
-        assert_eq!(signals.desired_bps(), 32_000);
+        assert_eq!(signals.desired_bps(), sound_opus::walk::BITRATE_FLOOR as i32);
         assert!(signals.behind());
 
-        // A few clean sends clear the behind flag well before any rate returns.
-        for _ in 0..RELIEF_SENDS {
-            walk.observe(Duration::ZERO, at);
+        // A second of clear sends clears the behind flag well before any rate returns.
+        for _ in 0..6 {
+            at += send;
+            walk.sent(Duration::ZERO, at);
         }
         assert!(!signals.behind());
+        assert_eq!(signals.desired_bps(), 32_000);
 
         // And a long clear stretch climbs back exactly to the ceiling.
-        for _ in 0..100 {
-            at += AUDIO_ADJUST_COOLDOWN;
-            for _ in 0..CLEAR_SENDS {
-                walk.observe(Duration::ZERO, at);
+        for _ in 0..20 {
+            for _ in 0..20 {
+                at += send;
+                walk.sent(Duration::ZERO, at);
             }
+            at += cooldown;
         }
         assert_eq!(signals.desired_bps(), 96_000);
     }

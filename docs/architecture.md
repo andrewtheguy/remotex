@@ -1536,8 +1536,8 @@ encoder.
 There is no codec byte in the binary frame; the codec is named once, out of
 band, in `audioFormat`. It is Opus encoded here: `codec` is `opus`, `sampleRate`
 48 000, `packetFrames` 960 (20 ms), and `head` the `OpusHead`. The rate is
-`audio_bitrate`, default 96 kbit/s, walking down to `audio_adaptive_min`,
-default 32. The one exception is a High Performance Mac's AAC-ELD, passed in
+`audio_bitrate`, default 96 kbit/s, walking down to the floor sound-opus fixes,
+32 kbit/s. The one exception is a High Performance Mac's AAC-ELD, passed in
 every session on such a target: `codec` `mp4a.40.39`, `packetFrames` 480 (10 ms), `head`
 the Mac's AudioSpecificConfig, and each packet one of the Mac's units, with no
 encoder and none of the keys below reaching it
@@ -1552,21 +1552,26 @@ is TCP, nothing is lost, and the adaptive walk already sheds silence.
 
 The rate is a per-target key and the audio dial's `video_quality`: a ceiling the
 link may fall below, on by default like `render_adaptive`, with
-`audio_adaptive = false` holding the rate whatever the link does.
-`AudioCongestion` (`src/audio.rs`) lives beside the pump's send. The audio
-socket's queue is deliberately two deep; two consecutive sends that each wait at
-least 20 ms are a behind verdict. The walk moves the encoder's bitrate down by a
-third toward `audio_adaptive_min`, and back up by an eighth after sustained
-clear sends. The change reaches the live encoder through `OPUS_SET_BITRATE`;
-packets stay 20 ms and independently decodable, so nothing is re-announced.
-While the link is *behind*, wave buffers that are pure silence are shed before
-the encoder instead of queued — silence is the one content whose loss cannot be
-heard, the client just receives no packets for a while (what a quiet remote
-already produces), and the backlog drains by exactly that much. All three keys
-are refused on a target none of whose sessions can carry sound, which is `ard`
-and a plain `vnc` target; the floor is also refused beside
-`audio_adaptive = false`, and the default floor is held to a lower
-`audio_bitrate` rather than refused.
+`audio_adaptive = false` holding the rate whatever the link does. The walk is
+sound-opus's (`sound_opus::walk::BitrateWalk`), the one crate that codes a
+desktop's sound as Opus for this gateway and for wlshare, so nothing adaptive
+about sound is this gateway's own: `AudioWalk` (`src/audio.rs`) owns one beside
+the pump's send and publishes its word through `AudioSignals`. The audio
+socket's queue is deliberately two deep, and how long a send waited is the
+walk's whole signal; two slow sends among four are a behind verdict. The walk
+gives a third up a step, more the longer the send blocked, down to the floor the
+crate fixes at 32 kbit/s — where Opus stereo still codes the whole band, so
+there is no floor key — and takes rate back after three seconds of clear sends
+in steps that double from a sixteenth of the ceiling, held under a rate the link
+refused, never past the ceiling. The change reaches the live encoder through
+`OPUS_SET_BITRATE`; packets stay 20 ms and independently decodable, so nothing
+is re-announced. While the link is *behind*, wave buffers that are pure silence
+are shed before the encoder instead of queued — silence is the one content whose
+loss cannot be heard, the client just receives no packets for a while (what a
+quiet remote already produces), and the backlog drains by exactly that much.
+Both keys are refused on a target none of whose sessions can carry sound, which
+is `ard` and a plain `vnc` target; a ceiling at or under the floor keeps a walk
+with nothing to give up rather than being refused.
 
 The RDP engine carries sound over MS-RDPEA (`rdp_client/proto/rdpsnd.rs`).
 A session started with sound names the `rdpsnd` and `rdpdr` static channels and

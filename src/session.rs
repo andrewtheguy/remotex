@@ -1166,15 +1166,10 @@ impl SessionManager {
         };
         // The adaptive walk, when the plan asked for one. It lives in the pump —
         // the side whose sends block — and publishes through the signals the
-        // encoder reads; see [`crate::audio::AudioCongestion`]. Where the encoder
-        // is wlshare's, the pump hands what the walk asks for to the engine.
+        // encoder reads; see [`crate::audio::AudioWalk`]. Where the encoder is
+        // wlshare's, the pump hands what the walk asks for to the engine.
         let remote = remote_plan.is_some().then(|| Arc::clone(&bridge));
-        let mut congestion = match (encoded.signals.clone(), plan.adaptive_floor_bps) {
-            (Some(signals), Some(floor)) => {
-                Some(crate::audio::AudioCongestion::new(plan.bitrate_bps, floor, signals))
-            }
-            _ => None,
-        };
+        let mut walk = encoded.signals.clone().map(|signals| crate::audio::AudioWalk::new(plan.bitrate_bps, signals));
 
         let mut st = self.state.lock().unwrap();
         // Anything that touched audio while the lock was down wins, and the epoch is
@@ -1219,13 +1214,13 @@ impl SessionManager {
                 {
                     break;
                 }
-                let queued = tokio::time::Instant::now();
+                let queued = std::time::Instant::now();
                 if out.send(ServerMsg::Audio(packets)).await.is_err() {
                     break;
                 }
-                if let Some(congestion) = &mut congestion {
-                    let now = tokio::time::Instant::now();
-                    if let Some(bps) = congestion.observe(now - queued, now) {
+                if let Some(walk) = &mut walk {
+                    let now = std::time::Instant::now();
+                    if let Some(bps) = walk.sent(now - queued, now) {
                         debug!("session: the audio walk asks for {} kbit/s", bps / 1000);
                         if let Some(bridge) = &remote {
                             bridge.ask_rate(bps);
@@ -1811,7 +1806,6 @@ mod tests {
             audio_bitrate: None,
             virtual_display: false,
             audio_adaptive: None,
-            audio_adaptive_min: None,
         }
     }
 

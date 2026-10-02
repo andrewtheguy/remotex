@@ -1077,7 +1077,6 @@ mod tests {
                 virtual_display: false,
                 audio_bitrate: None,
                 audio_adaptive: None,
-                audio_adaptive_min: None,
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -1319,7 +1318,6 @@ mod tests {
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
-            audio_adaptive_min: None,
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its
