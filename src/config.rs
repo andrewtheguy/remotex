@@ -278,29 +278,25 @@ pub struct AudioPlan {
     /// The Opus target bitrate — the average the encoder holds to, and the
     /// ceiling of the walk when the plan is adaptive.
     pub bitrate_bps: i32,
-    /// `Some(floor)` exactly when the bitrate should track the audio socket's
-    /// backpressure, walking between the floor and [`Self::bitrate_bps`] — and
-    /// silence should be shed while the link is behind. See
-    /// [`TargetConfig::audio_adaptive`].
-    pub adaptive_floor_bps: Option<i32>,
+    /// Whether the bitrate tracks the audio socket's backpressure, walking
+    /// between sound-opus's floor and [`Self::bitrate_bps`] — and silence is
+    /// shed while the link is behind. See [`TargetConfig::audio_adaptive`].
+    pub adaptive: bool,
 }
 
 impl AudioPlan {
     /// The default rate with no walk — what `audio_adaptive = false` resolves to.
     pub fn fixed() -> Self {
-        Self { adaptive_floor_bps: None, ..Self::default() }
+        Self { adaptive: false, ..Self::default() }
     }
 }
 
 impl Default for AudioPlan {
     /// What an unset dial means: Opus at the default rate, walking down to the
-    /// default floor when the link is behind. The fallback [`crate::session`]
-    /// uses when no target is selected, where there is no config to read.
+    /// floor when the link is behind. The fallback [`crate::session`] uses when
+    /// no target is selected, where there is no config to read.
     fn default() -> Self {
-        Self {
-            bitrate_bps: DEFAULT_AUDIO_BITRATE_KBPS as i32 * 1000,
-            adaptive_floor_bps: Some(DEFAULT_AUDIO_ADAPTIVE_MIN_KBPS as i32 * 1000),
-        }
+        Self { bitrate_bps: DEFAULT_AUDIO_BITRATE_KBPS as i32 * 1000, adaptive: true }
     }
 }
 
@@ -771,26 +767,21 @@ pub struct TargetConfig {
     /// on unless the operator turned it off, like [`Self::render_adaptive`].
     ///
     /// A send that blocks means the previous packets are still unwritten, and
-    /// sustained blocking walks the bitrate down toward
-    /// [`Self::audio_adaptive_min`]; a clear stretch walks it back up to the
-    /// ceiling. While behind, wave buffers that are pure silence are shed instead
-    /// of queued — silence is the one content whose loss is free, and dropping it
-    /// is how the client catches up without a trimmed or resampled note anywhere
-    /// (see [`crate::audio`]). On a `wlshare` target the walk is the same and
-    /// the encoder is wlshare's, told each rate the walk arrives at; its packets
+    /// sustained blocking walks the bitrate down toward the floor; a clear
+    /// stretch walks it back up to the ceiling. The walk is sound-opus's
+    /// (`sound_opus::walk`), shared with wlshare, and so is its floor, fixed
+    /// there where a lower rate stops being the same sound, as the render
+    /// walk's is fixed in its encoder: there is no floor key. While behind,
+    /// wave buffers that are pure silence are shed instead of queued — silence
+    /// is the one content whose loss is free, and dropping it is how the
+    /// client catches up without a trimmed or resampled note anywhere (see
+    /// [`crate::audio`]). On a `wlshare` target the walk is the same and the
+    /// encoder is wlshare's, told each rate the walk arrives at; its packets
     /// are passed, so no silence is shed.
     ///
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub audio_adaptive: Option<bool>,
-    /// Floor in kbit/s for [`Self::audio_adaptive`] (6–510, below the
-    /// bitrate ceiling); `None` reads as [`DEFAULT_AUDIO_ADAPTIVE_MIN_KBPS`],
-    /// or as [`Self::audio_bitrate`] where the ceiling sits below it — a default
-    /// floor never narrows a walk to nothing. Refused beside
-    /// `audio_adaptive = false`: a floor for a walk that never moves is a key
-    /// that could not do anything.
-    #[serde(default)]
-    pub audio_adaptive_min: Option<u32>,
     /// The quality (1–100) this target's VP9 stream holds on a link that can carry
     /// it. `None` reads as [`DEFAULT_VIDEO_QUALITY`].
     ///
@@ -839,11 +830,6 @@ pub const DEFAULT_VIDEO_QUALITY: u8 = 90;
 /// starts to be audibly lossy, and the walk is what takes it down on a link that
 /// cannot carry it.
 pub const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 96;
-
-/// The adaptive floor (kbit/s) when [`TargetConfig::audio_adaptive_min`] is
-/// unset. 32 kbit/s stereo Opus is degraded but continuous — and continuity is
-/// the whole point of giving bitrate up.
-pub const DEFAULT_AUDIO_ADAPTIVE_MIN_KBPS: u32 = 32;
 
 /// Read [`TargetConfig::size`]: a width by a height, as in `"1920x1080"`.
 fn size<'de, D>(deserializer: D) -> Result<Option<(u16, u16)>, D::Error>
@@ -1052,24 +1038,14 @@ impl TargetConfig {
 
     /// The audio keys collapsed to what the encoder is built from, the same way
     /// [`Self::render_plan`] collapses the render dial: defaults resolved,
-    /// kilobits turned into the bits libopus speaks, and the adaptive floor
-    /// present exactly when there is a walk — unless the operator turned it off.
-    /// Callers gate on [`Self::sound`] — a session without sound has no plan to
-    /// resolve, and neither has a Mac's passed sound, which no encoder touches.
+    /// kilobits turned into the bits libopus speaks, and whether there is a
+    /// walk. A ceiling at or under the walk's floor gets a walk of nothing
+    /// rather than a refused config, as `video_quality` does. Callers gate on
+    /// [`Self::sound`] — a session without sound has no plan to resolve, and
+    /// neither has a Mac's passed sound, which no encoder touches.
     pub fn audio_plan(&self) -> AudioPlan {
         let bitrate_kbps = self.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS);
-        // The floor the walk will hold to, never above the ceiling it walks under.
-        // Only the *default* floor can sit there — an explicit `audio_adaptive_min`
-        // over the ceiling is refused at parse — and a low ceiling then gets a walk
-        // of nothing rather than a refused config, as `video_quality` does. Held
-        // here so a card cannot state a floor the stream never walks down to.
-        let adaptive_floor_bps = self.audio_adaptive().then(|| {
-            self.audio_adaptive_min
-                .unwrap_or(DEFAULT_AUDIO_ADAPTIVE_MIN_KBPS)
-                .min(bitrate_kbps) as i32
-                * 1000
-        });
-        AudioPlan { bitrate_bps: bitrate_kbps as i32 * 1000, adaptive_floor_bps }
+        AudioPlan { bitrate_bps: bitrate_kbps as i32 * 1000, adaptive: self.audio_adaptive() }
     }
 
     /// The one PCM format this target's sound can be in, known before the
@@ -1792,34 +1768,11 @@ impl ConfigFile {
                  encoder's bitrate, and no session there has sound to encode. Remove the key.",
                 target.name
             );
-            anyhow::ensure!(
-                target.audio_adaptive_min.is_none() || (sound && target.audio_adaptive()),
-                "target {:?} sets audio_adaptive_min beside audio_adaptive = false or on a \
-                 target without sound to encode — the floor belongs to the adaptive walk, and without \
-                 the walk nothing would read it",
-                target.name
-            );
-            let bitrate = target.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS);
             if let Some(kbps) = target.audio_bitrate {
                 anyhow::ensure!(
                     (6..=510).contains(&kbps),
                     "target {:?} sets audio_bitrate = {kbps}, which is out of range — it is \
                      in kbit/s and must be 6–510",
-                    target.name
-                );
-            }
-            if let Some(kbps) = target.audio_adaptive_min {
-                anyhow::ensure!(
-                    (6..=510).contains(&kbps),
-                    "target {:?} sets audio_adaptive_min = {kbps}, which is out of range — \
-                     it is in kbit/s and must be 6–510",
-                    target.name
-                );
-                anyhow::ensure!(
-                    kbps < bitrate,
-                    "target {:?} sets audio_adaptive_min = {kbps} at or above the bitrate \
-                     ceiling of {bitrate} kbit/s, which leaves the adaptive walk nowhere \
-                     to go",
                     target.name
                 );
             }
@@ -4048,7 +4001,7 @@ mod tests {
         assert!(!config.targets[0].offers().audio);
         assert!(!config.targets[0].sound(Choices { audio: Sound::Opus, ..Choices::default() }));
 
-        for key in ["audio_bitrate = 96", "audio_adaptive = false", "audio_adaptive_min = 24"] {
+        for key in ["audio_bitrate = 96", "audio_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");
@@ -4074,7 +4027,7 @@ mod tests {
 
         // The sound is the Mac's own AAC-ELD, so the Opus encoder's keys have
         // nothing to tune.
-        for key in ["audio_bitrate = 128", "audio_adaptive = false", "audio_adaptive_min = 24"] {
+        for key in ["audio_bitrate = 128", "audio_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");
@@ -4222,62 +4175,48 @@ mod tests {
     /// filled, kilobits become bits, and the walk is on unless it was turned
     /// off — a target that names none of them already adapts.
     #[test]
-    fn the_audio_plan_resolves_defaults_and_the_adaptive_floor() {
+    fn the_audio_plan_resolves_defaults_and_the_walk() {
         let cfg = parse_audio_target("").expect("bare audio");
         assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
         assert_eq!(
             cfg.targets[0].audio_plan(),
-            AudioPlan {
-                bitrate_bps: 96_000,
-                adaptive_floor_bps: Some(32_000)
-            },
-            "adaptive by default, between the default ceiling and floor"
+            AudioPlan { bitrate_bps: 96_000, adaptive: true },
+            "adaptive by default, from the default ceiling"
         );
 
         let cfg = parse_audio_target("audio_bitrate = 128").expect("a rate");
         assert_eq!(
             cfg.targets[0].audio_plan(),
-            AudioPlan {
-                bitrate_bps: 128_000,
-                adaptive_floor_bps: Some(32_000)
-            },
+            AudioPlan { bitrate_bps: 128_000, adaptive: true },
             "a ceiling alone moves the ceiling and keeps the walk"
         );
 
         let cfg = parse_audio_target("audio_adaptive = false").expect("fixed");
-        assert_eq!(
-            cfg.targets[0].audio_plan(),
-            AudioPlan::fixed(),
-            "turned off, the plan has no floor"
-        );
-        assert_eq!(cfg.targets[0].audio_plan().adaptive_floor_bps, None);
+        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::fixed(), "turned off, the plan has no walk");
+        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan { bitrate_bps: 96_000, adaptive: false });
 
-        let cfg = parse_audio_target(
-            "audio_bitrate = 64\naudio_adaptive = true\naudio_adaptive_min = 24",
-        )
-        .expect("adaptive with both rates");
-        assert_eq!(
-            cfg.targets[0].audio_plan(),
-            AudioPlan {
-                bitrate_bps: 64_000,
-                adaptive_floor_bps: Some(24_000)
-            }
-        );
+        let cfg = parse_audio_target("audio_bitrate = 64\naudio_adaptive = true").expect("adaptive at a rate");
+        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan { bitrate_bps: 64_000, adaptive: true });
     }
 
-    /// A ceiling under the default floor is no contradiction — the operator never
-    /// wrote the floor — so the plan holds the floor to the ceiling instead of
-    /// refusing, the way the render dial does.
+    /// A ceiling under the walk's floor is no contradiction: the plan keeps
+    /// the walk, which then has nothing to give up, the way the render dial
+    /// does under its encoder's floor.
     #[test]
-    fn a_ceiling_below_the_default_floor_is_the_floor() {
+    fn a_ceiling_below_the_floor_keeps_a_walk_of_nothing() {
         let cfg = parse_audio_target("audio_bitrate = 24").expect("a low ceiling");
-        assert_eq!(
-            cfg.targets[0].audio_plan(),
-            AudioPlan {
-                bitrate_bps: 24_000,
-                adaptive_floor_bps: Some(24_000)
-            }
-        );
+        let plan = cfg.targets[0].audio_plan();
+        assert_eq!(plan, AudioPlan { bitrate_bps: 24_000, adaptive: true });
+        assert!(plan.bitrate_bps < sound_opus::walk::BITRATE_FLOOR as i32);
+    }
+
+    /// The floor key is gone: the walk's floor is sound-opus's, fixed where a
+    /// lower rate stops being the same sound, and a file that still writes it
+    /// is refused as any unknown key is.
+    #[test]
+    fn an_audio_floor_is_no_longer_a_key() {
+        let err = parse_audio_target("audio_adaptive_min = 24").unwrap_err();
+        assert!(format!("{err:#}").contains("audio_adaptive_min"), "{err:#}");
     }
 
     /// Every key that tunes the encoder is refused on a target none of whose
@@ -4292,34 +4231,16 @@ mod tests {
             let err = plain(&format!("audio_adaptive = {switch}"));
             assert!(format!("{err:#}").contains("sets audio_adaptive"), "{err:#}");
         }
-        let err = plain("audio_adaptive_min = 24");
-        assert!(format!("{err:#}").contains("audio_adaptive_min"), "{err:#}");
     }
 
-    /// The floor needs the walk, has a range, and must sit under the ceiling.
+    /// The bitrate has a range: libopus's, in kbit/s.
     #[test]
-    fn the_audio_floor_is_validated_against_the_walk_and_the_ceiling() {
-        // The walk is on by default, so a bare floor is fine …
-        parse_audio_target("audio_adaptive_min = 24").expect("a floor for the default walk");
-        // … and refused only beside a walk turned off.
-        let err = parse_audio_target("audio_adaptive = false\naudio_adaptive_min = 24")
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("audio_adaptive_min"));
-
-        let err = parse_audio_target("audio_adaptive_min = 4").unwrap_err();
-        assert!(format!("{err:#}").contains("6–510"));
-
-        let err = parse_audio_target("audio_bitrate = 48\naudio_adaptive_min = 48")
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("nowhere to go"));
-
-        // The *default* floor above a low ceiling is no contradiction — the
-        // operator never wrote it. It parses, and the plan clamps it to the
-        // ceiling instead ([`a_ceiling_below_the_default_floor_is_the_floor`]).
-        parse_audio_target("audio_bitrate = 8")
-            .expect("a default floor clamps instead of refusing");
-
-        let err = parse_audio_target("audio_bitrate = 999").unwrap_err();
-        assert!(format!("{err:#}").contains("6–510"));
+    fn the_audio_bitrate_is_validated_against_libopus() {
+        parse_audio_target("audio_bitrate = 6").expect("the bottom of the range");
+        parse_audio_target("audio_bitrate = 510").expect("the top of the range");
+        for off in ["audio_bitrate = 5", "audio_bitrate = 999"] {
+            let err = parse_audio_target(off).unwrap_err();
+            assert!(format!("{err:#}").contains("6–510"), "{err:#}");
+        }
     }
 }

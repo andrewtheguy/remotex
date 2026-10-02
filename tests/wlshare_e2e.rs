@@ -113,7 +113,6 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,
-        audio_adaptive_min: None,
     }
 }
 

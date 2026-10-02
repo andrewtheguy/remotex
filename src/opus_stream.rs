@@ -90,7 +90,7 @@ impl OpusStream {
     }
 
     /// Move the encoder's bitrate mid-stream — the adaptive walk's one knob
-    /// (see [`crate::config::TargetConfig::audio_adaptive`]).
+    /// (see [`crate::audio::AudioWalk`]).
     ///
     /// Nothing else changes: packets stay 20 ms, `OpusHead` stays true, and every
     /// packet is independently decodable, so the decoder needs no announcement —

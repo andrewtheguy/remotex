@@ -2291,7 +2291,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.325"
+version = "0.0.326"
 dependencies = [
  "aes",
  "anyhow",
@@ -2897,8 +2897,8 @@ dependencies = [
 
 [[package]]
 name = "sound-opus"
-version = "0.0.2"
-source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.2#57147b529bd836abc2fca562c6936e5b74a71e7d"
+version = "0.0.4"
+source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.4#a7d8ec96b841c6fe5983eede045bddbe19b2928c"
 dependencies = [
  "opus-prebuilt",
  "thiserror",

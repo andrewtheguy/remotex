@@ -175,7 +175,7 @@ const ENCODING_WLSHARE_VP9: i32 = 0x574c_5356;
 /// the list that names the encoding, so wlshare's first frame is already the plan's.
 const ENCODING_WLSHARE_VP9_SUBSAMPLED: i32 = 0x574c_5330;
 /// Listed beside [`ENCODING_WLSHARE_VP9`] with the dial added, names the ceiling
-/// wlshare's walk never goes above, in place of its own `vp9_quality`: `WLQ` and the
+/// wlshare's walk never goes above, which wlshare has no quality of its own for: `WLQ` and the
 /// 1–100 value.
 const ENCODING_WLSHARE_VP9_QUALITY_BASE: i32 = 0x574c_5100;
 /// Listed beside [`ENCODING_WLSHARE_VP9`], holds wlshare's dial at the ceiling

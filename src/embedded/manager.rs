@@ -774,12 +774,12 @@ fn describe_audio(target: &TargetConfig) -> String {
     }
     let plan = target.audio_plan();
     let ceiling = plan.bitrate_bps / 1000;
-    match plan.adaptive_floor_bps {
-        Some(floor) if floor < plan.bitrate_bps => {
-            format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s, or flac", floor / 1000)
-        }
-        // A walk clamped to its ceiling, or none: the rate is the rate.
-        Some(_) | None => format!("opus at {ceiling} kbit/s, or flac"),
+    let floor = sound_opus::walk::BITRATE_FLOOR as i32;
+    if plan.adaptive && floor < plan.bitrate_bps {
+        format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s, or flac", floor / 1000)
+    } else {
+        // A walk with nothing under it, or none: the rate is the rate.
+        format!("opus at {ceiling} kbit/s, or flac")
     }
 }
 
