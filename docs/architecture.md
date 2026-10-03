@@ -66,11 +66,11 @@ area and points here; read the area's section before changing what it covers.
 ### Server tiers
 
 The three prioritized servers are ranked in tiers by how seamlessly each
-integrates with remotex and with its host's operating system. The ranking is
-not the order work is done in: Windows and macOS are the common use case, so
-testing and optimization prioritize them. The picture is one measure among
-the others: passed through as the server made it, or decoded and encoded again
-as VP9 here, which adapts to the link.
+integrates with remotex and with its host's operating system: how its displays
+are chosen and resized, whether it carries sound and the browser's camera and
+microphone, and how its picture reaches the browser. The ranking is not the
+order work is done in: Windows and macOS are the common use case, so testing
+and optimization prioritize them.
 
 | Tier | Server | Target | Displays | Sound | Camera and microphone | Picture |
 |---|---|---|---|---|---|---|
