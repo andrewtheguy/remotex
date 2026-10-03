@@ -113,6 +113,48 @@ const CLOSE_TAKEN: u16 = 4003;
 /// fresh attachment gets a fresh sequence space rather than reusing one.
 const CLOSE_SEQUENCE_EXHAUSTED: u16 = 1011;
 
+/// How long a socket the gateway closes waits for the browser's answering close
+/// before the connection goes ([`refuse`], [`await_close`]).
+///
+/// The closing handshake is what carries the code: a connection dropped the moment
+/// the close frame is written can reach the page as an abnormal close (1006)
+/// instead of the code, where a proxy or tunnel sits in between and sees the
+/// connection end before it has passed the frame on. A page reads 1006 as a link
+/// to reconnect over, not a refusal to report. Bounded, because a browser that
+/// never answers is not one to wait for.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// Refuse an upgraded socket with `code`, completing the closing handshake.
+async fn refuse(mut socket: WebSocket, code: u16, reason: String) {
+    if socket.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await.is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(CLOSE_GRACE, async {
+        while let Some(Ok(msg)) = socket.recv().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
+/// Wait for the browser's answering close on a socket whose outbound half has
+/// already sent one, for the reason [`CLOSE_GRACE`] gives.
+async fn await_close<S>(ws_rx: &mut S)
+where
+    S: futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin,
+{
+    let _ = tokio::time::timeout(CLOSE_GRACE, async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
 /// WebSocket keepalive interval. Browsers answer protocol pings in the network
 /// stack, so background-tab JavaScript timer throttling cannot suppress it.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -836,7 +878,7 @@ pub async fn audio_handler(
 /// frame arrive, but it acts on neither beyond keeping the heartbeat alive and noticing
 /// the end. Everything else is a one-way stream of the format and its packets.
 async fn audio(
-    mut socket: WebSocket,
+    socket: WebSocket,
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
@@ -845,12 +887,7 @@ async fn audio(
     let attachment = token.and_then(|t| sessions.attach_audio(&t).ok());
     let Some(attachment) = attachment else {
         warn!("ws: rejected an audio connection without a valid session token");
-        let _ = socket
-            .send(Message::Close(Some(CloseFrame {
-                code: CLOSE_INVALID_TOKEN,
-                reason: "invalid session token".into(),
-            })))
-            .await;
+        refuse(socket, CLOSE_INVALID_TOKEN, "invalid session token".into()).await;
         return;
     };
 
@@ -968,7 +1005,7 @@ pub async fn camera_handler(
 /// `cameraStop` and `cameraKeyframe` text frames. Unlike the audio socket it is
 /// refused outright — close `4002` — when the running target carries no camera.
 async fn camera(
-    mut socket: WebSocket,
+    socket: WebSocket,
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
@@ -986,9 +1023,7 @@ async fn camera(
                 UplinkRefused::Unsupported => (CLOSE_UNSUPPORTED, "the target carries no camera"),
             };
             warn!("ws: rejected a camera connection: {reason}");
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
-                .await;
+            refuse(socket, code, reason.into()).await;
             return;
         }
     };
@@ -1131,7 +1166,7 @@ pub async fn mic_handler(
 /// running target carries no microphone, and it closes with the engine. Inbound are binary
 /// Opus packets alone; outbound go `micOpen` and `micClose`.
 async fn mic(
-    mut socket: WebSocket,
+    socket: WebSocket,
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
@@ -1149,9 +1184,7 @@ async fn mic(
                 UplinkRefused::Unsupported => (CLOSE_UNSUPPORTED, "the target carries no microphone"),
             };
             warn!("ws: rejected a microphone connection: {reason}");
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
-                .await;
+            refuse(socket, code, reason.into()).await;
             return;
         }
     };
@@ -1407,7 +1440,7 @@ pub async fn display_handler(
 /// A display socket: one display's picture out, paced by its paint
 /// acknowledgments, and the input made over it in.
 async fn display(
-    mut socket: WebSocket,
+    socket: WebSocket,
     sessions: Arc<SessionManager>,
     login: Option<String>,
     display: u32,
@@ -1428,9 +1461,7 @@ async fn display(
                 DisplayRefused::NotShown(_) => CLOSE_UNSUPPORTED,
                 DisplayRefused::Taken(_) => CLOSE_TAKEN,
             };
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame { code, reason: refused.to_string().into() })))
-                .await;
+            refuse(socket, code, refused.to_string()).await;
             return;
         }
     };
@@ -1466,6 +1497,7 @@ async fn display(
                     warn!("ws: display outbound task failed: {e}");
                 }
                 outbound_done = true;
+                await_close(&mut ws_rx).await;
                 break;
             }
             msg = ws_rx.next() => msg,
@@ -1529,7 +1561,7 @@ async fn display(
 }
 
 async fn session(
-    mut socket: WebSocket,
+    socket: WebSocket,
     sessions: Arc<SessionManager>,
     token: Option<String>,
     display: Option<protocol::HostDisplay>,
@@ -1543,12 +1575,7 @@ async fn session(
     };
     let Some(attachment) = attachment else {
         warn!("ws: rejected connection without a valid session token");
-        let _ = socket
-            .send(Message::Close(Some(CloseFrame {
-                code: CLOSE_INVALID_TOKEN,
-                reason: "invalid session token".into(),
-            })))
-            .await;
+        refuse(socket, CLOSE_INVALID_TOKEN, "invalid session token".into()).await;
         return;
     };
 
@@ -1596,6 +1623,7 @@ async fn session(
                     warn!("ws: outbound task failed: {e}");
                 }
                 outbound_done = true;
+                await_close(&mut ws_rx).await;
                 break;
             }
             msg = ws_rx.next() => msg,
