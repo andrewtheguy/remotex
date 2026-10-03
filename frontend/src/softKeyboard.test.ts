@@ -151,6 +151,15 @@ test("the PC grid puts each side's keys on its side, by code", () => {
   assert.equal(labelOf(shifts[0].def, false), labelOf(shifts[1].def, false));
 });
 
+test("the PC grid alone has the Sticky key, in the Caps Lock slot", () => {
+  for (const page of PAGES.values()) {
+    const ids = [...cellsOf(page).values()]
+      .filter((cell) => cell.def.type === "sticky")
+      .map((cell) => cell.id);
+    assert.deepEqual(ids, page.id === "pc" ? ["pc:3:0"] : [], page.id);
+  }
+});
+
 test("the keys that repeat are exactly the editing and cursor keys, never a character", () => {
   for (const page of PAGES.values()) {
     for (const cell of cellsOf(page).values()) {

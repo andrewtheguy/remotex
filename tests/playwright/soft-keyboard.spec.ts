@@ -102,6 +102,35 @@ test.describe("the soft keyboard", () => {
     await key(page, "s").click();
     await expect.poll(() => keys.slice(6)).toEqual([down("KeyS"), up("KeyS")]);
   });
+
+  test("with Sticky off a modifier is sent alone, and on again it sticks", async ({
+    page,
+  }) => {
+    const keys = watchKeys(page);
+    await logInAndConnect(page);
+    await openKeyboard(page);
+    const sticky = key(page, "Sticky modifiers");
+    const shift = key(page, "Shift").first();
+    await expect(sticky).toHaveAttribute("aria-pressed", "true");
+
+    await sticky.click();
+    await expect(sticky).toHaveAttribute("aria-pressed", "false");
+    await shift.click();
+    await expect.poll(() => keys).toEqual([
+      down("ShiftLeft"),
+      up("ShiftLeft"),
+    ]);
+    await key(page, "a").click();
+    await expect.poll(() => keys.slice(2)).toEqual([down("KeyA"), up("KeyA")]);
+
+    await sticky.click();
+    await expect(sticky).toHaveAttribute("aria-pressed", "true");
+    await shift.click();
+    await expect(shift).toHaveAttribute("aria-pressed", "true");
+    // Disarmed again, so the session is left with nothing held.
+    await shift.click();
+    await expect(shift).toHaveAttribute("aria-pressed", "false");
+  });
 });
 
 test.describe("the soft keyboard on a phone", () => {

@@ -42,6 +42,7 @@ const CELLS: LayoutCell[] = [
   ),
   cell("ctrl", { type: "special", label: "Ctrl", code: "ControlLeft" }, "lift"),
   cell("esc", { type: "special", label: "Esc", code: "Escape" }, "tap"),
+  cell("sticky", { type: "sticky", label: "Sticky" }, "lift"),
 ];
 
 const LAYOUT = new Map(CELLS.map((c) => [c.id, c]));
@@ -394,6 +395,53 @@ test("a shortcut-row modifier is wrapped by an armed one and spends it", () => {
   f.tap("super", 100);
   assert.deepEqual(f.sent, [["ControlLeft", "MetaLeft"]]);
   assert.deepEqual(f.modifiers(), []);
+});
+
+test("with Sticky off a modifier is a key sent alone, and on again it sticks", () => {
+  const f = new Fingers();
+  f.tap("sticky", 0);
+  assert.deepEqual(
+    f.log.filter((c) => c.kind === "sticky"),
+    [{ kind: "sticky", on: false }],
+  );
+  f.down("ctrl", 100);
+  assert.deepEqual(f.modifiers(), []);
+  assert.deepEqual(f.sent, []);
+  f.up("ctrl", 150);
+  assert.deepEqual(f.sent, [["ControlLeft"]]);
+  assert.deepEqual(f.modifiers(), []);
+  f.tap("a", 200);
+  assert.deepEqual(f.sent.at(-1), ["KeyA"]);
+
+  // A finger resting on one chords nothing.
+  f.down("shift", 300, 1);
+  f.tap("a", 350, 2);
+  assert.deepEqual(f.sent.at(-1), ["KeyA"]);
+  f.up("shift", 400, 1);
+  assert.deepEqual(f.sent.at(-1), ["ShiftLeft"]);
+
+  // A slide may end on one, as on any key of the row.
+  f.down("a", 500);
+  f.moveTo(xOf("shift"), 20, 520);
+  f.upAt(xOf("shift"), 20, 540);
+  assert.deepEqual(f.sent.at(-1), ["ShiftLeft"]);
+
+  f.tap("sticky", 600);
+  assert.deepEqual(f.log.filter((c) => c.kind === "sticky").at(-1), {
+    kind: "sticky",
+    on: true,
+  });
+  f.tap("ctrl", 700);
+  assert.deepEqual(f.modifiers(), [["ControlLeft", "oneShot"]]);
+});
+
+test("turning Sticky off drops what was armed", () => {
+  const f = new Fingers();
+  f.tap("ctrl", 0);
+  f.tap("sticky", 100);
+  assert.deepEqual(f.modifiers(), []);
+  f.tap("a", 200);
+  assert.deepEqual(f.sent, [["KeyA"]]);
 });
 
 test("a page key switches on lift and drops the other fingers' keys", () => {

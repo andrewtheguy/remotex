@@ -1332,9 +1332,14 @@ body {
   line-height: 1;
 }
 
-.sk-modifier .sk-cap {
+.sk-modifier .sk-cap,
+.sk-sticky .sk-cap {
   background: linear-gradient(to bottom, #233a5e, #1b2b47);
   border-color: #2f4f80;
+}
+
+.sk-sticky .sk-cap {
+  font-size: 0.7rem;
 }
 
 .sk-page .sk-cap {
@@ -1342,8 +1347,9 @@ body {
   font-size: 0.7rem;
 }
 
-/* A bare modifier of the shortcut row: sent alone on a tap, drawn open so it
-   reads apart from the strip's key that arms for the next one. */
+/* A bare modifier: sent alone on a tap, drawn open so it reads apart from one
+   that arms for the next key. The shortcut row's always are; the PC grid's are
+   while its Sticky key is off, and that key is drawn open with them. */
 .sk-bare .sk-cap {
   background: #1b2b47;
   border-style: dashed;

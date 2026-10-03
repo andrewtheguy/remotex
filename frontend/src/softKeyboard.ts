@@ -45,8 +45,15 @@ export interface PageSoftKey {
   page: PageId;
 }
 
-// Inert width: the half key at each end of the home row, the Caps Lock slot of
-// the PC grid. Drawn as nothing; a finger on it belongs to the neighbouring key.
+// Switches the PC grid's modifiers between sticking and being sent alone on a
+// tap, as the shortcut row's are on a phone. Sits in the Caps Lock slot.
+export interface StickySoftKey {
+  type: "sticky";
+  label: string;
+}
+
+// Inert width: the half key at each end of the home row. Drawn as nothing; a
+// finger on it belongs to the neighbouring key.
 export interface SpacerSoftKey {
   type: "spacer";
 }
@@ -56,6 +63,7 @@ export type SoftKeyDefinition =
   | SpecialSoftKey
   | ComboSoftKey
   | PageSoftKey
+  | StickySoftKey
   | SpacerSoftKey;
 
 // ── Modifiers ──
@@ -392,7 +400,7 @@ const PC_QWERTY_ROW: Key[] = [
 ];
 
 const PC_HOME_ROW: Key[] = [
-  gap(2.1),
+  { def: { type: "sticky", label: "Sticky" }, units: 2.1 },
   ...letters("asdfghjkl"),
   p(";", "Semicolon", ":"),
   p("'", "Quote", '"'),
