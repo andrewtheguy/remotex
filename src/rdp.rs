@@ -1299,13 +1299,15 @@ async fn active_loop(
 
     loop {
         // A display shown in a tab follows that tab's window for as long as All
-        // Displays is chosen — a tab reloading keeps it — and is the first
-        // display's size again once it is not.
-        if resize && !view.all {
-            let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
-            if base.second.is_some() {
-                install_layout(base.with_second(None), view.current(applied), &mut pending_layout, &mut layout_retry_at);
-            }
+        // Displays is chosen — a tab reloading keeps it — and a layout pending
+        // once it is not asks for the first display's size again. Only a pending
+        // one: leaving All Displays asks for the equal row once, and a host that
+        // never applied it is not asked again every turn.
+        if resize
+            && !view.all
+            && let Some(wanted) = pending_layout.as_ref().map(|p| p.layout).filter(|l| l.second.is_some())
+        {
+            install_layout(wanted.with_second(None), view.current(applied), &mut pending_layout, &mut layout_retry_at);
         }
         let layout_retry = async {
             match layout_retry_at {
@@ -1573,6 +1575,7 @@ async fn active_loop(
                 // stands, as wlshare answers one. An id the list does not have is
                 // dropped, so a browser cannot name a column that is not there.
                 if let ClientMsg::SelectDisplay { id } = msg {
+                    let was_all = view.all;
                     match view.select(id) {
                         None => debug!("rdp: ignoring a selection of unknown display {id}"),
                         Some(moved) => {
@@ -1580,6 +1583,18 @@ async fn active_loop(
                             // which names no tab, closes its socket.
                             if !view.all {
                                 tab = None;
+                            }
+                            // And the second display goes back to the first's size.
+                            if resize && was_all && !view.all {
+                                let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
+                                if base.second.is_some() {
+                                    install_layout(
+                                        base.with_second(None),
+                                        view.current(applied),
+                                        &mut pending_layout,
+                                        &mut layout_retry_at,
+                                    );
+                                }
                             }
                             if moved {
                                 info!("rdp: showing display {} of {}", view.active + 1, view.columns);

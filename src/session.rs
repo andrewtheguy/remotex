@@ -663,10 +663,16 @@ impl State {
         self.tabs = tabs;
     }
 
-    /// Let go of every display socket: the claim they attached under is gone.
+    /// Let go of every display socket: the claim they attached under is gone. The
+    /// engine's tabs stay listed for the next claim's sockets, so its feeds are
+    /// told to stop; [`Self::take_engine`] is what ends the tabs themselves.
     fn evict_displays(&mut self) {
+        if let Some(engine) = &self.engine {
+            for display in self.displays.keys().filter(|display| **display != FIRST_DISPLAY) {
+                let _ = engine.input_tx.send(ClientMsg::DisplayShown { display: *display, feed: None });
+            }
+        }
         self.displays.clear();
-        self.tabs.clear();
         self.tab_token = None;
     }
 
