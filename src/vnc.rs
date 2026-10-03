@@ -2784,6 +2784,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         microphone: microphone.clone(),
         media: media.clone(),
         tab: Arc::clone(&tab),
+        switch: Arc::default(),
         passthrough,
     };
 
@@ -3793,6 +3794,11 @@ struct Shared {
     media: Option<SharedMedia>,
     /// The tab a High Performance session's second display is shown in.
     tab: SharedTab,
+    /// Held while the canvas changes display, and by the read loop from deciding
+    /// where a picture goes until it has gone: one display's picture is never
+    /// sent into what the canvas holds of the other, which at equal sizes nothing
+    /// else tells apart, and which a passed stream's decoder cannot take.
+    switch: Arc<tokio::sync::Mutex<()>>,
     /// See [`Connected::passthrough`]. `Some` is a session that may be sent
     /// [`ENCODING_WLSHARE_VP9`], and the only one that reads it.
     passthrough: Option<Arc<Listing>>,
@@ -3919,6 +3925,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
 
             (leg, picture) = next_picture(&mut apple) => {
+                let _switch = shared.switch.lock().await;
                 match picture {
                     FromStream::Picture(picture) => {
                         if let Some(media) = media {
@@ -4196,7 +4203,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     // actual display regions have arrived or the bounded request
                     // budget is exhausted, so an incremental request cannot
                     // immediately replace this full one on macOS.
-                    let expected = display.lock().unwrap().repaint_pixels;
+                    // No more than the request covers: of two virtual displays
+                    // it is the one on the canvas, and the layout counts both.
+                    let asked = u64::from(size.0) * u64::from(size.1);
+                    let expected = display.lock().unwrap().repaint_pixels.min(asked);
                     full_repaint = Some(FullRepaint::new(expected));
                     send(uplink, &update_request(false, size)).await?;
                 } else {
@@ -6046,6 +6056,7 @@ async fn hp_tab_shown(
 async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> anyhow::Result<()> {
     let Shared { uplink, desktop, shadow, display, tab, hp_wake, .. } = shared;
     let media = shared.media.as_ref();
+    let _switch = shared.switch.lock().await;
     let (was, now, shown) = {
         let mut d = desktop.lock().unwrap();
         let Some(now) = HpView::chosen(id, d.virtuals.len()) else {
@@ -9151,6 +9162,7 @@ mod tests {
             microphone: None,
             media: None,
             tab: SharedTab::default(),
+            switch: Arc::default(),
             passthrough: None,
         }
     }
