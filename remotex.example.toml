@@ -334,9 +334,10 @@ password = "change-me"
 # passthrough is not offered beside 2, since the browser composes a passed
 # pipeline whole; a Mac sends each display as a stream of its own (the second to
 # UDP port 5902), passed or not. Checked against one Windows 11 host and one
-# virtual Mac. For a client with two physical displays: not recommended on a
-# client with one, and not supported on a phone or tablet, though the Display
-# picker there does not stop anyone choosing between them.
+# virtual Mac. The second display's tab, which the picker's All Displays opens,
+# is for a client with two physical displays: it is not recommended on a client
+# with one, and not supported on a phone or tablet, though the Display picker
+# there does not stop anyone choosing it.
 #virtual_displays = 2
 
 # The clipboard has no key: every target shares its clipboard with the browser.
