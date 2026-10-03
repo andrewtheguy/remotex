@@ -2420,7 +2420,8 @@ slide scrolls the row and sends nothing, and it arms nothing. The Sym page's
 row has the same four ahead of F1 to F12. The PC grid has no such row, so its
 Sticky key, in the Caps Lock slot, switches its modifiers between the two: on,
 as it starts, they stick; off, each is sent alone and is drawn dashed like the
-row's. The key area
+row's. It is drawn as the switch it is, a green pill with a lamp lit while they
+stick, so it is not taken for a key that types. The key area
 refuses every browser gesture (`touch-action: none`), so a cancelled touch means
 the system took the finger and commits nothing; the shortcut row alone allows
 the horizontal pan it scrolls by. A phone — a touch screen whose short side is a

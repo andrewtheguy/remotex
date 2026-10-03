@@ -1332,14 +1332,9 @@ body {
   line-height: 1;
 }
 
-.sk-modifier .sk-cap,
-.sk-sticky .sk-cap {
+.sk-modifier .sk-cap {
   background: linear-gradient(to bottom, #233a5e, #1b2b47);
   border-color: #2f4f80;
-}
-
-.sk-sticky .sk-cap {
-  font-size: 0.7rem;
 }
 
 .sk-page .sk-cap {
@@ -1353,6 +1348,44 @@ body {
 .sk-bare .sk-cap {
   background: #1b2b47;
   border-style: dashed;
+}
+
+/* The Sticky key is a switch, not a key that types, and is drawn as one: a pill
+   in green, which no key uses, with a lamp that is lit while modifiers stick.
+   Off, the lamp is hollow and the outline dashed, as the modifiers it has
+   turned bare are. */
+.sk-sticky .sk-cap {
+  gap: 0.4em;
+  border-radius: 999px;
+  border-color: #238636;
+  background: #12261a;
+  color: #3fb950;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sk-sticky .sk-cap::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 0.55em;
+  height: 0.55em;
+  border-radius: 50%;
+  border: 1px solid #3fb950;
+  background: #3fb950;
+  box-shadow: 0 0 5px rgba(63, 185, 80, 0.8);
+}
+
+.sk-sticky.sk-bare .sk-cap {
+  background: #161b22;
+  color: #8b949e;
+}
+
+.sk-sticky.sk-bare .sk-cap::before {
+  border-color: #8b949e;
+  background: transparent;
+  box-shadow: none;
 }
 
 /* Under a finger, or a modifier armed one-shot or held by a finger. */
