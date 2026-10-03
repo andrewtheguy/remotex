@@ -2524,6 +2524,15 @@ async fn apple_preface(
          list SetDisplayConfiguration, without which there is no virtual display. Apple's \
          viewer connects it in Standard mode; use subtype = \"ard\" without virtual_display"
     );
+    // A scroll goes to a Mac in Apple's scroll message and in nothing else, so a
+    // Mac that does not list it would be connected with a scroll that does
+    // nothing. Apple's viewer scrolls such a Mac by the wheel bits.
+    anyhow::ensure!(
+        server.apple_commands.as_ref().is_some_and(vnc_apple::takes_scroll),
+        "this Mac does not take Screen Sharing's scroll message: its ServerInit does not \
+         list the second event message (0x17), which is how a scroll is sent to a Mac. \
+         Connect it as a plain VNC server, without a subtype"
+    );
     // How many virtual displays the session asks for. The Mac says how many it
     // will create, and holds a configuration naming more to that many without a
     // word, which would leave this side waiting on a display that never comes.

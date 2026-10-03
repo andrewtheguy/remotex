@@ -198,8 +198,9 @@ async def main() -> int:
         action="append",
         default=[],
         metavar="DX,DY",
-        help="a scroll of DX,DY pixels, sent a second after the --mouse move and "
-        "a second after each other (repeatable; DX and DY are positive right and down)",
+        help="a scroll of DX,DY pixels on display 1, sent a second after the --mouse "
+        "move, which it needs, and a second after each other (repeatable; DX and DY "
+        "are positive right and down)",
     )
     parser.add_argument("--mouse-width", type=int, default=None)
     parser.add_argument(
@@ -320,6 +321,8 @@ async def main() -> int:
         help="print each screen batch's VIDEO records",
     )
     args = parser.parse_args()
+    if args.wheel and args.mouse is None:
+        parser.error("--wheel scrolls where --mouse put the pointer; give --mouse too")
 
     password = args.password or getpass.getpass("Gateway password: ")
     base = f"http://127.0.0.1:{args.port}"
@@ -559,13 +562,13 @@ async def main() -> int:
         sweep_task = None
         move_tasks = []
 
-        async def move_later(to, prefix: str, position: tuple[int, int]) -> None:
-            """Send one pointer move on `to`, after --mouse-delay."""
+        async def move_later(to, prefix: str, position: tuple[int, int], wheels=()) -> None:
+            """Send one pointer move on `to`, after --mouse-delay, then `wheels`."""
             await asyncio.sleep(args.mouse_delay)
             x, y = position
             print(f"  {prefix}-> mouseMove {x},{y}")
             await to.send(json.dumps({"type": "mouseMove", "x": x, "y": y}))
-            for dx, dy in args.wheel:
+            for dx, dy in wheels:
                 await asyncio.sleep(1.0)
                 print(f"  {prefix}-> wheel {dx},{dy}")
                 await to.send(json.dumps({"type": "wheel", "dx": dx, "dy": dy, "unit": "pixel"}))
@@ -699,7 +702,7 @@ async def main() -> int:
                                 or data["w"] == args.mouse_width
                             )
                         ):
-                            move_tasks.append(asyncio.create_task(move_later(socket, "", args.mouse)))
+                            move_tasks.append(asyncio.create_task(move_later(socket, "", args.mouse, args.wheel)))
                             mouse_sent = True
                     elif kind == "displays":
                         print(f"  displays  active={data['active']:#x}")

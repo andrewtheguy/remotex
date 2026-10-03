@@ -336,7 +336,7 @@ pub fn scroll_wheel((dx, dy): (i32, i32), (x, y): (u16, u16)) -> Vec<u8> {
     const CONTINUOUS: u32 = 0x02;
     let axes = [-dx, -dy, 0];
     let mut msg = Vec::with_capacity(58);
-    msg.push(0x17);
+    msg.push(EVENT_2);
     msg.push(0);
     msg.extend_from_slice(&54u16.to_be_bytes()); // length of what follows
     msg.extend_from_slice(&1u16.to_be_bytes()); // version
@@ -499,6 +499,16 @@ const SET_DISPLAY_CONFIGURATION: u8 = 0x1d;
 /// See docs/apple-vnc-889.md, "ServerInit's name field is not a name".
 pub fn holds_high_performance(commands: &[u8; 16]) -> bool {
     accepts(commands, SET_DISPLAY_CONFIGURATION)
+}
+
+/// The second event message's type, which [`scroll_wheel`] is one kind of.
+const EVENT_2: u8 = 0x17;
+
+/// Whether a Mac takes [`scroll_wheel`]: the command bitmap of its enhanced
+/// ServerInit lists the second event message. Apple's viewer asks exactly this
+/// before it sends one, and scrolls a Mac that fails it by the wheel bits.
+pub fn takes_scroll(commands: &[u8; 16]) -> bool {
+    accepts(commands, EVENT_2)
 }
 
 /// Whether the command bitmap lists client message `kind`, most significant bit
@@ -1144,6 +1154,18 @@ mod tests {
         assert!(!holds_high_performance(&without));
         assert!(!holds_high_performance(&[0; 16]));
         assert!(!accepts(&[0xff; 16], 0x80), "past the bitmap");
+    }
+
+    /// macvm's bitmap lists the second event message, and the same with only
+    /// that bit cleared does not.
+    #[test]
+    fn a_scroll_needs_the_mac_to_accept_the_second_event_message() {
+        let macvm = [0xbf, 0xf6, 0xe7, 0x2f, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(takes_scroll(&macvm));
+        let mut without = macvm;
+        without[2] &= !0x01;
+        assert!(!takes_scroll(&without));
+        assert!(holds_high_performance(&without), "nothing else is cleared");
     }
 
     #[test]

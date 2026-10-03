@@ -650,8 +650,10 @@ with no gesture around it. Checked on macOS 26.6 in both modes with a window tha
 logs its scroll events: 40 points right and 25 up arrive as exactly that, at the
 pointer.
 
-Apple's viewer sends this message only to a Mac that says it takes it, and falls
-back to wheel bits otherwise. Remotex has no such fallback.
+Apple's viewer sends this message only to a Mac whose ServerInit lists `0x17`
+([the command bitmap](#serverinits-name-field-is-not-a-name)), and falls back to
+wheel bits otherwise. Remotex has no such fallback: an Apple subtype refuses the
+session on a Mac that does not list it.
 
 ### Keys
 
