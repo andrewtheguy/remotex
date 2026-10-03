@@ -1448,7 +1448,7 @@ and `GET /api/targets` carries it:
 
 | Target | Window drives the size | Sound | Passthrough |
 |---|---|---|---|
-| `rdp` | yes | shown | shown: the graphics pipeline, beta; hidden beside `virtual_displays = 2` |
+| `rdp` | yes | shown | shown: the graphics pipeline, beta |
 | `vnc` | no | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture |
 | `vnc`, `ard` | no | hidden | hidden |
@@ -1487,9 +1487,9 @@ and `GET /api/targets` carries it:
   row. High Performance's sound is such a one: the Mac refuses the picture
   without it, so there is nothing to choose, and the session's Mute is what a
   person has. An `rdp` target with `egfx = false` has no pipeline, so neither
-  the window nor the pipeline's row; one with `virtual_displays = 2` has the window
-  and not the pipeline's row, since a passed pipeline is composed whole and the
-  browser shows one display of two. A `connect` that names a choice the target does
+  the window nor the pipeline's row; one with `virtual_displays = 2` has both,
+  since the browser composes a passed pipeline whole and shows one display of
+  it. A `connect` that names a choice the target does
   not offer is refused with an `error`, and the slot stays as it was.
 - **Offered but unavailable is greyed, with the reason.** A passthrough is
   greyed wherever the browser cannot take it: one that does not decode the Mac's
@@ -2101,8 +2101,9 @@ positions into it, and lists the columns as `Display 1` and `Display 2`. A
 holds, with the list, the size and a repaint of the chosen column, and the host
 is asked for nothing. The list follows what the host laid out, read off the
 desktop it opened and off each graphics reset's monitor count, so a host that
-opens one desktop lists nothing. The pipeline's passthrough is not offered beside
-it, since the browser composes a passed pipeline whole.
+opens one desktop lists nothing. The pipeline's passthrough is offered beside
+it: the browser composes a passed pipeline whole and shows one column of it
+([Two displays, one picture](#rdps-graphics-pipeline-passed-through)).
 
 With two columns the list ends with *All Displays* (alpha), under the id Apple's
 own entry uses: the first column on the canvas and the second in a browser tab of
