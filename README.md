@@ -49,7 +49,8 @@ for the tiers they are ranked in.
   follows the browser's density. Without the subtype the same server is read as any VNC
   server is.
 
-There is one client: the page a browser loads. For desktop use, install that page
+There is one client: the page a browser loads. It works on Windows, macOS,
+Linux, iOS and Android. For desktop use, install that page
 as an app in Chrome or Edge. The app window gives the client the browser-reserved
 key chords that a normal windowed tab keeps for itself, without a separate native
 wrapper or a second client lifecycle.
