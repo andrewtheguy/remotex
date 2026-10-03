@@ -178,6 +178,23 @@ What it lacks:
 Fixing those does not take it out of alpha by itself. It also needs more testing
 than it has had, on both kinds of target, before it is offered as anything else.
 
+### A touchpad's scroll as a gesture on a Mac
+
+A Mac is sent a scroll as a distance on both axes, with no gesture around it
+([a Mac scrolls by a distance](apple-vnc-889.md#a-mac-scrolls-by-a-distance)).
+Horizontal scrolling from a touchpad feels less fluid that way than vertical. A
+two-finger swipe is rarely straight: on a Windows precision touchpad the browser
+reports both axes in most swipes, as finely on one as on the other, and a Mac
+holds a scroll to the axis it began on only within a gesture.
+
+The plan is to send the gesture. The scroll message has a field for the scroll
+phase and one for the momentum phase, which Apple's viewer fills from its own
+trackpad. A browser's wheel events carry neither, so the gateway would open a
+gesture at the first event of a glide, continue it while events keep coming and
+end it once they stop. What the Mac does with a gesture it is sent that way, and
+whether the phases alone make the horizontal axis feel right, are still to be
+tested, on a physical Mac.
+
 ## Under consideration
 
 ### Touch on an RDP target (MS-RDPEI)

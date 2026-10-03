@@ -318,6 +318,48 @@ pub fn auto_framebuffer_update(interval_us: u32, (w, h): (u16, u16)) -> Vec<u8> 
     msg
 }
 
+/// A scroll, as the scroll-wheel event of Apple's second event message (`0x17`,
+/// kind 11): a distance on both axes, which the wheel bits of the pointer mask
+/// cannot say and have no horizontal axis for at all.
+///
+/// `dx` and `dy` are points of the remote desktop, positive right and down as
+/// the DOM counts them; the Mac counts a scroll up and to the left as positive,
+/// so both go out negated. The agent copies each field into the `CGEvent` it
+/// posts: the distance as the point delta, a tenth of it as the line delta an
+/// older application reads, and the continuous flag that makes the point delta
+/// the one that counts. No phase is sent, which is a scroll with no gesture
+/// around it. See docs/apple-vnc-889.md, "A Mac scrolls by a distance".
+pub fn scroll_wheel((dx, dy): (i32, i32), (x, y): (u16, u16)) -> Vec<u8> {
+    /// The points macOS counts as a line.
+    const POINTS_PER_LINE: i32 = 10;
+    /// `kCGScrollWheelEventIsContinuous`, as the message's flag for it.
+    const CONTINUOUS: u32 = 0x02;
+    let axes = [-dx, -dy, 0];
+    let mut msg = Vec::with_capacity(58);
+    msg.push(EVENT_2);
+    msg.push(0);
+    msg.extend_from_slice(&54u16.to_be_bytes()); // length of what follows
+    msg.extend_from_slice(&1u16.to_be_bytes()); // version
+    msg.extend_from_slice(&11u16.to_be_bytes()); // kind: scroll wheel
+    // Each delta is horizontal, vertical, then the third axis no device has.
+    for points in axes {
+        msg.extend_from_slice(&((points / POINTS_PER_LINE) as i16).to_be_bytes());
+    }
+    for points in axes {
+        // 16.16 fixed point.
+        msg.extend_from_slice(&((i64::from(points) * 65536 / i64::from(POINTS_PER_LINE)) as i32).to_be_bytes());
+    }
+    for points in axes {
+        msg.extend_from_slice(&points.to_be_bytes());
+    }
+    // Scroll phase, momentum phase, scroll count.
+    msg.extend_from_slice(&[0; 12]);
+    msg.extend_from_slice(&CONTINUOUS.to_be_bytes());
+    msg.extend_from_slice(&x.to_be_bytes());
+    msg.extend_from_slice(&y.to_be_bytes());
+    msg
+}
+
 /// `SetDisplayMessage`: share this one display, or all of them.
 ///
 /// Measured to work both ways on macOS 26. `combine_all` puts every screen in one
@@ -457,6 +499,16 @@ const SET_DISPLAY_CONFIGURATION: u8 = 0x1d;
 /// See docs/apple-vnc-889.md, "ServerInit's name field is not a name".
 pub fn holds_high_performance(commands: &[u8; 16]) -> bool {
     accepts(commands, SET_DISPLAY_CONFIGURATION)
+}
+
+/// The second event message's type, which [`scroll_wheel`] is one kind of.
+const EVENT_2: u8 = 0x17;
+
+/// Whether a Mac takes [`scroll_wheel`]: the command bitmap of its enhanced
+/// ServerInit lists the second event message. Apple's viewer asks exactly this
+/// before it sends one, and scrolls a Mac that fails it by the wheel bits.
+pub fn takes_scroll(commands: &[u8; 16]) -> bool {
+    accepts(commands, EVENT_2)
 }
 
 /// Whether the command bitmap lists client message `kind`, most significant bit
@@ -1102,6 +1154,18 @@ mod tests {
         assert!(!holds_high_performance(&without));
         assert!(!holds_high_performance(&[0; 16]));
         assert!(!accepts(&[0xff; 16], 0x80), "past the bitmap");
+    }
+
+    /// macvm's bitmap lists the second event message, and the same with only
+    /// that bit cleared does not.
+    #[test]
+    fn a_scroll_needs_the_mac_to_accept_the_second_event_message() {
+        let macvm = [0xbf, 0xf6, 0xe7, 0x2f, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(takes_scroll(&macvm));
+        let mut without = macvm;
+        without[2] &= !0x01;
+        assert!(!takes_scroll(&without));
+        assert!(holds_high_performance(&without), "nothing else is cleared");
     }
 
     #[test]
