@@ -343,11 +343,12 @@ pub enum ClientMsg {
     /// Share the display identified by the last [`ServerMsg::Displays`].
     ///
     /// Acted on by the VNC engine's Apple dialect and by wlshare, whose outputs
-    /// extension lists the compositor's outputs and takes one back. RDP delivers
-    /// one framebuffer spanning every remote screen and has no message for this,
-    /// and neither has any other generic VNC server. A client that never receives
-    /// [`ServerMsg::Displays`] never has an id to name here, which is how the
-    /// panel stays hidden on those engines.
+    /// extension lists the compositor's outputs and takes one back, and by the RDP
+    /// engine on a target that asked for virtual displays, which shows one column
+    /// of the framebuffer the host spans over them and switches columns here, asking
+    /// the host for nothing. Every other session delivers one framebuffer and no
+    /// list. A client that never receives [`ServerMsg::Displays`] never has an id to
+    /// name here, which is how the panel stays hidden on those engines.
     SelectDisplay { id: u32 },
     /// One touch contact's transition, in framebuffer coordinates: the
     /// touchscreen mode, where fingers are forwarded as the contacts they are
@@ -884,7 +885,8 @@ pub struct DisplayInfo {
     /// [`ClientMsg::SelectDisplay`]. On the Apple dialect it is a
     /// `CGDirectDisplayID`, except for `0xffffffff`, which the engine uses for its
     /// own "All Displays" entry (and which is Apple's own sentinel for that);
-    /// against wlshare it is the output's `wl_output` global.
+    /// against wlshare it is the output's `wl_output` global; on RDP it is the
+    /// display's place in the row the host laid out, from zero.
     pub id: u32,
     /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
     pub label: String,

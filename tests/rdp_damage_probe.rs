@@ -73,6 +73,7 @@ fn connect() -> (Session, Receiver<Event>) {
         width: SIZE.0,
         height: SIZE.1,
         scale_percent: 0,
+        monitors: 1,
         resize: offers.resize,
         egfx: target.egfx(),
         pass_graphics: false,
@@ -252,7 +253,7 @@ async fn a_real_host_reports_every_pixel_it_paints() {
                 });
                 rects.clear();
             }
-            Event::Resize { width, height } => {
+            Event::Resize { width, height, .. } => {
                 let (w, h, pixels) = snapshot(&session);
                 println!("  resized to {width}x{height}; mirror restarted at {w}x{h}");
                 shadow = Shadow::new(w, h, pixels);

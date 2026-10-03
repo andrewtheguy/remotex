@@ -75,7 +75,7 @@ and optimization prioritize them.
 | Tier | Server | Target | Displays | Sound | Camera and microphone | Picture |
 |---|---|---|---|---|---|---|
 | 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker; a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
-| 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density | Opus or FLAC | yes, experimental | VP9 from the gateway, or the graphics pipeline passed through (beta) |
+| 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, one shown at a time and switched from the picker (alpha) | Opus or FLAC | yes, experimental | VP9 from the gateway, or the graphics pipeline passed through (beta) |
 | 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density | AAC-ELD, always | no | VP9 from the gateway, or the Mac's HEVC passed through |
 | 3 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
 | baseline | any other VNC server | `vnc` | one framebuffer at the size the server says, at 1x | none | no | VP9 from the gateway |
@@ -1390,7 +1390,7 @@ and `GET /api/targets` carries it:
 
 | Target | Window drives the size | Sound | Passthrough |
 |---|---|---|---|
-| `rdp` | yes | shown | shown: the graphics pipeline, beta |
+| `rdp` | yes | shown | shown: the graphics pipeline, beta; hidden beside `virtual_displays = 2` |
 | `vnc` | no | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture |
 | `vnc`, `ard` | no | hidden | hidden |
@@ -1429,7 +1429,9 @@ and `GET /api/targets` carries it:
   row. High Performance's sound is such a one: the Mac refuses the picture
   without it, so there is nothing to choose, and the session's Mute is what a
   person has. An `rdp` target with `egfx = false` has no pipeline, so neither
-  the window nor the pipeline's row. A `connect` that names a choice the target does
+  the window nor the pipeline's row; one with `virtual_displays = 2` has the window
+  and not the pipeline's row, since a passed pipeline is composed whole and the
+  browser shows one display of two. A `connect` that names a choice the target does
   not offer is refused with an `error`, and the slot stays as it was.
 - **Offered but unavailable is greyed, with the reason.** A passthrough is
   greyed wherever the browser cannot take it: one that does not decode the Mac's
@@ -2029,9 +2031,20 @@ A client shows the display picker exactly when the target sends it a
 Apple subtypes and on a `wlshare` target: it parses an `AppleDisplayLayout`, or
 wlshare's `OutputList`, into a `displays` message and acts on a `selectDisplay`
 by asking that remote for that screen. RDP exposes a single framebuffer spanning
-every remote screen and has nothing to enumerate, and a plain `vnc` target reads
-its server the same way, so neither sends the message and the picker stays hidden
-there.
+every remote screen. On an `rdp` target left at one display it has nothing to
+enumerate, and a plain `vnc` target reads its server the same way, so neither
+sends the message and the picker stays hidden there. An `rdp` target with
+`virtual_displays = 2` (alpha) asks the host for two monitors of the session's
+size in a row, in the connect-time monitor data and in every monitor layout, and
+the host spans one framebuffer over both. The engine shows one column of it: it
+announces the column's size as the desktop, cuts damage to it, offsets pointer
+positions into it, and lists the columns as `Display 1` and `Display 2`. A
+`selectDisplay` is answered in the gateway, out of the framebuffer it already
+holds, with the list, the size and a repaint of the chosen column, and the host
+is asked for nothing. The list follows what the host laid out, read off the
+desktop it opened and off each graphics reset's monitor count, so a host that
+opens one desktop lists nothing. The pipeline's passthrough is not offered beside
+it, since the browser composes a passed pipeline whole.
 
 Where the list is sent, the checkmark moves only when the remote comes back naming
 the screen it is now sending — never on the click. On a Mac the engine prepends an
@@ -2122,6 +2135,14 @@ Static virtual channels are asked for by what the session needs: `drdynvc` for a
 session started with resize, the default `egfx = true`, `camera = true`, or
 `microphone = true`; `cliprdr` always; and `rdpsnd` with `rdpdr`
 for a session started with sound.
+
+`virtual_displays = 2` (alpha) asks the host for two monitors in a row, each the
+session's size, in the connect-time monitor data and in every layout a resizing
+session sends; the host spans one framebuffer over both and the engine shows one
+column of it, switched from the display picker without asking the host
+([Display geometry](#display-geometry)). The key is shared by every target type
+that can create virtual displays and acted on by `rdp` alone today; it is refused
+elsewhere, and held to two ([Roadmap](roadmap.md#more-than-two-virtual-displays-on-a-target)).
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
 the 16 ms coalescer demoted to a 100 ms safety net — and answers a monitor layout

@@ -22,8 +22,8 @@ use super::proto::frame::Frames;
 use super::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
 use super::proto::info::ClientInfo;
 use super::proto::share::{self, Pdu};
-use super::proto::x224::{ConnectionConfirm, ConnectionRequest, Security, TPKT_HEADER};
-use super::proto::{fastpath, license, mcs, tls, x224};
+use super::proto::x224::{ConfirmFlags, ConnectionConfirm, ConnectionRequest, Security, TPKT_HEADER};
+use super::proto::{display, fastpath, license, mcs, tls, x224};
 use super::session::Connect;
 use crate::engine;
 
@@ -118,8 +118,10 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     };
     tcp.write_all(&request.encode()).await.context("sending the X.224 Connection Request")?;
     let frame = read_frame(&mut tcp).await.context("reading the X.224 Connection Confirm")?;
-    let protocol = match ConnectionConfirm::decode(&frame)? {
-        ConnectionConfirm::Negotiated { protocol, .. } if protocol == Security::HYBRID => protocol,
+    let (protocol, confirmed) = match ConnectionConfirm::decode(&frame)? {
+        ConnectionConfirm::Negotiated { protocol, flags } if protocol == Security::HYBRID => {
+            (protocol, flags)
+        }
         ConnectionConfirm::Negotiated { protocol, .. } => {
             bail!("{dest} chose {protocol:?}, and this client speaks only NLA")
         }
@@ -150,9 +152,21 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     // 4. MCS Connect-Initial, carrying the GCC conference. The answer numbers every
     //    channel the session will use.
     let wanted = wanted_channels(config);
+    // More than one monitor rides an extended block, which [MS-RDPBCGR] 2.2.1.3.6
+    // forbids sending to a server that did not say it reads them. Such a server is
+    // given the one desktop it would have been given anyway, and the session has
+    // one display to show.
+    let extended = confirmed.contains(ConfirmFlags::EXTENDED_CLIENT_DATA);
+    let monitors = if config.monitors > 1 && !extended {
+        info!("rdp: {dest} does not take extended client data, so one monitor is asked for");
+        1
+    } else {
+        config.monitors.clamp(1, display::MAX_MONITORS)
+    };
     let conference = ConferenceCreateRequest {
         width: narrow(config.width),
         height: narrow(config.height),
+        monitors: narrow(monitors),
         scale_percent: config.scale_percent,
         client_name: "remotex",
         keyboard_layout: KEYBOARD_LAYOUT,

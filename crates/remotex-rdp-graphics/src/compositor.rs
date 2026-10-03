@@ -58,7 +58,7 @@ impl Compositor {
         let mut composed = Composed::default();
         for update in self.graphics.compose(commands, &self.framebuffer)? {
             match update {
-                Update::Reset { width, height } => {
+                Update::Reset { width, height, .. } => {
                     composed.resized = Some((width, height));
                     composed.painted.clear();
                 }

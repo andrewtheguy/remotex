@@ -7,10 +7,13 @@
 //! size, and the server answers by tearing the share down and building it again at
 //! the new size: a Deactivate All, then a fresh capability exchange.
 //!
-//! # One monitor, upright, of unknown physical size
+//! # A row of identical monitors, upright, of unknown physical size
 //!
-//! This gateway presents one desktop to one browser, so it sends one monitor and
-//! marks it primary. Three fields that a client with a real display would fill in are
+//! This gateway presents one desktop to one browser, so a layout is one monitor,
+//! marked primary — or, for a session that asked for virtual displays, a row of
+//! them of the same size, the primary at the left and each next one at the right
+//! edge of the last, as a Windows host lays out a client's monitors from their
+//! coordinates. Three fields that a client with a real display would fill in are
 //! deliberately left at zero:
 //!
 //! - **Orientation.** A window taller than it is wide is not a rotated monitor. Every
@@ -57,15 +60,19 @@ const PRIMARY: u32 = 0x0000_0001;
 /// One `DISPLAYCONTROL_MONITOR_LAYOUT`, whose size the layout PDU announces.
 const ENTRY: u32 = 40;
 
-/// A whole monitor layout PDU: the header, the monitor count, and one entry.
-const LAYOUT: u32 = HEADER + 8 + ENTRY;
+/// A monitor layout PDU before its entries: the header, the entry size and the count.
+const LAYOUT_HEAD: u32 = HEADER + 8;
+
+/// The most monitors one layout names. MS-RDPEDISP's own ceiling is the server's
+/// `MaxNumMonitors`; this is what the callers above ever ask for.
+pub const MAX_MONITORS: u32 = 16;
 
 const WHAT: &str = "a Display Control PDU";
 
 /// What the server will lay out, out of its capabilities PDU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities {
-    /// How many monitors a layout may name. This client sends one.
+    /// How many monitors a layout may name.
     pub monitors: u32,
     /// The largest total area, in pixels, that a layout may come to — the product of
     /// the two factors the server names and the number of monitors it allows.
@@ -104,32 +111,39 @@ pub fn adjust_size(width: u32, height: u32) -> (u32, u32) {
     (width.clamp(MIN_DIMENSION, MAX_DIMENSION) & !1, height.clamp(MIN_DIMENSION, MAX_DIMENSION))
 }
 
-/// Ask the host for a desktop of this size.
+/// Ask the host for `monitors` desktops of this size, side by side.
 ///
-/// `width` and `height` come from a browser window and are clamped to what the
-/// protocol permits — [`MIN_DIMENSION`] to [`MAX_DIMENSION`], with an odd width
-/// rounded down — rather than refused: a window can be any size, and the nearest
-/// desktop the host will open is a better answer than none. `scale` is the browser's
-/// pixel density as a percentage, and is written only if the server would read it.
-pub fn monitor_layout(width: u32, height: u32, scale: u32) -> Vec<u8> {
+/// `width` and `height` are one monitor's, come from a browser window, and are
+/// clamped to what the protocol permits — [`MIN_DIMENSION`] to [`MAX_DIMENSION`],
+/// with an odd width rounded down — rather than refused: a window can be any size,
+/// and the nearest desktop the host will open is a better answer than none. `scale`
+/// is the browser's pixel density as a percentage, and is written only if the
+/// server would read it; every monitor states the same one. `monitors` is held to
+/// 1 to [`MAX_MONITORS`]. The row's left edge is the primary's at 0, and each next
+/// monitor starts where the last ended, so the union is `monitors * width` wide.
+pub fn monitor_layout(width: u32, height: u32, scale: u32, monitors: u32) -> Vec<u8> {
     let (width, height) = adjust_size(width, height);
+    let monitors = monitors.clamp(1, MAX_MONITORS);
     let scale = if (MIN_SCALE..=MAX_SCALE).contains(&scale) { Some(scale) } else { None };
 
-    let mut w = Writer::with_capacity(LAYOUT as usize);
+    let length = LAYOUT_HEAD + ENTRY * monitors;
+    let mut w = Writer::with_capacity(length as usize);
     w.u32_le(MONITOR_LAYOUT);
-    w.u32_le(LAYOUT);
+    w.u32_le(length);
     w.u32_le(ENTRY); // MonitorLayoutSize, the size of one entry
-    w.u32_le(1); // NumMonitors
-    w.u32_le(PRIMARY);
-    w.u32_le(0); // Left
-    w.u32_le(0); // Top
-    w.u32_le(width);
-    w.u32_le(height);
-    w.u32_le(0); // PhysicalWidth
-    w.u32_le(0); // PhysicalHeight
-    w.u32_le(0); // Orientation
-    w.u32_le(scale.unwrap_or(0)); // DesktopScaleFactor
-    w.u32_le(scale.map_or(0, |_| DEVICE_SCALE));
+    w.u32_le(monitors); // NumMonitors
+    for index in 0..monitors {
+        w.u32_le(if index == 0 { PRIMARY } else { 0 });
+        w.u32_le(index * width); // Left
+        w.u32_le(0); // Top
+        w.u32_le(width);
+        w.u32_le(height);
+        w.u32_le(0); // PhysicalWidth
+        w.u32_le(0); // PhysicalHeight
+        w.u32_le(0); // Orientation
+        w.u32_le(scale.unwrap_or(0)); // DesktopScaleFactor
+        w.u32_le(scale.map_or(0, |_| DEVICE_SCALE));
+    }
     w.finish()
 }
 
@@ -158,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_pdu_that_is_not_the_capabilities_is_refused_by_type() {
-        let layout = monitor_layout(1280, 800, 100);
+        let layout = monitor_layout(1280, 800, 100, 1);
         let err = capabilities(&layout).unwrap_err();
         assert!(matches!(err, Malformed::Refused { field: "a PDU type", value: 2, .. }));
 
@@ -172,10 +186,10 @@ mod tests {
     /// numbers a caller sets.
     #[test]
     fn a_layout_is_one_primary_monitor_of_the_size_that_was_asked_for() {
-        let bytes = monitor_layout(1280, 800, 150);
+        let bytes = monitor_layout(1280, 800, 150, 1);
         let mut r = Reader::new("a test", &bytes);
         assert_eq!(r.u32_le().unwrap(), MONITOR_LAYOUT);
-        assert_eq!(r.u32_le().unwrap(), LAYOUT);
+        assert_eq!(r.u32_le().unwrap(), LAYOUT_HEAD + ENTRY);
         assert_eq!(r.u32_le().unwrap(), ENTRY);
         assert_eq!(r.u32_le().unwrap(), 1);
         assert_eq!(r.u32_le().unwrap(), PRIMARY);
@@ -189,7 +203,36 @@ mod tests {
         assert_eq!(r.u32_le().unwrap(), 150);
         assert_eq!(r.u32_le().unwrap(), DEVICE_SCALE);
         assert!(r.is_empty());
-        assert_eq!(bytes.len(), LAYOUT as usize);
+        assert_eq!(bytes.len(), (LAYOUT_HEAD + ENTRY) as usize);
+    }
+
+    /// Two monitors are a row: the primary at the left, the second starting at the
+    /// primary's right edge, both the size that was asked for and both at the same
+    /// density, and the PDU's length counts both entries.
+    #[test]
+    fn a_layout_of_two_monitors_is_a_row_with_the_primary_at_the_left() {
+        let bytes = monitor_layout(1281, 800, 200, 2);
+        assert_eq!(bytes.len(), (LAYOUT_HEAD + 2 * ENTRY) as usize);
+        let mut r = Reader::new("a test", &bytes);
+        assert_eq!(r.u32_le().unwrap(), MONITOR_LAYOUT);
+        assert_eq!(r.u32_le().unwrap(), LAYOUT_HEAD + 2 * ENTRY);
+        assert_eq!(r.u32_le().unwrap(), ENTRY);
+        assert_eq!(r.u32_le().unwrap(), 2);
+        let mut entries = Vec::new();
+        for _ in 0..2 {
+            let mut entry = [0_u32; 10];
+            for field in &mut entry {
+                *field = r.u32_le().unwrap();
+            }
+            entries.push(entry);
+        }
+        assert!(r.is_empty());
+        // The odd width was rounded down, and the second monitor starts at it.
+        assert_eq!(entries[0], [PRIMARY, 0, 0, 1280, 800, 0, 0, 0, 200, DEVICE_SCALE]);
+        assert_eq!(entries[1], [0, 1280, 0, 1280, 800, 0, 0, 0, 200, DEVICE_SCALE]);
+        // Zero monitors is one, and more than the protocol allows is the most it does.
+        assert_eq!(monitor_layout(1280, 800, 100, 0), monitor_layout(1280, 800, 100, 1));
+        assert_eq!(monitor_layout(1280, 800, 100, 99).len(), (LAYOUT_HEAD + MAX_MONITORS * ENTRY) as usize);
     }
 
     /// A window is whatever size the person made it; a desktop has to be one the
@@ -199,7 +242,7 @@ mod tests {
         let sizes =
             [((1367, 768), (1366, 768)), ((100, 99), (200, 200)), ((9000, 9000), (8192, 8192))];
         for (asked, sent) in sizes {
-            let bytes = monitor_layout(asked.0, asked.1, 100);
+            let bytes = monitor_layout(asked.0, asked.1, 100, 1);
             let mut r = Reader::new("a test", &bytes[28..]);
             assert_eq!((r.u32_le().unwrap(), r.u32_le().unwrap()), sent, "asked for {asked:?}");
         }
@@ -210,10 +253,10 @@ mod tests {
     #[test]
     fn a_scale_the_server_would_ignore_is_left_out_with_the_one_beside_it() {
         for scale in [0, 99, 501] {
-            let bytes = monitor_layout(1280, 800, scale);
+            let bytes = monitor_layout(1280, 800, scale, 1);
             assert_eq!(&bytes[48..], &[0; 8], "a scale of {scale}");
         }
-        let bytes = monitor_layout(1280, 800, 500);
+        let bytes = monitor_layout(1280, 800, 500, 1);
         assert_eq!(&bytes[48..], &[0xF4, 0x01, 0, 0, 100, 0, 0, 0]);
     }
 }

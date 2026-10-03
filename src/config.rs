@@ -723,6 +723,31 @@ pub struct TargetConfig {
     /// from the specification and has not been seen from a host.
     #[serde(default)]
     pub egfx_h264: bool,
+    /// ALPHA. How many virtual displays the remote is asked to lay out for the
+    /// session, side by side at the session's size: `virtual_displays = 2`.
+    /// One, the default, is the single desktop every target has always opened;
+    /// at most [`MAX_VIRTUAL_DISPLAYS`].
+    ///
+    /// The browser shows one of them at a time, chosen from the display picker
+    /// in the floating menu, and the gateway encodes only the one shown: each
+    /// display is held under the stream's ceiling on its own, and the host
+    /// renders the other for the windows left on it. The key is a count the
+    /// remote is *asked* for; the list the picker shows is what the remote laid
+    /// out, so a server that opens one desktop shows no picker.
+    ///
+    /// Shared by every target type that can create virtual displays, and acted
+    /// on today by `rdp` alone: a Windows host lays the displays out from the
+    /// connect-time monitor data ([MS-RDPBCGR] 2.2.1.3.6) and from each monitor
+    /// layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2). Refused on every
+    /// other target, where it would be silently inert, and beside the pipeline's
+    /// passthrough, which composes the whole desktop in the browser and has no
+    /// view of one display ([`Self::offers`]).
+    ///
+    /// Alpha: checked against one Windows 11 host; the second display's windows,
+    /// its pointer and its density follow the first's, and nothing of it has been
+    /// measured against Microsoft's own client.
+    #[serde(default = "one_display")]
+    pub virtual_displays: u8,
     /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a
     /// `wlshare` target the wlshare camera extension ([`crate::vnc_camera`]),
     /// listed the way its audio extension is. Rejected on a plain `vnc`
@@ -936,10 +961,14 @@ impl TargetConfig {
             // bitmap path keeps its opening size. MS-RDPEDISP's other answer, a
             // Deactivation-Reactivation Sequence, is left out on purpose: see
             // "Bitmap updates" in docs/rdp-client.md.
+            // A passed pipeline is composed whole in the browser, which has no
+            // view of one display out of several, so a target asking for more
+            // than one has no passthrough row.
             (Protocol::Rdp, _) => Offers {
                 resize: self.egfx(),
                 audio: true,
-                passthrough: self.egfx().then_some(Passthrough::RdpGraphics),
+                passthrough: (self.egfx() && self.virtual_displays == 1)
+                    .then_some(Passthrough::RdpGraphics),
             },
             // Read as any VNC server, which carries no sound, and whose answer
             // to a size is not known until it is dialled.
@@ -1115,6 +1144,19 @@ impl TargetConfig {
 /// to the ceiling a video stream encodes within
 /// ([`crate::video::MAX_LONG_SIDE`]).
 pub const DEFAULT_SIZE: (u16, u16) = (1440, 900);
+
+/// The most virtual displays a target may ask for ([`TargetConfig::virtual_displays`]).
+///
+/// Two, while the feature is alpha: two is what the picker, the input offset and
+/// the span the host builds have been checked with, and each display is a desktop
+/// the host renders whether or not anybody is looking at it.
+pub const MAX_VIRTUAL_DISPLAYS: u8 = 2;
+
+/// Serde's default for [`TargetConfig::virtual_displays`]: the one desktop every
+/// target opens unless asked otherwise.
+fn one_display() -> u8 {
+    1
+}
 
 /// The port this project answers on when nothing says otherwise, in either
 /// shape: [`DEFAULT_LISTEN`] below, and the TUI control plane's `--port`.
@@ -1725,6 +1767,23 @@ impl ConfigFile {
                  on can take: H.264 is drawn on that pipeline. Remove the key{}.",
                 target.name,
                 if target.protocol == Protocol::Rdp { ", or egfx = false" } else { "" }
+            );
+            // A count of virtual displays is a count the engine asks the remote
+            // for, and only the RDP engine asks today: on any other target the key
+            // would be read and change nothing.
+            anyhow::ensure!(
+                (1..=MAX_VIRTUAL_DISPLAYS).contains(&target.virtual_displays),
+                "target {:?} sets virtual_displays = {}, which must be 1 to {MAX_VIRTUAL_DISPLAYS}",
+                target.name,
+                target.virtual_displays
+            );
+            anyhow::ensure!(
+                target.virtual_displays == 1 || target.protocol == Protocol::Rdp,
+                "target {:?} sets virtual_displays = {} on a {} target, and only rdp lays \
+                 out more than one virtual display today. Remove the key.",
+                target.name,
+                target.virtual_displays,
+                target.protocol.name()
             );
             // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
             // `wlshare` target. Neither Apple's Screen Sharing nor a VNC server read
@@ -3544,6 +3603,37 @@ mod tests {
                 .unwrap()
                 .targets[0];
         assert!(virtual_display.sized());
+    }
+
+    /// A count of virtual displays is one unless asked, at most two, and a key
+    /// only an rdp target takes: everywhere else it would change nothing. Beside
+    /// more than one the pipeline's passthrough has no row, since a passed pipeline
+    /// is composed whole in the browser.
+    #[test]
+    fn virtual_displays_are_one_unless_asked_and_only_on_rdp() {
+        let one = ConfigFile::parse(&rdp_toml("")).unwrap().targets.remove(0);
+        assert_eq!(one.virtual_displays, 1);
+        assert_eq!(one.offers().passthrough, Some(Passthrough::RdpGraphics));
+
+        let two = ConfigFile::parse(&rdp_toml("virtual_displays = 2")).unwrap().targets.remove(0);
+        assert_eq!(two.virtual_displays, 2);
+        assert_eq!(two.offers().passthrough, None, "the passthrough has no view of one display");
+        assert!(two.offers().resize, "the window still drives each display's size");
+        assert_eq!(
+            two.accepts(Choices { passthrough: true, ..Choices::default() }),
+            Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })
+        );
+
+        for bad in ["virtual_displays = 0", "virtual_displays = 3"] {
+            let err = ConfigFile::parse(&rdp_toml(bad)).unwrap_err();
+            assert!(format!("{err:#}").contains("must be 1 to 2"), "{bad}: {err:#}");
+        }
+        let err = ConfigFile::parse(&vnc_toml("virtual_displays = 2
+vnc_password = \"x\"")).unwrap_err();
+        assert!(format!("{err:#}").contains("only rdp lays out"), "{err:#}");
+        // One is every target's default and so is accepted anywhere.
+        ConfigFile::parse(&vnc_toml("virtual_displays = 1
+vnc_password = \"x\"")).unwrap();
     }
 
     /// Which sizings a target takes: following a window where the window can drive

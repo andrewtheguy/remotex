@@ -35,8 +35,8 @@ use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
-    ClientMsg, ClipboardSnapshot, CursorShape, CursorUnit, HostDisplay, MAX_CLIPBOARD_BYTES,
-    MAX_CURSOR_DIM, MouseButton, Painted, ServerMsg, UNSCALED, WheelUnit,
+    ClientMsg, ClipboardSnapshot, CursorShape, CursorUnit, DisplayInfo, HostDisplay,
+    MAX_CLIPBOARD_BYTES, MAX_CURSOR_DIM, MouseButton, Painted, ServerMsg, UNSCALED, WheelUnit,
 };
 use crate::rdp_camera;
 use crate::rdp_mic;
@@ -230,26 +230,36 @@ async fn session(
     let Some((width, height)) = await_desktop(&mut events, &config, sink).await else {
         return;
     };
-    // The opening density counts as applied only when the desktop came back at the
-    // size that asked for it — the same proof a mid-session layout needs (see
-    // `confirms`). A server that opened something else is taken to be at 1x, and
-    // the attachment's `HostDisplay` asks again through Display Control.
-    let applied = if (u32::from(width), u32::from(height)) == opening.adjusted().size() {
+    // Which of the displays asked for the host laid out, read off the desktop it
+    // opened: the row's union, or one. The opening density counts as applied only
+    // when the desktop came back at the size that asked for it — the same proof a
+    // mid-session layout needs (see `confirms`). A server that opened something
+    // else is taken to be at 1x, and the attachment's `HostDisplay` asks again
+    // through Display Control.
+    let asked = u32::from(config.virtual_displays);
+    let mut view = View::opened(asked, opening.adjusted(), (width, height));
+    let applied = if (u32::from(width), u32::from(height)) == span(opening.adjusted(), view.columns) {
         opening.density
     } else {
         Density::One
     };
-    info!("rdp: connected, desktop {width}x{height} at {}x", applied.percent() / 100);
+    info!(
+        "rdp: connected, desktop {width}x{height} at {}x over {} display(s)",
+        applied.percent() / 100,
+        view.columns
+    );
 
-    if sink
-        .msg(ServerMsg::Resize { w: width, h: height, scale: applied.scale() })
-        .await
-        .is_err()
-    {
+    let (w, h) = view.size((width, height));
+    if sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await.is_err() {
         return; // browser already gone
     }
     // No RDP server ships for macOS, so a Mac never answers here.
     if sink.msg(ServerMsg::RemoteOs { macos: false }).await.is_err() {
+        return; // browser already gone
+    }
+    if let Some(msg) = view.displays((width, height), applied)
+        && sink.msg(msg).await.is_err()
+    {
         return; // browser already gone
     }
 
@@ -259,6 +269,7 @@ async fn session(
         Flags { resize, pass_graphics: plan.rdp_graphics },
         (width, height),
         applied,
+        view,
         input_rx,
         sink,
     )
@@ -396,6 +407,7 @@ fn connect_config(
         domain: config.domain.clone(),
         width: opening.w,
         height: opening.h,
+        monitors: u32::from(config.virtual_displays),
         // Stated only in a session whose density is this end's to set, where 1x is
         // a statement too: a session left at 2x reconnects at 100%. Otherwise the
         // host keeps whatever scaling it was configured with.
@@ -553,6 +565,113 @@ impl Layout {
 impl std::fmt::Display for Layout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}x{} at {}x", self.w, self.h, self.density.percent() / 100)
+    }
+}
+
+/// The desktop a layout makes when the host lays it out over `columns` monitors in
+/// a row: the union the host names in a Demand Active or a graphics reset.
+fn span(layout: Layout, columns: u16) -> (u32, u32) {
+    (layout.w * u32::from(columns.max(1)), layout.h)
+}
+
+/// The virtual displays the host laid out, and the one the browser is looking at.
+///
+/// RDP delivers one framebuffer spanning every monitor of the session, and this
+/// engine shows one monitor of it: `columns` equal columns side by side, which is
+/// how every layout it asks for is built (`display::monitor_layout` in the RDP
+/// client), and `active` the column on the canvas. The picker's list is this and
+/// its checkmark is `active`, both sent from here: a switch is answered out of the
+/// framebuffer the gateway already holds, and the host is asked for nothing. The
+/// browser keeps no display state of its own, so the list goes out again whenever
+/// the desktop or the selection changes, and — once it has been sent at all — when
+/// it shrinks to one, so a browser is not left offering a display the host took away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct View {
+    /// How many monitors the host laid the desktop out over, each `desktop.0 /
+    /// columns` wide. Never zero.
+    columns: u16,
+    /// The column on the canvas, below `columns`.
+    active: u16,
+    /// Whether a list has ever been sent, so a shrink to one is told as well.
+    listed: bool,
+}
+
+impl View {
+    /// What the host laid out at connect, read off the desktop it opened: the
+    /// `asked` monitors when the desktop is their union, else one. A Demand Active
+    /// names no monitor count, and a server without the extended client data was
+    /// asked for one monitor anyway.
+    fn opened(asked: u32, per_monitor: Layout, desktop: (u16, u16)) -> Self {
+        let asked = narrow(asked.max(1));
+        let columns = if asked > 1 && (u32::from(desktop.0), u32::from(desktop.1)) == span(per_monitor, asked) {
+            asked
+        } else {
+            1
+        };
+        Self { columns, active: 0, listed: false }
+    }
+
+    /// The host laid the desktop out again, over `monitors` monitors — its answer
+    /// to a layout, or its own change. The selection is kept where it still exists.
+    fn laid_out(self, monitors: u32) -> Self {
+        let columns = narrow(monitors.max(1));
+        Self { columns, active: if self.active < columns { self.active } else { 0 }, ..self }
+    }
+
+    /// One column's size: what the browser is told the desktop is.
+    fn size(self, desktop: (u16, u16)) -> (u16, u16) {
+        (desktop.0 / self.columns.max(1), desktop.1)
+    }
+
+    /// Where the active column starts, in the framebuffer.
+    fn origin(self, desktop: (u16, u16)) -> (u16, u16) {
+        (self.size(desktop).0 * self.active, 0)
+    }
+
+    /// The active column, as the inclusive rectangle of the framebuffer it is.
+    fn rect(self, desktop: (u16, u16)) -> Rect {
+        let (w, h) = self.size(desktop);
+        let (left, top) = self.origin(desktop);
+        Rect {
+            left,
+            top,
+            right: left.saturating_add(w).saturating_sub(1),
+            bottom: top.saturating_add(h).saturating_sub(1),
+        }
+    }
+
+    /// Take the picker's choice: `None` for an id the list does not have, else
+    /// whether the view moved.
+    fn select(&mut self, id: u32) -> Option<bool> {
+        let column = u16::try_from(id).ok().filter(|column| *column < self.columns)?;
+        let moved = column != self.active;
+        self.active = column;
+        Some(moved)
+    }
+
+    /// The list and the checkmark for the browser, or `None` while there is one
+    /// display and never was more: such a session shows no picker, which is the
+    /// rule for every engine with nothing to choose between.
+    fn displays(&mut self, desktop: (u16, u16), density: Density) -> Option<ServerMsg> {
+        if self.columns <= 1 && !self.listed {
+            return None;
+        }
+        self.listed = true;
+        let (w, h) = self.size(desktop);
+        let points = |pixels: u16| (f32::from(pixels) / density.scale()).round() as u32;
+        let detail = format!("{}×{} at {}x", points(w), points(h), density.percent() / 100);
+        let displays = (0..self.columns)
+            .map(|column| DisplayInfo {
+                id: u32::from(column),
+                label: format!("Display {}", column + 1),
+                detail: detail.clone(),
+                main: column == 0,
+                // The host made each of them for this session; none is a screen
+                // of its own.
+                virtual_display: true,
+            })
+            .collect();
+        Some(ServerMsg::Displays { active: u32::from(self.active), displays })
     }
 }
 
@@ -890,12 +1009,14 @@ impl ClipboardState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn active_loop(
     session: &Session,
     mut events: mpsc::Receiver<Event>,
     flags: Flags,
     connected_at: (u16, u16),
     connected_density: Density,
+    mut view: View,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
@@ -903,14 +1024,22 @@ async fn active_loop(
     let input = session.input();
     let framebuffer = session.framebuffer();
 
+    // The framebuffer the host paints: every display it laid out, side by side.
+    // What the browser sees is `view`'s column of it.
     let mut desktop = connected_at;
-    // The pixels the browser has already been sent. Lives beside the framebuffer
-    // it shadows, and is forgotten on a repaint and on a resize.
-    let mut shadow = Shadow::new("rdp", desktop.0, desktop.1);
+    // The pixels the browser has already been sent, of the display it is looking
+    // at. Lives beside the framebuffer it shadows, and is forgotten on a repaint,
+    // on a resize and on a switch.
+    let (view_w, view_h) = view.size(desktop);
+    let mut shadow = Shadow::new("rdp", view_w, view_h);
 
-    // Last known pointer position, so button/wheel events (which the browser
-    // sends without coordinates) land where the cursor actually is.
-    let mut last_pos: (u16, u16) = (desktop.0 / 2, desktop.1 / 2);
+    // Last known pointer position, in the framebuffer, so button/wheel events
+    // (which the browser sends without coordinates) land where the cursor
+    // actually is.
+    let mut last_pos: (u16, u16) = {
+        let (ox, oy) = view.origin(desktop);
+        (ox + view_w / 2, oy + view_h / 2)
+    };
     // The scroll distance not yet worth a rotation unit.
     let mut wheel = WheelRotation::default();
     // The pointer shape, on its way to the browser that draws it.
@@ -1017,7 +1146,7 @@ async fn active_loop(
                     // out now — not in up-to-16ms, and never cut in half.
                     Event::Frame => {
                         frame_marks = true;
-                        flush_damage(framebuffer, &mut pending_damage, &mut shadow, sink)
+                        flush_damage(framebuffer, &mut pending_damage, view.rect(desktop), &mut shadow, sink)
                             .await?;
                         damage_flushed = Instant::now();
                         damage_due = None;
@@ -1065,8 +1194,9 @@ async fn active_loop(
                     // gets. It also arrives unprompted when a server resizes a
                     // session on its own, which is why `applied` follows the
                     // pending layout rather than assuming there was one.
-                    Event::Resize { width, height } => {
+                    Event::Resize { width, height, monitors } => {
                         desktop = (narrow(width), narrow(height));
+                        view = view.laid_out(monitors);
                         // A resize is the only acknowledgment this protocol has
                         // and it is an ambiguous one, since a server also
                         // renegotiates the desktop unprompted. So a pending
@@ -1079,27 +1209,30 @@ async fn active_loop(
                         // a layout the server had just thrown away became the
                         // `scale` announced for the desktop it built instead.
                         if let Some(pending) =
-                            pending_layout.take_if(|p| confirms(p, desktop))
+                            pending_layout.take_if(|p| confirms(p, desktop, view.columns))
                         {
                             applied = pending.layout.density;
                             layout_retry_at = None;
                         }
-                        info!("rdp: resized, desktop {}x{}", desktop.0, desktop.1);
+                        info!(
+                            "rdp: resized, desktop {}x{} over {} display(s)",
+                            desktop.0, desktop.1, view.columns
+                        );
                         // Damage staged before the resize names rectangles of a
                         // framebuffer that no longer exists.
                         pending_damage.clear();
                         damage_due = None;
-                        shadow.resize(desktop.0, desktop.1);
+                        let (w, h) = view.size(desktop);
+                        shadow.resize(w, h);
                         sink.reset_render();
                         last_pos = (
                             last_pos.0.min(desktop.0.saturating_sub(1)),
                             last_pos.1.min(desktop.1.saturating_sub(1)),
                         );
-                        sink.msg(ServerMsg::Resize {
-                            w: desktop.0,
-                            h: desktop.1,
-                            scale: applied.scale(),
-                        }).await?;
+                        sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await?;
+                        if let Some(msg) = view.displays(desktop, applied) {
+                            sink.msg(msg).await?;
+                        }
                         // The framebuffer was cleared by the resize and a server
                         // is not obliged to repaint, so ask — through the queue,
                         // which the RDP client drains only once the resize has
@@ -1127,7 +1260,10 @@ async fn active_loop(
                         // session is over either way, and the shadow's claim about them
                         // dies with it.
                         for rect in pending_damage.drain(..) {
-                            if send_damage(framebuffer, rect, &mut shadow, sink).await.is_err() {
+                            if send_damage(framebuffer, rect, view.rect(desktop), &mut shadow, sink)
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -1162,12 +1298,14 @@ async fn active_loop(
                     // encode, which settles every debt and makes every cell's
                     // history a single redraw rather than motion.
                     sink.reset_render();
-                    sink.msg(ServerMsg::Resize {
-                        w: desktop.0,
-                        h: desktop.1,
-                        scale: applied.scale(),
-                    }).await?;
+                    let (w, h) = view.size(desktop);
+                    sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await?;
                     sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
+                    // The list is pushed, never asked for, so a browser that attaches
+                    // is told it here.
+                    if let Some(msg) = view.displays(desktop, applied) {
+                        sink.msg(msg).await?;
+                    }
                     // Not part of the repaint: the pixels carry no pointer, and
                     // the server only names a shape when it changes.
                     sink.msg(pointer.attached()).await?;
@@ -1180,22 +1318,52 @@ async fn active_loop(
                         input.refresh();
                         continue;
                     }
-                    send_damage(
-                        framebuffer,
-                        Rect {
-                            left: 0,
-                            top: 0,
-                            right: desktop.0.saturating_sub(1),
-                            bottom: desktop.1.saturating_sub(1),
-                        },
-                        &mut shadow,
-                        sink,
-                    )
-                    .await?;
+                    send_damage(framebuffer, view.rect(desktop), view.rect(desktop), &mut shadow, sink)
+                        .await?;
                     // A repaint is a frame. Without this, the whole repaint would
                     // sit in the video mirror unsent, while the shadow already
                     // counts every pixel of it as delivered.
                     sink.frame().await?;
+                    continue;
+                }
+                // The picker's choice of display: a column of the framebuffer this
+                // end already holds, so the switch is made here and the host is
+                // asked for nothing. Everything the browser is told follows from
+                // the new view — the size, the list with its checkmark, and a
+                // repaint of the column out of the framebuffer — and a choice of
+                // the display already shown is answered with the list as it
+                // stands, as wlshare answers one. An id the list does not have is
+                // dropped, so a browser cannot name a column that is not there.
+                if let ClientMsg::SelectDisplay { id } = msg {
+                    match view.select(id) {
+                        None => debug!("rdp: ignoring a selection of unknown display {id}"),
+                        Some(moved) => {
+                            if moved {
+                                info!("rdp: showing display {} of {}", view.active + 1, view.columns);
+                                pending_damage.clear();
+                                damage_due = None;
+                                let (w, h) = view.size(desktop);
+                                shadow.resize(w, h);
+                                shadow.forget();
+                                sink.reset_render();
+                                sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await?;
+                            }
+                            if let Some(msg) = view.displays(desktop, applied) {
+                                sink.msg(msg).await?;
+                            }
+                            if moved {
+                                send_damage(
+                                    framebuffer,
+                                    view.rect(desktop),
+                                    view.rect(desktop),
+                                    &mut shadow,
+                                    sink,
+                                )
+                                .await?;
+                                sink.frame().await?;
+                            }
+                        }
+                    }
                     continue;
                 }
                 // The screen this client's window is on — a density report
@@ -1217,10 +1385,10 @@ async fn active_loop(
                         let want = Density::from_host(screen.scale);
                         let base = pending_layout
                             .as_ref()
-                            .map_or_else(|| Layout::current(desktop, applied), |p| p.layout);
+                            .map_or_else(|| Layout::current(view.size(desktop), applied), |p| p.layout);
                         install_layout(
                             base.at_density(want).held(),
-                            Layout::current(desktop, applied),
+                            Layout::current(view.size(desktop), applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
                         );
@@ -1253,7 +1421,7 @@ async fn active_loop(
                         let density = pending_layout.as_ref().map_or(applied, |p| p.layout.density);
                         install_layout(
                             Layout { w, h, density: Density::One }.at_density(density).held(),
-                            Layout::current(desktop, applied),
+                            Layout::current(view.size(desktop), applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
                         );
@@ -1280,7 +1448,7 @@ async fn active_loop(
                     }).await?;
                     continue;
                 }
-                for event in translate_input(msg, &mut last_pos, &mut wheel) {
+                for event in translate_input(msg, &mut last_pos, &mut wheel, view.origin(desktop)) {
                     event.apply(input);
                 }
                 continue;
@@ -1295,7 +1463,7 @@ async fn active_loop(
                     continue; // a resize confirmed it first
                 };
                 let wanted = pending.layout;
-                match request_layout(input, resize_ready, Layout::current(desktop, applied), wanted) {
+                match request_layout(input, resize_ready, Layout::current(view.size(desktop), applied), wanted) {
                     // Sent, but nothing acknowledges a layout — so ask again
                     // until a resize proves it or the schedule runs out.
                     // Dropping the request is all that giving up takes: `applied`
@@ -1307,7 +1475,7 @@ async fn active_loop(
                             warn!(
                                 "rdp: the remote never applied {}; leaving the desktop at {}",
                                 wanted,
-                                Layout::current(desktop, applied),
+                                Layout::current(view.size(desktop), applied),
                             );
                             pending_layout = None;
                         }
@@ -1335,7 +1503,7 @@ async fn active_loop(
                 continue;
             }
             _ = damage_flush => {
-                flush_damage(framebuffer, &mut pending_damage, &mut shadow, sink).await?;
+                flush_damage(framebuffer, &mut pending_damage, view.rect(desktop), &mut shadow, sink).await?;
                 damage_flushed = Instant::now();
                 damage_due = None;
                 // The flush is a frame boundary of its own: under a video plan those
@@ -1368,7 +1536,7 @@ async fn active_loop(
                     damage_due = Some(Instant::now() + FRAME_NET);
                 }
             } else if damage_flushed.elapsed() >= DAMAGE_INTERVAL {
-                flush_damage(framebuffer, &mut pending_damage, &mut shadow, sink).await?;
+                flush_damage(framebuffer, &mut pending_damage, view.rect(desktop), &mut shadow, sink).await?;
                 damage_flushed = Instant::now();
                 damage_due = None;
             } else if damage_due.is_none() {
@@ -1454,9 +1622,12 @@ fn install_layout(
 /// factor on the same PDU as the size but the server acknowledges neither, and no
 /// PDU reports the scale a server settled on. The size is the only evidence there
 /// is, which is why it has to be the evidence used.
-fn confirms(pending: &PendingLayout, desktop: (u16, u16)) -> bool {
-    let want = pending.layout.adjusted();
-    (want.w, want.h) == (u32::from(desktop.0), u32::from(desktop.1))
+///
+/// `columns` is how many monitors the host laid the desktop out over, from the
+/// reset that reported it: the layout asked for one monitor of this size per
+/// display, so the answer to it is their union.
+fn confirms(pending: &PendingLayout, desktop: (u16, u16), columns: u16) -> bool {
+    span(pending.layout.adjusted(), columns) == (u32::from(desktop.0), u32::from(desktop.1))
 }
 
 fn request_layout(input: &Input, ready: bool, current: Layout, wanted: Layout) -> Asked {
@@ -1615,14 +1786,22 @@ impl WheelRotation {
 }
 
 /// Translate one browser input message into what to do to the remote.
+///
+/// `origin` is where the display the browser is looking at starts in the
+/// framebuffer: a position arrives in that display's pixels and goes to the host
+/// in the desktop's, and `last_pos` is kept in the desktop's.
 fn translate_input(
     input: ClientMsg,
     last_pos: &mut (u16, u16),
     wheel: &mut WheelRotation,
+    origin: (u16, u16),
 ) -> Vec<RemoteInput> {
     match input {
         ClientMsg::MouseMove { x, y } => {
-            let (x, y) = (clamp_u16(x), clamp_u16(y));
+            let (x, y) = (
+                clamp_u16(x.saturating_add(i32::from(origin.0))),
+                clamp_u16(y.saturating_add(i32::from(origin.1))),
+            );
             *last_pos = (x, y);
             vec![RemoteInput::Move { x, y }]
         }
@@ -1685,10 +1864,8 @@ fn translate_input(
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here.
         ClientMsg::Connect { .. } | ClientMsg::Disconnect | ClientMsg::PaintAck { .. } => Vec::new(),
-        // An RDP session is one framebuffer spanning every monitor the server
-        // composed into it, and its protocol has no way to ask for one of them.
-        // So this engine never sends a display list, no client offers the
-        // picker, and anything arriving here is a client that invented one.
+        // Answered by the active loop, out of the framebuffer, before translation:
+        // the host has no message for it and is asked for nothing.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
     }
 }
@@ -1762,20 +1939,27 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
     pending[pick] = union(&pending[pick], &rect);
 }
 
-/// Drain the staged damage into the mirror.
+/// Drain the staged damage into the mirror, the part of it inside `view`.
 async fn flush_damage(
     framebuffer: &Framebuffer,
     pending: &mut Vec<Rect>,
+    view: Rect,
     shadow: &mut Shadow,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
     for rect in pending.drain(..) {
-        send_damage(framebuffer, rect, shadow, sink).await?;
+        send_damage(framebuffer, rect, view, shadow, sink).await?;
     }
     Ok(())
 }
 
 /// Hand the sink whatever part of `rect` the client does not already have.
+///
+/// `rect` and `view` are in the framebuffer; what the browser is looking at is
+/// `view`, the display it chose, and it is told rectangles of that. So the damage
+/// is cut to the view and moved to the view's origin, and damage on a display the
+/// browser is not looking at costs nothing here at all. The host still paints it
+/// into the framebuffer, which is what a switch is repainted from.
 ///
 /// Comparing against `shadow` earns its keep on this engine in particular: it
 /// repaints regions that did not change, which nothing upstream filters. They come
@@ -1789,46 +1973,53 @@ async fn flush_damage(
 async fn send_damage(
     framebuffer: &Framebuffer,
     rect: Rect,
+    view: Rect,
     shadow: &mut Shadow,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
+    let Some(rect) = rect.intersect(&view) else {
+        return Ok(());
+    };
     let mut buf = Vec::new();
-    let Some(rect) = framebuffer.with(|frame| {
-        // Clamped to *both* sizes, because they can disagree for one turn of the
-        // loop: the RDP client resizes the framebuffer on its own thread, and the
-        // shadow follows when `Event::Resize` is processed.
-        let (fb_w, fb_h) = shadow.size();
-        let w = narrow(frame.width).min(fb_w);
-        let h = narrow(frame.height).min(fb_h);
+    let Some(local) = framebuffer.with(|frame| {
+        // Clamped to the frame as well as to the view, because they can disagree
+        // for one turn of the loop: the RDP client resizes the framebuffer on its
+        // own thread, and the view follows when `Event::Resize` is processed. And
+        // to the shadow, which is the view's size as of that same event.
+        let w = narrow(frame.width);
+        let h = narrow(frame.height);
         if rect.left >= w || rect.top >= h {
             return None;
         }
-        let rect = Rect {
-            left: rect.left,
-            top: rect.top,
-            right: rect.right.min(w - 1),
-            bottom: rect.bottom.min(h - 1),
-        };
-        if rect.right < rect.left || rect.bottom < rect.top {
+        let (shadow_w, shadow_h) = shadow.size();
+        let right = rect.right.min(w - 1).min(view.left.saturating_add(shadow_w).saturating_sub(1));
+        let bottom = rect.bottom.min(h - 1).min(view.top.saturating_add(shadow_h).saturating_sub(1));
+        if right < rect.left || bottom < rect.top {
             return None;
         }
+        let rect = Rect { right, bottom, ..rect };
         pack_rgb(frame, rect, &mut buf);
-        Some(rect)
+        Some(Rect {
+            left: rect.left - view.left,
+            top: rect.top - view.top,
+            right: rect.right - view.left,
+            bottom: rect.bottom - view.top,
+        })
     }) else {
         return Ok(());
     };
 
-    let Some(changed) = shadow.accept(rect, &buf) else {
+    let Some(changed) = shadow.accept(local, &buf) else {
         return Ok(());
     };
-    if changed == rect {
-        return sink.damage(rect, &buf).await;
+    if changed == local {
+        return sink.damage(local, &buf).await;
     }
     // Cropped out of the pack already made rather than repacked from the frame — the
     // changed rows are not contiguous in `buf`, but they are row copies, where a
     // repack is another per-pixel swizzle over the same pixels.
     let mut pixels = Vec::new();
-    shadow::crop(&buf, rect, changed, &mut pixels);
+    shadow::crop(&buf, local, changed, &mut pixels);
     sink.damage(changed, &pixels).await
 }
 
@@ -2122,6 +2313,90 @@ mod tests {
         );
     }
 
+    /// A position arrives in the pixels of the display on the canvas and goes to
+    /// the host in the desktop's: the second of two displays starts a display's
+    /// width in.
+    #[test]
+    fn a_position_on_the_second_display_is_offset_by_the_first() {
+        let mut last_pos = (0, 0);
+        let events = translate_input(
+            ClientMsg::MouseMove { x: 10, y: 20 },
+            &mut last_pos,
+            &mut WheelRotation::default(),
+            (1280, 0),
+        );
+        assert_eq!(events, vec![RemoteInput::Move { x: 1290, y: 20 }]);
+        assert_eq!(last_pos, (1290, 20), "the position kept is the desktop's");
+        // A button then lands where the pointer is, on that display.
+        let events = translate_input(
+            ClientMsg::MouseButton { button: MouseButton::Left, pressed: true, clicks: 1 },
+            &mut last_pos,
+            &mut WheelRotation::default(),
+            (1280, 0),
+        );
+        assert_eq!(events, vec![RemoteInput::Button { button: RdpButton::Left, down: true, x: 1290, y: 20 }]);
+    }
+
+    /// The view is read off what the host opened: two displays when the desktop is
+    /// their union, one when the host gave one, and the list that goes with each.
+    #[test]
+    fn the_view_is_what_the_host_laid_out() {
+        let per = Layout { w: 1280, h: 800, density: Density::One };
+        let two = View::opened(2, per, (2560, 800));
+        assert_eq!((two.columns, two.active), (2, 0));
+        assert_eq!(two.size((2560, 800)), (1280, 800));
+        assert_eq!(two.rect((2560, 800)), rect(0, 0, 1279, 799));
+        // A host that opened one desktop, or something else entirely, is one display.
+        assert_eq!(View::opened(2, per, (1280, 800)).columns, 1);
+        assert_eq!(View::opened(2, per, (1024, 768)).columns, 1);
+        assert_eq!(View::opened(1, per, (1280, 800)).columns, 1);
+
+        let mut view = two;
+        let msg = view.displays((2560, 800), Density::One).expect("two displays are a list");
+        let ServerMsg::Displays { active, displays } = msg else { panic!("not a list") };
+        assert_eq!(active, 0);
+        assert_eq!(
+            displays.iter().map(|d| (d.id, d.label.as_str(), d.detail.as_str(), d.main)).collect::<Vec<_>>(),
+            vec![(0, "Display 1", "1280×800 at 1x", true), (1, "Display 2", "1280×800 at 1x", false)]
+        );
+        // At 2x the detail is in points.
+        let ServerMsg::Displays { displays, .. } = view.displays((5120, 1600), Density::Two).unwrap() else {
+            panic!("not a list")
+        };
+        assert_eq!(displays[1].detail, "1280×800 at 2x");
+
+        // The picker's choice: the second column, then the same one again, then
+        // one that is not there.
+        assert_eq!(view.select(1), Some(true));
+        assert_eq!(view.rect((2560, 800)), rect(1280, 0, 2559, 799));
+        assert_eq!(view.origin((2560, 800)), (1280, 0));
+        assert_eq!(view.select(1), Some(false));
+        assert_eq!(view.select(2), None);
+        assert_eq!(view.active, 1);
+        let ServerMsg::Displays { active, .. } = view.displays((2560, 800), Density::One).unwrap() else {
+            panic!("not a list")
+        };
+        assert_eq!(active, 1);
+
+        // A host that lays the desktop out over one monitor again shrinks the view
+        // to it, the selection with it — and a browser that was sent a list is sent
+        // the shorter one, so it stops offering the display that went away.
+        let one = view.laid_out(1);
+        assert_eq!((one.columns, one.active), (1, 0));
+        let mut one = one;
+        let ServerMsg::Displays { displays, .. } = one.displays((1280, 800), Density::One).unwrap() else {
+            panic!("a list once sent is sent again")
+        };
+        assert_eq!(displays.len(), 1);
+        // One that never had a list has none to send.
+        assert!(View::opened(1, per, (1280, 800)).displays((1280, 800), Density::One).is_none());
+        // A reset over two monitors confirms a layout against their union.
+        let pending = PendingLayout::new(per);
+        assert!(confirms(&pending, (2560, 800), 2));
+        assert!(!confirms(&pending, (1280, 800), 2));
+        assert!(confirms(&pending, (1280, 800), 1));
+    }
+
     #[test]
     fn mouse_move_sets_flags_and_updates_last_pos() {
         let mut last = (0, 0);
@@ -2196,11 +2471,11 @@ mod tests {
 
     /// Input that carries no scroll, translated with a wheel that has none pending.
     fn translate(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInput> {
-        translate_input(input, last_pos, &mut WheelRotation::default())
+        translate_input(input, last_pos, &mut WheelRotation::default(), (0, 0))
     }
 
     fn scroll(wheel: &mut WheelRotation, dx: f32, dy: f32, unit: WheelUnit) -> Vec<RemoteInput> {
-        translate_input(ClientMsg::Wheel { dx, dy, unit }, &mut (1, 2), wheel)
+        translate_input(ClientMsg::Wheel { dx, dy, unit }, &mut (1, 2), wheel, (0, 0))
     }
 
     fn vertical(delta: i16) -> RemoteInput {
@@ -2465,8 +2740,8 @@ mod tests {
         // And the held layout is what the server's answer is checked against, so the
         // retry ladder recognises the desktop it asked for.
         let pending = PendingLayout::new(retina.held());
-        assert!(confirms(&pending, (3840, 2400)));
-        assert!(!confirms(&pending, (5120, 2880)));
+        assert!(confirms(&pending, (3840, 2400), 1));
+        assert!(!confirms(&pending, (5120, 2880), 1));
     }
 
     #[test]
@@ -2549,16 +2824,16 @@ mod tests {
     #[test]
     fn only_the_size_that_was_asked_for_confirms_a_layout() {
         let pending = PendingLayout::new(Layout { w: 1600, h: 900, density: Density::Two });
-        assert!(confirms(&pending, (1600, 900)), "the size that went out came back");
-        assert!(!confirms(&pending, (1280, 800)), "a desktop the server chose for itself");
-        assert!(!confirms(&pending, (1600, 1000)), "one axis is not enough");
+        assert!(confirms(&pending, (1600, 900), 1), "the size that went out came back");
+        assert!(!confirms(&pending, (1280, 800), 1), "a desktop the server chose for itself");
+        assert!(!confirms(&pending, (1600, 1000), 1), "one axis is not enough");
 
         // Through the adjustment, because an odd width is not what was sent: a
         // server answering 1600 has answered the request, and a comparison
         // against the 1601 asked for would retry until the ladder ran out.
         let odd = PendingLayout::new(Layout { w: 1601, h: 900, density: Density::One });
-        assert!(confirms(&odd, (1600, 900)));
-        assert!(!confirms(&odd, (1601, 900)), "1601 is not a size this can be sent as");
+        assert!(confirms(&odd, (1600, 900), 1));
+        assert!(!confirms(&odd, (1601, 900), 1), "1601 is not a size this can be sent as");
     }
 
     /// The pack drops the fourth byte and keeps the order. Its own test because

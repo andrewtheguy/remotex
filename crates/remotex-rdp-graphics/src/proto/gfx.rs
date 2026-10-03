@@ -112,6 +112,45 @@ pub const MAX_DIMENSION: u32 = 32_766;
 /// The most monitors a ResetGraphics may describe.
 const MAX_MONITORS: u32 = 16;
 
+/// One `TS_MONITOR_DEF` ([MS-RDPBCGR] 2.2.1.3.6.1), as a ResetGraphics lists the
+/// session's monitors: inclusive edges relative to the primary's corner, and the
+/// flags, of which `TS_MONITOR_PRIMARY` is the one defined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MonitorDef {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub flags: u32,
+}
+
+/// How many monitors of `monitors` make up the output as a row of equal columns:
+/// the layout this client asks for, monitor `i` filling `[i * w, (i + 1) * w)` of
+/// a `width` that is a whole number of them, each the output's full height. That
+/// many when they do, and one when the host laid the session out any other way —
+/// unequal, stacked, offset, or with no definitions at all — since a caller that
+/// shows one column of the output can only cut it right along a row it knows the
+/// shape of. A session laid out otherwise is shown whole, as one display.
+pub fn row(width: u32, height: u32, monitors: &[MonitorDef]) -> u32 {
+    let count = u32::try_from(monitors.len()).unwrap_or(u32::MAX);
+    if count <= 1 || width == 0 || height == 0 || !width.is_multiple_of(count) {
+        return 1;
+    }
+    let column = width / count;
+    let expected = |index: u32| MonitorDef {
+        left: (index * column) as i32,
+        top: 0,
+        right: ((index + 1) * column) as i32 - 1,
+        bottom: height as i32 - 1,
+        flags: 0,
+    };
+    let in_place = monitors.iter().enumerate().all(|(index, def)| {
+        let want = expected(index as u32);
+        (def.left, def.top, def.right, def.bottom) == (want.left, want.top, want.right, want.bottom)
+    });
+    if in_place { count } else { 1 }
+}
+
 /// `RECTANGLE_16`, with exclusive right and bottom edges.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect16 {
@@ -160,7 +199,11 @@ pub enum Message<'a> {
     EndFrame { frame: u32 },
     /// The output is now this size. Answered to a monitor layout in place of a
     /// Deactivation-Reactivation Sequence.
-    ResetGraphics { width: u32, height: u32, monitors: u32 },
+    ///
+    /// `monitors` is the session's monitor layout as the host states it, which may
+    /// be anything a Windows desktop can be; [`row`] says how many of them make the
+    /// row of equal columns this client asks for.
+    ResetGraphics { width: u32, height: u32, monitors: Vec<MonitorDef> },
     MapSurfaceToOutput { surface: u16, x: u32, y: u32 },
     /// The one capability set the server chose out of those advertised.
     CapsConfirm { version: u32, flags: u32 },
@@ -325,9 +368,19 @@ impl<'a> Messages<'a> {
                 if monitors > MAX_MONITORS {
                     return Err(r.refuse("a monitor count", monitors));
                 }
-                // The monitor definitions, and the padding that brings the PDU to
-                // 340 bytes: neither is read, both have to be there.
-                r.skip(monitors as usize * 20)?;
+                // The monitor definitions; the padding that brings the PDU to 340
+                // bytes follows them and is not read.
+                let monitors = (0..monitors)
+                    .map(|_| {
+                        Ok(MonitorDef {
+                            left: r.u32_le()? as i32,
+                            top: r.u32_le()? as i32,
+                            right: r.u32_le()? as i32,
+                            bottom: r.u32_le()? as i32,
+                            flags: r.u32_le()?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 Message::ResetGraphics { width, height, monitors }
             }
             CMD_MAP_SURFACE_TO_OUTPUT => {
@@ -590,17 +643,50 @@ mod tests {
         assert_eq!(data, &[9, 8, 7]);
     }
 
+    fn monitor(left: i32, top: i32, right: i32, bottom: i32) -> MonitorDef {
+        MonitorDef { left, top, right, bottom, flags: 0 }
+    }
+
     #[test]
-    fn a_reset_graphics_names_the_output_and_steps_over_its_monitors() {
+    fn a_reset_graphics_names_the_output_and_reads_its_monitors() {
         let mut body = Writer::new();
         body.u32_le(1600);
         body.u32_le(900);
         body.u32_le(1);
-        body.zeros(20); // one monitor definition
+        for field in [0, 0, 1599, 899, 1] {
+            body.u32_le(field); // one monitor definition, the primary
+        }
         body.zeros(340 - 8 - 12 - 20); // padding to 340 bytes in all
         let bytes = server(CMD_RESET_GRAPHICS, &body.finish());
         assert_eq!(bytes.len(), 340);
-        assert_eq!(one(&bytes), Message::ResetGraphics { width: 1600, height: 900, monitors: 1 });
+        assert_eq!(
+            one(&bytes),
+            Message::ResetGraphics {
+                width: 1600,
+                height: 900,
+                monitors: vec![MonitorDef { flags: 1, ..monitor(0, 0, 1599, 899) }]
+            }
+        );
+    }
+
+    /// Only the row of equal columns this client asks for is cut into columns;
+    /// anything else the host lays out is one display shown whole.
+    #[test]
+    fn a_row_of_equal_columns_is_counted_and_any_other_layout_is_one_display() {
+        let two = [monitor(0, 0, 1279, 799), monitor(1280, 0, 2559, 799)];
+        assert_eq!(row(2560, 800, &two), 2);
+        assert_eq!(row(2560, 800, &two[..1]), 1, "one definition is one display");
+        assert_eq!(row(2560, 800, &[]), 1, "no definitions is one display");
+        // The same two the other way round are not in their places.
+        assert_eq!(row(2560, 800, &[two[1], two[0]]), 1);
+        // Stacked, offset, unequal, or not filling the output.
+        assert_eq!(row(1280, 1600, &[monitor(0, 0, 1279, 799), monitor(0, 800, 1279, 1599)]), 1);
+        assert_eq!(row(2560, 800, &[monitor(0, 0, 1279, 799), monitor(1280, 100, 2559, 899)]), 1);
+        assert_eq!(row(2560, 800, &[monitor(0, 0, 1599, 799), monitor(1600, 0, 2559, 799)]), 1);
+        assert_eq!(row(2561, 800, &two), 1, "a width that is not a whole number of columns");
+        assert_eq!(row(2560, 800, &[monitor(0, 0, 1279, 767), monitor(1280, 0, 2559, 767)]), 1);
+        let three = [monitor(0, 0, 999, 599), monitor(1000, 0, 1999, 599), monitor(2000, 0, 2999, 599)];
+        assert_eq!(row(3000, 600, &three), 3);
     }
 
     #[test]

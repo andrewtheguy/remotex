@@ -82,7 +82,9 @@
 //!   interceptor cannot replay the credentials; it is **not** defensible under
 //!   plain TLS security, where the credentials go to whoever answered.
 //! - **No Kerberos.** CredSSP runs NTLM with the target's user name and password.
-//! - **One monitor.** [`Input::resize`] sends a layout of exactly one.
+//! - **Monitors in a row, or one.** [`Connect::monitors`] asks for a row of
+//!   same-sized monitors, and the framebuffer spans them; the caller shows what it
+//!   will of it. Nothing here lays monitors out any other way.
 
 mod camera;
 mod connect;
