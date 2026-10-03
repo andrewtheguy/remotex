@@ -106,6 +106,9 @@ export type ConnectionStatus =
   // there is no session in this browser, or another tab shows it. Nothing is
   // attempted until Retry.
   | "unavailable"
+  // A page showing a display in a tab of its own that has not been asked to yet,
+  // or was asked to stop: the display is not taken for this tab until Connect.
+  | "idle"
   // The gateway is another version than this page (gatewayVersion.ts). Apart from
   // "failed" because trying again cannot change it: the overlay offers Reload.
   | "stale";
@@ -145,6 +148,14 @@ function writeTabToken(display: number, token: string): void {
     sessionStorage.setItem(tabTokenKey(display), token);
   } catch {
     // Storage blocked: this tab keeps the display until it reloads.
+  }
+}
+
+function dropTabToken(display: number): void {
+  try {
+    sessionStorage.removeItem(tabTokenKey(display));
+  } catch {
+    // Storage blocked: there was none to drop.
   }
 }
 // The Mac-host Command-to-Control preference, default on. localStorage rather
@@ -279,6 +290,9 @@ const CLOSE_EVICTED = 4001;
 const CLOSE_INVALID = 4000;
 const CLOSE_UNSUPPORTED = 4002;
 const CLOSE_TAKEN = 4003;
+// The code this page closes its display socket with to give the display up, for
+// another tab to take (src/ws.rs).
+const CLOSE_RELEASED = 4004;
 // The display a page shows unless it is one opened in a tab of its own.
 const FIRST_DISPLAY = 1;
 const MAX_RETRY_DELAY_MS = 15_000;
@@ -540,7 +554,11 @@ export function useRemoteDesktop(
   // nothing else.
   tabDisplay: number | null = null,
 ) {
-  const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  const [status, setStatus] = useState<ConnectionStatus>(() =>
+    tabDisplay !== null && readTabToken(tabDisplay) === null
+      ? "idle"
+      : "connecting",
+  );
   const [size, setSize] = useState<RemoteSize | null>(null);
   // This screen's density, kept in state only so the menu can show it beside the
   // remote's. Nothing about how the desktop is presented reads it — see
@@ -787,6 +805,8 @@ export function useRemoteDesktop(
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
+  // The same way in for a tab giving its display up.
+  const releaseTabRef = useRef<(() => void) | null>(null);
   // Whether this window drives the remote's size — the session's `resize`, off
   // on a pinch-zoom device whatever the target allows (see CAN_PINCH_ZOOM).
   // There is no client-side mode beside it: the gateway names the policy on
@@ -1245,7 +1265,7 @@ export function useRemoteDesktop(
       handleControlMsg(msg);
     };
 
-    const closeDisplay = () => {
+    const closeDisplay = (code?: number) => {
       if (displayWs) {
         const old = displayWs;
         displayWs = null; // silence its onclose before closing
@@ -1255,7 +1275,7 @@ export function useRemoteDesktop(
         if (tabDisplay !== null) {
           wsRef.current = null;
         }
-        old.close();
+        old.close(code);
       }
     };
 
@@ -1286,7 +1306,7 @@ export function useRemoteDesktop(
     const unavailableReason = (display: number, code: number) => {
       switch (code) {
         case CLOSE_TAKEN:
-          return `Display ${display} is open in another tab. To show it here instead, choose another display and then All Displays again in the session's display menu.`;
+          return `Display ${display} is open in another tab. To show it here instead, choose Disconnect in that tab's menu.`;
         case CLOSE_INVALID:
           return "This browser has no session open. Start one in another tab first.";
         case CLOSE_EVICTED:
@@ -1305,7 +1325,9 @@ export function useRemoteDesktop(
         scheduleRetry();
         return;
       }
-      // Nothing to wait for: opening it again is the Retry.
+      // Nothing to wait for: opening it again is the Retry. The token goes, since
+      // whatever it named is no longer this tab's.
+      dropTabToken(display);
       clearDesktop();
       setConnectError(reason);
       setStatus("unavailable");
@@ -2039,12 +2061,31 @@ export function useRemoteDesktop(
       void connect(force);
     };
     startRef.current = start;
+    // A tab gives its display up: the socket closes saying so, which is what
+    // frees the display for another tab, and this one is back to being asked.
+    releaseTabRef.current = () => {
+      if (tabDisplay === null) {
+        return;
+      }
+      clearTimeout(retryTimer);
+      closeDisplay(CLOSE_RELEASED);
+      dropTabToken(tabDisplay);
+      clearDesktop();
+      setConnectError(null);
+      setStatus("idle");
+    };
     audioSocketRef.current = { open: openAudioSocket, close: closeAudioSocket };
     cameraUrlRef.current = () =>
       session ? gatewaySocketUrl("/ws/camera", session) : null;
     micUrlRef.current = () =>
       session ? gatewaySocketUrl("/ws/mic", session) : null;
-    start(false);
+    // A display in a tab of its own is taken for that tab, so the tab asks first.
+    // One holding a token is a reload of the tab that has it, and gets back in.
+    if (tabDisplay !== null && readTabToken(tabDisplay) === null) {
+      setStatus("idle");
+    } else {
+      start(false);
+    }
 
     // Window resizes re-report the viewport, debounced so a drag-resize sends
     // one message, not hundreds. The CSS size is re-derived too: the
@@ -2098,6 +2139,7 @@ export function useRemoteDesktop(
       advancePaintGeneration(paintGenerationRef);
       paintSocket = null;
       startRef.current = null;
+      releaseTabRef.current = null;
       audioSocketRef.current = null;
       audioWs?.close();
       cameraUrlRef.current = null;
@@ -2139,6 +2181,9 @@ export function useRemoteDesktop(
   /// Try again after a failure that stopped the retries. Unforced, unlike
   /// `takeOver`: nothing here is holding the slot, so there is nobody to evict.
   const retry = useCallback(() => startRef.current?.(false), []);
+  /// Give up the display this page shows in a tab of its own, for another tab to
+  /// take. Connecting again is `retry`.
+  const releaseTab = useCallback(() => releaseTabRef.current?.(), []);
 
   // Start a target from the picker, with what was chosen under it: its session
   // is started over the live socket. The server answers `connected` (→ desktop)
@@ -2950,6 +2995,7 @@ export function useRemoteDesktop(
     onLocalShortcut,
     takeOver,
     retry,
+    releaseTab,
     connect,
     switchTarget,
     selectDisplay,

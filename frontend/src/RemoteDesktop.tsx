@@ -18,6 +18,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   takenOver: "Session taken over",
   failed: "Cannot open the session",
   unavailable: "Display not available",
+  idle: "Not connected",
   stale: "Page out of date",
 };
 
@@ -139,12 +140,14 @@ function StatusOverlay({
   status,
   connectError,
   waiting,
+  tabDisplay,
   onTakeOver,
   onRetry,
 }: {
   branding: string;
   status: ConnectionStatus;
   connectError: string | null;
+  tabDisplay: number | null;
   // The session is up and its first frame has not come.
   waiting: boolean;
   onTakeOver: () => void;
@@ -175,6 +178,19 @@ function StatusOverlay({
         <button type="button" className="status-action" onClick={onRetry}>
           Retry
         </button>
+      )}
+      {/* A display's tab asks before it takes the display: one tab shows it at a
+          time, and the one that connects is the one that has it. */}
+      {status === "idle" && (
+        <>
+          <span className="status-hint">
+            Display {tabDisplay} is shown in one tab at a time. Connect to show
+            it in this one.
+          </span>
+          <button type="button" className="status-action" onClick={onRetry}>
+            Connect
+          </button>
+        </>
       )}
       {status === "stale" && (
         <button
@@ -267,6 +283,7 @@ export default function RemoteDesktop({
     onLocalShortcut,
     takeOver,
     retry,
+    releaseTab,
     connect,
     switchTarget,
     selectDisplay,
@@ -354,10 +371,12 @@ export default function RemoteDesktop({
         (tabDisplay !== null ? (
           <DisplayMenu
             display={tabDisplay}
+            connected={status === "connected"}
             isMacHost={isMacHost}
             onLocalShortcut={onLocalShortcut}
             onFocusDesktop={focusDesktop}
             onViewOnlyChange={setViewOnly}
+            onDisconnect={releaseTab}
           />
         ) : (
           <FloatingMenu
@@ -450,6 +469,7 @@ export default function RemoteDesktop({
           status={status}
           connectError={connectError}
           waiting={status === "connected"}
+          tabDisplay={tabDisplay}
           onTakeOver={takeOver}
           onRetry={retry}
         />

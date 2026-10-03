@@ -22,6 +22,7 @@ import {
   onFullscreenChange,
   toggleFullscreen,
 } from "./fullscreen.ts";
+import { gatewayUrl } from "./gateway.ts";
 import { keyboardLockSupported } from "./keyboardLock.ts";
 import {
   type AudioRow,
@@ -108,8 +109,9 @@ const GESTURE_HELP: readonly { gesture: string; action: string }[] = [
 // clear the other — and this makes it impossible to express.
 type Panel = "clipboard" | "keyboard" | "display";
 
-// Which face the one modal card shows, when it is up at all.
-type Modal = "info" | "throughput";
+// Which face the one modal card shows, when it is up at all: what this session
+// is, how to drive it, or what it has carried.
+type Modal = "info" | "help" | "throughput";
 
 /// The window kind, subscribed to rather than read once.
 ///
@@ -537,7 +539,7 @@ function WindowSection({
   );
 }
 
-// What the remote is drawing against what this browser is, at the top of the Help
+// What the remote is drawing against what this browser is, at the top of the Info
 // card so the two can be read off one another.
 //
 // It exists because a density that did not take is otherwise invisible. Both
@@ -626,6 +628,54 @@ function ScreenHelp({
               the gateway encoded, which only the gateway knows. */}
           <dd>{video}</dd>
         </div>
+      </dl>
+    </>
+  );
+}
+
+// Every display the remote lists, with the size and density each is drawn at, under
+// the session's own rows: the row above is the one on this page's canvas, and a
+// session over two displays has another that is otherwise read only in the Display
+// picker, one at a time. A display shown in a tab of its own carries the link that
+// opens it, the same one the picker has. Absent where the remote lists none.
+function DisplaysHelp({
+  displays,
+  activeDisplayId,
+}: {
+  displays: DisplayInfo[];
+  activeDisplayId: number | null;
+}) {
+  if (displays.length === 0) {
+    return null;
+  }
+  return (
+    <>
+      <h3>Displays</h3>
+      <dl className="help-list">
+        {displays.map((display) => (
+          <div key={display.id} className="help-item">
+            <dt>
+              {display.label}
+              {display.id === activeDisplayId ? " (chosen)" : ""}
+            </dt>
+            <dd>
+              {display.detail}
+              {display.tab !== null && (
+                <>
+                  {" · "}
+                  <a
+                    className="dp-tab-link"
+                    href={gatewayUrl(`/display/${display.tab}`)}
+                    target="_blank"
+                    rel="noopener"
+                  >
+                    Open in a new tab ↗
+                  </a>
+                </>
+              )}
+            </dd>
+          </div>
+        ))}
       </dl>
     </>
   );
@@ -1076,7 +1126,7 @@ export default function FloatingMenu({
     setModal(null);
     modalOpenerRef.current?.focus();
   }, []);
-  const closeThroughput = useCallback(() => setModal("info"), []);
+  const backToInfo = useCallback(() => setModal("info"), []);
 
   // A soft key is input, and the drawer standing over a view-only desktop says
   // input is not happening — so pressing one takes the drawer down with it rather
@@ -1260,7 +1310,7 @@ export default function FloatingMenu({
                 modalOpenerRef.current = e.currentTarget;
                 setModal("info");
               }}
-              title="This session's size, density, render dial and decoders, and the touch gestures"
+              title="This session's displays, density, render dial and decoders, with the shortcuts and gestures under Help"
             >
               Info
             </button>
@@ -1295,7 +1345,7 @@ export default function FloatingMenu({
 
       <ThroughputModal
         open={modal === "throughput"}
-        onBack={closeThroughput}
+        onBack={backToInfo}
         onDismiss={closeModal}
         onUnauthorized={onUnauthorized}
       />
@@ -1317,6 +1367,29 @@ export default function FloatingMenu({
             }}
             videoStream={videoStream}
           />
+          <DisplaysHelp displays={displays} activeDisplayId={activeDisplayId} />
+          <div className="help-actions">
+            <ThroughputButton onOpen={() => setModal("throughput")} />
+            <button
+              type="button"
+              className="toolbar-btn"
+              onClick={() => setModal("help")}
+            >
+              Help
+            </button>
+            <button type="button" className="toolbar-btn" onClick={closeModal}>
+              Close
+            </button>
+          </div>
+          <AppVersion className="app-version" />
+        </ModalOverlay>
+      )}
+
+      {/* The Info card switched to Help: how the session is driven, apart from
+          what it is. Back returns to Info, as from Throughput. */}
+      {modal === "help" && (
+        <ModalOverlay label="Help" className="help-card" onDismiss={closeModal}>
+          <h2>Help</h2>
           <h3>Shortcuts</h3>
           <dl className="help-list">
             <div className="help-item">
@@ -1349,12 +1422,13 @@ export default function FloatingMenu({
             ))}
           </dl>
           <div className="help-actions">
-            <ThroughputButton onOpen={() => setModal("throughput")} />
+            <button type="button" className="toolbar-btn" onClick={backToInfo}>
+              Back to info
+            </button>
             <button type="button" className="toolbar-btn" onClick={closeModal}>
               Close
             </button>
           </div>
-          <AppVersion className="app-version" />
         </ModalOverlay>
       )}
 

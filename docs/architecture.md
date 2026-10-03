@@ -2090,7 +2090,7 @@ The tab has a menu of its own (`DisplayMenu.tsx`), the session page's button and
 drawer (`floatingButton.tsx`) with the display's number on the button where the
 session's shows ☰. It holds what is the tab's alone: immersive full screen, which
 is a window's and which the session page's button reaches only for its own
-window. What the session has one of — sound, clipboard, the display picker, End
+window, and Disconnect. What the session has one of — sound, clipboard, the display picker, End
 session — stays in the menu on the session's page.
 
 The display is one tab's. The first socket for it after the engine lists its tab is
@@ -2098,8 +2098,12 @@ given a token, sent first on it as `displayToken`; the tab keeps it in its
 `sessionStorage` and presents it on every display socket it opens after
 (`/ws/display?display=2&token=…`), so a reload gets back in. Any other socket for
 the display — a second tab, or one holding a token from before — is closed with
-4003. The token lasts while the tab is listed: choosing another display and then
-*All Displays* again frees the display for whichever tab opens it next, as does a
+4003. A page opened without a token asks before it opens a socket, since the
+socket is what takes the display: Connect opens it, and one holding a token is a
+reload and opens it at once. The tab's Disconnect closes its socket with 4004,
+which drops the token at both ends, so the page asks again and the display is
+the next tab's to connect to. The token otherwise lasts while the tab is
+listed: choosing another display and then *All Displays* again frees the display for whichever tab opens it next, as does a
 host laying out one monitor, the engine ending, or the claim or login changing. It
 is not the claim's token, and it opens nothing but that display. A page at
 `/display/2` whose display is not shown — *All Displays* not chosen, a target
