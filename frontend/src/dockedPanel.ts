@@ -10,6 +10,9 @@ export function useIsDesktop(breakpoint = 800): boolean {
   const [desktop, setDesktop] = useState(() => window.innerWidth >= breakpoint);
   useEffect(() => {
     const mql = window.matchMedia(`(min-width: ${breakpoint}px)`);
+    // The query's own answer first: the breakpoint may have changed, or the
+    // viewport between the first render and this subscription.
+    setDesktop(mql.matches);
     const handler = (e: MediaQueryListEvent) => setDesktop(e.matches);
     mql.addEventListener("change", handler);
     return () => mql.removeEventListener("change", handler);

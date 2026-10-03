@@ -124,9 +124,10 @@ export function createHitTester(
     if (rows.length === 0 || !inside(bounds, x, y)) {
       return null;
     }
+    // A spacer is never kept: it was never the answer, and would commit nothing.
     if (prefer !== null) {
       const held = byId.get(prefer);
-      if (held && inside(held.rect, x, y, slop)) {
+      if (held && !held.spacer && inside(held.rect, x, y, slop)) {
         return prefer;
       }
     }

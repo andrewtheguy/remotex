@@ -143,22 +143,23 @@ function previewOf(area: HTMLElement, id: CellId): Preview | null {
 }
 
 // The cell a pointer went down on, as the DOM has it, or `skip` for a control
-// in the key area with a click of its own (the close button).
+// in the key area with a click of its own (the close button). A spacer is no
+// cell: the hit tester gives the finger to the neighbouring key.
 function cellUnder(e: PointerEvent): { cell: CellId | null; skip: boolean } {
   const target = e.target instanceof Element ? e.target : null;
   const cellEl = target?.closest<HTMLElement>("[data-cell]") ?? null;
   if (cellEl) {
-    return { cell: cellEl.dataset.cell ?? null, skip: false };
+    const spacer = cellEl.dataset.spacer === "true";
+    return { cell: spacer ? null : (cellEl.dataset.cell ?? null), skip: false };
   }
   return { cell: null, skip: target?.closest("button") !== null };
 }
 
-// A touch is captured by its target already; a mouse is not, and its release
-// outside the panel would otherwise be lost.
+// Every pointer is captured by the key area, which outlives the keys: a mouse
+// released outside the panel would otherwise be lost, and a touch would
+// otherwise stay with the key it landed on, which a page switch replaces under
+// a resting thumb, taking its lift with it.
 function capture(area: HTMLElement, e: PointerEvent) {
-  if (e.pointerType === "touch") {
-    return;
-  }
   try {
     area.setPointerCapture(e.pointerId);
   } catch {
@@ -200,9 +201,9 @@ function vibrate() {
 
 // Keep the engine for the panel's life, listen on the key area, and run its
 // commands. The handlers are read through a ref so the listeners are attached
-// once per page and never go stale. Returns the call that forgets the keys'
-// measured positions, for whatever moves them without changing the page (the
-// floating panel's drag).
+// once and never go stale. Returns the call that forgets the keys' measured
+// positions, for whatever moves them without changing the page (the floating
+// panel's drag).
 function useSoftKeyEngine(
   areaRef: RefObject<HTMLDivElement | null>,
   page: LayoutPage,
@@ -243,6 +244,10 @@ function useSoftKeyEngine(
       window.removeEventListener("resize", invalidateGeometry);
     };
   }, [areaRef, invalidateGeometry]);
+
+  // Runs a result's commands and arms the next tick. Set by the listener
+  // effect below for the page effect after it, which never outlives it.
+  const applyRef = useRef<(result: StepResult) => void>(() => {});
 
   useEffect(() => {
     const area = areaRef.current;
@@ -302,10 +307,7 @@ function useSoftKeyEngine(
         }, delay);
       }
     };
-
-    // A new page: new cells, and new positions under the next touch.
-    geometryRef.current = null;
-    apply(engine.handle({ kind: "layout", cells: cellsOf(page) }));
+    applyRef.current = apply;
 
     const sample = (e: PointerEvent): PointerSample => ({
       id: e.pointerId,
@@ -377,10 +379,24 @@ function useSoftKeyEngine(
       if (timer !== null) {
         window.clearTimeout(timer);
       }
-      // Whatever was held when the page changed or the panel closed is over.
+      // Whatever was held when the panel closed is over.
       apply(engine.handle({ kind: "cancelAll", t: performance.now() }));
+      applyRef.current = () => {};
     };
-  }, [areaRef, page]);
+  }, [areaRef]);
+
+  // A new page: new cells under the fingers, and new positions under the next
+  // touch. The fingers themselves stay — a thumb resting on a modifier keeps
+  // it through the switch, and its lift still arrives, since the key area that
+  // captured it is the same element on every page.
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) {
+      return;
+    }
+    geometryRef.current = null;
+    applyRef.current(engine.handle({ kind: "layout", cells: cellsOf(page) }));
+  }, [page]);
 
   return invalidateGeometry;
 }

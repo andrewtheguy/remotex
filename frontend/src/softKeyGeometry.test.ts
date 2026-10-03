@@ -61,6 +61,11 @@ test("a spacer belongs to its neighbour", () => {
   assert.equal(hit(-3, 90, null), "a");
 });
 
+test("a spacer is never kept as the key under the finger", () => {
+  assert.equal(hit(10, 90, "gapL"), "a");
+  assert.equal(hit(390, 90, "gapR"), "l");
+});
+
 test("a point below the last row is still the last row; above the area is nothing", () => {
   assert.equal(hit(60, 118, null), "s");
   assert.equal(hit(60, 20, null), null);
