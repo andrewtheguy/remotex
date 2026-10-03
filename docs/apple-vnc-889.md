@@ -928,9 +928,8 @@ dials the Mac.
 
 After the first layout the viewer sends a second `SetEncodings`, the opening list
 with encoding 1010 (`0x3f2`) appended. The Mac answers it with message 1, below,
-naming its ports, and Apple's viewer makes its offer only then: message `0x1c`
-(`RFBMediaStreamServerConfiguration`, version 3). Remotex sends the offer right
-behind the `SetEncodings`, without waiting:
+naming its ports, and the viewer makes its offer only then: message `0x1c`
+(`RFBMediaStreamServerConfiguration`, version 3):
 
 ```text
 +0x00 u8   0x1c
@@ -994,11 +993,11 @@ mode never touches the sound output, so a Mac there plays to its speakers or to
 an AirPlay receiver outside remotex as usual; in a High Performance session it
 plays nothing to one, which was confirmed on a physical Mac.
 
-**Either order.** The Mac sends message 1 and the answer from separate paths, so
-when the offer goes out before message 1 has come, as remotex sends it, the two
-come in either order. The session's first message 1 names the ports of its first
-offer either way. The Mac sends it once: an offer made again in its place gets
-an answer and no ports.
+**Ports first.** The Mac sends message 1 and the answer from separate paths, so
+an offer sent before message 1 can be answered before it, and the Mac names its
+ports once for the `SetEncodings` and once per display change, never again for an
+offer made in its place. Remotex therefore offers as Apple's viewer does: once
+for each message 1, and only once its display has settled.
 
 **One offer at a time.** A second `0x1c` sent while the first one's capture was
 still starting left the capture failed (`didStart: 0 error: 32000`). When the
@@ -1069,8 +1068,10 @@ other failures (see [Liveness](#the-stream)).
     start over. It also sends the rate reports described under
     [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
     viewer does.
-- **Liveness.** Every offer owes its answer, its display's first picture and
-  the first sound packet within 10 s, and the running stream an authentic
+- **Liveness.** The `SetEncodings` naming 1010 owes message 1 within 10 s, and so
+  does a display that has settled without one. Every offer owes its answer, its
+  display's first picture and the first sound packet within 10 s, and the running
+  stream an authentic
   packet, SRTP or SRTCP, on each leg every 48 s, 16 of Apple's 3-second
   timeouts. Apple's viewer times each leg from the last RTCP packet it
   received, not from pictures, which a still screen stops. The Mac's
@@ -1242,10 +1243,10 @@ went unread for 5–19 s at a time
 
 Every display change stops both legs, so the sound drops out with the picture
 until the new stream starts. The Mac then re-sends message 1 on its own,
-with no stream behind it. A new offer after the new layout starts a new stream on
-the same ports, under a new SSRC, with an IDR at the new size. Remotex offers once
-the display has settled, and the resize's cover stays up until that IDR is on its
-way to the browser.
+with no stream behind it. The offer it allows starts a new stream on the same
+ports, under a new SSRC, with an IDR at the new size. Remotex offers once message
+1 has come and the display has settled, and the resize's cover stays up until that
+IDR is on its way to the browser.
 
 ### Reaching the gateway
 
