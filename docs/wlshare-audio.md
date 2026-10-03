@@ -41,7 +41,7 @@ password = "…"
 `rdp` one, with wlshare's encoder in place of the gateway's: Opus at
 `audio_bitrate`, walked down toward the floor sound-opus fixes while the
 browser's link is behind. They tune a session started with its sound as Opus;
-one started with it lossless (EXPERIMENTAL) is sent FLAC, which has no rate. The
+one started with it lossless is sent FLAC, which has no rate. The
 format is chosen at the picker and is the gateway's to ask for on the wire;
 wlshare has no key for it, and neither has the target.
 
@@ -94,7 +94,7 @@ sound: both are [sound-opus](https://github.com/andrewtheguy/sound-opus), a
 repository of its own that the gateway and wlshare each pin by release tag.
 
 Opus is the one lossy step on the way to the browser, made once, by wlshare, and
-a session started with lossless sound (EXPERIMENTAL) has none
+a session started with lossless sound has none
 ([Lossless sound](architecture.md#lossless-sound)). As FLAC, music and speech
 cost about two-thirds of their 1.5 Mbit/s PCM rate or less on the RFB
 connection and on the browser's, and a desktop playing nothing, whose capture

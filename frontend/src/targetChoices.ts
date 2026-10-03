@@ -305,7 +305,7 @@ function soundRow(
     },
     {
       value: "flac",
-      label: "Lossless (experimental)",
+      label: "Lossless",
       note: "FLAC, about a megabit a second of music. For a LAN.",
     },
   ];
