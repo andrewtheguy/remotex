@@ -1,7 +1,8 @@
 //! WebSocket endpoint bridging a browser to the server-side remote-desktop
 //! session.
 //!
-//! Four endpoints, all presenting the claim token from `POST /api/session`.
+//! Five endpoints. Four present the claim token from `POST /api/session`; the
+//! display socket presents none.
 //!
 //! `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
 //! is the session: it attaches to the single slot
@@ -19,8 +20,18 @@
 //! session-control messages (`connect` to pick a target from the post-login picker,
 //! `disconnect` to switch back to it) act on the slot; everything else is engine
 //! input, routed to the current engine (or dropped in the picker state). Outbound
-//! `ServerMsg` go to the browser as access units in binary frames and control messages
-//! (resize/error, the picker/connected status) as JSON text (see [`crate::protocol`]).
+//! go the `ServerMsg` that are not a display's ([`ServerMsg::is_display`]) — the
+//! picker/connected status, errors, the display list, the clipboard — as JSON text
+//! (see [`crate::protocol`]).
+//!
+//! `/ws/display?display=N` is one display's picture: access units in binary frames,
+//! and its size, pointer and stream announcements as text, paced by the paint
+//! acknowledgments that come back on it, with the input made over it. It carries no
+//! token. The page holding the session opens display 1's beside its session socket,
+//! and a page of the same browser opens display 2's in a tab of its own while an RDP
+//! target's *All Displays* shows it there; both are let in by the login cookie the
+//! claim was made with ([`SessionManager::attach_display`]), which another browser
+//! does not have, and a tab is given no token to present.
 //!
 //! `/ws/audio?session=<token>` is sound, and **opening it is the subscription** —
 //! there is no message that turns audio on. It carries exactly two things, the format
@@ -42,11 +53,16 @@
 //! rules: binary Opus packets in, the host's `micOpen` / `micClose` out.
 //!
 //! Close codes tell the browser why any socket ended:
-//! - `4000` — the token is missing or superseded; claim again.
-//! - `4001` — evicted: another browser claimed the slot, or a newer audio, camera or
-//!   microphone socket replaced this one.
+//! - `4000` — the token is missing or superseded; claim again. On a display socket:
+//!   its login is not the one holding the session.
+//! - `4001` — evicted: another browser claimed the slot, or a newer audio, camera,
+//!   microphone or display socket replaced this one, or the session stopped showing
+//!   this display in a tab.
 //! - `4002` — the running target does not carry this socket's medium (a camera or
-//!   microphone the target does not carry, or no engine running).
+//!   microphone the target does not carry, or no engine running), or shows no tab
+//!   for this display.
+//! - `4003` — another tab shows this display: the socket's `token` is not the one
+//!   that tab was given.
 //!
 //! Any other close on the session socket detaches the browser. The owner reattaching
 //! within the grace period restores the picker or live engine; a different claim's
@@ -68,6 +84,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
@@ -77,7 +94,7 @@ use crate::{
     mic::MicSignal,
     protocol::{self, ClientMsg, Held, Painted, ServerMsg, WireFrame},
     server::AppState,
-    session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
+    session::{AttachEvent, DisplayRefused, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
     throughput::{Socket, ThroughputMeters},
     wire::Wire,
 };
@@ -90,9 +107,53 @@ const CLOSE_EVICTED: u16 = 4001;
 /// camera or microphone socket on a target that does not carry it, or with no
 /// engine running.
 const CLOSE_UNSUPPORTED: u16 = 4002;
+/// Close code: another tab shows this display ([`DisplayRefused::Taken`]).
+const CLOSE_TAKEN: u16 = 4003;
 /// Standard internal-error close. The browser treats it as reconnectable, so a
 /// fresh attachment gets a fresh sequence space rather than reusing one.
 const CLOSE_SEQUENCE_EXHAUSTED: u16 = 1011;
+
+/// How long a socket the gateway closes waits for the browser's answering close
+/// before the connection goes ([`refuse`], [`await_close`]).
+///
+/// The closing handshake is what carries the code: a connection dropped the moment
+/// the close frame is written can reach the page as an abnormal close (1006)
+/// instead of the code, where a proxy or tunnel sits in between and sees the
+/// connection end before it has passed the frame on. A page reads 1006 as a link
+/// to reconnect over, not a refusal to report. Bounded, because a browser that
+/// never answers is not one to wait for.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// Refuse an upgraded socket with `code`, completing the closing handshake.
+async fn refuse(mut socket: WebSocket, code: u16, reason: String) {
+    if socket.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await.is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(CLOSE_GRACE, async {
+        while let Some(Ok(msg)) = socket.recv().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
+/// Wait for the browser's answering close on a socket whose outbound half has
+/// already sent one, for the reason [`CLOSE_GRACE`] gives.
+async fn await_close<S>(ws_rx: &mut S)
+where
+    S: futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin,
+{
+    let _ = tokio::time::timeout(CLOSE_GRACE, async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+}
 
 /// WebSocket keepalive interval. Browsers answer protocol pings in the network
 /// stack, so background-tab JavaScript timer throttling cannot suppress it.
@@ -817,7 +878,7 @@ pub async fn audio_handler(
 /// frame arrive, but it acts on neither beyond keeping the heartbeat alive and noticing
 /// the end. Everything else is a one-way stream of the format and its packets.
 async fn audio(
-    mut socket: WebSocket,
+    socket: WebSocket,
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
@@ -826,12 +887,7 @@ async fn audio(
     let attachment = token.and_then(|t| sessions.attach_audio(&t).ok());
     let Some(attachment) = attachment else {
         warn!("ws: rejected an audio connection without a valid session token");
-        let _ = socket
-            .send(Message::Close(Some(CloseFrame {
-                code: CLOSE_INVALID_TOKEN,
-                reason: "invalid session token".into(),
-            })))
-            .await;
+        refuse(socket, CLOSE_INVALID_TOKEN, "invalid session token".into()).await;
         return;
     };
 
@@ -949,7 +1005,7 @@ pub async fn camera_handler(
 /// `cameraStop` and `cameraKeyframe` text frames. Unlike the audio socket it is
 /// refused outright — close `4002` — when the running target carries no camera.
 async fn camera(
-    mut socket: WebSocket,
+    socket: WebSocket,
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
@@ -967,9 +1023,7 @@ async fn camera(
                 UplinkRefused::Unsupported => (CLOSE_UNSUPPORTED, "the target carries no camera"),
             };
             warn!("ws: rejected a camera connection: {reason}");
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
-                .await;
+            refuse(socket, code, reason.into()).await;
             return;
         }
     };
@@ -1112,7 +1166,7 @@ pub async fn mic_handler(
 /// running target carries no microphone, and it closes with the engine. Inbound are binary
 /// Opus packets alone; outbound go `micOpen` and `micClose`.
 async fn mic(
-    mut socket: WebSocket,
+    socket: WebSocket,
     sessions: Arc<SessionManager>,
     token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
@@ -1130,9 +1184,7 @@ async fn mic(
                 UplinkRefused::Unsupported => (CLOSE_UNSUPPORTED, "the target carries no microphone"),
             };
             warn!("ws: rejected a microphone connection: {reason}");
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
-                .await;
+            refuse(socket, code, reason.into()).await;
             return;
         }
     };
@@ -1210,49 +1262,31 @@ async fn mic(
     info!("ws: the microphone socket closed after {packets} packet(s), {bytes} bytes of Opus");
 }
 
-async fn session(
-    mut socket: WebSocket,
-    sessions: Arc<SessionManager>,
-    token: Option<String>,
-    display: Option<protocol::HostDisplay>,
-    decoders: Decoders,
-    heartbeat_timings: HeartbeatTimings,
-    throughput: Arc<ThroughputMeters>,
-) {
-    let attachment = match token {
-        Some(t) => sessions.attach(&t, display, decoders).await.ok(),
-        None => None,
-    };
-    let Some(attachment) = attachment else {
-        warn!("ws: rejected connection without a valid session token");
-        let _ = socket
-            .send(Message::Close(Some(CloseFrame {
-                code: CLOSE_INVALID_TOKEN,
-                reason: "invalid session token".into(),
-            })))
-            .await;
-        return;
-    };
-
-    info!("ws: client attached to the session slot");
-
-    let (mut ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), throughput, Socket::Session);
-    let (attach_id, mut events) = (attachment.id, attachment.events);
-    let superseded = attachment.superseded;
-
-    let paint = Arc::new(Mutex::new(PaintTracker::publishing(attachment.feedback)));
-    let outbound_paint = Arc::clone(&paint);
-    // Woken by the inbound half whenever an acknowledgment advances the window,
-    // so a parked batch leaves as soon as there is room rather than on a timer.
-    let room = Arc::new(tokio::sync::Notify::new());
-    let outbound_room = Arc::clone(&room);
-
-    // Outbound: session events -> browser, batched through [`Wire`], whose
-    // counters are logged when the attachment ends so the transport can be
-    // measured in the field. Ends on eviction (explicit close) or engine death.
-    let mut outbound = tokio::spawn(async move {
+/// One socket's outbound half: its events to the browser, batched through
+/// [`Wire`], whose counters are logged when the socket ends so the transport can
+/// be measured in the field, and every screen batch admitted by the paint window.
+///
+/// Ends when the events do, when the browser is gone, or when `cut` resolves —
+/// raced, not queued behind the events like a takeover's eviction: the engine
+/// lives on into the replacement, and a socket worth replacing is one parked on a
+/// link that stopped — which would keep the engine's queue budget, and the pump
+/// waiting on this channel, until its heartbeat ran out. So nothing more is owed
+/// there: the queue goes, and with it every share it held. An eviction, a cut, and
+/// — when `ended_is_eviction`, for a socket whose slot ending its events is
+/// the slot letting it go — the events ending are owed a close frame.
+async fn outbound<S>(
+    mut ws_tx: S,
+    mut events: mpsc::Receiver<AttachEvent>,
+    outbound_paint: Arc<Mutex<PaintTracker>>,
+    outbound_room: Arc<tokio::sync::Notify>,
+    heartbeat_interval: Duration,
+    cut: impl std::future::Future<Output = &'static str>,
+    ended_is_eviction: bool,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
         let mut wire = Wire::default();
-        let mut heartbeat = interval(heartbeat_timings.interval);
+        let mut heartbeat = interval(heartbeat_interval);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // Whether the loop ended on an eviction, which is owed a close frame.
         let sending = async {
@@ -1260,7 +1294,7 @@ async fn session(
             let event = tokio::select! {
                 event = events.recv() => {
                     let Some(event) = event else {
-                        break false;
+                        break ended_is_eviction;
                     };
                     event
                 }
@@ -1271,7 +1305,6 @@ async fn session(
                     continue;
                 }
             };
-
             // Take everything already queued behind the first message, so a burst
             // of units is batched instead of costing a frame each. `try_recv` and
             // not another `await`: a batch must never *wait* for more work, only
@@ -1355,15 +1388,10 @@ async fn session(
             }
         }
         };
-        // Raced, not queued behind the events like a takeover's eviction: the engine
-        // lives on into the replacement, and a socket worth replacing is one parked
-        // on a link that stopped — which would keep the engine's queue budget, and
-        // the pump waiting on this channel, until its heartbeat ran out. So nothing
-        // more is owed here: the queue goes, and with it every share it held.
         let evicted = tokio::select! {
             evicted = sending => evicted,
-            () = superseded.notified() => {
-                info!("ws: superseded by this browser's next socket");
+            reason = cut => {
+                info!("ws: {reason}");
                 drop(events);
                 outbound_paint.lock().unwrap().let_go();
                 true
@@ -1378,7 +1406,223 @@ async fn session(
                 .await;
         }
         info!("ws: outbound totals: {}", wire.totals);
-    });
+}
+
+/// The display socket's query string: which display it shows, from one, and for
+/// the second, the token its tab was given ([`crate::protocol::ServerMsg::DisplayToken`]).
+#[derive(Deserialize)]
+pub struct DisplayParams {
+    display: u32,
+    token: Option<String>,
+}
+
+pub async fn display_handler(
+    ws: WebSocketUpgrade,
+    Query(params): Query<DisplayParams>,
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    // The route's guard has already checked the cookie; this is which login it is.
+    let login = crate::auth::token_from_headers(&headers);
+    ws.on_upgrade(move |socket| {
+        display(
+            socket,
+            state.sessions,
+            login,
+            params.display,
+            params.token,
+            HEARTBEAT_TIMINGS,
+            Arc::clone(&state.throughput.meters),
+        )
+    })
+}
+
+/// A display socket: one display's picture out, paced by its paint
+/// acknowledgments, and the input made over it in.
+async fn display(
+    socket: WebSocket,
+    sessions: Arc<SessionManager>,
+    login: Option<String>,
+    display: u32,
+    token: Option<String>,
+    heartbeat_timings: HeartbeatTimings,
+    throughput: Arc<ThroughputMeters>,
+) {
+    let attachment = match login {
+        Some(login) => sessions.attach_display(&login, display, token.as_deref()),
+        None => Err(DisplayRefused::NotOwner),
+    };
+    let attachment = match attachment {
+        Ok(attachment) => attachment,
+        Err(refused) => {
+            warn!("ws: refused a display socket: {refused}");
+            let code = match refused {
+                DisplayRefused::NotOwner => CLOSE_INVALID_TOKEN,
+                DisplayRefused::NotShown(_) => CLOSE_UNSUPPORTED,
+                DisplayRefused::Taken(_) => CLOSE_TAKEN,
+            };
+            refuse(socket, code, refused.to_string()).await;
+            return;
+        }
+    };
+
+    // Counted as the session's: the picture is what that socket's meter has always
+    // measured, wherever it travels now.
+    let (ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), throughput, Socket::Session);
+    let id = attachment.id;
+    let evicted = attachment.evicted;
+    let paint = Arc::new(Mutex::new(PaintTracker::publishing(attachment.feedback)));
+    let room = Arc::new(tokio::sync::Notify::new());
+    let mut outbound = tokio::spawn(outbound(
+        ws_tx,
+        attachment.events,
+        Arc::clone(&paint),
+        Arc::clone(&room),
+        heartbeat_timings.interval,
+        async move {
+            let _ = evicted.await;
+            "a display socket was let go"
+        },
+        true,
+    ));
+
+    let mut outbound_done = false;
+    // Whether this end gave up on the socket, rather than the browser closing it
+    // or the slot letting it go.
+    let mut gave_up = false;
+    let mut heartbeat_check = interval(heartbeat_timings.interval);
+    heartbeat_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last_heartbeat = Instant::now();
+    loop {
+        let msg = tokio::select! {
+            res = &mut outbound => {
+                if let Err(e) = res {
+                    warn!("ws: display outbound task failed: {e}");
+                }
+                outbound_done = true;
+                await_close(&mut ws_rx).await;
+                break;
+            }
+            msg = ws_rx.next() => msg,
+            _ = heartbeat_check.tick() => {
+                if last_heartbeat.elapsed() >= heartbeat_timings.timeout {
+                    warn!(
+                        "ws: display {display}'s heartbeat timed out after {}s",
+                        last_heartbeat.elapsed().as_secs()
+                    );
+                    gave_up = true;
+                    break;
+                }
+                continue;
+            }
+        };
+        if matches!(msg, Some(Ok(_))) {
+            last_heartbeat = Instant::now();
+        }
+        match msg {
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
+                Ok(ClientMsg::PaintAck { sequence, queued_ms, draw_ms }) => {
+                    paint.lock().unwrap().acknowledge(sequence, queued_ms, draw_ms);
+                    room.notify_one();
+                }
+                // What is made over a display — the pointer, the keys, touches —
+                // its repaint, and the window it is shown in. What concerns the
+                // session goes on its socket.
+                Ok(
+                    input @ (ClientMsg::MouseMove { .. }
+                    | ClientMsg::MouseButton { .. }
+                    | ClientMsg::Wheel { .. }
+                    | ClientMsg::Key { .. }
+                    | ClientMsg::Touch { .. }
+                    | ClientMsg::Refresh
+                    | ClientMsg::Viewport { .. }),
+                ) => sessions.forward_display_input(id, input),
+                Ok(other) => warn!("ws: a display socket sent a session message: {other:?}"),
+                Err(e) => warn!("ws: bad client message: {e} (raw: {text})"),
+            },
+            Some(Ok(Message::Close(_))) | None => break,
+            Some(Ok(Message::Pong(payload))) => {
+                paint.lock().unwrap().ponged(&payload);
+                room.notify_one();
+            }
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                warn!("ws: display receive error: {e}");
+                gave_up = true;
+                break;
+            }
+        }
+    }
+
+    // A socket this end gave up on was not evicted, and the browser must not be
+    // told it was: an eviction's close (4001) is a takeover to the page, which
+    // waits for its session socket to say so and never reconnects. Letting go of
+    // the slot is what would send one, so the outbound half goes first, and the
+    // socket ends unannounced, as the session socket's does on a heartbeat
+    // timeout — a close the page reconnects after.
+    if gave_up && !outbound_done {
+        outbound.abort();
+        outbound_done = true;
+    }
+    sessions.detach_display(id);
+    if !outbound_done
+        && tokio::time::timeout(std::time::Duration::from_secs(5), &mut outbound)
+            .await
+            .is_err()
+    {
+        outbound.abort();
+    }
+    info!("ws: display {display} paint totals: {}", paint.lock().unwrap());
+}
+
+async fn session(
+    socket: WebSocket,
+    sessions: Arc<SessionManager>,
+    token: Option<String>,
+    display: Option<protocol::HostDisplay>,
+    decoders: Decoders,
+    heartbeat_timings: HeartbeatTimings,
+    throughput: Arc<ThroughputMeters>,
+) {
+    let attachment = match token {
+        Some(t) => sessions.attach(&t, display, decoders).await.ok(),
+        None => None,
+    };
+    let Some(attachment) = attachment else {
+        warn!("ws: rejected connection without a valid session token");
+        refuse(socket, CLOSE_INVALID_TOKEN, "invalid session token".into()).await;
+        return;
+    };
+
+    info!("ws: client attached to the session slot");
+
+    let (ws_tx, mut ws_rx) = metered(socket, Arc::clone(&sessions), throughput, Socket::Session);
+    let (attach_id, events) = (attachment.id, attachment.events);
+    let superseded = attachment.superseded;
+
+    // The session socket carries no picture, so nothing reads what this tracker
+    // publishes: it is here for the heartbeat, whose pings it numbers and times.
+    let paint = Arc::new(Mutex::new(PaintTracker::publishing(Arc::new(LinkFeedback::new()))));
+    let outbound_paint = Arc::clone(&paint);
+    // Woken by the inbound half whenever an acknowledgment advances the window,
+    // so a parked batch leaves as soon as there is room rather than on a timer.
+    let room = Arc::new(tokio::sync::Notify::new());
+    let outbound_room = Arc::clone(&room);
+
+    // Outbound: session events -> browser. Ends on eviction (explicit close) or
+    // when this browser's next socket supersedes it.
+    let mut outbound = tokio::spawn(outbound(
+        ws_tx,
+        events,
+        outbound_paint,
+        outbound_room,
+        heartbeat_timings.interval,
+        async move {
+            superseded.notified().await;
+            "superseded by this browser's next socket"
+        },
+        false,
+    ));
 
     // Inbound: browser input -> protocol engine. Also ends when the outbound
     // side finishes (eviction / engine death), so a socket that lingers after
@@ -1394,6 +1638,7 @@ async fn session(
                     warn!("ws: outbound task failed: {e}");
                 }
                 outbound_done = true;
+                await_close(&mut ws_rx).await;
                 break;
             }
             msg = ws_rx.next() => msg,
@@ -2062,7 +2307,7 @@ mod tests {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));
-        let token = sessions.claim(false, None).unwrap();
+        let token = sessions.claim(false, None, "login").unwrap();
         let throughput = Arc::new(ThroughputMeters::new(vec!["fake".to_owned()]));
         let served_throughput = Arc::clone(&throughput);
         let app = Router::new().route(
@@ -2154,23 +2399,36 @@ mod tests {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));
-        let token = sessions.claim(false, None).unwrap();
+        let token = sessions.claim(false, None, "login").unwrap();
         let reattaching = Arc::clone(&sessions);
         let bridged = token.clone();
+        let shown = Arc::clone(&sessions);
         let timings =
             HeartbeatTimings { interval: Duration::from_secs(1), timeout: Duration::from_secs(60) };
-        let app = Router::new().route(
-            "/ws",
-            any(move |ws: WebSocketUpgrade| {
-                let sessions = Arc::clone(&sessions);
-                let token = bridged.clone();
-                async move {
-                    ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full.into(), timings, Arc::default())
-                    })
-                }
-            }),
-        );
+        let app = Router::new()
+            .route(
+                "/ws",
+                any(move |ws: WebSocketUpgrade| {
+                    let sessions = Arc::clone(&sessions);
+                    let token = bridged.clone();
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            session(socket, sessions, Some(token), None, Chroma::Full.into(), timings, Arc::default())
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/ws/display",
+                any(move |ws: WebSocketUpgrade| {
+                    let sessions = Arc::clone(&shown);
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            display(socket, sessions, Some("login".to_owned()), 1, None, timings, Arc::default())
+                        })
+                    }
+                }),
+            );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -2192,8 +2450,12 @@ mod tests {
                 break;
             }
         }
+        // The picture's socket, which the pump waits for if it is not attached yet.
+        let (display_client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/display"))
+            .await
+            .unwrap();
 
-        // From here the client is never polled: it acknowledges nothing and answers
+        // From here the display client is never polled: it acknowledges nothing and answers
         // no ping, which is all the gateway can see of a link that has stopped.
         let budget = Arc::new(tokio::sync::Semaphore::new(100_000));
         let unit = |seed: u8| {
@@ -2217,7 +2479,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(budget.available_permits() <= 60_000, "nothing was parked behind the silent client");
 
-        let mut replacement = reattaching.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut replacement = reattaching.attach_display("login", 1, None).unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while budget.available_permits() < 100_000 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2226,17 +2488,13 @@ mod tests {
         .await
         .expect("the superseded socket kept the engine's queue budget");
 
-        assert!(matches!(
-            replacement.events.recv().await,
-            Some(AttachEvent::Msg(ServerMsg::Connected { .. }))
-        ));
         frame_tx.send(unit(6).await).await.unwrap();
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(2), replacement.events.recv()).await,
             Ok(Some(AttachEvent::Msg(ServerMsg::Video(_))))
         ));
 
-        drop(client);
+        drop((client, display_client));
         server.abort();
     }
 
@@ -2250,7 +2508,7 @@ mod tests {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));
-        let token = sessions.claim(false, None).unwrap();
+        let token = sessions.claim(false, None, "login").unwrap();
         let assertions = Arc::clone(&sessions);
         let timings = HeartbeatTimings {
             interval: Duration::from_secs(1),
@@ -2310,7 +2568,7 @@ mod tests {
         }
         assert!(input_rx.is_closed(), "heartbeat timeout did not stop the engine");
         let replacement_token = assertions
-            .claim(false, None)
+            .claim(false, None, "login")
             .expect("heartbeat timeout did not release the browser attachment");
         let mut replacement = assertions.attach(&replacement_token, None, Chroma::Full.into()).await.unwrap();
         assert!(matches!(
@@ -2319,6 +2577,45 @@ mod tests {
         ));
 
         drop(client);
+        server.abort();
+    }
+
+    /// A display socket this end gives up on is not an eviction, so it ends without
+    /// the eviction's close: the page reconnects after any other close, and after a
+    /// 4001 waits for a takeover its session socket will never report.
+    #[tokio::test]
+    async fn a_display_socket_whose_heartbeat_runs_out_is_not_told_it_was_evicted() {
+        let sessions = Arc::new(SessionManager::with_test_spawner(vec![fake_target()], |_, _, _, _, _, _| {}));
+        sessions.claim(false, None, "login").unwrap();
+        let timings = HeartbeatTimings { interval: Duration::from_millis(50), timeout: Duration::from_millis(200) };
+        let app = Router::new().route(
+            "/ws/display",
+            any(move |ws: WebSocketUpgrade| {
+                let sessions = Arc::clone(&sessions);
+                async move {
+                    ws.on_upgrade(move |socket| {
+                        display(socket, sessions, Some("login".into()), 1, None, timings, Arc::default())
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/display"))
+            .await
+            .unwrap();
+        // Unpolled, so nothing answers the pings, until well past the timeout.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        while let Ok(Some(Ok(frame))) = tokio::time::timeout(Duration::from_secs(5), client.next()).await {
+            if let ClientFrame::Close(Some(close)) = frame {
+                assert_ne!(u16::from(close.code), CLOSE_EVICTED, "a heartbeat timeout reported as an eviction");
+            }
+        }
+
         server.abort();
     }
 
@@ -2340,7 +2637,7 @@ mod tests {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));
-        let token = sessions.claim(false, None).unwrap();
+        let token = sessions.claim(false, None, "login").unwrap();
         // Wide apart on purpose: the assertion below survives a test machine that
         // stalls for a second, and fails a gateway that counts only pongs.
         let timings = HeartbeatTimings {
@@ -2400,7 +2697,7 @@ mod tests {
                 engine_tx.send((input_rx, frame_tx, audio)).unwrap();
             },
         ));
-        let token = sessions.claim(false, None).unwrap();
+        let token = sessions.claim(false, None, "login").unwrap();
         // A live desktop, driven in process: this test is about the audio socket, and
         // the session socket only has to exist for `connect` to be legal.
         let mut att = sessions.attach(&token, None, Chroma::Full.into()).await.unwrap();

@@ -120,8 +120,10 @@ function watchSession(page: Page): Session {
     unannounced: 0,
     missized: 0,
   };
+  // Both the session socket and the display socket that carries its picture.
   page.on("websocket", (ws) => {
-    if (new URL(ws.url()).pathname !== "/ws") {
+    const path = new URL(ws.url()).pathname;
+    if (path !== "/ws" && path !== "/ws/display") {
       return;
     }
     ws.on("framereceived", ({ payload }) => {

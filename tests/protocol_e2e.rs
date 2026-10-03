@@ -1287,7 +1287,7 @@ async fn http_get(addr: SocketAddr, path: &str, cookie: Option<&str>) -> String 
 /// `error` message or a close.
 async fn expect_resize(ws: &mut Ws, w: u16, h: u16) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.display_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
@@ -1313,7 +1313,7 @@ async fn expect_resize(ws: &mut Ws, w: u16, h: u16) {
 /// fails on an `error` message or a close.
 async fn expect_picker(ws: &mut Ws) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.session_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
@@ -1334,7 +1334,7 @@ async fn expect_picker(ws: &mut Ws) {
 /// Read from the socket until a binary frame of the desktop's stream arrives.
 async fn expect_frame(ws: &mut Ws) -> Vec<common::BatchUnit> {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.display_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
                     // Parsed rather than sniffed: the envelope's own invariants
@@ -1364,7 +1364,10 @@ async fn next_scroll_request(rx: &mut mpsc::UnboundedReceiver<ScrollRequest>) ->
 }
 
 /// Read from the socket until it closes; returns the close code (if any).
-async fn expect_close(ws: &mut Ws) -> Option<u16> {
+async fn expect_close<S>(ws: &mut S) -> Option<u16>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg {
@@ -1446,6 +1449,27 @@ async fn websocket_without_a_valid_token_is_closed_with_4000() {
     // A made-up token.
     let mut ws = connect_ws(addr, "not-a-real-token", &cookie).await;
     assert_eq!(expect_close(&mut ws).await, Some(4000));
+}
+
+/// A display socket carries no token and is let in by the login alone: the login
+/// the session was claimed under, which another login is not, and only for a
+/// display the session shows — the first always, the second only in a tab.
+#[tokio::test]
+async fn a_display_socket_is_the_claiming_logins_and_shows_only_a_listed_tab() {
+    let addr = spawn_app_dead_rdp().await;
+    let owner = common::login(addr).await;
+    let other = common::login(addr).await;
+    let _token = common::claim_session(addr, &owner).await;
+
+    let mut ws = common::connect_display_ws(addr, &other, 1).await;
+    assert_eq!(expect_close(&mut ws).await, Some(4000), "another login holds no session");
+    let mut ws = common::connect_display_ws(addr, &owner, 2).await;
+    assert_eq!(expect_close(&mut ws).await, Some(4002), "no display is shown in a tab");
+    let mut ws = common::connect_display_ws(addr, &owner, 1).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), expect_close(&mut ws)).await.is_err(),
+        "the claiming login's first display stays open"
+    );
 }
 
 /// The audio endpoint answers a bad token the same way, and that sameness is the
@@ -1613,7 +1637,7 @@ async fn an_oversize_vnc_desktop_holds_the_session_without_a_picture() {
     expect_no_picture(&mut ws).await;
 
     // A reattach is told the same, and still sent no picture.
-    ws.close(None).await.unwrap();
+    futures_util::SinkExt::close(&mut ws).await.unwrap();
     drop(ws);
     let (status, body) =
         common::post_session(addr, &cookie, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
@@ -1632,7 +1656,7 @@ async fn an_oversize_vnc_desktop_holds_the_session_without_a_picture() {
 /// a close: long enough for the full update the fake server answers with at once.
 async fn expect_no_picture(ws: &mut Ws) {
     let quiet = tokio::time::timeout(Duration::from_millis(500), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.display_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => panic!("a held desktop sent a {}-byte frame", frame.len()),
                 Message::Text(text) => {
@@ -1726,7 +1750,7 @@ async fn detach_keeps_the_engine_and_reattach_repaints() {
     expect_frame(&mut ws).await;
 
     // Detach: the browser goes away, the engine keeps running.
-    ws.close(None).await.unwrap();
+    futures_util::SinkExt::close(&mut ws).await.unwrap();
     drop(ws);
 
     // Reattach (same token, reclaim): the engine must re-announce the size
@@ -1804,7 +1828,7 @@ struct ClipboardMessage {
 /// arrives.
 async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.session_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
@@ -1949,9 +1973,28 @@ async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
 /// `displays` message carries remote-supplied strings — screen labels and details —
 /// so a substring match is a match against content the *remote* chooses, and a
 /// screen named `"type":"resize"` would satisfy a search for a resize.
+/// The socket a control message of `kind` travels on: a display's size, pointer and
+/// stream on the display socket, everything else on the session socket. A helper
+/// reading for one kind reads that socket alone, so what it skips past is never
+/// a message of the other socket that a later helper is waiting for.
+fn socket_for<'a>(ws: &'a mut Ws, kind: &str) -> &'a mut common::Socket {
+    const DISPLAY: [&str; 9] = [
+        "resize",
+        "cursor",
+        "mosaic",
+        "oversize",
+        "resizing",
+        "remoteOs",
+        "touchReady",
+        "videoFormat",
+        "graphicsStart",
+    ];
+    if DISPLAY.contains(&kind) { ws.display_socket() } else { ws.session_socket() }
+}
+
 async fn expect_control(ws: &mut Ws, kind: &str) -> serde_json::Value {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = socket_for(ws, kind).next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     let parsed: serde_json::Value = serde_json::from_str(&text)
@@ -2067,7 +2110,7 @@ async fn high_performance_ends_when_the_offer_brings_no_picture() {
 /// Read until an `error` control message arrives, and hand back its line.
 async fn expect_error(ws: &mut Ws) -> String {
     tokio::time::timeout(Duration::from_secs(20), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.session_socket().next().await {
             if let Ok(Message::Text(text)) = msg
                 && text.contains(r#""type":"error""#)
             {

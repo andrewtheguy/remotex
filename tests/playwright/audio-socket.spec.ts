@@ -101,7 +101,7 @@ test.describe("the audio socket", () => {
     await page.getByRole("button", { name: "Open menu" }).click();
     await expect(page.getByRole("button", { name: "End session" })).toBeVisible();
     await expect(page.getByRole("button", { name: /^(Mute|Unmute)$/ })).toHaveCount(0);
-    expect(traffic.map((t) => t.url)).toEqual(["/ws"]);
+    expect(traffic.map((t) => t.url).sort()).toEqual(["/ws", "/ws/display"]);
   });
 
   test("carries sound, and the session socket carries none", async ({
@@ -141,8 +141,14 @@ test.describe("the audio socket", () => {
       "the audio socket carries audio frames and nothing else",
     ).toEqual(new Set([AUDIO_FRAME_KIND]));
     expect(
-      only(traffic, "/ws").binaryKinds.filter((k) => k !== BATCH_FRAME_KIND),
-      "the session socket must carry batches only",
+      only(traffic, "/ws").binaryKinds,
+      "the session socket carries no binary frames",
+    ).toEqual([]);
+    expect(
+      only(traffic, "/ws/display").binaryKinds.filter(
+        (k) => k !== BATCH_FRAME_KIND,
+      ),
+      "the display socket must carry batches only",
     ).toEqual([]);
   });
 
@@ -170,6 +176,7 @@ test.describe("the audio socket", () => {
       .toBe(true);
     // And the desktop is untouched: a session must survive its sound ending.
     expect(only(traffic, "/ws").closed).toBe(false);
+    expect(only(traffic, "/ws/display").closed).toBe(false);
     await expect(
       page.getByRole("button", { name: "Unmute", exact: true }),
     ).toBeVisible();

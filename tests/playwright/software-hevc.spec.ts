@@ -60,7 +60,8 @@ interface Session {
   decoderFiles: string[];
 }
 
-/// Watch the session socket and the decoder's files. Registered before navigation.
+/// Watch the session socket, the display socket that carries its picture, and the
+/// decoder's files. Registered before navigation.
 function watchSession(page: Page): Session {
   const seen: Session = { formats: [], acks: [], refreshes: [], decoderFiles: [] };
   // The context's, not the page's: the decoder's files are fetched by the paint
@@ -75,10 +76,11 @@ function watchSession(page: Page): Session {
   });
   page.on("websocket", (ws) => {
     const url = new URL(ws.url());
-    if (url.pathname !== "/ws") {
+    if (url.pathname === "/ws") {
+      seen.appleMedia = url.searchParams.get("apple_media") ?? undefined;
+    } else if (url.pathname !== "/ws/display") {
       return;
     }
-    seen.appleMedia = url.searchParams.get("apple_media") ?? undefined;
     ws.on("framereceived", ({ payload }) => {
       if (typeof payload === "string") {
         const message = JSON.parse(payload);

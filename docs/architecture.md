@@ -75,7 +75,7 @@ and optimization prioritize them.
 | Tier | Server | Target | Displays | Sound | Camera and microphone | Picture |
 |---|---|---|---|---|---|---|
 | 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker; a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
-| 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, one shown at a time and switched from the picker (alpha) | Opus or FLAC | yes, experimental | VP9 from the gateway, or the graphics pipeline passed through (beta) |
+| 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | VP9 from the gateway, or the graphics pipeline passed through (beta) |
 | 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density | AAC-ELD, always | no | VP9 from the gateway, or the Mac's HEVC passed through |
 | 3 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
 | baseline | any other VNC server | `vnc` | one framebuffer at the size the server says, at 1x | none | no | VP9 from the gateway |
@@ -205,6 +205,12 @@ passed.
   the previous engine exits; only the owning browser's reattach to the same
   target resumes an engine. Preserve the takeover and fresh-session behavior in
   [Session lifecycle](#session-lifecycle).
+- A session's displays may be shown in more than one tab of the browser that
+  holds it, and in no other browser: each display rides a display socket of its
+  own, let in by the login cookie the session was claimed under and never by a
+  token. Only an RDP target's *All Displays* does this, for its second display at
+  `/display/2` (alpha). That is one session shown twice, not a shared one; do not
+  let a display socket in for any other login, or hand a tab the claim's token.
 - Size, sound and passthrough are chosen under the target at the picker and
   carried by `connect`; they are not config keys, and the gateway holds the
   session to them. The size a session will have is shown before Start: a size
@@ -415,7 +421,7 @@ that selects the stream. See
   unofficial wherever it is named, and tested with macOS 26 only; do not present
   it as a mode of Apple's viewer or grow it into a third subtype.
 - The passthrough on `ard-high-performance` passes the Mac's picture
-  unaltered, for a LAN: HEVC access units on the session socket. It is offered
+  unaltered, for a LAN: HEVC access units on the display socket. It is offered
   at the picker to a browser that said it decodes the HEVC; a session started
   without it is sent VP9. The sound is not part of the choice: AAC-ELD units go
   on `/ws/audio` either way. Decoded or passed, the
@@ -432,7 +438,7 @@ that selects the stream. See
 
 The passthrough on `rdp` passes the host's graphics pipeline (MS-RDPEGFX) to
 the browser, for a LAN: its commands out of their bulk compression, never
-altered, as `GRAPHICS` records on the session socket behind a `graphicsStart`;
+altered, as `GRAPHICS` records on the display socket behind a `graphicsStart`;
 the gateway neither composes nor encodes them. It is offered at the picker by a
 target with the pipeline on, to a page that said it composes one: a
 cross-origin isolated page, for the compositor's threads, with a WebGL 2 canvas
@@ -929,7 +935,7 @@ nothing of it.
 as it is there, and the module built from it is tested as the page loads it.
 What is passed is checked against a real host: `tests/rdp_client_probe.rs`
 composes a passed pipeline beside the session that passed it, and
-`tests/playwright/egfx-passthrough.spec.ts` reads the session socket of a
+`tests/playwright/egfx-passthrough.spec.ts` reads the display socket of a
 headless browser composing one. That host is one Windows 11 machine, used with
 sound and the clipboard beside it; the camera and the microphone beside it
 have not been tried, and no container stands in for a host that draws through
@@ -1341,6 +1347,19 @@ Authentication and desktop ownership are separate:
    [Apple's media stream, passed through](#apples-media-stream-passed-through) and
    [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
    The media sockets carry the token alone.
+   Beside it the page opens `/ws/display?display=1`, the first display's socket:
+   the picture, its size and pointer, and the paint acknowledgments that pace it
+   ([`ServerMsg::is_display`] routes an engine's output between the two). It
+   carries no token: the claim records the login cookie it was made with, and a
+   display socket is let in by that login alone. The two are opened together, and
+   the gateway holds an engine's picture for up to five seconds for the display's
+   socket of a page whose session socket is attached, since a passed stream's
+   opening is the part no repaint replaces. A display socket that attaches after
+   its picture lost anything is repainted. The page closes its session socket
+   when its display socket drops, and the reattach brings both back. `/ws/display?display=2`
+   is the second display shown in a tab of its own, an RDP target's *All Displays*
+   (alpha); see
+   [Display geometry](#display-geometry).
 4. `connect` starts the selected engine with the choices made at the picker.
    `disconnect` stops it and returns to the picker.
 5. Losing the WebSocket detaches the client. The engine remains available for a
@@ -1594,7 +1613,7 @@ message that turns sound on, and closing the socket is the only way to stop. The
 page opens it when a session that carries sound starts, and its Mute and Unmute
 close and open it.
 
-The separation is the point. The session socket's bounded queue is four frames
+The separation is the point. The display socket's bounded queue is four frames
 deep; an audio pump waiting behind a video backlog on it would stop draining the
 bridge, and what the bridge then drops is wave buffers. A lost wave buffer is a
 hole. The dedicated socket has no picture-induced loss path.
@@ -2046,6 +2065,39 @@ desktop it opened and off each graphics reset's monitor count, so a host that
 opens one desktop lists nothing. The pipeline's passthrough is not offered beside
 it, since the browser composes a passed pipeline whole.
 
+With two columns the list ends with *All Displays* (alpha), under the id Apple's
+own entry uses: the first column on the canvas and the second in a browser tab of
+its own, which the list names as `tab: 2` and the display panel links to as
+`/display/2`. That page is the same SPA with no menu and no picker; it claims
+nothing, since a claim would take the session from the tab holding it, and opens
+`/ws/display?display=2` by the login cookie alone — opened with `noopener`, so it
+shares none of the first tab's storage, the token included. The session lets that
+socket in only while the engine's last list names the tab, and hands the engine a
+feed for it (`ClientMsg::DisplayShown`): a sink, an encoder and a shadow of its
+own over the second column, the same pointer shape, and a repaint when it
+attaches or asks. Its input arrives wrapped as `ClientMsg::OnDisplay` and is
+offset into its column. On a session that follows the window the tab's window is
+the second monitor's size: its viewport, sent on its own socket, makes the next
+layout a row of two sizes, top-aligned, and the second keeps that size for as long
+as *All Displays* is chosen — a tab reloading does not reset it — and is the
+first's again once it is not. Choosing a display, a host that lays out one
+monitor, or the engine ending takes the tab away, and the session closes its
+socket; a closed tab only ends the feed. The root page is always the first
+display, so there is no `/display/1`.
+
+The display is one tab's. The first socket for it after the engine lists its tab is
+given a token, sent first on it as `displayToken`; the tab keeps it in its
+`sessionStorage` and presents it on every display socket it opens after
+(`/ws/display?display=2&token=…`), so a reload gets back in. Any other socket for
+the display — a second tab, or one holding a token from before — is closed with
+4003. The token lasts while the tab is listed: choosing another display and then
+*All Displays* again frees the display for whichever tab opens it next, as does a
+host laying out one monitor, the engine ending, or the claim or login changing. It
+is not the claim's token, and it opens nothing but that display. A page at
+`/display/2` whose display is not shown — *All Displays* not chosen, a target
+without it, no session in this browser, or another tab holding it — says the
+display is not available, why, and offers Retry; it does not keep reconnecting.
+
 Where the list is sent, the checkmark moves only when the remote comes back naming
 the screen it is now sending — never on the click. On a Mac the engine prepends an
 *All Displays* entry of its own so a client that picks a screen can get back; see
@@ -2099,7 +2151,7 @@ at all from the browser ends the engine; an orderly close starts a fresh 60-seco
 reattach window. Any frame counts, not a pong alone: a ping queues behind every
 batch already written, so on a slow link the pong is the last thing to come back,
 while the acknowledgment for each batch that did arrive says the same thing sooner.
-On the session socket a ping's payload is the sequence of the last screen batch
+On a display socket a ping's payload is the sequence of the last screen batch
 written before it, which is what makes its pong a receipt (see
 [Image batches](#image-batches)).
 
@@ -2139,7 +2191,8 @@ for a session started with sound.
 `virtual_displays = 2` (alpha) asks the host for two monitors in a row, each the
 session's size, in the connect-time monitor data and in every layout a resizing
 session sends; the host spans one framebuffer over both and the engine shows one
-column of it, switched from the display picker without asking the host
+column of it, switched from the display picker without asking the host, or —
+on *All Displays* — the second column in a browser tab of its own
 ([Display geometry](#display-geometry)). The key is shared by every target type
 that can create virtual displays and acted on by `rdp` alone today; it is refused
 elsewhere, and held to two ([Roadmap](roadmap.md#more-than-two-virtual-displays-on-a-target)).

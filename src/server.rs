@@ -308,6 +308,9 @@ pub(crate) fn router_with_sessions(
         .merge(
             Router::new()
                 .route("/ws", any(ws::handler))
+                // A display's picture and the input made over it, one socket per
+                // display, attached by the login cookie alone.
+                .route("/ws/display", any(ws::display_handler))
                 // Sound, on a socket of its own so it never queues behind a picture.
                 // Same guard, same credential kinds; only the payload differs.
                 .route("/ws/audio", any(ws::audio_handler))
@@ -850,11 +853,17 @@ struct ClaimResponse {
 /// present the token alone — `chroma`, the most colour this browser's video
 /// decoder takes, is the session socket's and is required there
 /// ([`crate::ws`]).
+///
+/// The claim remembers the login cookie it was made with: the display sockets
+/// carry no token and attach by that login instead ([`crate::ws`]).
 async fn claim_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ClaimRequest>,
 ) -> ApiResult<Json<ClaimResponse>> {
-    let session_id = state.sessions.claim(req.force, req.session_id.as_deref())?;
+    // The route's guard has already checked the cookie, so it is there.
+    let login = auth::token_from_headers(&headers).unwrap_or_default();
+    let session_id = state.sessions.claim(req.force, req.session_id.as_deref(), &login)?;
     Ok(Json(ClaimResponse { session_id }))
 }
 

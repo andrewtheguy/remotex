@@ -1773,6 +1773,24 @@ body {
   color: #8b949e;
 }
 
+/* The links to the displays shown in tabs of their own, under the list. */
+.dp-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+}
+
+.dp-tab-link {
+  font-size: 0.85rem;
+  color: #58a6ff;
+  text-decoration: none;
+}
+
+.dp-tab-link:hover {
+  text-decoration: underline;
+}
+
 /* ── Audio (the drawer's Audio row in FloatingMenu.tsx) ──
 
    No panel: the row's button is the whole control. What a docked panel held —

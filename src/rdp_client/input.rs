@@ -20,7 +20,7 @@ pub(super) enum Command {
     /// Ask the server to repaint the whole desktop.
     Refresh,
     /// Ask the server for a new desktop size, over Display Control.
-    Resize { width: u32, height: u32, scale_percent: u32 },
+    Resize { sizes: Vec<(u32, u32)>, scale_percent: u32 },
     /// Something for the clipboard channel, in the three shapes a clipboard has.
     Clipboard(Clipboard),
     /// A frame of a passed graphics pipeline has been composed.
@@ -147,9 +147,13 @@ impl Input {
     /// are queued; see [`sanitise_size`] and [`sanitise_scale`]. This does not
     /// rate-limit: every request costs the remote a desktop resize, so a caller
     /// driving this from a window has to debounce.
-    pub fn resize(&self, width: u32, height: u32, scale_percent: u32) {
-        let (width, height) = sanitise_size(width, height);
-        self.push(Command::Resize { width, height, scale_percent: sanitise_scale(scale_percent) });
+    ///
+    /// `sizes` is each monitor's, left to right, the primary first: one for a single
+    /// desktop, and a row of [`Connect::monitors`](super::Connect::monitors) for a
+    /// session that asked for more, in which each may be its own size.
+    pub fn resize(&self, sizes: &[(u32, u32)], scale_percent: u32) {
+        let sizes = sizes.iter().map(|&(width, height)| sanitise_size(width, height)).collect();
+        self.push(Command::Resize { sizes, scale_percent: sanitise_scale(scale_percent) });
     }
 
     /// Tell the remote what this end's clipboard now holds, as Windows format ids.

@@ -164,6 +164,11 @@ export interface DisplayInfo {
   main: boolean;
   // A display the remote made for this purpose rather than one of its screens.
   virtual: boolean;
+  // Where this display is shown in a browser tab of its own, beside the one on
+  // the canvas: the number its page (`/display/N`) and its display socket name
+  // it by. Null for a display the picker switches the canvas to. Only an RDP
+  // target's All Displays sets it (alpha).
+  tab: number | null;
 }
 
 // A rectangle in whole pixels or points, origin at the top left.
@@ -215,6 +220,9 @@ export type ControlMsg =
     }
   | { type: "error"; message: string }
   | { type: "picker" }
+  // The token that makes this tab the one showing a display in a tab of its own:
+  // presented on every display socket it opens for that display after.
+  | { type: "displayToken"; token: string }
   // `resize` means this window drives the remote's size, continuously and on
   // every engine alike — what the session was started with, with no client-side
   // mode. True is auto-follow (and the mobile one-shot); false is a session

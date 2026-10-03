@@ -75,6 +75,27 @@ export function gatewaySocketUrl(
   return url.toString();
 }
 
+/// The WebSocket URL of display `display`'s socket: its picture, and the input
+/// made over it.
+///
+/// No claim rides on it. The display socket attaches by the login cookie, which
+/// a page of this browser carries and nothing else does — and which is all a
+/// display opened in another tab has: that tab is given no session token. What
+/// such a tab presents instead is `token`, the one the gateway gave it for the
+/// display, which keeps a second tab from taking the display from the first.
+export function gatewayDisplaySocketUrl(
+  display: number,
+  token: string | null = null,
+): string {
+  const url = new URL(gatewayUrl("/ws/display"));
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("display", String(display));
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  return url.toString();
+}
+
 /// The software HEVC decoder's files, `hevc.js` and `hevc.wasm`: a release of
 /// andrewtheguy/hevc-wasm the gateway serves beside the bundle when it has the
 /// release archive, as they were built, because the module starts its slice

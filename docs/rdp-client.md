@@ -366,31 +366,40 @@ to the row's union; it is an extended block, so it is sent only to a server whos
 X.224 Connection Confirm carried `EXTENDED_CLIENT_DATA_SUPPORTED`, and a server
 without the flag is asked for one monitor and the one desktop it always gave. And
 in every monitor layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2), one
-`DISPLAYCONTROL_MONITOR_LAYOUT` per monitor at the same size and scale factor, the
-first flagged primary. The server's `MaxNumMonitors` and area ceiling arrive in
+`DISPLAYCONTROL_MONITOR_LAYOUT` per monitor, the first flagged primary, all at one
+scale factor and each at the size `Input::resize` names for it: the same for every
+monitor unless a display shown in a tab of its own follows that tab's window, top
+at 0 and each starting at the last one's right edge. The server's `MaxNumMonitors` and area ceiling arrive in
 its capabilities as before, and every layout is held to both: no more monitors
 than the server lays out, and no more than fit its area together, since a layout
-past either is one a conforming server ignores in silence. A size that does not
-fit even once is not sent. `Event::ResizeReady` carries the area over every
+past either is one a conforming server ignores in silence, so monitors are dropped
+from the right until the rest fit. A first monitor that does not fit alone is not
+sent. `Event::ResizeReady` carries the area over every
 monitor together.
 
 The host answers with one desktop spanning the row: a Demand Active naming the
 union at connect, and a `ResetGraphics` naming it, with its monitor definitions,
 after each layout. The framebuffer is that span, and the host maps one surface
 onto the output per monitor. The definitions are read against the row asked for
-(`row` in the graphics crate's `proto/gfx.rs`): `Event::Resize` carries their
-count when they are that row of equal columns, and one when the host laid the
-session out any other way — stacked, offset, unequal — so a caller that shows one
-column never cuts a layout it does not know the shape of. At connect the caller
-reads the count off the size. The client composes and reports the span as
+(`row` in the graphics crate's `proto/gfx.rs`): `Event::Resize` carries each
+monitor's size when they are a row like the one asked for — top-aligned, each
+starting where the last ended, the row as wide as the output and as tall as its
+tallest — and the output's one size when the host laid the session out any other
+way, stacked, offset or out of order, so a caller that shows one column never
+cuts a layout it does not know the shape of. At connect the caller reads the
+equal row off the size. The client composes and reports the span as
 it does any desktop. Which part of it a browser sees, and the pointer offset
-into it, is the engine's (`View` in `src/rdp.rs`).
+into it, is the engine's (`View` in `src/rdp.rs`), and so is *All Displays*, which
+shows the second column on a socket of its own (`Tab`): nothing of it reaches
+the RDP client, which composes the one span either way.
 
 Measured 2026-10-03 against a Windows 11 host, through `tests/ws_probe.py`: a
 kept-size session asked for two 1440×900 monitors opened a 2880×900 desktop,
 `CreateSurface 2, MapSurfaceToOutput 2`; a resizing session opened at two
 1280×800 and a 1366×768 layout came back as one `ResetGraphics` of 2732×768 over
-two monitors. Alpha: one host, and nothing of the second display has been held
+two monitors; and asked for 1280×800 beside 1024×700, it answered a 2304×800
+`ResetGraphics` defining those two monitors, top-aligned. Alpha: one host, and
+nothing of the second display has been held
 against Microsoft's own client.
 
 ## The clipboard (MS-RDPECLIP)

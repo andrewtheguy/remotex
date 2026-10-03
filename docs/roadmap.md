@@ -231,11 +231,12 @@ The decision is recorded in
 
 ### More than two virtual displays on a target
 
-`virtual_displays` is held to two. A browser shows one display at a time and the
-gateway encodes only that one, so each further display is a desktop the host
-renders for nobody and a column of the framebuffer kept for a switch; two is the
-most the picker, the input offset and the span the host builds have been checked
-with. RDP would allow sixteen in a row (MS-RDPBCGR 2.2.1.3.6). A Mac's High
+`virtual_displays` is held to two. A browser tab shows one display, and the
+gateway encodes only the displays shown: the one on the session's page, and on an
+RDP target's *All Displays* (alpha) the second in a tab of its own at `/display/2`. Each
+further display is a desktop the host renders for nobody but a further tab, and
+two is the most the picker, the input offset, the tab's feed and the span the host
+builds have been checked with. RDP would allow sixteen in a row (MS-RDPBCGR 2.2.1.3.6). A Mac's High
 Performance mode advertises how many virtual displays it will create, and that
 count may well be two itself, so two might be the limit there whatever this
 gateway asked for. What holds the ceiling is that nothing shows more: a person at
