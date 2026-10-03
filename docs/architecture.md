@@ -324,8 +324,8 @@ Displays over more than two screens, whatever its size. On VNC started without
 resize the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
-cropped picture. Two streams for Apple's All Displays are the planned way, in
-[the roadmap](roadmap.md#two-streams-for-apples-all-displays). See
+cropped picture. Two streams for Standard's All Displays are the planned way, in
+[the roadmap](roadmap.md#two-streams-for-standards-all-displays). See
 [Past the ceiling](#past-the-ceiling).
 
 #### wlshare's VP9 and the `wlshare` subtype
@@ -2085,6 +2085,13 @@ first's again once it is not. Choosing a display, a host that lays out one
 monitor, or the engine ending takes the tab away, and the session closes its
 socket; a closed tab only ends the feed. The root page is always the first
 display, so there is no `/display/1`.
+
+The tab has a menu of its own (`DisplayMenu.tsx`), the session page's button and
+drawer (`floatingButton.tsx`) with the display's number on the button where the
+session's shows ☰. It holds what is the tab's alone: immersive full screen, which
+is a window's and which the session page's button reaches only for its own
+window. What the session has one of — sound, clipboard, the display picker, End
+session — stays in the menu on the session's page.
 
 The display is one tab's. The first socket for it after the engine lists its tab is
 given a token, sent first on it as `displayToken`; the tab keeps it in its

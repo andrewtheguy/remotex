@@ -125,6 +125,11 @@ touch.
   it. Opened while it is not shown, it says it is not available. The passthrough
   row is not offered beside it. Checked against one Windows 11 host.
 
+  The second display's tab has a menu of its own, behind a button showing the
+  display's number where the session's page shows ☰. It holds what is that tab's
+  alone, which is **Immersive full screen** and nothing else so far; everything
+  else stays in the menu on the session's page.
+
   The second display's tab is for a client with two physical displays, one for
   each, and *All Displays* is not recommended on a client with one. It is not
   supported on a phone or tablet, though the Display picker there does not stop
