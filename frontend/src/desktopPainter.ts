@@ -19,6 +19,7 @@
 // gone, and is terminated rather than left decoding for it.
 import { appleHevcDecoder } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
+import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { batchFrameSequence } from "./protocol.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
@@ -71,6 +72,13 @@ export interface DesktopPainter {
   setVideoFormat(format: VideoFormat): void;
   /** An RDP host's graphics pipeline starts, for the worker to compose. */
   startGraphics(): void;
+  /** The part of the pipeline's picture this page's display is (`graphicsView`). */
+  setGraphicsView(part: PicturePart): void;
+  /**
+   * This page shows display `display` in a tab of its own, `part` of the picture
+   * the session's page composes, and is painted from there (displayRelay.ts).
+   */
+  mirrorGraphics(display: number, part: PicturePart): void;
   /** The attachment boundary: wipe the bitmap and the decoder. */
   clear(): void;
 }
@@ -177,6 +185,12 @@ export function desktopPainterFor(
     },
     startGraphics() {
       post({ type: "graphicsStart" });
+    },
+    setGraphicsView(part) {
+      post({ type: "graphicsView", part });
+    },
+    mirrorGraphics(display, part) {
+      post({ type: "graphicsMirror", display, part });
     },
     clear() {
       clears += 1;

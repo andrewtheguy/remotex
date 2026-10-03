@@ -212,6 +212,10 @@ passed.
   or a High Performance Mac, for the second display at
   `/display/2` (alpha). That is one session shown twice, not a shared one; do not
   let a display socket in for any other login, or hand a tab the claim's token.
+  In a session started with an RDP host's pipeline passed, the second display's
+  socket carries no picture: the tab is painted from the picture the session's
+  page composes, handed across the browser
+  ([RDP's graphics pipeline](#rdps-graphics-pipeline)).
 - Size, sound and passthrough are chosen under the target at the picker and
   carried by `connect`; they are not config keys, and the gateway holds the
   session to them. The size a session will have is shown before Start: a size
@@ -451,7 +455,13 @@ not write a second one there. The page, which already carries a software HEVC
 decoder of its own, may decode, compose or present the pipeline its own way
 (on the GPU, say) where that brings a measured gain. The host answers a
 repaint out of its caches, so a reattach starts such a session over; do not
-resume one on a repaint. A host that draws with bitmap updates is encoded here
+resume one on a repaint. Over two virtual displays the host draws one span
+through one pipeline, whose caches and copies between surfaces cross the
+displays: the page composes the span once and shows the column `graphicsView`
+names, and on *All Displays* the second display's tab is painted that column of
+the same picture, handed across the browser (`frontend/src/displayRelay.ts`).
+Do not compose a pipeline in two tabs, and do not deal its commands out by
+display. A host that draws with bitmap updates is encoded here
 as VP9. Call it beta wherever it is named to an operator.
 
 H.264 stays refused in the capability advertise of every pipeline the gateway
@@ -935,9 +945,11 @@ nothing of it.
 **Beta.** The compositor the page runs is the gateway's own, unit tested
 as it is there, and the module built from it is tested as the page loads it.
 What is passed is checked against a real host: `tests/rdp_client_probe.rs`
-composes a passed pipeline beside the session that passed it, and
+composes a passed pipeline beside the session that passed it,
 `tests/playwright/egfx-passthrough.spec.ts` reads the display socket of a
-headless browser composing one. That host is one Windows 11 machine, used with
+headless browser composing one, and `tests/playwright/egfx-two-displays.spec.ts`
+reads both displays' sockets of a browser showing a passed span in two tabs.
+That host is one Windows 11 machine, used with
 sound and the clipboard beside it; the camera and the microphone beside it
 have not been tried, and no container stands in for a host that draws through
 the pipeline.
@@ -1028,6 +1040,32 @@ the pipeline.
   and the page makes a compositor with nothing in it. A `resize` still announces
   the desktop's size and density, ahead of the run whose ResetGraphics the page's
   compositor resizes itself by.
+- **Two displays, one picture.** Over `virtual_displays = 2` the host draws both
+  displays as one output through one pipeline
+  ([Virtual displays](rdp-client.md#virtual-displays-alpha)), and the pipeline's
+  state crosses them: a cache slot filled from one surface is pasted onto the
+  other, and a copy between surfaces may name both. So the commands are not dealt
+  out by display, and no second compositor is fed them. The page holding the
+  session composes the span once; `graphicsView`, sent on a display socket beside
+  every `resize` of a passed session, names the column of the picture that
+  display is, and the page's picture is a texture of the span shown through that
+  window (`frontend/src/egfxPicture.ts`), so the picker's switch between the
+  displays is a draw and asks the host for nothing. On *All Displays* the second
+  display's tab composes nothing: its own `graphicsView` names its column, and
+  the tab is painted that column of the session page's picture over a
+  BroadcastChannel of the gateway's origin, from the page's paint worker to the
+  tab's (`frontend/src/displayRelay.ts`). The page's worker is told what each run
+  painted and sends the tab what falls in its column — one update in flight at a
+  time, cut from the picture as it stands when it goes, so a slow tab sees the
+  latest picture and never a queue of old ones — and a tab that opens or reloads
+  says what it shows and is sent all of it. The gateway holds nothing of a passed
+  pipeline and sends the tab no pixels; the frame is acknowledged by the session
+  page's paint, as over one display, and the tab's painting paces nothing. Alpha,
+  as the second display is: the two ends are unit tested against each other,
+  `tests/playwright/egfx-two-displays.spec.ts` reads both displays' sockets of a
+  headless browser showing a passed span in two tabs against one Windows 11
+  host, it has not been checked by eye, and what the copy across the browser
+  costs, or how far the tab runs behind the page, has not been measured.
 - **The page composes with the gateway's compositor.** The RDP client's graphics
   are a crate, `crates/remotex-rdp-graphics`, that the gateway is built with and
   that `frontend/wasm/egfx` binds for the page, built for
@@ -1410,7 +1448,7 @@ and `GET /api/targets` carries it:
 
 | Target | Window drives the size | Sound | Passthrough |
 |---|---|---|---|
-| `rdp` | yes | shown | shown: the graphics pipeline, beta; hidden beside `virtual_displays = 2` |
+| `rdp` | yes | shown | shown: the graphics pipeline, beta |
 | `vnc` | no | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture |
 | `vnc`, `ard` | no | hidden | hidden |
@@ -1449,9 +1487,9 @@ and `GET /api/targets` carries it:
   row. High Performance's sound is such a one: the Mac refuses the picture
   without it, so there is nothing to choose, and the session's Mute is what a
   person has. An `rdp` target with `egfx = false` has no pipeline, so neither
-  the window nor the pipeline's row; one with `virtual_displays = 2` has the window
-  and not the pipeline's row, since a passed pipeline is composed whole and the
-  browser shows one display of two. A `connect` that names a choice the target does
+  the window nor the pipeline's row; one with `virtual_displays = 2` has both,
+  since the browser composes a passed pipeline whole and shows one display of
+  it. A `connect` that names a choice the target does
   not offer is refused with an `error`, and the slot stays as it was.
 - **Offered but unavailable is greyed, with the reason.** A passthrough is
   greyed wherever the browser cannot take it: one that does not decode the Mac's
@@ -2063,8 +2101,9 @@ positions into it, and lists the columns as `Display 1` and `Display 2`. A
 holds, with the list, the size and a repaint of the chosen column, and the host
 is asked for nothing. The list follows what the host laid out, read off the
 desktop it opened and off each graphics reset's monitor count, so a host that
-opens one desktop lists nothing. The pipeline's passthrough is not offered beside
-it, since the browser composes a passed pipeline whole.
+opens one desktop lists nothing. The pipeline's passthrough is offered beside
+it: the browser composes a passed pipeline whole and shows one column of it
+([Two displays, one picture](#rdps-graphics-pipeline-passed-through)).
 
 With two columns the list ends with *All Displays* (alpha), under the id Apple's
 own entry uses: the first column on the canvas and the second in a browser tab of

@@ -1085,6 +1085,19 @@ pub enum ServerMsg {
     /// discovered from the connection rather than an OS name someone has to keep
     /// correct in the config file.
     RemoteOs { macos: bool },
+    /// The part of an RDP host's passed graphics pipeline this display shows, in
+    /// the pixels of the picture the page composes from it: the column of the
+    /// host's desktop the display is, `w` by `h` from `x`, `y`. Sent only in a
+    /// session started with the pipeline passed, on a display socket, next to
+    /// every [`ServerMsg::Resize`] of that display; the whole picture where the
+    /// host laid out one display.
+    ///
+    /// The page holding the session composes the whole span the host draws — one
+    /// surface a display, mapped side by side onto one output — and presents this
+    /// part of it. The second display's tab composes nothing: its picture is this
+    /// part of the session page's, handed across the browser by that page, so a
+    /// pipeline is composed once however many tabs show it (`displayRelay.ts`).
+    GraphicsView { x: u16, y: u16, w: u16, h: u16 },
     /// The host opened the touch channel (MS-RDPEI), so [`ClientMsg::Touch`]
     /// reaches it as real touch contacts from here on. Sent by the RDP engine
     /// when a Windows host creates the channel — shortly after connect — and
@@ -1258,6 +1271,7 @@ enum ControlMsg<'a> {
     Picker,
     DisplayToken { token: &'a str },
     GraphicsStart,
+    GraphicsView { x: u16, y: u16, w: u16, h: u16 },
     Connected {
         name: &'a str,
         protocol: &'a str,
@@ -1345,6 +1359,7 @@ impl ServerMsg {
             ServerMsg::Video(_)
                 | ServerMsg::Graphics(_)
                 | ServerMsg::GraphicsStart
+                | ServerMsg::GraphicsView { .. }
                 | ServerMsg::VideoFormat { .. }
                 | ServerMsg::Resize { .. }
                 | ServerMsg::Cursor(_)
@@ -1368,6 +1383,9 @@ impl ServerMsg {
                 return None;
             }
             ServerMsg::GraphicsStart => control(&ControlMsg::GraphicsStart),
+            ServerMsg::GraphicsView { x, y, w, h } => {
+                control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
+            }
             ServerMsg::Resize { w, h, scale } => control(&ControlMsg::Resize {
                 w: *w,
                 h: *h,
@@ -1814,6 +1832,13 @@ mod tests {
             Some(json) => assert_eq!(json, r#"{"type":"error","message":"boom"}"#),
             None => panic!("error must be a text frame"),
         }
+        // The second column of a passed pipeline's picture: a display's message.
+        let view = ServerMsg::GraphicsView { x: 1440, y: 0, w: 1440, h: 900 };
+        assert!(view.is_display());
+        assert_eq!(
+            view.text_frame().as_deref(),
+            Some(r#"{"type":"graphicsView","x":1440,"y":0,"w":1440,"h":900}"#)
+        );
         // A Mac, which is where the subtype earns its place on the wire: three
         // targets say `"protocol":"vnc"` and only this field tells them apart.
         match (ServerMsg::Connected {

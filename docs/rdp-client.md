@@ -391,7 +391,11 @@ equal row off the size. The client composes and reports the span as
 it does any desktop. Which part of it a browser sees, and the pointer offset
 into it, is the engine's (`View` in `src/rdp.rs`), and so is *All Displays*, which
 shows the second column on a socket of its own (`Tab`): nothing of it reaches
-the RDP client, which composes the one span either way.
+the RDP client, which composes the one span either way. In a session that passes
+the pipeline the span is composed in the browser instead, which is told the
+column to show (`ServerMsg::GraphicsView`) and paints the second column's tab
+from the same picture
+([Two displays, one picture](architecture.md#rdps-graphics-pipeline-passed-through)).
 
 Measured 2026-10-03 against a Windows 11 host, through `tests/ws_probe.py`: a
 kept-size session asked for two 1440×900 monitors opened a 2880×900 desktop,

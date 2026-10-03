@@ -132,8 +132,21 @@ export interface EgfxCompositor {
    * client.
    */
   compose(commands: Uint8Array): ComposedRun;
+  /**
+   * The picture as composed so far: a view on the framebuffer where it is, good
+   * until the next `compose`, and of nothing before the first reset or after
+   * `close`.
+   */
+  picture(): Picture;
   /** Give the compositor's memory back. */
   close(): void;
+}
+
+/** The whole picture: `width` by `height` RGBX pixels, top row first. */
+export interface Picture {
+  width: number;
+  height: number;
+  pixels: Uint8ClampedArray;
 }
 
 /** Makes a compositor with nothing in it, for a pipeline that is starting. */
@@ -196,7 +209,7 @@ async function startThreads(
  * overlap along it merged into one. A Progressive frame is reported tile by tile,
  * and each rectangle costs an upload and a draw, whatever its width.
  */
-function coalesce(painted: Uint32Array): Uint32Array {
+export function coalesce(painted: Uint32Array): Uint32Array {
   const rects: number[][] = [];
   for (let i = 0; i + 3 < painted.length; i += 4) {
     rects.push([painted[i], painted[i + 1], painted[i + 2], painted[i + 3]]);
@@ -294,6 +307,22 @@ export function loadEgfx(
         // the browser is still writing into it.
         let closed = false;
         let copying: Promise<unknown> | null = null;
+        const picture = (): Picture => {
+          if (closed) {
+            return { width: 0, height: 0, pixels: new Uint8ClampedArray(0) };
+          }
+          const width = egfx.width();
+          const height = egfx.height();
+          return {
+            width,
+            height,
+            pixels: new Uint8ClampedArray(
+              memory.buffer,
+              egfx.pixels(),
+              width * height * 4,
+            ),
+          };
+        };
         return {
           scan(commands: Uint8Array): Scanned[] {
             return scanned(egfx.units(commands));
@@ -343,21 +372,13 @@ export function loadEgfx(
           },
           compose(commands: Uint8Array): ComposedRun {
             egfx.compose(commands);
-            const width = egfx.width();
-            const height = egfx.height();
-            const pixels = new Uint8ClampedArray(
-              memory.buffer,
-              egfx.pixels(),
-              width * height * 4,
-            );
             return {
               painted: coalesce(egfx.painted()),
-              width,
-              height,
               resized: egfx.resized(),
-              pixels,
+              ...picture(),
             };
           },
+          picture,
           close() {
             closed = true;
             if (copying) {

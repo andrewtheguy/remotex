@@ -1915,6 +1915,23 @@ export function useRemoteDesktop(
       void navigator.clipboard.writeText(text).catch(() => {});
     };
 
+    // The part of a passed pipeline's picture this display is. Queued in the
+    // worker behind the resize it came with. On the page that composes the
+    // pipeline, the part of its picture to show; in a tab showing a display of
+    // its own, the part of the session page's picture this tab is painted from,
+    // which is the only picture such a tab gets.
+    const handleGraphicsView = (
+      msg: Extract<ControlMsg, { type: "graphicsView" }>,
+    ) => {
+      const part = { x: msg.x, y: msg.y, w: msg.w, h: msg.h };
+      if (tabDisplay === null) {
+        painter?.setGraphicsView(part);
+        return;
+      }
+      painter?.mirrorGraphics(tabDisplay, part);
+      setVideoStream({ decode: "", passthrough: true, composed: true });
+    };
+
     const handleControlMsg = (msg: ControlMsg) => {
       // Any control message proves the socket attached to the slot, so reset
       // the reconnect backoff (an onopen-time reset would let a slot that
@@ -1974,6 +1991,9 @@ export function useRemoteDesktop(
           // the pipeline's first run must find a compositor with nothing in it.
           painter?.startGraphics();
           setVideoStream({ decode: "", passthrough: true, composed: true });
+          break;
+        case "graphicsView":
+          handleGraphicsView(msg);
           break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
