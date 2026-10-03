@@ -73,7 +73,7 @@ export type Sizing = "target" | "default" | "window";
 
 /**
  * Whether a session takes the remote's sound, as `connect` names it, and what
- * the sound is sent as: Opus, or lossless as FLAC.
+ * the sound is sent as: Opus, or FLAC, which is lossless.
  */
 export type Sound = "off" | "opus" | "flac";
 
@@ -287,7 +287,7 @@ function sizeOptions(
 
 /**
  * `target`'s sound as the picker shows it: nothing where it offers none, and
- * otherwise a tick and, under a ticked one, Opus or lossless. Ticking it takes
+ * otherwise a tick and, under a ticked one, Opus or FLAC. Ticking it takes
  * Opus.
  */
 function soundRow(
@@ -305,8 +305,8 @@ function soundRow(
     },
     {
       value: "flac",
-      label: "Lossless",
-      note: "FLAC, about a megabit a second of music. For a LAN.",
+      label: "FLAC",
+      note: "Lossless, about a megabit a second of music. For a LAN.",
     },
   ];
   // What was chosen last time.
