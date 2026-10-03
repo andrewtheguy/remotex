@@ -997,6 +997,11 @@ pub enum ServerMsg {
     /// to an idle slot, on disconnect ("End session"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
     Picker,
+    /// The token that makes this tab the one showing a display in a tab of its
+    /// own, sent first on the display socket that was given it
+    /// ([`crate::session::SessionManager::attach_display`]). The tab keeps it and
+    /// presents it on every socket it opens for that display after.
+    DisplayToken { token: String },
     /// A live target, what its session was started with and its client-visible
     /// capabilities. `audio` says the session carries the remote's sound, not
     /// whether any is arriving.
@@ -1249,6 +1254,7 @@ enum ControlMsg<'a> {
     },
     Error { message: &'a str },
     Picker,
+    DisplayToken { token: &'a str },
     GraphicsStart,
     Connected {
         name: &'a str,
@@ -1385,6 +1391,7 @@ impl ServerMsg {
             }),
             ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
             ServerMsg::Picker => control(&ControlMsg::Picker),
+            ServerMsg::DisplayToken { token } => control(&ControlMsg::DisplayToken { token }),
             ServerMsg::Connected {
                 name,
                 protocol,

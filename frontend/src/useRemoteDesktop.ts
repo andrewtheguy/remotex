@@ -123,6 +123,25 @@ export interface RemoteSize {
 // same browser still contend like two browsers — as intended). Exported so
 // logout (App.tsx) can drop it.
 export const SESSION_KEY = "remotex.sessionId";
+// The token that makes this tab the one showing display N in a tab of its own,
+// per tab like the claim: a reload keeps it, and another tab has none.
+const tabTokenKey = (display: number) => `remotex.displayToken.${display}`;
+
+function readTabToken(display: number): string | null {
+  try {
+    return sessionStorage.getItem(tabTokenKey(display));
+  } catch {
+    return null;
+  }
+}
+
+function writeTabToken(display: number, token: string): void {
+  try {
+    sessionStorage.setItem(tabTokenKey(display), token);
+  } catch {
+    // Storage blocked: this tab keeps the display until it reloads.
+  }
+}
 // The Mac-host Command-to-Control preference, default on. localStorage rather
 // than sessionStorage: unlike the session identity this is a lasting choice about
 // how this machine's keyboard behaves, and it should survive a new tab.
@@ -251,9 +270,10 @@ function overClipboardLimit(text: string): boolean {
 const CLOSE_EVICTED = 4001;
 // Close codes a display socket opened in a tab of its own is refused or let go
 // with: not this browser's session (4000), or a display the session no longer
-// shows in a tab (4002), as well as 4001 above.
+// shows in a tab (4002), as well as 4001 above — or one another tab shows (4003).
 const CLOSE_INVALID = 4000;
 const CLOSE_UNSUPPORTED = 4002;
+const CLOSE_TAKEN = 4003;
 // The display a page shows unless it is one opened in a tab of its own.
 const FIRST_DISPLAY = 1;
 const MAX_RETRY_DELAY_MS = 15_000;
@@ -1259,6 +1279,14 @@ export function useRemoteDesktop(
     // The socket of the display a tab of its own shows closed.
     const tabClosed = (display: number, code: number) => {
       wsRef.current = null;
+      if (code === CLOSE_TAKEN) {
+        clearDesktop();
+        setConnectError(
+          `Display ${display} is open in another tab. To show it here instead, choose another display and then All Displays again in the session's display menu.`,
+        );
+        setStatus("failed");
+        return;
+      }
       if (
         code === CLOSE_EVICTED ||
         code === CLOSE_INVALID ||
@@ -1279,7 +1307,12 @@ export function useRemoteDesktop(
     // A display's socket, which carries no claim: the gateway lets it in by the
     // login cookie this browser carries (src/session.rs, `attach_display`).
     const openDisplay = (display: number) => {
-      const socket = new WebSocket(gatewayDisplaySocketUrl(display));
+      const socket = new WebSocket(
+        gatewayDisplaySocketUrl(
+          display,
+          tabDisplay === null ? null : readTabToken(display),
+        ),
+      );
       const generation = advancePaintGeneration(paintGenerationRef);
       paintSocket = socket;
       socket.binaryType = "arraybuffer";
@@ -1921,6 +1954,11 @@ export function useRemoteDesktop(
           break;
         case "oversize":
           setOversize(msg.cause);
+          break;
+        case "displayToken":
+          if (tabDisplay !== null) {
+            writeTabToken(tabDisplay, msg.token);
+          }
           break;
         case "picker":
           // No target selected (idle attach, switch-target, a takeover, or an

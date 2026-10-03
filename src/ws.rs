@@ -61,6 +61,8 @@
 //! - `4002` — the running target does not carry this socket's medium (a camera or
 //!   microphone the target does not carry, or no engine running), or shows no tab
 //!   for this display.
+//! - `4003` — another tab shows this display: the socket's `token` is not the one
+//!   that tab was given.
 //!
 //! Any other close on the session socket detaches the browser. The owner reattaching
 //! within the grace period restores the picker or live engine; a different claim's
@@ -105,6 +107,8 @@ const CLOSE_EVICTED: u16 = 4001;
 /// camera or microphone socket on a target that does not carry it, or with no
 /// engine running.
 const CLOSE_UNSUPPORTED: u16 = 4002;
+/// Close code: another tab shows this display ([`DisplayRefused::Taken`]).
+const CLOSE_TAKEN: u16 = 4003;
 /// Standard internal-error close. The browser treats it as reconnectable, so a
 /// fresh attachment gets a fresh sequence space rather than reusing one.
 const CLOSE_SEQUENCE_EXHAUSTED: u16 = 1011;
@@ -1371,10 +1375,12 @@ async fn outbound<S>(
         info!("ws: outbound totals: {}", wire.totals);
 }
 
-/// The display socket's query string: which display it shows, from one.
+/// The display socket's query string: which display it shows, from one, and for
+/// the second, the token its tab was given ([`crate::protocol::ServerMsg::DisplayToken`]).
 #[derive(Deserialize)]
 pub struct DisplayParams {
     display: u32,
+    token: Option<String>,
 }
 
 pub async fn display_handler(
@@ -1391,6 +1397,7 @@ pub async fn display_handler(
             state.sessions,
             login,
             params.display,
+            params.token,
             HEARTBEAT_TIMINGS,
             Arc::clone(&state.throughput.meters),
         )
@@ -1404,11 +1411,12 @@ async fn display(
     sessions: Arc<SessionManager>,
     login: Option<String>,
     display: u32,
+    token: Option<String>,
     heartbeat_timings: HeartbeatTimings,
     throughput: Arc<ThroughputMeters>,
 ) {
     let attachment = match login {
-        Some(login) => sessions.attach_display(&login, display),
+        Some(login) => sessions.attach_display(&login, display, token.as_deref()),
         None => Err(DisplayRefused::NotOwner),
     };
     let attachment = match attachment {
@@ -1418,6 +1426,7 @@ async fn display(
             let code = match refused {
                 DisplayRefused::NotOwner => CLOSE_INVALID_TOKEN,
                 DisplayRefused::NotShown(_) => CLOSE_UNSUPPORTED,
+                DisplayRefused::Taken(_) => CLOSE_TAKEN,
             };
             let _ = socket
                 .send(Message::Close(Some(CloseFrame { code, reason: refused.to_string().into() })))
@@ -2370,7 +2379,7 @@ mod tests {
                     let sessions = Arc::clone(&shown);
                     async move {
                         ws.on_upgrade(move |socket| {
-                            display(socket, sessions, Some("login".to_owned()), 1, timings, Arc::default())
+                            display(socket, sessions, Some("login".to_owned()), 1, None, timings, Arc::default())
                         })
                     }
                 }),
@@ -2425,7 +2434,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(budget.available_permits() <= 60_000, "nothing was parked behind the silent client");
 
-        let mut replacement = reattaching.attach_display("login", 1).unwrap();
+        let mut replacement = reattaching.attach_display("login", 1, None).unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while budget.available_permits() < 100_000 {
                 tokio::time::sleep(Duration::from_millis(10)).await;

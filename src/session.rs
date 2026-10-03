@@ -148,6 +148,10 @@ pub enum DisplayRefused {
     /// The running engine shows no tab for this display.
     #[error("the session shows no display {0} of its own")]
     NotShown(u32),
+    /// Another tab shows this display: the token presented is not the one the
+    /// display's tab was given.
+    #[error("display {0} is open in another tab")]
+    Taken(u32),
 }
 
 /// The browser's media going to the remote, one bridge per medium the target carries.
@@ -547,6 +551,12 @@ struct State {
     /// The displays the running engine shows in tabs of their own, from the last
     /// [`ServerMsg::Displays`] it sent ([`crate::protocol::DisplayInfo::tab`]).
     tabs: Vec<u32>,
+    /// The token of the one tab showing the second display, from its first attach
+    /// after the engine listed the tab until the engine stops listing it. A socket
+    /// for that display presenting anything else is refused, so a second tab
+    /// cannot take the display from the first; the same tab reloading presents it
+    /// and is let back in.
+    tab_token: Option<String>,
     /// The first display's picture has lost messages since its socket last had
     /// all of them, so the next socket for it is owed a [`ClientMsg::Refresh`].
     display_lost: bool,
@@ -647,6 +657,9 @@ impl State {
     /// display no longer in it.
     fn show_tabs(&mut self, tabs: Vec<u32>) {
         self.displays.retain(|display, _| *display == FIRST_DISPLAY || tabs.contains(display));
+        if !tabs.contains(&SECOND_DISPLAY) {
+            self.tab_token = None;
+        }
         self.tabs = tabs;
     }
 
@@ -654,6 +667,7 @@ impl State {
     fn evict_displays(&mut self) {
         self.displays.clear();
         self.tabs.clear();
+        self.tab_token = None;
     }
 
     fn evict_camera(&mut self) {
@@ -1032,10 +1046,17 @@ impl SessionManager {
     /// socket. Another display is accepted only while the engine shows it in a tab
     /// of its own, and the engine is handed where its picture goes. A newer socket
     /// for the same display replaces this one.
+    ///
+    /// The second display is one tab's: the first socket for it after the engine
+    /// listed its tab is given a token ([`ServerMsg::DisplayToken`], the first
+    /// message on it), and every later socket for it must present `token` equal to
+    /// it — the same tab reconnecting — or is refused as [`DisplayRefused::Taken`].
+    /// The token lasts until the engine stops listing the tab.
     pub fn attach_display(
         self: &Arc<Self>,
         login: &str,
         display: u32,
+        token: Option<&str>,
     ) -> Result<DisplayAttachment, DisplayRefused> {
         let mut st = self.state.lock().unwrap();
         if st.claim.is_none() || st.login.as_deref() != Some(login) {
@@ -1044,6 +1065,19 @@ impl SessionManager {
         if display != FIRST_DISPLAY && (display != SECOND_DISPLAY || !st.tabs.contains(&display)) {
             return Err(DisplayRefused::NotShown(display));
         }
+        let given = if display == SECOND_DISPLAY {
+            match &st.tab_token {
+                Some(held) if token == Some(held.as_str()) => None,
+                Some(_) => return Err(DisplayRefused::Taken(display)),
+                None => {
+                    let token = Uuid::new_v4().to_string();
+                    st.tab_token = Some(token.clone());
+                    Some(token)
+                }
+            }
+        } else {
+            None
+        };
         if st.displays.remove(&display).is_some() {
             info!("session: superseding the socket of display {display}");
             if display == FIRST_DISPLAY && st.engine.is_some() {
@@ -1051,6 +1085,10 @@ impl SessionManager {
             }
         }
         let (event_tx, events) = mpsc::channel(FRAME_BUFFER);
+        // First, ahead of anything the engine sends: the channel is empty.
+        if let Some(token) = given {
+            let _ = event_tx.try_send(AttachEvent::Msg(ServerMsg::DisplayToken { token }));
+        }
         let (close_tx, evicted) = oneshot::channel();
         st.next_display_id += 1;
         let id = st.next_display_id;
@@ -2761,7 +2799,7 @@ mod tests {
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, frame_tx, _audio, _camera) = hooks.try_recv().expect("engine spawned on connect");
-        let mut display = mgr.attach_display("login", FIRST_DISPLAY).unwrap();
+        let mut display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
 
         // The picture goes on the display's socket, and the rest on the session's.
         frame_tx
@@ -2800,7 +2838,7 @@ mod tests {
         assert!(hooks.try_recv().is_err(), "no second engine while one runs");
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::Refresh)));
         // The display's next socket is repainted: its picture lost a frame.
-        let mut display = mgr.attach_display("login", FIRST_DISPLAY).unwrap();
+        let mut display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::Refresh)));
         frame_tx
             .send(ServerMsg::Resize { w: 30, h: 40, scale: UNSCALED })
@@ -2819,16 +2857,16 @@ mod tests {
     #[tokio::test]
     async fn a_display_socket_attaches_by_login_and_a_tab_while_the_engine_shows_it() {
         let (mgr, hooks) = manager_with_fake_engine();
-        assert!(matches!(mgr.attach_display("login", FIRST_DISPLAY), Err(DisplayRefused::NotOwner)));
+        assert!(matches!(mgr.attach_display("login", FIRST_DISPLAY, None), Err(DisplayRefused::NotOwner)));
         let token = mgr.claim(false, None, "login").unwrap();
-        assert!(matches!(mgr.attach_display("another", FIRST_DISPLAY), Err(DisplayRefused::NotOwner)));
+        assert!(matches!(mgr.attach_display("another", FIRST_DISPLAY, None), Err(DisplayRefused::NotOwner)));
         let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
         expect_picker(&mut att.events).await;
-        let _first = mgr.attach_display("login", FIRST_DISPLAY).unwrap();
+        let _first = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
-        assert!(matches!(mgr.attach_display("login", 2), Err(DisplayRefused::NotShown(2))));
+        assert!(matches!(mgr.attach_display("login", 2, None), Err(DisplayRefused::NotShown(2))));
 
         let list = |tab: Option<u32>| ServerMsg::Displays {
             active: 0,
@@ -2843,9 +2881,20 @@ mod tests {
         };
         frame_tx.send(list(Some(2))).await.unwrap();
         assert!(matches!(recv(&mut att.events).await, AttachEvent::Msg(ServerMsg::Displays { .. })));
-        let mut second = mgr.attach_display("login", 2).unwrap();
-        let Some(ClientMsg::DisplayShown { display: 2, feed: Some(feed) }) = input_rx.recv().await else {
+        let mut second = mgr.attach_display("login", 2, None).unwrap();
+        let Some(ClientMsg::DisplayShown { display: 2, feed: Some(_) }) = input_rx.recv().await else {
             panic!("the engine is handed the tab's feed");
+        };
+        let AttachEvent::Msg(ServerMsg::DisplayToken { token }) = recv(&mut second.events).await else {
+            panic!("the tab is given its token first");
+        };
+        // The display is that tab's: another tab, or a stale token, is refused, and
+        // the same tab reconnecting is let back in.
+        assert!(matches!(mgr.attach_display("login", 2, None), Err(DisplayRefused::Taken(2))));
+        assert!(matches!(mgr.attach_display("login", 2, Some("stale")), Err(DisplayRefused::Taken(2))));
+        let mut second = mgr.attach_display("login", 2, Some(&token)).unwrap();
+        let Some(ClientMsg::DisplayShown { display: 2, feed: Some(feed) }) = input_rx.recv().await else {
+            panic!("the engine is handed the reconnected tab's feed");
         };
         feed.frames.send(ServerMsg::Resize { w: 7, h: 8, scale: UNSCALED }).await.unwrap();
         assert!(matches!(recv(&mut second.events).await, AttachEvent::Msg(ServerMsg::Resize { w: 7, .. })));
@@ -2863,7 +2912,16 @@ mod tests {
             .await
             .expect("the tab's socket is let go")
             .ok();
-        assert!(matches!(mgr.attach_display("login", 2), Err(DisplayRefused::NotShown(2))));
+        assert!(matches!(mgr.attach_display("login", 2, Some(&token)), Err(DisplayRefused::NotShown(2))));
+        // Listed again, the display is the next tab's to take, the old token's too.
+        frame_tx.send(list(Some(2))).await.unwrap();
+        assert!(matches!(recv(&mut att.events).await, AttachEvent::Msg(ServerMsg::Displays { .. })));
+        let mut third = mgr.attach_display("login", 2, None).unwrap();
+        let AttachEvent::Msg(ServerMsg::DisplayToken { token: fresh }) = recv(&mut third.events).await else {
+            panic!("a new token for the tab that takes it");
+        };
+        assert_ne!(fresh, token);
+        assert!(matches!(mgr.attach_display("login", 2, Some(&token)), Err(DisplayRefused::Taken(2))));
     }
 
     /// A page opens its two sockets together, so the picture an engine starts with
@@ -2879,7 +2937,7 @@ mod tests {
         let (mut input_rx, frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
         frame_tx.send(ServerMsg::GraphicsStart).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut display = mgr.attach_display("login", FIRST_DISPLAY).unwrap();
+        let mut display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         assert!(matches!(recv(&mut display.events).await, AttachEvent::Msg(ServerMsg::GraphicsStart)));
         // Nothing was lost, so nothing is repainted.
         assert!(input_rx.try_recv().is_err());
@@ -3163,7 +3221,7 @@ mod tests {
         mgr.connect(att_b.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att_b.events, "fake").await;
         let (_input_rx_b, frame_tx_b, _audio, _camera) = hooks.try_recv().unwrap();
-        let mut display_b = mgr.attach_display("login", FIRST_DISPLAY).unwrap();
+        let mut display_b = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         frame_tx_b
             .send(ServerMsg::Resize { w: 5, h: 6, scale: UNSCALED })
             .await
