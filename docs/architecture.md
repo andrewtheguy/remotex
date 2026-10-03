@@ -2563,8 +2563,10 @@ A `wheel` message's pixels are points of the remote desktop: a pointer client
 sends the browser's deltas, which are that at 100%, and the touch layer sends
 two-finger travel through the scale the desktop is shown at, so content follows
 the fingers. Each engine spends the distance in what its wire has: RDP as
-proportional wheel rotation, an Apple target as as many wheel pulses as it is
-worth there, a `wlshare` target as the distance itself, in wlshare's scroll
+proportional wheel rotation, an Apple target as the distance itself, on both axes, in
+Apple's scroll message (see
+[A Mac scrolls by a distance](apple-vnc-889.md#a-mac-scrolls-by-a-distance)),
+a `wlshare` target as the distance itself, in wlshare's scroll
 message (`0xE5`), which the compositor hands its applications as a touchpad's
 continuous axis. Plain VNC has only the wheel buttons, a notch an event.
 

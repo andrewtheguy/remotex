@@ -192,6 +192,15 @@ async def main() -> int:
         default=None,
         help="client screen WIDTHxHEIGHT@SCALE[fit] carried on the connect (the opening size)",
     )
+    parser.add_argument(
+        "--wheel",
+        type=coordinates,
+        action="append",
+        default=[],
+        metavar="DX,DY",
+        help="a scroll of DX,DY pixels, sent a second after the --mouse move and "
+        "a second after each other (repeatable; DX and DY are positive right and down)",
+    )
     parser.add_argument("--mouse-width", type=int, default=None)
     parser.add_argument(
         "--mouse-delay",
@@ -556,6 +565,10 @@ async def main() -> int:
             x, y = position
             print(f"  {prefix}-> mouseMove {x},{y}")
             await to.send(json.dumps({"type": "mouseMove", "x": x, "y": y}))
+            for dx, dy in args.wheel:
+                await asyncio.sleep(1.0)
+                print(f"  {prefix}-> wheel {dx},{dy}")
+                await to.send(json.dumps({"type": "wheel", "dx": dx, "dy": dy, "unit": "pixel"}))
 
         page_task = None
         audio_task = None

@@ -344,8 +344,8 @@ export function attachTouchGestures(
   //
   // Pixels, because that is what the deltas are: a step is a step's worth of
   // the desktop passing under the fingers. RDP spends the distance as proportional wheel rotation and
-  // an Apple VNC target as as many wheel pulses as it is worth there, and
-  // wlshare is sent it as a distance; generic VNC reads only the sign, so a
+  // an Apple VNC target and
+  // wlshare are sent it as a distance; generic VNC reads only the sign, so a
   // step is a notch there.
   function sendScrollTick(dx: number, dy: number): void {
     const c = currentCursor();

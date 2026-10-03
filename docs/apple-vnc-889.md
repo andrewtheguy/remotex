@@ -614,14 +614,44 @@ macOS button numbers (left, right, center). So on 003.889 a by-the-book
 right-click arrives as a middle-click, which macOS does nothing visible with, in
 either mode. `Buttons` in `src/vnc.rs` swaps the two bits for both Apple subtypes.
 
-### A Mac scrolls only on a lone wheel bit
+### A Mac scrolls by a distance
 
-The Mac scrolls only for a mask of exactly `0x08` (up) or `0x10` (down). Any other
+The wheel bits of the pointer mask are a poor scroll on a Mac. It scrolls only for
+a mask of exactly `0x08` (up) or `0x10` (down), about two pixels a pulse. Any other
 combination is posted as buttons: a wheel bit with a button held becomes Back or
 Forward, and the horizontal bits `0x20`/`0x40` become clicks on buttons 5 and 6.
-Each pulse scrolls only about two pixels. Remotex sends each vertical pulse
-alone, sends no horizontal ones, and sends pulses in proportion to the scroll
-distance (`src/vnc.rs`).
+
+Apple's viewer sends a scroll in a message of its own instead, the scroll-wheel
+event of the second event message (`0x17`), and so does remotex, in both modes
+(`vnc_apple::scroll_wheel`). It is 58 bytes, numbers big-endian:
+
+| Bytes | |
+|---|---|
+| 0 | type, `0x17` |
+| 1 | flags, 0 |
+| 2–3 | `u16` size of what follows, 54 |
+| 4–5 | `u16` version, 1 |
+| 6–7 | `u16` kind, 11: a scroll-wheel event |
+| 8–13 | three `i16` line deltas |
+| 14–25 | three `i32` line deltas in 16.16 fixed point |
+| 26–37 | three `i32` point deltas |
+| 38–41 | `u32` scroll phase |
+| 42–45 | `u32` momentum phase |
+| 46–49 | `u32` scroll count |
+| 50–53 | `u32` flags: 1 instant mouser, 2 continuous, 4 inverted from the device |
+| 54–57 | `u16` x and `u16` y, the pointer's position |
+
+Each group of three is horizontal, vertical, then a third axis, and a scroll up or
+to the left is positive, the opposite of the DOM's. The agent copies every field
+into the `CGEvent` it posts, so an application receives what was sent: remotex
+sends the distance as the point delta, a tenth of it as the line delta, the
+continuous flag, and no phase, which an application reads as a precise scroll
+with no gesture around it. Checked on macOS 26.6 in both modes with a window that
+logs its scroll events: 40 points right and 25 up arrive as exactly that, at the
+pointer.
+
+Apple's viewer sends this message only to a Mac that says it takes it, and falls
+back to wheel bits otherwise. Remotex has no such fallback.
 
 ### Keys
 
@@ -948,7 +978,7 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 
 Message types: `MiscStatus` `0x14`, `AutoFrameBufferUpdate` `0x09`, `ViewerInfo`
 `0x21`, `SetDisplayConfiguration` `0x1d`, `SetDisplay` `0x0d`, `SetServerScaling`
-`0x08`, and the media-stream negotiation `0x1c`.
+`0x08`, the scroll-wheel event `0x17`, and the media-stream negotiation `0x1c`.
 
 ## The media stream: High Performance's picture and sound
 

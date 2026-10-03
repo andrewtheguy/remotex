@@ -195,7 +195,7 @@ pub enum MouseButton {
 /// trackpad (pixels) or a notched wheel (lines), and `notch` for a wheel the
 /// browser reported in pixels and the client recognised all the same. Read by
 /// RDP, whose wheel rotation carries a magnitude, by VNC talking to an Apple
-/// subtype, the one RFB server whose scroll step has been measured, and by a
+/// subtype, which is sent every unit as the distance it stands for, and by a
 /// `wlshare` target, which is sent a distance in pixels as the distance and
 /// anything else as wheel notches; generic RFB spends any nonzero delta as a
 /// single notch.
@@ -240,7 +240,7 @@ pub enum ClientMsg {
     },
     /// Scroll wheel delta, in `unit`; a pixel is a point of the remote desktop.
     /// RDP turns the distance into proportional wheel rotation, an Apple VNC
-    /// target into as many wheel-button pulses as it is worth there, and a
+    /// target is sent it in Apple's scroll message, on both axes, and a
     /// `wlshare` target is sent pixels as they are and a wheel's units as
     /// notches; generic VNC gets one notch per event and leaves the scaling to
     /// the guest.
