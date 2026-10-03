@@ -42,7 +42,7 @@ graphics pipeline is passed on for the browser to compose, which is experimental
 How a session's desktop is sized, whether it takes the remote's sound and whether
 it passes the remote's stream are chosen at the picker before it starts — see
 [What a session is started with](#what-a-session-is-started-with). Remote audio is encoded as
-Opus, save the Mac's passed AAC-ELD, wlshare's own Opus, passed too, and a target's EXPERIMENTAL lossless FLAC
+Opus, save the Mac's passed AAC-ELD, wlshare's own Opus, passed too, and a target's lossless FLAC
 ([Lossless sound](#lossless-sound)), and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
@@ -128,7 +128,7 @@ is not tested against.
   gateway and the graphics crate build on stable. Its threads share a memory, so
   every file `src/assets.rs` serves carries the two cross-origin isolation
   headers; keep them, and load nothing from another origin.
-  `frontend/wasm/flac` is the EXPERIMENTAL lossless sound's decoder, the page's
+  `frontend/wasm/flac` is the lossless sound's decoder, the page's
   alone: the gateway's FLAC is libFLAC and shares no code with it, so it has no
   crate under `crates/`. It has no threads, needs no shared memory, and builds
   on stable. Do not fold one module into the other, or add a third without a
@@ -312,7 +312,7 @@ that selects the stream. See
   Preserve claim-bound eviction and the source-format/resampling
   boundaries in [Audio frames](#audio-frames).
 - The sound's format is part of that choice, Opus or lossless, and not a config
-  key. Lossless is EXPERIMENTAL: a `wlshare` target is asked for FLAC frames,
+  key. Lossless is FLAC: a `wlshare` target is asked for FLAC frames,
   passed as they came like its Opus, and an `rdp` target's PCM is coded as FLAC
   here by libFLAC; the page decodes either
   in its own WebAssembly module (`frontend/wasm/flac`), never through WebCodecs.
@@ -1657,7 +1657,7 @@ rather than as silence. FLAC is the one stream it decodes itself
 
 #### Lossless sound
 
-EXPERIMENTAL. A session started with its sound lossless is sent it as FLAC,
+A session started with its sound lossless is sent it as FLAC,
 on the same socket and in the same frames: `audioFormat` says `codec` `flac`, an
 empty `head`, the source's own `sampleRate` and a `packetFrames` of twenty
 milliseconds of it, and each packet is one FLAC frame. It is a choice at the picker, on an

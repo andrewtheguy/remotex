@@ -17,8 +17,8 @@
 //! to be told ([`AudioBridge::ask_rate`]), or FLAC
 //! ([`crate::vnc_audio::PASSED_FLAC`]).
 //!
-//! A session started with lossless sound is sent it as FLAC
-//! (EXPERIMENTAL): wlshare's FLAC frames passed, or an RDP host's PCM coded as
+//! A session started with lossless sound is sent it as FLAC:
+//! wlshare's FLAC frames passed, or an RDP host's PCM coded as
 //! FLAC here ([`AudioListener::into_flac`]). The page decodes either in its
 //! WebAssembly module, and there is no rate to walk.
 

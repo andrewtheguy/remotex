@@ -35,7 +35,7 @@
 //! decoder takes, so it goes to the bridge as it came ([`PASSED_OPUS`]), made by
 //! the encoder this gateway codes an RDP host's sound with (`sound-opus`), at
 //! the rate the target's audio keys and their walk arrive at. A FLAC frame goes
-//! the same way in a session started with lossless sound (EXPERIMENTAL), for
+//! the same way in a session started with lossless sound, for
 //! the page's own decoder ([`PASSED_FLAC`]). Neither stream's header is sent by
 //! wlshare: everything in one follows from the format this client set and the
 //! extension's one rule, that every frame is [`BLOCK_FRAMES`] frames of it.

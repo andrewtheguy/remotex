@@ -225,7 +225,7 @@ site_passwd = ""
 # "wlshare" target lists wlshare's audio extension. Started with it off, neither
 # is asked, and the host keeps playing where it did.
 #
-# Opus is sent at the rates the audio keys below hold. Lossless (EXPERIMENTAL) is
+# Opus is sent at the rates the audio keys below hold. Lossless is
 # FLAC, which the page decodes in a WebAssembly module of its own: a "wlshare"
 # target's sound is coded by wlshare in whichever format was chosen and passed to
 # the browser as it came, so the gateway codes none of it, and an "rdp" target's

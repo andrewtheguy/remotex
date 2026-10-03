@@ -69,7 +69,7 @@ config key.
   or 1440×900 where it sets none, or follows the window: the remote is asked to
   render at the window's size and the browser's density, rather than being
   scaled on the client. A phone is offered the kept sizes only.
-- **Sound.** Opus, or lossless FLAC (experimental). A session started without
+- **Sound.** Opus, or lossless FLAC. A session started without
   sound asks the remote for none, so the host keeps playing where it did. In the
   session, Mute and Unmute change only whether this browser listens.
 - **Passthrough.** Sends the remote's own stream to the browser as it came, for
