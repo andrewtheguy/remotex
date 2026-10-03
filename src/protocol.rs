@@ -346,8 +346,9 @@ pub enum ClientMsg {
     /// extension lists the compositor's outputs and takes one back, and by the RDP
     /// engine on a target that asked for virtual displays, which shows one column
     /// of the framebuffer the host spans over them and switches columns here, asking
-    /// the host for nothing. Every other session delivers one framebuffer and no
-    /// list. A client that never receives [`ServerMsg::Displays`] never has an id to
+    /// the host for nothing, and by the VNC engine on a High Performance Mac asked
+    /// for two, which shows one display's media stream and switches streams here.
+    /// Every other session delivers one framebuffer and no list. A client that never receives [`ServerMsg::Displays`] never has an id to
     /// name here, which is how the panel stays hidden on those engines.
     SelectDisplay { id: u32 },
     /// Not a wire message. The session layer's word to an engine that a display
@@ -916,9 +917,10 @@ pub struct DisplayInfo {
     /// Where an engine shows this display in a tab of its own beside the first
     /// display rather than instead of it: the number a display socket names it by
     /// (`/ws/display?display=N`, and the page at `/display/N`). `None` for a
-    /// display the picker switches the one canvas to. Set by the RDP engine for
-    /// every column but the first while its *All displays* entry is active, and
-    /// by nothing else.
+    /// display the picker switches the one canvas to. Set for every virtual
+    /// display but the first while *All Displays* is chosen: by the RDP engine for
+    /// a column of its framebuffer, and by the VNC engine for a High Performance
+    /// Mac's second display.
     pub tab: Option<u32>,
 }
 

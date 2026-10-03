@@ -26,7 +26,7 @@ layer.
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
 | `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
-| `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, covered until it is up | AAC-ELD over the media stream |
+| `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC over the media stream, a leg per display, covered until it is up | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
@@ -46,12 +46,12 @@ official modes alone.
 
 | | |
 |---|---|
-| Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for. |
+| Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for, or two. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
 | Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and shows nothing else: the browser stays behind its resize notice until the stream is up and across display changes. |
-| Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
+| Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
 
@@ -117,7 +117,9 @@ encoder move between them. The viewer exposes no switch for it. See
 
 Remotex matches the split, on the same handshake: `ard` shares the physical
 displays, offers no resize and never creates a virtual display, and
-`ard-high-performance` creates exactly one, the "1 Virtual Display" choice, and
+`ard-high-performance` creates one, the "1 Virtual Display" choice, or with
+`virtual_displays = 2` the "2 Virtual Displays" one
+([Two virtual displays](#two-virtual-displays)), and
 never selects a physical screen or sends `SetServerScaling`. It departs in two
 places, and a third unofficially — `ard` with `virtual_display = true` creates
 the one virtual display the way High Performance does and then runs Standard's
@@ -490,7 +492,8 @@ for the unofficial `virtual_display = true` under `ard`, which sends the same
 messages; on macOS 26 the Mac answered them the same way with no media stream
 offered, and that is the only macOS it was tried on.
 
-`SetDisplayConfiguration` (`0x1d`) carries one display descriptor and one mode:
+`SetDisplayConfiguration` (`0x1d`) carries a display count and, for each display,
+one descriptor with one mode:
 
 | Descriptor field | Value remotex sends |
 |---|---|
@@ -523,6 +526,59 @@ A backing size twice the logical one makes a 2x display.
 - **The display outlives its session briefly.** A reconnect within a few seconds
   finds it still there with the same id; after about 45 seconds the Mac is back on
   its physical display. The new session's own layout arrives either way.
+
+### Two virtual displays
+
+Apple's viewer's High Performance sheet offers "2 Virtual Displays", and a
+target's `virtual_displays = 2` (alpha) asks the Mac for the same. What that
+changes, as read from Apple's viewer and daemon and as macOS 26 answered:
+
+- **The Mac says how many it creates.** Its ServerInit flags carry the count
+  above bit 4: 2, unless a managed preference holds the Mac to 1. It holds a
+  configuration that names more to that many without saying so. Remotex refuses
+  a session that asks for more than the Mac states, before it sends one.
+- **One configuration names both.** The display count is 2 and the descriptors
+  follow back to back, each led by its own length, which is how the Mac steps
+  from one to the next. Remotex sends the one-mode descriptor above for each
+  display, in the opening configuration and in every resize. The Mac creates the
+  second display to the right of the first, top-aligned: 1440×900 beside
+  1440×900 put it at 1440 points across, and 1366×768 beside 1024×700 at 1366.
+- **The layout lists both under the combined sentinel,** the first display
+  first, and its framebuffer is the span of the two: 2880×900 over two 1440×900
+  displays. Each record's backing rectangle is where that display sits in the
+  span, and pointer positions are addressed in the span too. A position of
+  100,200 on the second of those displays, sent as 1540,200, put the Mac's
+  pointer at 1540,200; over two 1280×800 displays at 2x, 2660,200 put it at
+  1330,100 in points. A position sent in the first second after the layout
+  moved nothing, on one display as on two.
+- **The media stream has a video leg per display.** Message 1 enables video 2,
+  on the port after video 1's; the offer carries the second display's keys and
+  offer behind the first's; the answer has a blob for each
+  ([Negotiation](#negotiation)). Video 1 is the first display and video 2 the
+  second: asked for 1366×768 beside 1024×700, each leg's pictures were its own
+  display's size. Each leg has its own keys, SSRC, reports, rate feedback and
+  keyframe requests, and the offers carry the session's one call id, as Apple's
+  viewer's do. The legs are offered, answered, stopped by a display change and
+  offered again together, in one message each time, so the rule of one offer at
+  a time is unchanged.
+- **Remotex shows one display on a page.** The picker lists `Display 1`,
+  `Display 2` and *All Displays*, which keeps the first on the session's page
+  and shows the second in a browser tab of its own, where Apple's viewer opens a
+  window for each. The choice is answered in the gateway: the Mac sends both legs
+  whatever is chosen, and the leg of a display nobody is shown is authenticated,
+  counted for liveness and dropped. A display coming into view starts at a
+  keyframe the Mac is asked for with a PLI on its leg. In a session started with
+  resize the tab's window sizes the second display, and otherwise both are the
+  size the session keeps. See
+  [Display geometry](architecture.md#display-geometry).
+- **Each display owes its first picture.** An offer for two displays ends the
+  session when either leg brings none within the 10 s, or goes silent
+  ([Liveness](#the-stream)). The first packet of a picture stands for the first
+  picture of a display nobody is shown, since none of its pictures is put
+  together.
+
+Checked on macvm only, decoded and passed, at 1x and 2x. HDR on either display,
+a physical Mac, and what Apple's viewer does beside it have not been.
 
 ### Resizing a High Performance display, as measured
 
@@ -944,7 +1000,8 @@ naming its ports, and the viewer makes its offer only then: message `0x1c`
 +0x14 16B  session UUID
 +0x24 46B  audio SRTP master key, viewer -> server
 +0x52 46B  audio SRTP master key, server -> viewer
-+0x80      audio offer, then the video1 keys (46B v->s, 46B s->v) and offer
++0x80      audio offer, then the video1 keys (46B v->s, 46B s->v) and offer,
+           then for a second display the video2 keys and offer, the same way
 ```
 
 The Mac answers with rectangles of encoding 1010, a `u16` size and then:
@@ -952,15 +1009,16 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
 - **message 1**, a 36-byte body: `u16` type, `u16` version, `u32` flags, then a
   `u16` port and `u32` flags for audio at `+8`/`+10`, video 1 at `+14`/`+16`,
   and video 2 at `+20`/`+22`, followed by ten reserved zero bytes. Bit 0 enables
-  a leg. Apple's viewer requires it on audio and video 1; remotex also requires
-  video 2 off because it offered one display. The measured ports were always
-  5900 and 5901, the RFB port and the next. The viewer receives on the same
+  a leg. Apple's viewer requires it on audio and video 1, and takes video 2's as
+  the Mac having two displays to send; remotex requires video 2 on exactly when the
+  session asked for two. The measured ports were always
+  5900 and 5901, the RFB port and the next, and 5902 for a second display. The viewer receives on the same
   numbers. The Mac sends message 1 once for the `SetEncodings` naming 1010, and
   again after each display change, never in reply to an offer.
 - **message 2**, AVConference's answer: the common eight-byte header, `u16`
   lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
   those blobs. Remotex checks that their lengths describe the whole body and
-  that video 2 is empty. The answer sometimes comes twice for one offer.
+  that video 2 has a blob exactly when it was offered. The answer sometimes comes twice for one offer.
   Apple's viewer disregards an answer that comes before message 1.
 - **message 3**, a 16-byte error: the common header, then `u32` type and `u32`
   sub-code.
@@ -977,10 +1035,11 @@ two fields:
 The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
 sets its bits and then byte-swaps the word before sending it. A published
 description has the word in host order, which would move every bit to another
-byte. Two other bits exist, and remotex sets neither:
-- bit 1 asks for 60 fps on the second video stream;
+byte. Two other bits exist:
+- bit 1 is bit 0 for the second video stream, which remotex sets beside it in an
+  offer for two displays;
 - bit 3 names Apple Remote Desktop, rather than Screen Sharing, as the video
-  client.
+  client, and remotex never sets it.
 
 **The picture and the sound go together.** A configuration with an empty audio
 offer is refused (`unable to create audio config`, error type 2), and one with an

@@ -158,6 +158,14 @@ connection with the same error as wrong credentials. See
   and puts every window on one virtual display, sized by the session, up to
   3840×2160 backing pixels. Picture and sound come over the Mac's media stream,
   HEVC and AAC-ELD over SRTP:
+  - **Alpha:** `virtual_displays = 2` asks the Mac for two virtual displays,
+    Apple's viewer's "2 Virtual Displays", the second to the right of the first.
+    The Display picker switches between them, and its *All Displays* keeps the
+    first here and opens the second at `/display/2` in a new tab of the same
+    browser, as on an RDP target; on a session that follows the window that
+    tab's window sizes the second display. The Mac sends a stream for each
+    display, the second to UDP port 5902, and the gateway decodes or passes
+    only the displays shown.
   - The Mac sends to the gateway's UDP ports 5900 and 5901, so a firewall or
     NAT between them must let that through.
   - A Linux gateway needs `net.core.rmem_max` of at least 4194304 for the
