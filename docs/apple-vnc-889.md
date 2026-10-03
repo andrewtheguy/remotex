@@ -927,7 +927,8 @@ dials the Mac.
 ### Negotiation
 
 After the first layout the viewer sends a second `SetEncodings`, the opening list
-with encoding 1010 (`0x3f2`) appended, then message `0x1c`
+with encoding 1010 (`0x3f2`) appended. The Mac answers it with message 1, below,
+naming its ports, and the viewer makes its offer only then: message `0x1c`
 (`RFBMediaStreamServerConfiguration`, version 3):
 
 ```text
@@ -954,11 +955,13 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
   a leg. Apple's viewer requires it on audio and video 1; remotex also requires
   video 2 off because it offered one display. The measured ports were always
   5900 and 5901, the RFB port and the next. The viewer receives on the same
-  numbers.
+  numbers. The Mac sends message 1 once for the `SetEncodings` naming 1010, and
+  again after each display change, never in reply to an offer.
 - **message 2**, AVConference's answer: the common eight-byte header, `u16`
   lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
   those blobs. Remotex checks that their lengths describe the whole body and
   that video 2 is empty. The answer sometimes comes twice for one offer.
+  Apple's viewer disregards an answer that comes before message 1.
 - **message 3**, a 16-byte error: the common header, then `u32` type and `u32`
   sub-code.
 
@@ -989,6 +992,12 @@ picker offers no choice of it. The stream takes over the Mac's sound, AirPlay in
 mode never touches the sound output, so a Mac there plays to its speakers or to
 an AirPlay receiver outside remotex as usual; in a High Performance session it
 plays nothing to one, which was confirmed on a physical Mac.
+
+**Ports first.** The Mac sends message 1 and the answer from separate paths, so
+an offer sent before message 1 can be answered before it, and the Mac names its
+ports once for the `SetEncodings` and once per display change, never again for an
+offer made in its place. Remotex therefore offers as Apple's viewer does: once
+for each message 1, and only once its display has settled.
 
 **One offer at a time.** A second `0x1c` sent while the first one's capture was
 still starting left the capture failed (`didStart: 0 error: 32000`). When the
@@ -1059,8 +1068,10 @@ other failures (see [Liveness](#the-stream)).
     start over. It also sends the rate reports described under
     [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
     viewer does.
-- **Liveness.** Every offer owes its answer, its display's first picture and
-  the first sound packet within 10 s, and the running stream an authentic
+- **Liveness.** The `SetEncodings` naming 1010 owes message 1 within 10 s, and so
+  does a display that has settled without one. Every offer owes its answer, its
+  display's first picture and the first sound packet within 10 s, and the running
+  stream an authentic
   packet, SRTP or SRTCP, on each leg every 48 s, 16 of Apple's 3-second
   timeouts. Apple's viewer times each leg from the last RTCP packet it
   received, not from pictures, which a still screen stops. The Mac's
@@ -1232,15 +1243,16 @@ went unread for 5–19 s at a time
 
 Every display change stops both legs, so the sound drops out with the picture
 until the new stream starts. The Mac then re-sends message 1 on its own,
-with no stream behind it. A new offer after the new layout starts a new stream on
-the same ports, under a new SSRC, with an IDR at the new size. Remotex offers once
-the display has settled, and the resize's cover stays up until that IDR is on its
-way to the browser.
+with no stream behind it. The offer it allows starts a new stream on the same
+ports, under a new SSRC, with an IDR at the new size. Remotex offers once message
+1 has come and the display has settled, and the resize's cover stays up until that
+IDR is on its way to the browser.
 
 ### Reaching the gateway
 
 The Mac sends from its own address to the viewer's address on the TCP connection,
-so a NAT between them has to pass it. The viewer's reports go out from the same
+from each port it named to the same port number at the viewer, so a NAT between
+them has to pass it. The viewer's reports go out from the same
 ports every second, which opens a port-preserving NAT's mapping. Every Mac uses the
 same port numbers, so remotex binds them with address and port reuse and connects
 each socket to its Mac. Several gateways on one host can then share the numbers,

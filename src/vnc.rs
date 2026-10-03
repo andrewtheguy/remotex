@@ -3134,7 +3134,8 @@ async fn hp_resize_step(
 /// Offer High Performance's media stream for the current display, when there is
 /// one to offer it for and nothing is about to change it — see
 /// [`DesktopState::media_offerable`] and [`MediaStream::offer`]. The session's
-/// first offer goes out behind the `SetEncodings` that names the stream.
+/// first call sends the `SetEncodings` that names the stream instead, and an offer
+/// waits for the ports the Mac names for it or for a display change.
 async fn offer_media(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
@@ -3150,16 +3151,17 @@ async fn offer_media(
         }
         (d.size, media.lock().unwrap().offer(d.size))
     };
-    let Some((first, configuration)) = offer else {
-        return Ok(());
-    };
-    info!("vnc: offering the Mac's media stream for its {}x{} display", size.0, size.1);
-    let mut msgs = Vec::with_capacity(2);
-    if first {
-        msgs.push(set_encodings(&vnc_apple_media::encodings_with_media_stream()));
+    match offer {
+        None => Ok(()),
+        Some(vnc_apple_media::Offer::Encodings) => {
+            debug!("vnc: asking the Mac to name its media-stream ports");
+            send(uplink, &set_encodings(&vnc_apple_media::encodings_with_media_stream())).await
+        }
+        Some(vnc_apple_media::Offer::Configuration(configuration)) => {
+            info!("vnc: offering the Mac's media stream for its {}x{} display", size.0, size.1);
+            send(uplink, &configuration).await
+        }
     }
-    msgs.push(configuration);
-    send_all(uplink, &msgs).await
 }
 
 /// Show a picture the media stream decoded: the whole display, through the shadow
@@ -4834,10 +4836,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
         vnc_apple::ENCODING_REKEY if apple.is_some() => {
             anyhow::bail!("the server re-keyed mid-session, which this client never requests")
         }
-        // The Mac's replies to a media-stream offer ([`vnc_apple_media`]): a `u16`
-        // saying how much follows, then the reply. A refusal ends the session, as it
-        // ends Apple's viewer's. A stream the Mac took down on its own leaves the
-        // browser covered until the next offer delivers ([`DesktopState::covered`]):
+        // The Mac's media-stream messages ([`vnc_apple_media`]): a `u16` saying how
+        // much follows, then the message — its ports, which the next offer waits
+        // for, or its answer. A refusal ends the session, as it ends Apple's
+        // viewer's. Ports named again for a stream the Mac took down on its own
+        // leave the browser covered until the next offer delivers ([`DesktopState::covered`]):
         // covered here, unless a resize already covers it, since the display change
         // behind it may keep the size and bring no layout that resizes.
         vnc_apple_media::ENCODING_MEDIA_STREAM if shared.media.is_some() => {

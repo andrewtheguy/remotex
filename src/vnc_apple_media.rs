@@ -1631,8 +1631,23 @@ enum Outlet {
 /// display's 30 Hz ([`vnc_apple::DISPLAY_HZ`]).
 const PASS_QUEUE: usize = 15;
 
+/// What [`MediaStream::offer`] has the session send.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Offer {
+    /// The `SetEncodings` naming [`ENCODING_MEDIA_STREAM`], which the Mac names its
+    /// ports for.
+    Encodings,
+    /// The `0x1c` offer for the display.
+    Configuration(Vec<u8>),
+}
+
 /// One session's media stream: its offers, and once the Mac names its ports, the
 /// receiver. Shared between the engine's two loops, which each decide on offers.
+///
+/// An offer goes out only once the Mac has named its ports, as Apple's viewer
+/// makes it: the Mac names them for the encodings naming the stream and after each
+/// display change, never in reply to an offer, and each naming is good for one
+/// offer.
 ///
 /// Only one offer is ever out: a second one, sent while the first's capture was
 /// starting, failed to start (`error 32000`) and left a display stream behind that
@@ -1648,12 +1663,14 @@ pub struct MediaStream {
     asked: bool,
     /// An offer is out that the Mac has not answered.
     pending: bool,
+    /// The Mac has named its ports, and no offer has gone out on that naming yet.
+    invited: bool,
     /// The size the live (or starting) stream was offered for; `None` while there
     /// is none, as after a display change.
     offered: Option<(u16, u16)>,
     /// What the stream owes the session next — see [`MediaStream::overdue`].
     owed: Owed,
-    /// Signalled at every offer — see [`MediaStream::offered`].
+    /// Signalled at every new deadline — see [`MediaStream::offered`].
     offer_made: std::sync::Arc<tokio::sync::Notify>,
     /// The ports the receiver is bound to, and the receiver.
     receiver: Option<((u16, u16), tokio::task::JoinHandle<()>)>,
@@ -1690,6 +1707,9 @@ enum Owed {
     /// Nothing: no stream is offered, as before the first display and across a
     /// display change.
     Nothing,
+    /// The Mac's ports, without which no offer can go out, since this instant: the
+    /// encodings naming the stream went then, or the display settled without them.
+    Ports(std::time::Instant),
     /// An answer to the offer that went at this instant, for a display that has
     /// changed since. No other offer can go out until it comes.
     Answer(std::time::Instant),
@@ -1731,6 +1751,7 @@ impl MediaStream {
             local: local.ip(),
             asked: false,
             pending: false,
+            invited: false,
             offered: None,
             owed: Owed::Nothing,
             offer_made: std::sync::Arc::default(),
@@ -1752,20 +1773,36 @@ impl MediaStream {
         self
     }
 
-    /// What to send to offer the stream for a display of `size` backing pixels,
-    /// unless an offer is already out or the stream already runs at that size: the
-    /// `0x1c` message, and ahead of the session's first one, whether the
-    /// `SetEncodings` naming [`ENCODING_MEDIA_STREAM`] has to precede it.
-    pub fn offer(&mut self, size: (u16, u16)) -> Option<(bool, Vec<u8>)> {
+    /// What to send toward a stream for a display of `size` backing pixels, which
+    /// the session's display now is and nothing is about to change, unless an
+    /// offer is already out or the stream already runs at that size: first the
+    /// `SetEncodings` naming [`ENCODING_MEDIA_STREAM`], then, once the Mac has
+    /// named its ports for it, the `0x1c` offer. Until it has, the Mac owes them.
+    pub fn offer(&mut self, size: (u16, u16)) -> Option<Offer> {
         if self.pending || self.offered == Some(size) {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        if !std::mem::replace(&mut self.asked, true) {
+            self.owe(Owed::Ports(now));
+            return Some(Offer::Encodings);
+        }
+        if !std::mem::take(&mut self.invited) {
+            if self.owed == Owed::Nothing {
+                self.owe(Owed::Ports(now));
+            }
             return None;
         }
         self.pending = true;
         self.offered = Some(size);
-        self.owed = Owed::Stream { offered: std::time::Instant::now(), pictured: None };
+        self.owe(Owed::Stream { offered: now, pictured: None });
+        Some(Offer::Configuration(self.offers.configuration(size)))
+    }
+
+    /// Owe `owed` from here, which sets a new deadline.
+    fn owe(&mut self, owed: Owed) {
+        self.owed = owed;
         self.offer_made.notify_one();
-        let first = !std::mem::replace(&mut self.asked, true);
-        Some((first, self.offers.configuration(size)))
     }
 
     /// The newest decoded picture, for a browser that needs the whole desktop again.
@@ -1794,8 +1831,9 @@ impl MediaStream {
     }
 
     /// The display changed. The Mac stops both streams for it and starts them
-    /// again only on an offer, which the settled layout gets; until then the stream
-    /// owes nothing but an answer to an offer still out, which holds back that one.
+    /// again only on an offer, which the settled layout gets once the Mac has named
+    /// its ports for it; until then the stream owes nothing but an answer to an
+    /// offer still out, which holds back that one.
     pub fn stopped(&mut self) {
         self.offered = None;
         self.owed = match self.owed {
@@ -1830,7 +1868,7 @@ impl MediaStream {
         Some(heard_since(&self.sound_heard, sounded).unwrap_or(sounded))
     }
 
-    /// Signalled at every offer, which sets a new [`deadline`](Self::deadline): an
+    /// Signalled at every new [`deadline`](Self::deadline), which an offer sets: an
     /// offer can go out from either of the engine's loops, and the one that waits
     /// for the deadline may be idle behind a still screen when the other sends it.
     pub fn offered(&self) -> std::sync::Arc<tokio::sync::Notify> {
@@ -1841,7 +1879,7 @@ impl MediaStream {
     pub fn deadline(&self) -> Option<std::time::Instant> {
         match self.owed {
             Owed::Nothing => None,
-            Owed::Answer(offered) => Some(offered + STREAM_START),
+            Owed::Ports(since) | Owed::Answer(since) => Some(since + STREAM_START),
             Owed::Stream { offered, pictured } => {
                 let picture = leg_due(offered, self.picture_last(pictured));
                 Some(picture.min(leg_due(offered, self.sound_last(offered))))
@@ -1858,6 +1896,7 @@ impl MediaStream {
         let first = STREAM_START.as_secs();
         let silence = STREAM_SILENCE.as_secs();
         let unanswered = || anyhow::anyhow!("the Mac did not answer the media-stream offer within {first}s");
+        let unnamed = || anyhow::anyhow!("the Mac named no ports for its media stream within {first}s");
         let portless = || {
             anyhow::anyhow!("the Mac accepted the media stream but named no ports for it within {first}s")
         };
@@ -1871,6 +1910,7 @@ impl MediaStream {
         let ports = self.receiver.as_ref().map(|(ports, _)| *ports);
         let (offered, pictured) = match self.owed {
             Owed::Nothing => return None,
+            Owed::Ports(since) => return (now >= since + STREAM_START).then(unnamed),
             Owed::Answer(offered) => return (now >= offered + STREAM_START).then(unanswered),
             Owed::Stream { offered, pictured } => (offered, pictured),
         };
@@ -1907,26 +1947,30 @@ impl MediaStream {
             .unwrap_or_else(|| anyhow::anyhow!("its receiver stopped"))
     }
 
-    /// Act on an encoding-1010 rectangle. `true` when the stream is down until the
-    /// next offer: the Mac re-announced its ports with no offer of this side's out,
-    /// which is what it does after a display change of its own, with no stream
-    /// behind the announcement.
+    /// Act on an encoding-1010 rectangle. `true` when a stream offered for the
+    /// display went down with it: the Mac named its ports again, which it does
+    /// after every display change, its own included, and the browser stays covered
+    /// until the offer that naming allows delivers.
     ///
     /// An error ends the session: the Mac refused the stream, or described one this
     /// side cannot receive. Apple's viewer shows the refusal and closes.
     pub fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<bool> {
         match parse_media_reply(body)? {
             MediaReply::Ports { audio_port, video_port } => {
-                if !self.pending {
-                    log::debug!("vnc: the Mac re-announced its media streams unasked; they are down until offered");
+                self.invited = true;
+                if matches!(self.owed, Owed::Ports(_)) {
+                    self.owed = Owed::Nothing;
+                }
+                let down = self.offered.is_some();
+                if down {
+                    log::debug!("vnc: the Mac re-announced its media streams; they are down until offered");
                     self.stopped();
-                    return Ok(true);
                 }
                 let ports = (audio_port, video_port);
                 // The Mac names the same ports every time, and the receiver carries
                 // on across display changes.
                 if self.receiver.as_ref().is_some_and(|(bound, _)| *bound == ports) {
-                    return Ok(false);
+                    return Ok(down);
                 }
                 if let Some((_, receiver)) = self.receiver.take() {
                     receiver.abort();
@@ -1936,6 +1980,7 @@ impl MediaStream {
                      sound at {audio_port}"
                 );
                 self.receiver = Some((ports, self.receive(ports)?));
+                return Ok(down);
             }
             MediaReply::Answer => {
                 log::debug!("vnc: the Mac accepted the media-stream offer");
@@ -3056,41 +3101,78 @@ mod tests {
         MediaStream::new(peer, local, false).0
     }
 
-    /// One offer out at a time, one per display, and the encodings ahead of the
-    /// first.
+    /// Offer the stream for `size` as the session does once the Mac has named its
+    /// ports. The naming is noted as [`MediaStream::on_reply`] notes it: binding
+    /// the ports takes an address of this host's, which the tests' is not.
+    fn offer_on_ports(m: &mut MediaStream, size: (u16, u16)) -> Vec<u8> {
+        m.asked = true;
+        m.invited = true;
+        match m.offer(size) {
+            Some(Offer::Configuration(msg)) => msg,
+            other => panic!("no offer for {size:?}: {other:?}"),
+        }
+    }
+
+    const ANSWER: &str = "000200020000000000000000000000000000";
+    const PORTS: &str = "0001000100000000170c00000001170d0000000100000000000000000000000000000000";
+
+    /// The encodings first, then an offer only on the ports the Mac names for
+    /// them or for a display change, one per naming, one out at a time, one per
+    /// display.
     #[test]
-    fn an_offer_goes_out_once_per_display_and_one_at_a_time() {
+    fn an_offer_waits_for_the_ports_and_goes_out_once_per_display_and_one_at_a_time() {
         let mut m = media();
-        let (first, msg) = m.offer((1600, 1000)).expect("the first display gets an offer");
-        assert!(first);
+        assert_eq!(m.offer((1600, 1000)), Some(Offer::Encodings), "the encodings ask for the ports");
+        assert!(m.offer((1600, 1000)).is_none(), "no offer before the Mac names its ports");
+        m.invited = true;
+        let Some(Offer::Configuration(msg)) = m.offer((1600, 1000)) else {
+            panic!("the named ports allow an offer")
+        };
         assert_eq!(msg[0], 0x1c);
         assert!(m.pending());
         assert!(m.offer((1280, 800)).is_none(), "not while one is out");
-        assert!(!m.on_reply(&unhex("000200020000000000000000000000000000")).unwrap());
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
         assert!(!m.pending());
         assert!(m.offer((1600, 1000)).is_none(), "the stream runs at this size");
         m.stopped();
-        let (first, _) = m.offer((1600, 1000)).expect("a display change needs a new one");
-        assert!(!first, "the encodings went out with the first");
+        assert!(m.offer((1600, 1000)).is_none(), "a display change waits for the ports named after it");
+        m.invited = true;
+        assert!(matches!(m.offer((1600, 1000)), Some(Offer::Configuration(_))));
+    }
+
+    /// The ports are owed from the encodings that ask for them. Named, they allow
+    /// an offer; named again, which the Mac does after a display change of its
+    /// own, they take the stream offered for the old display down until the next.
+    #[test]
+    fn named_ports_allow_an_offer_and_named_again_take_the_stream_down() {
+        let mut m = media();
+        m.offer((1600, 1000)).unwrap();
+        let due = m.deadline().expect("the ports are owed once asked for");
+        let unnamed = m.overdue(due).expect("overdue at the deadline");
+        assert!(unnamed.to_string().contains("named no ports"), "{unnamed}");
+
+        // Binding them is what fails here, once the naming is noted.
+        let bound = m.on_reply(&unhex(PORTS)).unwrap_err();
+        assert!(format!("{bound:#}").contains("for the Mac's media stream"), "{bound:#}");
+        assert_eq!(m.deadline(), None, "named");
+        assert!(matches!(m.offer((1600, 1000)), Some(Offer::Configuration(_))));
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+
+        m.on_reply(&unhex(PORTS)).unwrap_err();
+        assert_eq!(m.offered, None, "the stream is down");
+        assert!(matches!(m.offer((1600, 1000)), Some(Offer::Configuration(_))), "and offered again");
     }
 
     /// A refusal is an error, which ends the session as it ends Apple's viewer's.
-    /// Ports re-announced with no offer out — which is what a display change the
-    /// Mac made on its own sends — are a stream down until the next offer.
     #[test]
-    fn a_refusal_ends_the_session_and_an_unasked_announcement_downs_the_stream() {
+    fn a_refusal_ends_the_session() {
         let mut m = media();
-        m.offer((1600, 1000)).unwrap();
+        offer_on_ports(&mut m, (1600, 1000));
         let refused = m.on_reply(&unhex("00030001000000000000000200000000")).unwrap_err();
         assert!(
             format!("{refused:#}").contains("refused the media stream (error type 2, sub-code 0)"),
             "{refused:#}"
         );
-
-        let mut m = media();
-        let ports = unhex("0001000100000000170c00000001170d0000000100000000000000000000000000000000");
-        assert!(m.on_reply(&ports).unwrap());
-        assert!(m.offer((1600, 1000)).is_some());
     }
 
     /// An offer owes its display's first picture and the first sound within
@@ -3105,14 +3187,14 @@ mod tests {
         assert_eq!(m.deadline(), None, "nothing is owed before an offer");
         *m.sounded.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
         let offered = std::time::Instant::now();
-        m.offer((1600, 1000)).unwrap();
+        offer_on_ports(&mut m, (1600, 1000));
         let first = m.deadline().expect("an offer owes a picture and sound");
         assert!(first >= offered + STREAM_START);
         assert!(m.overdue(first - std::time::Duration::from_millis(1)).is_none());
         let unanswered = m.overdue(first).expect("overdue at the deadline");
         assert!(unanswered.to_string().contains("did not answer"), "{unanswered}");
 
-        assert!(!m.on_reply(&unhex("000200020000000000000000000000000000")).unwrap());
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
         let portless = m.overdue(first).expect("still overdue once answered");
         assert!(portless.to_string().contains("named no ports"), "{portless}");
 
@@ -3153,7 +3235,7 @@ mod tests {
         m.stopped();
         assert_eq!(m.deadline(), None, "a display change owes nothing");
         assert!(m.overdue(next + STREAM_SILENCE).is_none());
-        m.offer((1280, 800)).unwrap();
+        offer_on_ports(&mut m, (1280, 800));
         assert!(m.deadline().is_some(), "until its own offer");
     }
 
@@ -3163,18 +3245,19 @@ mod tests {
     #[test]
     fn an_offer_out_across_a_display_change_still_owes_its_answer() {
         let mut m = media();
-        m.offer((1600, 1000)).unwrap();
+        offer_on_ports(&mut m, (1600, 1000));
         let first = m.deadline().unwrap();
         m.stopped();
         m.stopped();
         assert!(m.pending());
-        assert!(m.offer((1280, 800)).is_none(), "not while the first is out");
+        m.invited = true;
+        assert!(m.offer((1280, 800)).is_none(), "not while the first is out, ports named or not");
         assert_eq!(m.deadline(), Some(first), "the answer is still owed");
         assert!(m.overdue(first - std::time::Duration::from_millis(1)).is_none());
         let unanswered = m.overdue(first).expect("unanswered at the deadline");
         assert!(unanswered.to_string().contains("did not answer"), "{unanswered}");
 
-        assert!(!m.on_reply(&unhex("000200020000000000000000000000000000")).unwrap());
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
         assert_eq!(m.deadline(), None, "answered, for a display that has gone");
         assert!(m.offer((1280, 800)).is_some(), "the new display's offer goes out");
     }

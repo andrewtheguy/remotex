@@ -372,11 +372,13 @@ async fn serve_scrolling_vnc(
 // banner, its DH authentication, the `0x81` ClientInit, the cleartext prelude,
 // the rekey that switches on the record layer, and then a display layout — the
 // virtual display once one is configured, the physical screen otherwise — and a
-// framebuffer update *inside* that record layer. The fake accepts the media
-// stream the gateway offers and names no ports for it, which keeps the picture on
-// RFB pixels for the gateway's first-picture allowance: the stream's own packets are
-// UDP, and `src/vnc_apple_media.rs` tests them. Or it refuses the offer, which
-// ends the session.
+// framebuffer update *inside* that record layer. The fake names its media
+// stream's ports for the encodings that list the stream and after each display
+// change, as the Mac does, and accepts the offer the gateway makes on them while
+// sending nothing to them, which keeps the picture on RFB pixels for the gateway's
+// first-picture allowance: the stream's own packets are UDP, and
+// `src/vnc_apple_media.rs` tests them. Or it refuses the offer, which ends the
+// session.
 //
 // This is the only automated test that can reach any of it. There is no
 // containerisable Apple server — `tests/vnc-dummy` is Xtigervnc and speaks none of
@@ -460,7 +462,7 @@ async fn spawn_fake_mac() -> (
 /// How the fake Mac answers a media-stream offer.
 #[derive(Clone, Copy, Debug)]
 enum MacStream {
-    /// With AVConference's answer and no ports, so no packet is ever owed.
+    /// With AVConference's answer, and nothing ever sent to the ports.
     Accept,
     /// With error message 3 of type 2, what a Mac sends for an offer it cannot
     /// build a configuration from.
@@ -726,6 +728,26 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16), answer: Option<MacStream>) -> 
     update
 }
 
+/// The rect that names the media stream's ports, in encoding 1010: message 1, with
+/// the audio and the first video leg enabled. Two ports free on this host, which
+/// nothing is sent to.
+fn fake_mac_ports() -> Vec<u8> {
+    let free = || std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut rect = vec![0u8; 8]; // x, y, w, h
+    rect.extend_from_slice(&1010i32.to_be_bytes());
+    rect.extend_from_slice(&36u16.to_be_bytes());
+    rect.extend_from_slice(&1u16.to_be_bytes()); // the ports
+    rect.extend_from_slice(&1u16.to_be_bytes()); // version
+    rect.extend_from_slice(&0u32.to_be_bytes()); // flags
+    for port in [free(), free()] {
+        rect.extend_from_slice(&port.to_be_bytes());
+        rect.extend_from_slice(&1u32.to_be_bytes()); // enabled
+    }
+    rect.extend_from_slice(&[0u8; 6]); // video 2, off
+    rect.extend_from_slice(&[0u8; 10]);
+    rect
+}
+
 /// The rect that answers a media-stream offer, in encoding 1010: [`MacStream`]'s
 /// message 2 or 3.
 fn fake_mac_answer(answer: MacStream) -> Vec<u8> {
@@ -918,6 +940,9 @@ async fn serve_fake_mac_records(
     let mut sent_clipboard_status = false;
     let mut clipboard_fetch_pending = false;
     let mut offer_pending = false;
+    // Whether the encodings listed the media stream, after which every display
+    // change names its ports again.
+    let mut media_listed = false;
 
     loop {
         let mut kind = [0u8; 1];
@@ -948,12 +973,21 @@ async fn serve_fake_mac_records(
             0 => {
                 records.read_exact(&mut [0u8; 19]).await?;
             }
-            // SetEncodings
+            // SetEncodings. The list naming the media stream is answered with its
+            // ports, in an update of their own.
             2 => {
                 let mut head = [0u8; 3];
                 records.read_exact(&mut head).await?;
                 let count = u16::from_be_bytes([head[1], head[2]]);
-                records.read_exact(&mut vec![0u8; usize::from(count) * 4]).await?;
+                let mut encodings = vec![0u8; usize::from(count) * 4];
+                records.read_exact(&mut encodings).await?;
+                let lists_media = encodings.as_chunks::<4>().0.iter().any(|&e| i32::from_be_bytes(e) == 1010);
+                if lists_media && !std::mem::replace(&mut media_listed, true) {
+                    let mut update = vec![0u8, 0];
+                    update.extend_from_slice(&1u16.to_be_bytes());
+                    update.extend_from_slice(&fake_mac_ports());
+                    write_half.write_all(writer.frame(&update).unwrap()).await?;
+                }
             }
             // FramebufferUpdateRequest. A non-incremental one is answered; the
             // first is answered with the display layout first, which is the
@@ -1082,13 +1116,17 @@ async fn serve_fake_mac_records(
                 configurations.push((points, density));
                 // Setup is answered by the first non-incremental request below.
                 // A steady-state dynamic configuration is answered immediately by
-                // a fresh authoritative layout, as the real Mac does.
+                // a fresh authoritative layout, as the real Mac does, and once the
+                // media stream is listed, by its ports named again.
                 if sent_layout {
                     let mut rect = vec![0u8, 0];
-                    rect.extend_from_slice(&1u16.to_be_bytes());
+                    rect.extend_from_slice(&(1 + u16::from(media_listed)).to_be_bytes());
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
                     rect.extend_from_slice(&fake_mac_layout(MAC_VIRTUAL_DISPLAY, points, density));
+                    if media_listed {
+                        rect.extend_from_slice(&fake_mac_ports());
+                    }
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
             }
