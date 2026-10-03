@@ -1487,6 +1487,9 @@ async fn display(
     ));
 
     let mut outbound_done = false;
+    // Whether this end gave up on the socket, rather than the browser closing it
+    // or the slot letting it go.
+    let mut gave_up = false;
     let mut heartbeat_check = interval(heartbeat_timings.interval);
     heartbeat_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_heartbeat = Instant::now();
@@ -1507,6 +1510,7 @@ async fn display(
                         "ws: display {display}'s heartbeat timed out after {}s",
                         last_heartbeat.elapsed().as_secs()
                     );
+                    gave_up = true;
                     break;
                 }
                 continue;
@@ -1544,11 +1548,22 @@ async fn display(
             Some(Ok(_)) => {}
             Some(Err(e)) => {
                 warn!("ws: display receive error: {e}");
+                gave_up = true;
                 break;
             }
         }
     }
 
+    // A socket this end gave up on was not evicted, and the browser must not be
+    // told it was: an eviction's close (4001) is a takeover to the page, which
+    // waits for its session socket to say so and never reconnects. Letting go of
+    // the slot is what would send one, so the outbound half goes first, and the
+    // socket ends unannounced, as the session socket's does on a heartbeat
+    // timeout — a close the page reconnects after.
+    if gave_up && !outbound_done {
+        outbound.abort();
+        outbound_done = true;
+    }
     sessions.detach_display(id);
     if !outbound_done
         && tokio::time::timeout(std::time::Duration::from_secs(5), &mut outbound)
@@ -2562,6 +2577,45 @@ mod tests {
         ));
 
         drop(client);
+        server.abort();
+    }
+
+    /// A display socket this end gives up on is not an eviction, so it ends without
+    /// the eviction's close: the page reconnects after any other close, and after a
+    /// 4001 waits for a takeover its session socket will never report.
+    #[tokio::test]
+    async fn a_display_socket_whose_heartbeat_runs_out_is_not_told_it_was_evicted() {
+        let sessions = Arc::new(SessionManager::with_test_spawner(vec![fake_target()], |_, _, _, _, _, _| {}));
+        sessions.claim(false, None, "login").unwrap();
+        let timings = HeartbeatTimings { interval: Duration::from_millis(50), timeout: Duration::from_millis(200) };
+        let app = Router::new().route(
+            "/ws/display",
+            any(move |ws: WebSocketUpgrade| {
+                let sessions = Arc::clone(&sessions);
+                async move {
+                    ws.on_upgrade(move |socket| {
+                        display(socket, sessions, Some("login".into()), 1, None, timings, Arc::default())
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/display"))
+            .await
+            .unwrap();
+        // Unpolled, so nothing answers the pings, until well past the timeout.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        while let Ok(Some(Ok(frame))) = tokio::time::timeout(Duration::from_secs(5), client.next()).await {
+            if let ClientFrame::Close(Some(close)) = frame {
+                assert_ne!(u16::from(close.code), CLOSE_EVICTED, "a heartbeat timeout reported as an eviction");
+            }
+        }
+
         server.abort();
     }
 

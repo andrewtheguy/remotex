@@ -1660,6 +1660,18 @@ async fn active_loop(
                 // repaint is its own.
                 if let ClientMsg::OnDisplay { display, input: made } = msg {
                     let Some(shown) = tab.as_mut().filter(|tab| tab.display == display) else {
+                        // A release from a tab already gone — the session lets go
+                        // of what its socket left held — still reaches the host,
+                        // which would otherwise keep it down. A key or a button
+                        // has no position to place.
+                        if matches!(
+                            *made,
+                            ClientMsg::Key { pressed: false, .. } | ClientMsg::MouseButton { pressed: false, .. }
+                        ) {
+                            for event in translate_input(*made, &mut last_pos, &mut wheel, view.origin()) {
+                                event.apply(input);
+                            }
+                        }
                         continue;
                     };
                     if matches!(*made, ClientMsg::Refresh) {

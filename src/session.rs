@@ -337,6 +337,9 @@ struct EngineSlot {
     ended: oneshot::Receiver<()>,
     /// What the browser has told this engine is down and not yet let go of.
     held: HeldInput,
+    /// The same for each display shown in a tab of its own, over its socket: let
+    /// go of when that socket goes, while the session's browser stays.
+    tab_held: std::collections::BTreeMap<u32, HeldInput>,
 }
 
 impl EngineSlot {
@@ -356,6 +359,26 @@ impl EngineSlot {
         for msg in releases {
             let _ = self.input_tx.send(msg);
         }
+        let tabs: Vec<u32> = self.tab_held.keys().copied().collect();
+        for display in tabs {
+            self.release_tab(display);
+        }
+    }
+
+    /// Let go of everything display `display`'s tab left held, as input made over
+    /// that display. Ahead of the [`ClientMsg::DisplayShown`] that ends its feed,
+    /// so the engine still has the tab to place it in.
+    fn release_tab(&mut self, display: u32) {
+        let Some(mut held) = self.tab_held.remove(&display) else {
+            return;
+        };
+        let releases = held.releases();
+        if !releases.is_empty() {
+            info!("session: releasing {} input(s) display {display}'s tab left held", releases.len());
+        }
+        for input in releases {
+            let _ = self.input_tx.send(ClientMsg::OnDisplay { display, input: Box::new(input) });
+        }
     }
 }
 
@@ -373,7 +396,6 @@ struct HeldInput {
 impl HeldInput {
     fn note(&mut self, msg: &ClientMsg) {
         match msg {
-            ClientMsg::OnDisplay { input, .. } => self.note(input),
             ClientMsg::Key { code, pressed: true, .. } => {
                 self.keys.insert(code.clone());
             }
@@ -656,6 +678,12 @@ impl State {
     /// Take the engine's list of tabbed displays, letting go of the socket of every
     /// display no longer in it.
     fn show_tabs(&mut self, tabs: Vec<u32>) {
+        if let Some(engine) = &mut self.engine {
+            let gone: Vec<u32> = engine.tab_held.keys().copied().filter(|display| !tabs.contains(display)).collect();
+            for display in gone {
+                engine.release_tab(display);
+            }
+        }
         self.displays.retain(|display, _| *display == FIRST_DISPLAY || tabs.contains(display));
         if !tabs.contains(&SECOND_DISPLAY) {
             self.tab_token = None;
@@ -667,8 +695,9 @@ impl State {
     /// engine's tabs stay listed for the next claim's sockets, so its feeds are
     /// told to stop; [`Self::take_engine`] is what ends the tabs themselves.
     fn evict_displays(&mut self) {
-        if let Some(engine) = &self.engine {
+        if let Some(engine) = &mut self.engine {
             for display in self.displays.keys().filter(|display| **display != FIRST_DISPLAY) {
+                engine.release_tab(*display);
                 let _ = engine.input_tx.send(ClientMsg::DisplayShown { display: *display, feed: None });
             }
         }
@@ -1113,7 +1142,9 @@ impl SessionManager {
             Arc::clone(&self.feedback)
         } else {
             let feedback = Arc::new(LinkFeedback::new());
-            if let Some(engine) = &st.engine {
+            if let Some(engine) = &mut st.engine {
+                // A tab reconnecting starts with nothing held of its own.
+                engine.release_tab(display);
                 let (frames, mut frames_rx) = mpsc::channel(FRAME_BUFFER);
                 let forward = event_tx.clone();
                 tokio::spawn(async move {
@@ -1151,7 +1182,8 @@ impl SessionManager {
             // No socket, no lag: an engine must not spend the wait for the next
             // one coarsening quality against the measurements of one that is gone.
             self.feedback.reset();
-        } else if let Some(engine) = &st.engine {
+        } else if let Some(engine) = &mut st.engine {
+            engine.release_tab(display);
             let _ = engine.input_tx.send(ClientMsg::DisplayShown { display, feed: None });
         }
     }
@@ -1166,13 +1198,14 @@ impl SessionManager {
         else {
             return;
         };
-        let msg = if display == FIRST_DISPLAY {
-            msg
-        } else {
-            ClientMsg::OnDisplay { display, input: Box::new(msg) }
-        };
         if let Some(engine) = &mut st.engine {
-            engine.held.note(&msg);
+            let msg = if display == FIRST_DISPLAY {
+                engine.held.note(&msg);
+                msg
+            } else {
+                engine.tab_held.entry(display).or_default().note(&msg);
+                ClientMsg::OnDisplay { display, input: Box::new(msg) }
+            };
             let _ = engine.input_tx.send(msg);
         }
     }
@@ -1700,6 +1733,7 @@ impl SessionManager {
             microphone: uplinks.microphone.clone(),
             ended,
             held: HeldInput::default(),
+            tab_held: std::collections::BTreeMap::new(),
         });
         (self.spawn_engine)(
             target.clone(),
@@ -2928,6 +2962,21 @@ mod tests {
         };
         assert_ne!(fresh, token);
         assert!(matches!(mgr.attach_display("login", 2, Some(&token)), Err(DisplayRefused::Taken(2))));
+
+        // What a tab holds down is let go of, over its display, when its socket goes.
+        let Some(ClientMsg::DisplayShown { display: 2, feed: Some(_) }) = input_rx.recv().await else {
+            panic!("the engine is handed the next tab's feed");
+        };
+        let control = || ClientMsg::Key { code: "ControlLeft".into(), pressed: true, caps: false };
+        mgr.forward_display_input(third.id, control());
+        assert!(matches!(input_rx.recv().await, Some(ClientMsg::OnDisplay { display: 2, .. })));
+        mgr.detach_display(third.id);
+        assert!(matches!(
+            input_rx.recv().await,
+            Some(ClientMsg::OnDisplay { display: 2, input })
+                if matches!(&*input, ClientMsg::Key { code, pressed: false, .. } if code == "ControlLeft")
+        ));
+        assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, feed: None })));
     }
 
     /// A page opens its two sockets together, so the picture an engine starts with
