@@ -24,7 +24,7 @@ and the gateway is the only thing that serves the page. `build.rs` runs
 `bun run build` into Cargo's private output directory before the crate compiles
 and fails the build if `index.html` is missing afterwards. The frontend's build
 compiles the page's WebAssembly modules too; see
-[Local build](../packaging/README.md#local-build) for the toolchain that takes.
+[Local build](../packaging/README.md#local-build) for the required toolchain.
 
 The main directories are:
 
