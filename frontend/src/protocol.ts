@@ -294,6 +294,14 @@ export type ControlMsg =
   // records after it are the picture: this page composes them. Whatever it held of
   // a pipeline or a video stream before is done with.
   | { type: "graphicsStart" }
+  // The part of a passed pipeline's picture this display is, in the picture's
+  // pixels: the host draws its virtual displays as one span, and this names one
+  // display's column of it, `w` by `h` from `x`, `y`. Only a session started with
+  // the pipeline passed sends it, on a display socket next to each `resize`. The
+  // page that composes the pipeline shows that part of its picture; the tab
+  // showing the second display composes nothing, and is painted that part of the
+  // session page's picture instead (displayRelay.ts).
+  | { type: "graphicsView"; x: number; y: number; w: number; h: number }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.

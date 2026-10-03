@@ -1,9 +1,17 @@
 import {
+  createRelaySink,
+  createRelaySource,
+  openRelayPort,
+  type RelayPort,
+  type RelaySink,
+  type RelaySource,
+} from "./displayRelay.ts";
+import {
   type EgfxCompositor,
   type EgfxFactory,
   loadEgfx,
 } from "./egfxCompositor.ts";
-import type { GraphicsPicture } from "./egfxPicture.ts";
+import type { GraphicsPicture, PicturePart } from "./egfxPicture.ts";
 import { createEgfxVideo, type EgfxVideo } from "./egfxVideo.ts";
 import type { HevcPicture } from "./hevcPicture.ts";
 import { type DecodedPicture, isHevcPlanes } from "./hevcWasmDecoder.ts";
@@ -57,6 +65,17 @@ export interface FramePainter {
    */
   startGraphics(): void;
   /**
+   * Adopt a `graphicsView` on the page that composes the pipeline: the part of
+   * its picture this display is, shown from now, by this pipeline and the next.
+   */
+  setGraphicsView(part: PicturePart): void;
+  /**
+   * Adopt a `graphicsView` in a tab showing display `display` of its own: the
+   * part of the session page's picture the tab is painted from
+   * (displayRelay.ts). The tab composes nothing.
+   */
+  mirrorGraphics(display: number, part: PicturePart): void;
+  /**
    * The desktop's canvas was replaced at this size and filled black. A pipeline's
    * picture is shown over that canvas, so it is blanked with it: the reset that
    * draws the new desktop is in a run not composed yet. The software HEVC
@@ -95,6 +114,12 @@ export function createFramePainter(options: {
    * (egfxPicture.ts). A painter given none composes no pipeline.
    */
   makePicture?: () => GraphicsPicture;
+  /**
+   * The channel the second display's picture crosses the browser on
+   * (displayRelay.ts), opened by the page that composes it and by the tab that
+   * shows it. Injectable for a test, which has no BroadcastChannel to open.
+   */
+  makeRelay?: () => RelayPort;
   /**
    * EXPERIMENTAL: what decodes the H.264 a pipeline may carry (egfxVideo.ts): the
    * browser's `VideoDecoder`, a stream for each surface. Injectable for a test,
@@ -147,6 +172,24 @@ export function createFramePainter(options: {
     (() => {
       throw new Error("the page gave no canvas for the pipeline's picture");
     });
+  const makeRelay = options.makeRelay ?? openRelayPort;
+
+  // The part of the picture this page's display is, from the gateway's last word:
+  // the whole of it until told, which is every pipeline the host draws over one
+  // display. Kept across pipelines, since the host's layout is not theirs.
+  let graphicsPart: PicturePart | null = null;
+  // The second display's end of displayRelay.ts on the page that composes: made
+  // with the first pipeline, told what every run paints, and kept for the page's
+  // life — the tab may open before a pipeline or outlive one.
+  let source: RelaySource | null = null;
+  // The other end, in a tab showing a display of its own: its picture, and
+  // whether the page has been told to show it.
+  interface Mirror {
+    sink: RelaySink;
+    picture: GraphicsPicture;
+    shown: boolean;
+  }
+  let mirror: Mirror | null = null;
 
   // A pipeline's compositor, given back; it composes nothing more. Its picture
   // stays where it is, showing what was last drawn.
@@ -176,6 +219,21 @@ export function createFramePainter(options: {
       finish(pipeline);
     }
     pipeline = null;
+    source?.reset();
+  };
+
+  // A tab's mirror, given back, and its picture no longer shown.
+  const releaseMirror = () => {
+    if (!mirror) {
+      return;
+    }
+    const done = mirror;
+    mirror = null;
+    done.sink.close();
+    done.picture.close();
+    if (done.shown) {
+      options.onGraphicsShown?.(false);
+    }
   };
 
   const describe = (error: unknown) =>
@@ -234,6 +292,7 @@ export function createFramePainter(options: {
 
   const releaseVideo = () => {
     releasePipeline();
+    releaseMirror();
     releaseHevc();
     video?.close();
     video = null;
@@ -361,6 +420,8 @@ export function createFramePainter(options: {
       endPipeline(current, describe(error));
       return;
     }
+    // And the tab's share of it, out of the same picture.
+    source?.painted(run);
     // Shown from its first drawn run, and not before: until then the picture's
     // canvas holds nothing of this pipeline's.
     if (!current.shown && run.width > 0 && run.height > 0) {
@@ -479,6 +540,8 @@ export function createFramePainter(options: {
     clear() {
       generation += 1;
       releaseVideo();
+      // The next attachment names its own part, ahead of any run.
+      graphicsPart = null;
     },
     startGraphics() {
       releaseVideo();
@@ -490,12 +553,27 @@ export function createFramePainter(options: {
         broken: false,
         ready: Promise.resolve(),
       };
+      // The second display's end, reading the picture of whichever pipeline is
+      // current when an update goes out. A channel that cannot be opened leaves
+      // the tab unpainted, and this page's picture as it is.
+      if (!source) {
+        try {
+          source = createRelaySource(makeRelay(), () =>
+            pipeline?.compositor && !pipeline.broken
+              ? pipeline.compositor.picture()
+              : null,
+          );
+        } catch (error) {
+          console.warn("the second display's channel did not open:", error);
+        }
+      }
       starting.ready = loadCompositor()
         .then((make) => {
           // Replaced or cleared while the module loaded: nothing to make one for.
           if (!starting.broken) {
             starting.compositor = make();
             starting.picture = makePicture();
+            starting.picture.window(graphicsPart);
           }
         })
         .catch((error: unknown) => {
@@ -508,8 +586,75 @@ export function createFramePainter(options: {
         });
       pipeline = starting;
     },
+    setGraphicsView(part) {
+      graphicsPart = part;
+      const current = pipeline;
+      if (!current?.picture || current.broken) {
+        return;
+      }
+      try {
+        current.picture.window(part);
+      } catch (error) {
+        endPipeline(current, describe(error));
+      }
+    },
+    mirrorGraphics(display, part) {
+      if (!mirror) {
+        // A tab holds no pipeline and no stream: the picture is the whole of
+        // what it shows.
+        releaseVideo();
+        let picture: GraphicsPicture;
+        try {
+          picture = makePicture();
+        } catch (error) {
+          options.onVideoError(
+            `This browser could not show display ${display}'s picture (${describe(error)}).`,
+          );
+          return;
+        }
+        // Shown from its first painted update, and not before: until then the
+        // picture's canvas holds nothing of the display's.
+        const made: Mirror = {
+          picture,
+          shown: false,
+          sink: createRelaySink(
+            makeRelay(),
+            picture,
+            () => {
+              if (mirror === made && !made.shown) {
+                made.shown = true;
+                options.onGraphicsShown?.(true);
+              }
+            },
+            (why) => {
+              if (mirror === made) {
+                releaseMirror();
+                videoComplained = false;
+                options.onVideoError(
+                  `This browser could not show display ${display}'s picture (${why}). Reload the page to start it over.`,
+                );
+              }
+            },
+          ),
+        };
+        mirror = made;
+      }
+      mirror.sink.show(display, part);
+    },
     blank(w, h) {
       hideHevc();
+      if (mirror) {
+        try {
+          mirror.picture.blank(w, h);
+        } catch (error) {
+          const why = describe(error);
+          releaseMirror();
+          options.onVideoError(
+            `This browser could not show the display's picture (${why}). Reload the page to start it over.`,
+          );
+        }
+        return;
+      }
       const current = pipeline;
       if (!current?.picture || current.broken) {
         return;

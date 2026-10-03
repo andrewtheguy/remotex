@@ -32,7 +32,7 @@
 // also the cure and not only the escape — closing the decoders settles every access
 // unit the stuck draw is holding, so the chain it abandoned unwedges behind it.
 
-import { createGraphicsPicture } from "./egfxPicture.ts";
+import { createGraphicsPicture, type PicturePart } from "./egfxPicture.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import { createHevcPicture } from "./hevcPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
@@ -93,6 +93,13 @@ export type PainterCommand =
   | { type: "videoFormat"; format: VideoFormat }
   /** An RDP host's graphics pipeline starts, and this worker composes it. */
   | { type: "graphicsStart" }
+  /** The part of the pipeline's picture this page's display is, to show. */
+  | { type: "graphicsView"; part: PicturePart }
+  /**
+   * This page shows display `display` in a tab of its own, which is `part` of
+   * the picture the session's page composes: painted from there, not composed.
+   */
+  | { type: "graphicsMirror"; display: number; part: PicturePart }
   /** The attachment boundary: wipe the bitmap and the decoder. */
   | { type: "clear" };
 
@@ -320,6 +327,12 @@ export function createPainterWorker(
           break;
         case "graphicsStart":
           queued(() => painter?.startGraphics());
+          break;
+        case "graphicsView":
+          queued(() => painter?.setGraphicsView(command.part));
+          break;
+        case "graphicsMirror":
+          queued(() => painter?.mirrorGraphics(command.display, command.part));
           break;
         case "clear":
           // Out of the chain, and starting a new one — see the module comment.

@@ -47,6 +47,15 @@ a batch whose commands draw with H.264 is acknowledged: the acknowledgment follo
 the decode of every access unit in the batch, and a decoder that gave no picture
 says so in the DOM instead.
 
+`egfx-two-displays.spec.ts` is the same pipeline passed over two virtual
+displays, read from both displays' sockets of one browser: that each socket
+names the column of the composed picture its display is (`graphicsView`) beside
+its size, that the second display's tab is sent no picture of its own — no
+`videoFormat`, no binary frame, no `graphicsStart` — and shows the canvas it is
+painted on from the session page's picture all the same, and that the picker
+moving the session's page to the other display moves the view without starting
+the pipeline over.
+
 `software-hevc.spec.ts` is the BETA software HEVC decoder, in a High
 Performance session started with the Mac's stream passed and the page loaded with
 `?hevc_decoder=software`. Against a gateway that has the decoder's archive it
@@ -178,6 +187,14 @@ REMOTEX_PLAYWRIGHT_USERNAME='admin' \
 REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
 REMOTEX_PLAYWRIGHT_EGFX_TARGET='win' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
+```
+
+The two-display spec needs the same kind of host, in a target with
+`virtual_displays = 2`, named by `REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET`:
+
+```sh
+REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET='win2' \
+bunx playwright test '/egfx-two-displays\.spec\.ts$'
 ```
 
 The software HEVC spec needs a gateway whose config has an

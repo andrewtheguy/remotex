@@ -9,7 +9,9 @@
 // Run with `bun test src/framePainter.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
+import type { RelayMessage, RelayPort } from "./displayRelay.ts";
 import type { ComposedRun, EgfxCompositor, Scanned } from "./egfxCompositor.ts";
+import type { PicturePart } from "./egfxPicture.ts";
 import type { EgfxVideo } from "./egfxVideo.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 
@@ -164,6 +166,8 @@ beforeEach(() => {
   uploaded = [];
   pictures = { made: 0, closed: 0 };
   blanked = [];
+  windows = [];
+  patched = [];
   shown = [];
   cropped = [];
   decoded = [];
@@ -519,6 +523,13 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
         supplied: [] as number[][],
       };
       made.push(record);
+      // The picture: 64 by 48, every byte the last run's first byte, and of
+      // nothing before the first run, as a compositor's is before its reset.
+      const pixels = new Uint8ClampedArray(64 * 48 * 4);
+      const picture = () =>
+        record.fed.length === 0
+          ? { width: 0, height: 0, pixels: new Uint8ClampedArray(0) }
+          : { width: 64, height: 48, pixels };
       return {
         scan: h264Runs,
         supply(number, _window, frame) {
@@ -538,15 +549,16 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
             throw new Error("a command that does not decode");
           }
           record.fed.push([...commands]);
+          pixels.fill(commands[0]);
           return {
-            // Each run paints one rectangle named by its first byte.
+            // Each run paints one rectangle named by its first byte; the first
+            // run of a pipeline is the reset that lays the picture out.
             painted: new Uint32Array([commands[0], 2, 3, 4]),
-            width: 64,
-            height: 48,
-            resized: false,
-            pixels: new Uint8ClampedArray(64 * 48 * 4),
+            resized: record.fed.length === 1,
+            ...picture(),
           };
         },
+        picture,
         close() {
           record.closed = true;
         },
@@ -622,8 +634,37 @@ let uploaded: number[][] = [];
 let pictures = { made: 0, closed: 0 };
 /** The sizes a picture was blanked at. */
 let blanked: number[][] = [];
+/** The parts a picture was told to show, in order. */
+let windows: (PicturePart | null)[] = [];
+/** What a picture was patched with: its size, the rectangles, the bytes. */
+let patched: [number, number, number[], number][] = [];
 /** What the page was told about showing the picture, in order. */
 let shown: boolean[] = [];
+
+/** One end of the second display's channel, by hand: what it posted, and a way to
+ * deliver what the other end says. */
+function fakeRelay() {
+  const posted: RelayMessage[] = [];
+  let handler: (message: RelayMessage) => void = () => {};
+  let closed = 0;
+  const port: RelayPort = {
+    post: (message) => {
+      posted.push(message);
+    },
+    onMessage: (next) => {
+      handler = next;
+    },
+    close: () => {
+      closed += 1;
+    },
+  };
+  return {
+    port,
+    posted,
+    deliver: (message: RelayMessage) => handler(message),
+    closed: () => closed,
+  };
+}
 
 function graphicsPainter(
   load: ReturnType<typeof fakeCompositors>["load"],
@@ -631,9 +672,11 @@ function graphicsPainter(
     noPicture?: boolean;
     blankFails?: boolean;
     video?: () => EgfxVideo;
+    relay?: RelayPort;
   } = {},
 ) {
   return createFramePainter({
+    makeRelay: () => options.relay ?? fakeRelay().port,
     makeGraphicsVideo:
       options.video ??
       (() => {
@@ -655,6 +698,12 @@ function graphicsPainter(
       return {
         upload(run) {
           uploaded.push([...run.painted]);
+        },
+        window(part) {
+          windows.push(part);
+        },
+        patch(w, h, rects, pixels) {
+          patched.push([w, h, Array.from(rects), pixels.length]);
         },
         blank(w, h) {
           if (options.blankFails) {
@@ -742,6 +791,137 @@ test("a desktop resized under a pipeline blanks its picture", async () => {
     videoErrors.filter((error) => error !== null),
     [],
   );
+});
+
+test("the part of the picture a display is, is what the picture shows", async () => {
+  const { load } = fakeCompositors();
+  const p = graphicsPainter(load);
+  // Named ahead of the pipeline, as the gateway's `resize` and `graphicsView`
+  // come ahead of its `graphicsStart`: applied to the picture when it is made.
+  p.setGraphicsView({ x: 32, y: 0, w: 32, h: 48 });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[1]]));
+  assert.deepEqual(windows, [{ x: 32, y: 0, w: 32, h: 48 }]);
+  // The picker moving to the other display: shown at once, from what the
+  // picture holds, and kept by the next pipeline.
+  p.setGraphicsView({ x: 0, y: 0, w: 32, h: 48 });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[2]]));
+  assert.deepEqual(windows, [
+    { x: 32, y: 0, w: 32, h: 48 },
+    { x: 0, y: 0, w: 32, h: 48 },
+    { x: 0, y: 0, w: 32, h: 48 },
+  ]);
+  // The attachment boundary forgets it: the next names its own.
+  p.clear();
+  p.startGraphics();
+  await p.draw(graphicsFrame([[3]]));
+  assert.equal(windows[windows.length - 1], null);
+});
+
+test("a tab showing the second display is sent its column of the picture", async () => {
+  const { load } = fakeCompositors();
+  const relay = fakeRelay();
+  const p = graphicsPainter(load, { relay: relay.port });
+  p.startGraphics();
+  assert.deepEqual(
+    relay.posted,
+    [{ kind: "composing" }],
+    "a source that starts asks",
+  );
+  // The tab answers before the first run: it is owed everything once there is a
+  // picture, which the first run — the reset — lays out.
+  relay.deliver({
+    kind: "shown",
+    display: 2,
+    part: { x: 32, y: 0, w: 32, h: 48 },
+  });
+  await p.draw(graphicsFrame([[40]]));
+  assert.equal(relay.posted.length, 2);
+  const first = relay.posted[1];
+  assert.equal(first.kind, "paint");
+  if (first.kind !== "paint") {
+    return;
+  }
+  assert.deepEqual(
+    [first.seq, first.w, first.h, first.rects],
+    [1, 32, 48, [0, 0, 32, 48]],
+  );
+  const bytes = new Uint8Array(first.pixels);
+  assert.equal(bytes.length, 32 * 48 * 4);
+  assert.ok(
+    bytes.every((byte) => byte === 40),
+    "the column, out of the picture",
+  );
+  // While that is in flight, what the runs paint waits and is merged; what
+  // falls outside the column is nothing to the tab.
+  await p.draw(graphicsFrame([[36]]));
+  await p.draw(graphicsFrame([[50]]));
+  await p.draw(graphicsFrame([[7]]));
+  assert.equal(relay.posted.length, 2, "one update in flight at a time");
+  relay.deliver({ kind: "painted", seq: 1 });
+  const second = relay.posted[2];
+  assert.equal(second?.kind, "paint");
+  if (second?.kind !== "paint") {
+    return;
+  }
+  // Relative to the column, and out of the picture as it stands now.
+  assert.deepEqual([second.seq, second.rects], [2, [4, 2, 3, 4, 18, 2, 3, 4]]);
+  const latest = new Uint8Array(second.pixels);
+  assert.equal(latest.length, 2 * 3 * 4 * 4);
+  assert.ok(latest.every((byte) => byte === 7));
+  // A pipeline that starts again owes nothing of the old picture; its first run
+  // owes the column again.
+  relay.deliver({ kind: "painted", seq: 2 });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[9]]));
+  const third = relay.posted[3];
+  assert.equal(third?.kind, "paint");
+  if (third?.kind === "paint") {
+    assert.deepEqual(third.rects, [0, 0, 32, 48]);
+  }
+});
+
+test("a tab is painted from the session page's picture, not composed", async () => {
+  const { made, load } = fakeCompositors();
+  const relay = fakeRelay();
+  const p = graphicsPainter(load, { relay: relay.port });
+  p.blank(32, 48);
+  p.mirrorGraphics(2, { x: 32, y: 0, w: 32, h: 48 });
+  assert.deepEqual(relay.posted, [
+    { kind: "shown", display: 2, part: { x: 32, y: 0, w: 32, h: 48 } },
+  ]);
+  assert.deepEqual(shown, [], "nothing to show until the first update");
+  relay.deliver({
+    kind: "paint",
+    seq: 3,
+    w: 32,
+    h: 48,
+    rects: [0, 0, 32, 48],
+    pixels: new ArrayBuffer(32 * 48 * 4),
+  });
+  assert.deepEqual(patched, [[32, 48, [0, 0, 32, 48], 32 * 48 * 4]]);
+  assert.deepEqual(relay.posted[1], { kind: "painted", seq: 3 });
+  assert.deepEqual(shown, [true]);
+  // A session page that starts composing asks; the tab says again what it shows.
+  relay.deliver({ kind: "composing" });
+  assert.deepEqual(relay.posted[2], {
+    kind: "shown",
+    display: 2,
+    part: { x: 32, y: 0, w: 32, h: 48 },
+  });
+  // A layout change: the tab's desktop blanks its picture, and the new part is
+  // said on the same channel.
+  p.blank(40, 48);
+  p.mirrorGraphics(2, { x: 32, y: 0, w: 40, h: 48 });
+  assert.deepEqual(blanked, [[40, 48]]);
+  assert.equal(relay.posted.length, 4);
+  assert.equal(made.length, 0, "a tab composes nothing");
+  // The attachment boundary gives the picture back and hides it.
+  p.clear();
+  assert.deepEqual(shown, [true, false]);
+  assert.deepEqual(pictures, { made: 1, closed: 1 });
+  assert.equal(relay.closed(), 1);
 });
 
 test("a picture that cannot be blanked ends its pipeline", async () => {

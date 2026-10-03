@@ -331,10 +331,12 @@ password = "change-me"
 # windows left on it. 1 is the one desktop every target opens; at most 2. RDP
 # and `subtype = "ard-high-performance"` — the key is shared by the target types
 # that can create virtual displays, and refused elsewhere. On RDP the pipeline's
-# passthrough is not offered beside 2, since the browser composes a passed
-# pipeline whole; a Mac sends each display as a stream of its own (the second to
-# UDP port 5902), passed or not. Checked against one Windows 11 host and one
-# virtual Mac. The second display's tab, which the picker's All Displays opens,
+# passthrough is offered beside 2 as beside 1: the browser composes the whole
+# span once and shows one display of it, and the second display's tab is painted
+# from the same picture; a Mac sends each display as a stream of its own (the
+# second to UDP port 5902), passed or not. Checked against one Windows 11 host
+# and one virtual Mac, the passed span on neither yet. The second display's tab,
+# which the picker's All Displays opens,
 # is for a client with two physical displays: it is not recommended on a client
 # with one, and not supported on a phone or tablet, though the Display picker
 # there does not stop anyone choosing it.

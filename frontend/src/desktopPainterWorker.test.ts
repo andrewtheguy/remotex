@@ -54,6 +54,12 @@ function harness() {
     startGraphics() {
       calls.push("graphics");
     },
+    setGraphicsView(part) {
+      calls.push(`view:${part.x},${part.y} ${part.w}x${part.h}`);
+    },
+    mirrorGraphics(display, part) {
+      calls.push(`mirror:${display} ${part.x},${part.y} ${part.w}x${part.h}`);
+    },
     blank(w, h) {
       calls.push(`blank:${w}x${h}`);
     },
@@ -211,6 +217,38 @@ test("a graphics pipeline starts in its place, behind the frames before it", asy
   h.release();
   await settled();
   assert.deepEqual(h.calls, ["draw", "graphics", "draw"]);
+});
+
+test("the part a display shows, and a tab's mirror, hold their place behind a stalled draw", async () => {
+  // Both come with a resize, behind the frames before it, and must apply to the
+  // picture the frames before them left: the view to the pipeline's, the mirror
+  // to the tab's.
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(1),
+    sequence: 1,
+    generation: 1,
+  });
+  h.host.handle({
+    type: "graphicsView",
+    part: { x: 1440, y: 0, w: 1440, h: 900 },
+  });
+  h.host.handle({
+    type: "graphicsMirror",
+    display: 2,
+    part: { x: 1440, y: 0, w: 1440, h: 900 },
+  });
+  await settled();
+  assert.deepEqual(h.calls, ["draw"]);
+  h.release();
+  await settled();
+  assert.deepEqual(h.calls, [
+    "draw",
+    "view:1440,0 1440x900",
+    "mirror:2 1440,0 1440x900",
+  ]);
 });
 
 test("a later batch reports the time it waited behind earlier paint", async () => {

@@ -739,9 +739,10 @@ pub struct TargetConfig {
     /// `ard-high-performance`. A Windows host lays the displays out from the
     /// connect-time monitor data ([MS-RDPBCGR] 2.2.1.3.6) and from each monitor
     /// layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2), as one desktop
-    /// spanning both; beside the pipeline's passthrough it is not offered, since
-    /// that composes the whole desktop in the browser and has no view of one
-    /// display ([`Self::offers`]). A Mac in High Performance mode creates each
+    /// spanning both. Passed through, that desktop is composed once in the
+    /// browser, which shows one display of it and paints the second display's
+    /// tab from the same picture ([`crate::protocol::ServerMsg::GraphicsView`]).
+    /// A Mac in High Performance mode creates each
     /// from its `SetDisplayConfiguration` descriptor and sends each as a media
     /// stream of its own, which is Apple's viewer's "2 Virtual Displays", passed
     /// through or not. Refused on every other target, where it would be silently
@@ -965,14 +966,14 @@ impl TargetConfig {
             // bitmap path keeps its opening size. MS-RDPEDISP's other answer, a
             // Deactivation-Reactivation Sequence, is left out on purpose: see
             // "Bitmap updates" in docs/rdp-client.md.
-            // A passed pipeline is composed whole in the browser, which has no
-            // view of one display out of several, so a target asking for more
-            // than one has no passthrough row.
+            // The passthrough is the pipeline's, however many displays the host
+            // lays out: the browser composes the span the host draws and shows
+            // one display of it, and paints the second display's tab from the same
+            // picture (`ServerMsg::GraphicsView`).
             (Protocol::Rdp, _) => Offers {
                 resize: self.egfx(),
                 audio: true,
-                passthrough: (self.egfx() && self.virtual_displays == 1)
-                    .then_some(Passthrough::RdpGraphics),
+                passthrough: self.egfx().then_some(Passthrough::RdpGraphics),
             },
             // Read as any VNC server, which carries no sound, and whose answer
             // to a size is not known until it is dialled.
@@ -3614,9 +3615,8 @@ mod tests {
 
     /// A count of virtual displays is one unless asked, at most two, and a key
     /// only an rdp target and a High Performance Mac take: everywhere else it
-    /// would change nothing. Beside more than one the pipeline's passthrough has
-    /// no row, since a passed pipeline is composed whole in the browser; a Mac's
-    /// displays are a stream each, and keep theirs.
+    /// would change nothing. The pipeline's passthrough keeps its row beside two:
+    /// the browser composes the span once and shows a display of it.
     #[test]
     fn virtual_displays_are_one_unless_asked_and_only_where_they_are_created() {
         let one = ConfigFile::parse(&rdp_toml("")).unwrap().targets.remove(0);
@@ -3625,12 +3625,9 @@ mod tests {
 
         let two = ConfigFile::parse(&rdp_toml("virtual_displays = 2")).unwrap().targets.remove(0);
         assert_eq!(two.virtual_displays, 2);
-        assert_eq!(two.offers().passthrough, None, "the passthrough has no view of one display");
+        assert_eq!(two.offers().passthrough, Some(Passthrough::RdpGraphics), "the passthrough shows one display of the span");
         assert!(two.offers().resize, "the window still drives each display's size");
-        assert_eq!(
-            two.accepts(Choices { passthrough: true, ..Choices::default() }),
-            Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })
-        );
+        assert_eq!(two.accepts(Choices { passthrough: true, ..Choices::default() }), Ok(()));
 
         for bad in ["virtual_displays = 0", "virtual_displays = 3"] {
             let err = ConfigFile::parse(&rdp_toml(bad)).unwrap_err();

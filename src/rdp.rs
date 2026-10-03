@@ -253,6 +253,11 @@ async fn session(
     if sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await.is_err() {
         return; // browser already gone
     }
+    // A passed pipeline is composed whole in the browser: which part of it the
+    // canvas shows goes with every size it is told.
+    if plan.rdp_graphics && sink.msg(view.graphics_view()).await.is_err() {
+        return; // browser already gone
+    }
     // No RDP server ships for macOS, so a Mac never answers here.
     if sink.msg(ServerMsg::RemoteOs { macos: false }).await.is_err() {
         return; // browser already gone
@@ -713,6 +718,12 @@ impl View {
         (self.all && column > 0 && column < self.columns).then_some(column)
     }
 
+    /// Which part of a passed pipeline's picture the canvas shows: the active
+    /// column ([`graphics_view`]).
+    fn graphics_view(self) -> ServerMsg {
+        graphics_view(self.rect())
+    }
+
     /// `column`, as the inclusive rectangle of the framebuffer it is.
     fn column_rect(self, column: u16) -> Rect {
         let (w, h) = self.column_size(column);
@@ -877,6 +888,19 @@ impl Pointer {
     }
 }
 
+/// `rect` of the framebuffer, as the part of a passed pipeline's picture a display
+/// shows ([`ServerMsg::GraphicsView`]): the picture the browser composes is the
+/// framebuffer the host draws, pixel for pixel, so a column of one is a column of
+/// the other.
+fn graphics_view(rect: Rect) -> ServerMsg {
+    ServerMsg::GraphicsView {
+        x: rect.left,
+        y: rect.top,
+        w: rect.right - rect.left + 1,
+        h: rect.bottom - rect.top + 1,
+    }
+}
+
 /// A display shown in a browser tab of its own while *All Displays* is chosen: a
 /// column of the same framebuffer beside the one on the session's canvas, with a
 /// sink, an encoder and a shadow of its own, sent to the display socket the
@@ -930,29 +954,46 @@ impl Tab {
     }
 
     /// The desktop was laid out again at `size`: what the tab is told, ahead of
-    /// the repaint the host is asked for.
-    async fn resized(&mut self, size: (u16, u16), density: Density) {
-        self.shadow.resize(size.0, size.1);
-        self.sink.reset_render();
+    /// the repaint the host is asked for — or, while the pipeline is `passing`,
+    /// with which part of the browser's picture the column now is, since no
+    /// pixels follow from here.
+    async fn resized(&mut self, size: (u16, u16), density: Density, passing: Option<ServerMsg>) {
+        if passing.is_none() {
+            self.shadow.resize(size.0, size.1);
+            self.sink.reset_render();
+        }
         self.msg(ServerMsg::Resize { w: size.0, h: size.1, scale: density.scale() }).await;
+        if let Some(view) = passing {
+            self.msg(view).await;
+        }
     }
 
     /// Everything a socket holding nothing is owed: the size, the remote's system,
-    /// the pointer, and every pixel of the column.
+    /// the pointer, and every pixel of the column — or, while the pipeline is
+    /// `passing`, which part of the browser's own picture the column is: the
+    /// framebuffer here holds nothing of a passed pipeline, and the tab is painted
+    /// from the picture the session's page composes ([`ServerMsg::GraphicsView`]).
     async fn repaint(
         &mut self,
         framebuffer: &Framebuffer,
         view: View,
         density: Density,
         pointer: ServerMsg,
+        passing: bool,
     ) {
-        self.shadow.forget();
-        self.sink.reset_render();
+        if !passing {
+            self.shadow.forget();
+            self.sink.reset_render();
+        }
         let (w, h) = view.column_size(self.column());
         self.msg(ServerMsg::Resize { w, h, scale: density.scale() }).await;
         self.msg(ServerMsg::RemoteOs { macos: false }).await;
         self.msg(pointer).await;
         let column = view.column_rect(self.column());
+        if passing {
+            self.msg(graphics_view(column)).await;
+            return;
+        }
         self.damage(framebuffer, column, view).await;
         self.frame().await;
     }
@@ -1388,6 +1429,12 @@ async fn active_loop(
                         // begins, and the browser composes it from here.
                         if pass_graphics {
                             sink.graphics_start().await?;
+                            // A tab shown before the pipeline began was painted
+                            // from the framebuffer; from here it is painted from
+                            // the browser's picture, and is told which part.
+                            if let Some(tab) = &mut tab {
+                                tab.msg(graphics_view(view.column_rect(tab.column()))).await;
+                            }
                         }
                     }
                     // The pipeline's commands, for the browser to compose. The
@@ -1462,13 +1509,17 @@ async fn active_loop(
                             last_pos.1.min(desktop.1.saturating_sub(1)),
                         );
                         sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await?;
+                        if pass_graphics {
+                            sink.msg(view.graphics_view()).await?;
+                        }
                         // A tab whose column the host took away goes with it.
                         if tab.as_ref().is_some_and(|tab| view.tab_column(tab.display).is_none()) {
                             tab = None;
                         }
                         if let Some(tab) = &mut tab {
                             let size = view.column_size(tab.column());
-                            tab.resized(size, applied).await;
+                            let passing = sink.passing().then(|| graphics_view(view.column_rect(tab.column())));
+                            tab.resized(size, applied, passing).await;
                         }
                         if let Some(msg) = view.displays(applied) {
                             sink.msg(msg).await?;
@@ -1549,6 +1600,9 @@ async fn active_loop(
                     // Not part of the repaint: the pixels carry no pointer, and
                     // the server only names a shape when it changes.
                     sink.msg(pointer.attached()).await?;
+                    if pass_graphics {
+                        sink.msg(view.graphics_view()).await?;
+                    }
                     // A passed pipeline has no repaint this end can make: the
                     // framebuffer holds nothing of it. The host is asked instead,
                     // which repairs a browser that still holds the pipeline's state
@@ -1605,11 +1659,17 @@ async fn active_loop(
                                 shadow.forget();
                                 sink.reset_render();
                                 sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await?;
+                                if pass_graphics {
+                                    sink.msg(view.graphics_view()).await?;
+                                }
                             }
                             if let Some(msg) = view.displays(applied) {
                                 sink.msg(msg).await?;
                             }
-                            if moved {
+                            // A passed pipeline's picture is the browser's, which
+                            // the view above moves across; the framebuffer here
+                            // holds nothing of it to repaint from.
+                            if moved && !sink.passing() {
                                 send_damage(
                                     framebuffer,
                                     view.rect(),
@@ -1644,7 +1704,7 @@ async fn active_loop(
                                 shadow: Shadow::new("rdp", w, h),
                                 failed: false,
                             };
-                            shown.repaint(framebuffer, view, applied, pointer.current()).await;
+                            shown.repaint(framebuffer, view, applied, pointer.current(), sink.passing()).await;
                             tab = Some(shown);
                         }
                         Some(_) => debug!("rdp: display {display} is not shown in a tab"),
@@ -1675,7 +1735,7 @@ async fn active_loop(
                         continue;
                     };
                     if matches!(*made, ClientMsg::Refresh) {
-                        shown.repaint(framebuffer, view, applied, pointer.current()).await;
+                        shown.repaint(framebuffer, view, applied, pointer.current(), sink.passing()).await;
                         continue;
                     }
                     // The tab's window: the second monitor's size, in points, as
@@ -2702,6 +2762,27 @@ mod tests {
             (1280, 0),
         );
         assert_eq!(events, vec![RemoteInput::Button { button: RdpButton::Left, down: true, x: 1290, y: 20 }]);
+    }
+
+    /// In a passed session the browser composes the span and is told which column
+    /// of it to show: the active one on the canvas, the tab's in its tab.
+    #[test]
+    fn a_passed_picture_is_shown_by_the_column() {
+        let part = |msg: ServerMsg| match msg {
+            ServerMsg::GraphicsView { x, y, w, h } => (x, y, w, h),
+            other => panic!("not a view: {other:?}"),
+        };
+        let per = Layout { w: 1280, h: 800, density: Density::One, second: None };
+        let mut view = View::opened(2, per, (2560, 800));
+        assert_eq!(part(view.graphics_view()), (0, 0, 1280, 800));
+        assert_eq!(view.select(1), Some(true));
+        assert_eq!(part(view.graphics_view()), (1280, 0, 1280, 800));
+        assert_eq!(view.select(ALL_DISPLAYS), Some(true));
+        assert_eq!(part(view.graphics_view()), (0, 0, 1280, 800));
+        assert_eq!(part(graphics_view(view.column_rect(1))), (1280, 0, 1280, 800));
+        // One display is the whole picture.
+        let one = View::opened(1, per, (1280, 800));
+        assert_eq!(part(one.graphics_view()), (0, 0, 1280, 800));
     }
 
     /// The view is read off what the host opened: two displays when the desktop is
