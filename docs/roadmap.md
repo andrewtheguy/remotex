@@ -153,6 +153,25 @@ paint window order two chains, and how each stream starts over are the work.
 Two screens is the limit, as it is today: All Displays over three or more is held
 with the notice whatever its size.
 
+### Two virtual displays past alpha
+
+`virtual_displays = 2` on an `rdp` or `ard-high-performance` target is alpha
+([Windows](guide.md#windows-rdp), [Macs](guide.md#macs-vnc-with-an-apple-subtype)).
+What it lacks:
+
+- **Where the second display sits.** It is always to the right of the first. The
+  plan is four fixed choices, above, left, right or below, so the remote's
+  arrangement can match where the client's own second display is.
+- **Moving a window to the other display on Windows.** A window dragged to the
+  edge of the display in one tab does not arrive on the other, since the pointer
+  cannot leave the tab that holds it, so the session needs a way of its own to
+  send a window across. A Mac needs none: a window dragged halfway over the edge
+  is moved to the second display.
+- **Finding the second display.** The main window should show both displays'
+  details, give a way to tell which display is which, and carry a link that
+  opens the second one, where today the link is only in the Display picker
+  under *All Displays*.
+
 ## Under consideration
 
 ### Touch on an RDP target (MS-RDPEI)
