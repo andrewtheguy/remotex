@@ -57,9 +57,6 @@ It installs:
 /usr/local/share/doc/remotex/LICENSE
 ```
 
-The library decodes a wlshare target's sound. It is the package's own copy, in a
-folder of its own, and the installed gateway uses no other.
-
 The package is unsigned and not notarized. A browser download is quarantined,
 so fetch it with `curl` as shown and install it from the terminal. The `.pkg`
 contains the gateway CLI, with the web client inside it.
@@ -139,11 +136,10 @@ the gateway in the foreground:
 remotex serve
 ```
 
-For a Mac target, configure `protocol = "vnc"`, `subtype = "ard"`, and the Mac
-account's username and password. The gateway connects directly to macOS Screen
-Sharing; nothing is installed on the target Mac.
+Then open <http://localhost:52380>. [Using remotex](guide.md) says how each
+kind of target is set up and how the page is reached from another machine.
 
-`subtype = "ard-high-performance"` needs a library on the gateway's host that
+A Mac target with `subtype = "ard-high-performance"` needs a library on the gateway's host that
 no package contains, FFmpeg. See
 [High Performance decoder](high-performance-decoder.md) for installing it.
 

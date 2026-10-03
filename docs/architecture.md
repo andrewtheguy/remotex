@@ -3,7 +3,8 @@
 remotex is a single-user gateway for RDP and VNC targets, including Macs reached
 through their built-in Screen Sharing service. A Rust backend owns the remote
 protocol session and exposes one common HTTP/WebSocket interface to the React SPA,
-which is the only client.
+which is the only client. [Using remotex](guide.md) is the operator's view of
+the same system.
 
 ## Data path
 
@@ -62,12 +63,41 @@ area and points here; read the area's section before changing what it covers.
   Sharing and wlshare. Behavior specific to one of them is welcome, and when work
   for them and for other servers competes, they come first.
 
+### Server tiers
+
+The three prioritized servers are ranked in tiers by how the picture reaches
+the browser. Design, testing and optimization start from the first tier, and a
+higher tier comes first when work for two competes.
+
+| Tier | Server | Target | Picture |
+|---|---|---|---|
+| 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | wlshare's own VP9, passed through, walked by the browser's link |
+| 2 | Windows 10 and 11's Remote Desktop | `rdp` | encoded here as VP9, or the host's graphics pipeline passed through |
+| 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | encoded here as VP9, or the Mac's HEVC passed through |
+| 3 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | encoded here as VP9 |
+
+- **Tier 1** is the ideal: wlshare codes the desktop as VP9 itself, at the
+  quality and chroma the target asks for, and walks that quality by the
+  browser's link, so the gateway passes its stream untouched and the session
+  still adapts to a slow link. Because wlshare is ours, what RFB lacks is added
+  to it as an extension.
+- **Tier 2** is the host's own stream, passed to the browser for a LAN. A passed
+  stream does not adapt to the browser's link; a session started without the
+  passthrough is the gateway's VP9, which does.
+- **Tier 3** is decoded in the gateway and encoded as VP9. Nothing of it is
+  passed through.
+
+Every other VNC server is a plain `vnc` target, reached through the RFB
+baseline and worked on as needed rather than ahead of the tiers. Another RDP
+server, an older Windows or xrdp say, may happen to work but is not a target and
+is not tested against.
+
 ### The client and its bundle
 
 - There is one client: the browser SPA, whether in a browser or installed as a
   Chrome or Edge app. The user may at times start an experimental native client
-  to try out a use case, as the WebView apps were; one stays maintained only
-  while its benefits justify a separate client.
+  to try out a use case; one stays maintained only while its benefits justify a
+  separate client.
 - There is one frontend build, compiled from Cargo's `OUT_DIR` into the gateway
   binary (`src/assets.rs`) and served from its origin root. A standalone build
   and the release artifact use `frontend/dist`; a Cargo build produces the same
@@ -417,14 +447,6 @@ compose. A VNC desktop past the stream's picture ceiling in a session started
 without resize has no picture until the remote sends a smaller one — see
 [past the ceiling](#past-the-ceiling).
 
-> **There is no configurable tile transport.** Earlier releases also sent each
-> changed region as an independent PNG or WebP still (`render_type = "tiles"`, with
-> `render_subtype`, `image_quality`, a per-tile photographic classifier, a
-> `render_motion` switch that streamed only the moving regions, a slot cache,
-> `COPY` records and the `render_grid_debug` overlay). All of it was removed after
-> **v0.0.253**; `git checkout v0.0.253` recovers it, including the classifier's
-> research notes in `docs/still-image-classification-research.md`.
-
 A target's stream keys are per target, and every one has a default:
 
 - `video_quality` (1–100, default 90) is the ceiling the stream holds to.
@@ -481,9 +503,9 @@ Five rules hold the stream up, and each is a rule somewhere:
   most redraw nothing. VNC's CopyRect is read back out of the shadow as pixels.
 - **A frame boundary is a proposal, not a frame rate.** Those boundaries occur at
   whatever rate the remote reports damage — 126 a second, measured, on a busy RDP
-  desktop against a 30 Hz stream and a 60 Hz screen — and every one of them used to
-  cost a full encode, which is how a session carrying under 800 kbit/s spent 88% of
-  itself inside the encoder. `VIDEO_FRAME_INTERVAL` caps it at one access unit per
+  desktop against a 30 Hz stream and a 60 Hz screen — and a full encode at every
+  one of them had a session carrying under 800 kbit/s spend 88% of itself inside
+  the encoder. `VIDEO_FRAME_INTERVAL` caps it at one access unit per
   33 ms; damage in between accumulates in the mirror and rides the next one, which
   is cheaper than coding the same movement four times over. A forced keyframe skips
   the cap, because a repaint, reattach or resize is a client with nothing
@@ -1004,8 +1026,7 @@ including the one reattachment that would otherwise resume a running engine,
 which compares the plan the returning browser resolves to against the plan that
 is running and rebuilds when they differ.
 
-This is **selection, never refusal**, which is the distinction the removed probe
-lacked. Only a definite `supported === false` gives up the colour; a "yes", an
+This is **selection, never refusal**. Only a definite `supported === false` gives up the colour; a "yes", an
 answer with no verdict, and an `isConfigSupported` that throws all read as 4:4:4,
 and a browser that answered wrongly still ends where every browser ends, at its own
 decoder's refusal by name. One question at page load, no round trip in front of a
@@ -1020,9 +1041,8 @@ GPU-process decoder is the one that goes quiet under stream churn, and software
 libvpx is what answers every chunk (`frontend/src/videoDecoder.ts`). What it costs
 is CPU on the client, roughly twice the samples per frame.
 
-**`"420"` — profile 0 for every browser.** What every stream was before this key
-existed, and a selection now rather than a default: a decoder that would have taken
-profile 1 is sent the subsampled stream anyway. Right for a fleet that must stay on
+**`"420"` — profile 0 for every browser.** A selection rather than a default: a
+decoder that would have taken profile 1 is sent the subsampled stream anyway. Right for a fleet that must stay on
 a hardware decoder, or where the target is photographic rather than text and the
 chroma buys nothing.
 
@@ -1154,8 +1174,8 @@ and the close goes out last.
 **The client decodes it with WebCodecs** `VideoDecoder`, reached through
 `frontend/src/videoDecoder.ts` and driven from `framePainter.ts` — the batch loop,
 which replaces the decoder when the stream restarts on a different size. **Which decoder is the platform's choice**: the
-configuration states no `hardwareAcceleration`. A `prefer-software` hint was tried
-and removed, because it bought one platform's decoder at most — WebKit honours it
+configuration states no `hardwareAcceleration`. A `prefer-software` hint would
+buy one platform's decoder at most — WebKit honours it
 only on macOS (the clause routing it to a local software decoder is compiled
 `#if PLATFORM(MAC)`), Firefox disregards it, and iOS has no software VP9 decoder to
 route to at all, so VP9 there is VideoToolbox or nothing (measured against WebKit
@@ -1198,27 +1218,20 @@ encodes a frame in **4.7 ms** at **18 KB** — measure with
 `cargo test --release measure_the_encoder -- --ignored --nocapture`; a debug build
 reports nonsense, because the RGB→YUV conversion it also times is Rust — the `yuv`
 crate's, on the AVX2 or NEON path the machine has — and runs an order of magnitude
-slower unoptimised. The scalar loop that came before the crate was two fifths of a
-1080p encode on a six-core host, its 4:2:0 averaging the slower of its two paths;
-the crate's takes a third of that time at either chroma.
+slower unoptimised.
 
 Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,
 `stream.rs` and the wire carry access units, a keyframe bit and a configuration
 string, and `vp9.rs` is reachable only from `stream.rs`.
 
-**The browser is not asked for a codec, and never asked to justify itself.** The
-client used to probe for the codec: `/api/config` published the gateway's ordered
-codecs with a WebCodecs string for each, the client asked
-`VideoDecoder.isConfigSupported` about them before login, and `ClientMsg::Connect`
-carried the accepted names for `connect` to pick from. It worked, and it was
-removed. It put a round trip and a decoder query in front of every video session;
-`isConfigSupported` is not reliable enough on the same browser twice to build a
-refusal on; and because the refusal was phrased as "this browser accepted neither",
-any fault anywhere near the path — a serde field-name mismatch, for one — surfaced
-as an accusation against the browser and sent the reader to the wrong half of the
-system.
+**The browser is not asked for a codec, and never asked to justify itself.**
+There is no codec probe ahead of a session: it would put a round trip and a
+decoder query in front of every one, `isConfigSupported` is not reliable enough
+on the same browser twice to build a refusal on, and a refusal phrased as "this
+browser accepted none" turns any fault near the path into an accusation against
+the browser.
 
-What survives of asking is four questions. One selects rather than refuses: how
+What the browser is asked is four questions. One selects rather than refuses: how
 much colour this decoder takes, for `render_chroma = "auto"` to resolve against
 ([choosing a chroma](#choosing-a-chroma)). A wrong answer to it costs a picture,
 not a desktop. One decides what a host is told and nothing else: whether this
@@ -1508,11 +1521,10 @@ message that turns sound on, and closing the socket is the only way to stop. The
 page opens it when a session that carries sound starts, and its Mute and Unmute
 close and open it.
 
-The separation is the point. Sound and pictures used to share the session socket and
-the bounded queue behind it, which is four frames deep; an audio pump waiting behind
-a video backlog stops draining the bridge, and what the bridge then drops is wave
-buffers. A lost wave buffer is a hole. The dedicated socket removes that picture-induced loss
-path entirely.
+The separation is the point. The session socket's bounded queue is four frames
+deep; an audio pump waiting behind a video backlog on it would stop draining the
+bridge, and what the bridge then drops is wave buffers. A lost wave buffer is a
+hole. The dedicated socket has no picture-induced loss path.
 
 The socket is bound to the *claim*, not to an attachment, so it survives a session
 socket reconnecting and a target switch: the gateway re-announces the format when it
@@ -2351,7 +2363,7 @@ macOS trackpad reports, is sent in the unit `notch`. A `wlshare` target is sent
 `notch`, `line` (three to a notch) and `page` deltas as wheel-button notches,
 which wlshare injects as a wheel's discrete axis, and only `pixel` deltas as the
 distance. RDP counts a `notch` as one notch of rotation and an Apple target as
-the 100 pixels it stood for, which is what each made of it before.
+the 100 pixels it stood for.
 
 That touch layer is a trackpad, and there is a second one that is a touchscreen.
 When an engine's host opens a touch channel (MS-RDPEI on RDP), the gateway says
