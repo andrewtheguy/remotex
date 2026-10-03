@@ -45,8 +45,15 @@ export interface PageSoftKey {
   page: PageId;
 }
 
-// Inert width: the half key at each end of the home row, the Caps Lock slot of
-// the PC grid. Drawn as nothing; a finger on it belongs to the neighbouring key.
+// Switches the PC grid's modifiers between sticking and being sent alone on a
+// tap, as the shortcut row's are on a phone. Sits in the Caps Lock slot.
+export interface StickySoftKey {
+  type: "sticky";
+  label: string;
+}
+
+// Inert width: the half key at each end of the home row. Drawn as nothing; a
+// finger on it belongs to the neighbouring key.
 export interface SpacerSoftKey {
   type: "spacer";
 }
@@ -56,6 +63,7 @@ export type SoftKeyDefinition =
   | SpecialSoftKey
   | ComboSoftKey
   | PageSoftKey
+  | StickySoftKey
   | SpacerSoftKey;
 
 // ── Modifiers ──
@@ -115,11 +123,8 @@ export type PageId = "abc" | "sym" | "pc";
 // - `lift`: the key under the finger when it lifts, after any slide to correct;
 // - `down`: at once on touch, then repeating while held (Backspace, arrows);
 // - `tap`: on lift, only if the finger stayed put — the scrollable shortcut row,
-//   where a slide is the row scrolling and never a change of key;
-// - `hold`: a modifier pressed on the wire for as long as the finger rests on
-//   it — the shortcut row's Shift, Ctrl, Alt and Super, held for the other
-//   thumb or for a tap on the canvas, and never armed for a later key.
-export type Commit = "lift" | "down" | "tap" | "hold";
+//   where a slide is the row scrolling and never a change of key.
+export type Commit = "lift" | "down" | "tap";
 
 // A cell's identity within its page: "page:row:col". Never a code — Tab sits in
 // two places on a PC keyboard and both Shifts share a label.
@@ -176,8 +181,6 @@ function commitOf(def: SoftKeyDefinition): Commit {
 interface Key {
   def: SoftKeyDefinition;
   units: number;
-  // A commit of the key's own, over its row's.
-  commit?: Commit;
 }
 
 function p(label: string, code: string, shiftLabel?: string, units = 1): Key {
@@ -195,11 +198,6 @@ function s(label: string, code: string, units = 1): Key {
 
 function c(label: string, codes: string[], units = 1): Key {
   return { def: { type: "combo", label, codes }, units };
-}
-
-// A modifier held on the wire while touched.
-function hold(label: string, code: string): Key {
-  return { def: { type: "special", label, code }, units: 1, commit: "hold" };
 }
 
 function pg(label: string, page: PageId, units = 1): Key {
@@ -223,7 +221,7 @@ function row(
       id: `${page}:${index}:${col}`,
       def: key.def,
       units: key.units,
-      commit: key.commit ?? commit ?? commitOf(key.def),
+      commit: commit ?? commitOf(key.def),
     })),
   };
 }
@@ -240,22 +238,21 @@ function page(
 
 // ── Shortcut rows (scrollable, phone pages) ──
 
-// The held modifiers lead both shortcut rows: pressed and released alone,
-// Super is the Start key, and under a finger each one is a real modifier for
-// the other thumb's key — a letter below, an F-key beside it on the Sym page —
-// or a tap on the canvas.
-const HELD_MODIFIERS: Key[] = [
-  hold("Shift", "ShiftLeft"),
-  hold("Ctrl", "ControlLeft"),
-  hold("Alt", "AltLeft"),
-  hold("Super", "MetaLeft"),
+// The bare modifiers lead both shortcut rows. Each is a key like the Esc beside
+// it: a tap sends it alone, down then up — Super alone is the Start key — and
+// it arms nothing. The modifiers that stick are the solid ones below.
+const BARE_MODIFIERS: Key[] = [
+  s("Shift", "ShiftLeft"),
+  s("Ctrl", "ControlLeft"),
+  s("Alt", "AltLeft"),
+  s("Super", "MetaLeft"),
 ];
 
 // The chords that follow the modifiers are the ones a browser swallows or a
 // phone cannot otherwise reach; Ctrl+C and its kin are the strip's Ctrl and a
 // letter.
 const SHORTCUTS_ABC: Key[] = [
-  ...HELD_MODIFIERS,
+  ...BARE_MODIFIERS,
   s("Esc", "Escape"),
   c("Alt+Tab", ["AltLeft", "Tab"]),
   c("Alt+F4", ["AltLeft", "F4"]),
@@ -263,7 +260,7 @@ const SHORTCUTS_ABC: Key[] = [
 ];
 
 const SHORTCUTS_FN: Key[] = [
-  ...HELD_MODIFIERS,
+  ...BARE_MODIFIERS,
   ...Array.from({ length: 12 }, (_, i) => s(`F${i + 1}`, `F${i + 1}`)),
 ];
 
@@ -403,7 +400,7 @@ const PC_QWERTY_ROW: Key[] = [
 ];
 
 const PC_HOME_ROW: Key[] = [
-  gap(2.1),
+  { def: { type: "sticky", label: "Sticky" }, units: 2.1 },
   ...letters("asdfghjkl"),
   p(";", "Semicolon", ":"),
   p("'", "Quote", '"'),

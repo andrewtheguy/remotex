@@ -16,18 +16,19 @@
 // - `tap`: the scrollable shortcut row, where a slide is the row scrolling. The
 //   key commits on lift if the finger stayed within the slop. A cancel inside the
 //   slop commits too: the browser cancels a touch the moment it claims a pan, and
-//   its own slop can trip before ours, which used to swallow the tap.
-// - `hold`: a modifier that is a key on the wire — down when touched, up when
-//   the finger lifts or is taken. The remote holds it under whatever happens
-//   meanwhile: the other thumb's keys, a tap on the canvas, a physical key.
+//   its own slop can trip before ours, which used to swallow the tap. A modifier
+//   on this row is a key like the Esc beside it: a tap sends it, alone.
 //
-// The other modifier keys never reach the wire on their own. A tap arms a
-// one-shot, which the next commit spends, a repeat tick included, and a second
-// tap disarms it. Under a resting finger a modifier chords the other fingers'
-// keys like a physical chord, and is off when the finger lifts. Every such
-// modifier is sent down ahead of the key in the order it was taken, and
-// released after it, through sendKeyCombo; one the wire already holds is left
-// out, since the remote has it.
+// The modifier keys of every other row never reach the wire on their own. A tap
+// arms a one-shot, which the next commit spends, a repeat tick included, and a
+// second tap disarms it. Under a resting finger a modifier chords the other
+// fingers' keys like a physical chord, and is off when the finger lifts. Every
+// such modifier is sent down ahead of the key in the order it was taken, and
+// released after it, through sendKeyCombo.
+//
+// The PC grid's Sticky key turns that off and on again: while it is off, a
+// modifier of any row is a key like the rest of its row, sent alone, and
+// nothing is armed or chorded.
 import {
   type CellId,
   type Commit,
@@ -55,8 +56,8 @@ export type PressEvent =
   | { kind: "up"; p: PointerSample }
   // pointercancel or lostpointercapture for one pointer.
   | { kind: "cancel"; id: number; t: number }
-  // The page lost focus or was hidden: every finger is forgotten, nothing sends,
-  // and whatever the wire holds is released.
+  // The page lost focus or was hidden: every finger is forgotten and nothing
+  // sends.
   | { kind: "cancelAll"; t: number }
   // The host's timer, due at the last result's `nextTickAt`.
   | { kind: "tick"; t: number }
@@ -64,15 +65,13 @@ export type PressEvent =
   | { kind: "layout"; cells: ReadonlyMap<CellId, LayoutCell> };
 
 // `oneShot` is armed for the next key; `held` is a finger resting on the key,
-// chording; `down` is a `hold` key pressed on the wire under a finger.
-export type ModifierState = "oneShot" | "held" | "down";
+// chording.
+export type ModifierState = "oneShot" | "held";
 
 export type PressCommand =
   // Press these codes in order and release them in reverse: the chording
   // modifiers, then the key's own codes.
   | { kind: "send"; codes: string[] }
-  // Press or release one code and leave it so: a `hold` modifier.
-  | { kind: "key"; code: string; pressed: boolean }
   | { kind: "modifiers"; held: ReadonlyMap<string, ModifierState> }
   // The cells currently under a finger.
   | { kind: "active"; ids: ReadonlySet<CellId> }
@@ -80,6 +79,8 @@ export type PressCommand =
   // when it has lifted or slid off. Mouse pointers never get one.
   | { kind: "preview"; pointerId: number; id: CellId | null }
   | { kind: "page"; page: PageId }
+  // The Sticky key was tapped: whether modifiers stick now.
+  | { kind: "sticky"; on: boolean }
   // A commit happened under a touch: the host may vibrate.
   | { kind: "haptic" };
 
@@ -182,6 +183,8 @@ export function createPressEngine(
   const presses = new Map<number, Press>();
   // Insertion order is the order the modifiers go down on the wire.
   const held = new Map<string, ModifierState>();
+  // Whether a modifier sticks, or is a key sent alone: the Sticky key's.
+  let sticky = true;
   let shownActive: ReadonlySet<CellId> = new Set();
   let shownModifiers: ReadonlyMap<string, ModifierState> = new Map();
 
@@ -195,6 +198,11 @@ export function createPressEngine(
     }
     return modifierOf(cell.def) ? cell.def.code : null;
   };
+
+  // The modifier a cell arms or chords with, or null when it is a key that is
+  // sent: not a modifier, one on the shortcut row, or any while nothing sticks.
+  const stickyCodeOf = (id: CellId | null): string | null =>
+    sticky && cellOf(id)?.commit !== "tap" ? modifierCodeOf(id) : null;
 
   // Commands are gathered per event; `active` and `modifiers` are emitted at the
   // end only if they changed, so the host never re-renders for nothing.
@@ -233,9 +241,9 @@ export function createPressEngine(
       return;
     }
     press.modifier = null;
-    if (press.commit === "hold") {
+    // Sticky went off under the finger: there is nothing to arm or restore.
+    if (!sticky) {
       held.delete(code);
-      out.push({ kind: "key", code, pressed: false });
       return;
     }
     if (cancelled) {
@@ -273,18 +281,10 @@ export function createPressEngine(
     }
   };
 
-  // Send a key with the chording modifiers around it. A modifier the wire
-  // holds is dropped from both: pressing it again would release it under the
-  // finger that holds it, and the remote has it anyway.
+  // Send a key with the chording modifiers around it.
   const send = (press: Press, codes: string[]) => {
-    const own = codes.filter((code) => held.get(code) !== "down");
-    if (own.length === 0) {
-      return;
-    }
-    const wrap = [...held]
-      .filter(([code, state]) => state !== "down" && !own.includes(code))
-      .map(([code]) => code);
-    out.push({ kind: "send", codes: [...wrap, ...own] });
+    const wrap = [...held.keys()].filter((code) => !codes.includes(code));
+    out.push({ kind: "send", codes: [...wrap, ...codes] });
     spend();
     haptic(press);
   };
@@ -301,17 +301,30 @@ export function createPressEngine(
     }
   };
 
-  // What a committed cell does.
+  // The Sticky key: modifiers stop sticking, or stick again. What was armed is
+  // dropped with it; a finger resting on a modifier keeps its chord.
+  const toggleSticky = (press: Press) => {
+    sticky = !sticky;
+    if (!sticky) {
+      for (const [code, state] of [...held]) {
+        if (state === "oneShot") {
+          held.delete(code);
+        }
+      }
+    }
+    out.push({ kind: "sticky", on: sticky });
+    haptic(press);
+  };
+
+  // What a committed cell does. A modifier gets here only as a key that is
+  // sent; one that sticks acts on touch.
   const commit = (press: Press, id: CellId) => {
     const cell = cellOf(id);
     if (!cell) {
       return;
     }
-    const code = modifierCodeOf(id);
-    if (code !== null) {
-      // Only a `tap` modifier commits this way; the others act on touch.
-      toggle(code, held.get(code));
-      haptic(press);
+    if (cell.def.type === "sticky") {
+      toggleSticky(press);
       return;
     }
     if (cell.def.type === "page") {
@@ -329,23 +342,17 @@ export function createPressEngine(
     presses.delete(press.id);
   };
 
-  // A finger landed on a modifier that acts on touch: a `hold` key goes down on
-  // the wire, any other is held for a chord. One already under another finger
-  // is that finger's; this one does nothing.
+  // A finger landed on a modifier that acts on touch: it is held for a chord.
+  // One already under another finger is that finger's; this one does nothing.
   const takeModifier = (press: Press, code: string): boolean => {
     const state = held.get(code);
-    if (state === "held" || state === "down") {
+    if (state === "held") {
       return false;
     }
     press.modifier = code;
     press.previous = state;
     held.delete(code);
-    if (press.commit === "hold") {
-      held.set(code, "down");
-      out.push({ kind: "key", code, pressed: true });
-    } else {
-      held.set(code, "held");
-    }
+    held.set(code, "held");
     haptic(press);
     return true;
   };
@@ -375,8 +382,8 @@ export function createPressEngine(
       nextRepeatAt: null,
       previewed: null,
     };
-    const code = modifierCodeOf(id);
-    if (code !== null && cell.commit !== "tap") {
+    const code = stickyCodeOf(id);
+    if (code !== null) {
       if (takeModifier(press, code)) {
         presses.set(p.id, press);
       }
@@ -392,19 +399,18 @@ export function createPressEngine(
         preview(press, id);
         break;
       case "tap":
-      case "hold":
         break;
     }
   };
 
   // A finger sliding on a lift key: the key under it follows. A slide only
-  // moves between keys that commit on lift; onto a modifier or a repeating key
-  // it is off the key instead.
+  // moves between keys that commit on lift; onto a modifier that sticks or a
+  // repeating key it is off the key instead.
   const slide = (press: Press, p: PointerSample) => {
     const next = hit(p.x, p.y, press.cell);
     const cell = cellOf(next);
     const id =
-      cell && cell.commit === "lift" && !modifierCodeOf(next) ? next : null;
+      cell && cell.commit === "lift" && !stickyCodeOf(next) ? next : null;
     if (id !== press.cell) {
       press.cell = id;
       preview(press, id);

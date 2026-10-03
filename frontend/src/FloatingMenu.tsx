@@ -396,7 +396,6 @@ function DockedPanel({
   onClose,
   onDockedHeightChange,
   sendKeyCombo,
-  sendKey,
   onFocusDesktop,
   remoteClipboard,
   onSendClipboard,
@@ -408,7 +407,6 @@ function DockedPanel({
   onClose: () => void;
   onDockedHeightChange: (px: number) => void;
   sendKeyCombo: (codes: string[]) => void;
-  sendKey: (code: string, pressed: boolean) => void;
   onFocusDesktop: () => void;
   remoteClipboard: RemoteClipboard | null;
   onSendClipboard: (text: string) => void;
@@ -421,7 +419,6 @@ function DockedPanel({
       return (
         <SoftKeyboardPanel
           sendKeyCombo={sendKeyCombo}
-          sendKey={sendKey}
           onClose={onClose}
           onDockedHeightChange={onDockedHeightChange}
           onFocusDesktop={onFocusDesktop}
@@ -943,7 +940,6 @@ export default function FloatingMenu({
   onUnauthorized,
   onSwitchTarget,
   sendKeyCombo,
-  sendKey,
   onKeyboardInset,
   remoteClipboard,
   onFetchClipboard,
@@ -984,6 +980,7 @@ export default function FloatingMenu({
   onLocalShortcut,
   onFocusDesktop,
   onViewOnlyChange,
+  desktopShown,
 }: {
   onLogout: () => void;
   // The throughput read came back 401: the login expired. See ThroughputPanel.
@@ -992,7 +989,6 @@ export default function FloatingMenu({
   // current session without ending the login. See useRemoteDesktop.
   onSwitchTarget: () => void;
   sendKeyCombo: (codes: string[]) => void;
-  sendKey: (code: string, pressed: boolean) => void;
   // Reports the open docked panel's height so the touch canvas can inset above
   // it (0 when the panel closes or floats). See useRemoteDesktop. Both panels
   // share this channel, which is safe because only one is ever open.
@@ -1089,6 +1085,9 @@ export default function FloatingMenu({
   // desktop view-only for as long as it does. The input path is the other side of
   // the page, so this is reported rather than read. See useRemoteDesktop.
   onViewOnlyChange: (viewOnly: boolean) => void;
+  // False while the status overlay stands over the desktop: connecting,
+  // reconnecting, an error, a claim conflict, or the gap before the first frame.
+  desktopShown: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // The one modal card, and which face it shows: Info, or the "Throughput" view its
@@ -1312,15 +1311,6 @@ export default function FloatingMenu({
     },
     [sendKeyCombo],
   );
-  const onSoftKeyHeld = useCallback(
-    (code: string, pressed: boolean) => {
-      if (pressed) {
-        setOpen(false);
-      }
-      sendKey(code, pressed);
-    },
-    [sendKey],
-  );
 
   // Open the on-screen keyboard and collapse the drawer so the panel has the
   // screen to itself; toggling the button again closes the panel.
@@ -1408,6 +1398,14 @@ export default function FloatingMenu({
           maxHeight: `${maxHeight}px`,
         };
   }, [resolvedPosition, viewport, floor]);
+
+  // The soft keyboard types on the desktop, so it goes when the desktop does,
+  // and is not there again when the desktop comes back.
+  useEffect(() => {
+    if (!desktopShown) {
+      setPanel((current) => (current === "keyboard" ? null : current));
+    }
+  }, [desktopShown, setPanel]);
 
   const viewOnly = useViewOnly(open, hidden, modal, panel, onViewOnlyChange);
   // A click on the cover takes down what put it there. A modal card has a
@@ -1631,7 +1629,6 @@ export default function FloatingMenu({
         onClose={closePanel}
         onDockedHeightChange={onDockedHeight}
         sendKeyCombo={onSoftKey}
-        sendKey={onSoftKeyHeld}
         onFocusDesktop={onFocusDesktop}
         remoteClipboard={remoteClipboard}
         onSendClipboard={onSendClipboard}

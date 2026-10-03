@@ -1332,9 +1332,14 @@ body {
   line-height: 1;
 }
 
-.sk-modifier .sk-cap {
+.sk-modifier .sk-cap,
+.sk-sticky .sk-cap {
   background: linear-gradient(to bottom, #233a5e, #1b2b47);
   border-color: #2f4f80;
+}
+
+.sk-sticky .sk-cap {
+  font-size: 0.7rem;
 }
 
 .sk-page .sk-cap {
@@ -1342,15 +1347,15 @@ body {
   font-size: 0.7rem;
 }
 
-/* A held modifier of the shortcut row: down only while touched, drawn open so
-   it reads apart from the strip's key that arms for the next one. */
-.sk-hold .sk-cap {
+/* A bare modifier: sent alone on a tap, drawn open so it reads apart from one
+   that arms for the next key. The shortcut row's always are; the PC grid's are
+   while its Sticky key is off, and that key is drawn open with them. */
+.sk-bare .sk-cap {
   background: #1b2b47;
   border-style: dashed;
 }
 
-/* Under a finger, or a modifier armed one-shot, held by a finger, or down on
-   the wire. */
+/* Under a finger, or a modifier armed one-shot or held by a finger. */
 .sk-cell[data-active] .sk-cap,
 .sk-cell[data-mod] .sk-cap {
   background: linear-gradient(to bottom, #388bfd, #1f6feb);

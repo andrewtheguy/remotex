@@ -17,6 +17,7 @@ import {
   type LayoutRow,
   labelOf,
   MODIFIER_KEYS,
+  modifierOf,
   PAGE_PC,
   PAGES,
   type PageId,
@@ -61,9 +62,6 @@ interface SoftKeyboardPanelProps {
   // Presses each DOM code in order then releases in reverse (transient — see
   // useRemoteDesktop.sendKeyCombo).
   sendKeyCombo: (codes: string[]) => void;
-  // Presses or releases one DOM code and leaves it so: the shortcut row's held
-  // modifiers (see useRemoteDesktop.sendKey).
-  sendKey: (code: string, pressed: boolean) => void;
   onClose: () => void;
   // Reports the panel's height (CSS px) while it's docked to the bottom edge
   // (phone), 0 while it floats or when it unmounts. Lets the touch canvas pan
@@ -78,9 +76,9 @@ interface SoftKeyboardPanelProps {
 
 interface EngineHandlers {
   sendKeyCombo: (codes: string[]) => void;
-  sendKey: (code: string, pressed: boolean) => void;
   onFocusDesktop: () => void;
   setPage: (page: PageId) => void;
+  setSticky: (on: boolean) => void;
   setHeld: (held: ReadonlyMap<string, ModifierState>) => void;
   setActive: (ids: ReadonlySet<CellId>) => void;
   setPreviews: (
@@ -264,12 +262,6 @@ function useSoftKeyEngine(
           h.sendKeyCombo(command.codes);
           focusIfLost(h);
           break;
-        case "key":
-          h.sendKey(command.code, command.pressed);
-          if (command.pressed) {
-            focusIfLost(h);
-          }
-          break;
         case "modifiers":
           h.setHeld(command.held);
           break;
@@ -284,6 +276,9 @@ function useSoftKeyEngine(
         }
         case "page":
           h.setPage(command.page);
+          break;
+        case "sticky":
+          h.setSticky(command.on);
           break;
         case "haptic":
           vibrate();
@@ -410,13 +405,22 @@ const ARROW_NAMES: ReadonlyMap<string, string> = new Map([
   ["ArrowRight", "Right"],
 ]);
 
-// The accessible name. A held modifier is named apart from the strip's key of
-// the same code, which arms rather than holds.
+// A modifier that is a key sent alone: the shortcut row's always, and every
+// one while the Sticky key is off.
+function isBareModifier(cell: LayoutCell, sticky: boolean): boolean {
+  return (cell.commit === "tap" || !sticky) && modifierOf(cell.def) !== null;
+}
+
+// The accessible name. The shortcut row's modifier is named apart from the
+// strip's key of the same code, which arms rather than sends.
 function nameOf(cell: LayoutCell): string {
   const { def } = cell;
   if (def.type === "special") {
     const name = ARROW_NAMES.get(def.code) ?? def.label;
-    return cell.commit === "hold" ? `Hold ${name}` : name;
+    return cell.commit === "tap" && modifierOf(def) ? `${name} key` : name;
+  }
+  if (def.type === "sticky") {
+    return "Sticky modifiers";
   }
   return labelOf(def, false);
 }
@@ -426,6 +430,7 @@ interface CellProps {
   shift: boolean;
   active: boolean;
   modifier: ModifierState | undefined;
+  sticky: boolean;
 }
 
 // A cell is the whole hit area, edge to edge with its neighbours; the keycap
@@ -433,7 +438,7 @@ interface CellProps {
 // own: the key area's engine decides what a touch on it means. A real button
 // for the semantics and the accessible name, out of the tab order because the
 // physical keyboard types on the remote, not on this one.
-function Cell({ cell, shift, active, modifier }: CellProps) {
+function Cell({ cell, shift, active, modifier, sticky }: CellProps) {
   const style = { "--u": cell.units } as CSSProperties;
   const { def } = cell;
   if (def.type === "spacer") {
@@ -455,17 +460,25 @@ function Cell({ cell, shift, active, modifier }: CellProps) {
     def.shiftLabel !== def.label.toUpperCase()
       ? def.shiftLabel
       : null;
+  // Drawn open: a modifier that is sent alone, and the Sticky key while off.
+  const bare = def.type === "sticky" ? !sticky : isBareModifier(cell, sticky);
   const kind =
-    def.type === "special" && MODIFIER_KEYS.has(def.code)
+    def.type === "special" && MODIFIER_KEYS.has(def.code) && !bare
       ? "modifier"
       : def.type;
   return (
     <button
       type="button"
       tabIndex={-1}
-      className={`sk-cell sk-${kind}${cell.commit === "hold" ? " sk-hold" : ""}`}
+      className={`sk-cell sk-${kind}${bare ? " sk-bare" : ""}`}
       aria-label={nameOf(cell)}
-      aria-pressed={kind === "modifier" ? modifier !== undefined : undefined}
+      aria-pressed={
+        kind === "modifier"
+          ? modifier !== undefined
+          : kind === "sticky"
+            ? sticky
+            : undefined
+      }
       data-cell={cell.id}
       data-active={active ? "" : undefined}
       data-mod={modifier}
@@ -484,16 +497,20 @@ interface RowsProps {
   shift: boolean;
   active: ReadonlySet<CellId>;
   held: ReadonlyMap<string, ModifierState>;
+  sticky: boolean;
 }
 
 function modifierStateOf(
   cell: LayoutCell,
   held: ReadonlyMap<string, ModifierState>,
+  sticky: boolean,
 ): ModifierState | undefined {
-  return cell.def.type === "special" ? held.get(cell.def.code) : undefined;
+  return cell.def.type === "special" && !isBareModifier(cell, sticky)
+    ? held.get(cell.def.code)
+    : undefined;
 }
 
-function Rows({ rows, shift, active, held }: RowsProps) {
+function Rows({ rows, shift, active, held, sticky }: RowsProps) {
   return rows.map((row, index) => (
     <div
       // biome-ignore lint/suspicious/noArrayIndexKey: rows are a fixed order
@@ -507,7 +524,8 @@ function Rows({ rows, shift, active, held }: RowsProps) {
           cell={cell}
           shift={shift}
           active={active.has(cell.id)}
-          modifier={modifierStateOf(cell, held)}
+          modifier={modifierStateOf(cell, held, sticky)}
+          sticky={sticky}
         />
       ))}
     </div>
@@ -518,7 +536,6 @@ function Rows({ rows, shift, active, held }: RowsProps) {
 
 export function SoftKeyboardPanel({
   sendKeyCombo,
-  sendKey,
   onClose,
   onDockedHeightChange,
   onFocusDesktop,
@@ -529,6 +546,7 @@ export function SoftKeyboardPanel({
   const [held, setHeld] = useState<ReadonlyMap<string, ModifierState>>(
     () => new Map(),
   );
+  const [sticky, setSticky] = useState(true);
   const [active, setActive] = useState<ReadonlySet<CellId>>(() => new Set());
   const [previews, setPreviews] = useState<ReadonlyMap<number, Preview>>(
     () => new Map(),
@@ -539,9 +557,9 @@ export function SoftKeyboardPanel({
 
   const invalidateGeometry = useSoftKeyEngine(areaRef, page, {
     sendKeyCombo,
-    sendKey,
     onFocusDesktop,
     setPage: setPageId,
+    setSticky,
     setHeld,
     setActive,
     setPreviews,
@@ -683,7 +701,8 @@ export function SoftKeyboardPanel({
                   cell={cell}
                   shift={shift}
                   active={active.has(cell.id)}
-                  modifier={modifierStateOf(cell, held)}
+                  modifier={modifierStateOf(cell, held, sticky)}
+                  sticky={sticky}
                 />
               ))}
             </div>
@@ -710,7 +729,13 @@ export function SoftKeyboardPanel({
         {page.side.length > 0 ? (
           <div className="sk-pc">
             <div className="sk-pc-main">
-              <Rows rows={keyRows} shift={shift} active={active} held={held} />
+              <Rows
+                rows={keyRows}
+                shift={shift}
+                active={active}
+                held={held}
+                sticky={sticky}
+              />
             </div>
             <div className="sk-pc-side">
               <Rows
@@ -718,11 +743,18 @@ export function SoftKeyboardPanel({
                 shift={shift}
                 active={active}
                 held={held}
+                sticky={sticky}
               />
             </div>
           </div>
         ) : (
-          <Rows rows={keyRows} shift={shift} active={active} held={held} />
+          <Rows
+            rows={keyRows}
+            shift={shift}
+            active={active}
+            held={held}
+            sticky={sticky}
+          />
         )}
 
         {[...previews.values()].map((preview) => {
