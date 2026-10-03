@@ -259,6 +259,20 @@ impl futures_util::Sink<tokio_tungstenite::tungstenite::Message> for Ws {
     }
 }
 
+impl Ws {
+    /// The session socket alone: what is not a display's.
+    #[allow(dead_code)]
+    pub fn session_socket(&mut self) -> &mut Socket {
+        &mut self.session
+    }
+
+    /// The first display's socket alone: the picture, and its size and pointer.
+    #[allow(dead_code)]
+    pub fn display_socket(&mut self) -> &mut Socket {
+        &mut self.display
+    }
+}
+
 /// Open display `display`'s socket with nothing but the login cookie, as a page
 /// of the browser holding the session does.
 #[allow(dead_code)]
