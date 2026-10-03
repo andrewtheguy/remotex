@@ -14,6 +14,7 @@ import {
   cursorImage,
   MIN_POINTER_CSS_PX,
   type RemoteCursor,
+  unownedCursor,
 } from "./cursorCss.ts";
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { desktopPainterFor } from "./desktopPainter.ts";
@@ -354,12 +355,16 @@ function paintCursor(
   // density-independent pixmaps) follows the desktop's points, so it keeps its
   // size when the framebuffer goes Retina; a framebuffer-pixel image follows
   // the pixels it was cut from.
-  const imageView = image?.pointSized ? view * (size?.scale ?? 1) : view;
+  const points = view * (size?.scale ?? 1);
+  const imageView = image?.pointSized ? points : view;
   if (els.overlay) {
+    // The hardware pointer is never hidden: with no shape handed over it wears
+    // the X. The virtual pointer below is: it would sit on a pointer the
+    // remote drew itself.
     if (image) {
       applyCursorCss(els.overlay, image, imageView);
     } else {
-      els.overlay.style.cursor = "none";
+      applyCursorCss(els.overlay, unownedCursor(), points);
     }
   }
   const pointer = els.pointer;
@@ -838,6 +843,12 @@ export function useRemoteDesktop(
     });
   }, [canvasRef, overlayRef, pointerRef]);
 
+  // The overlay's pointer is set only from here, so the X of a session that
+  // has no shape yet needs one paint that no message prompts.
+  useEffect(() => {
+    syncCursor();
+  }, [syncCursor]);
+
   // The composition the canvas presents, while a Mac's mixed-density combined
   // view is on screen (mosaic.ts); null otherwise.
   const mosaicViewRef = useRef<MosaicView | null>(null);
@@ -979,8 +990,8 @@ export function useRemoteDesktop(
       // under the next one's overlay.
       pendingResizes.clear();
       // Pointer ownership is per-engine: the next target may well composite
-      // its own cursor, so drop back to hiding the browser's until it says
-      // otherwise. A reattach to the same engine gets the shape replayed.
+      // its own cursor, so drop back to the X until it says otherwise. A
+      // reattach to the same engine gets the shape replayed.
       cursorRef.current = null;
       touchCursorRef.current = null;
       // One message: the worker zeroes the canvas bitmap it owns and drops the
