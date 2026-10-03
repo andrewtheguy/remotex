@@ -60,7 +60,7 @@ export type SoftKeyDefinition =
 
 // ── Modifiers ──
 
-// The sticky modifiers the keyboard can hold, one entry per physical key: both
+// The modifiers the keyboard can hold, one entry per physical key: both
 // sides of Shift, Ctrl, Alt and Super are distinct codes, exactly as a hardware
 // keyboard reports them, and the backend keeps them apart (Alt_R vs Alt_L, the
 // E0-extended scancode) — so a right-hand soft key really is the right-hand key
@@ -86,7 +86,7 @@ export const MODIFIER_KEYS: ReadonlyMap<string, ModifierKey> = new Map([
   ["MetaRight", { kind: "super", side: "right", label: "RSuper" }],
 ]);
 
-// Which sticky modifier a key toggles, or null if it is not a modifier key. A
+// Which modifier a key holds, or null if it is not a modifier key. A
 // modifier inside a combo (Ctrl in Ctrl+C) is not one: only a `special` key
 // whose own code is a modifier is.
 export function modifierOf(def: SoftKeyDefinition): ModifierKey | null {
@@ -115,8 +115,11 @@ export type PageId = "abc" | "sym" | "pc";
 // - `lift`: the key under the finger when it lifts, after any slide to correct;
 // - `down`: at once on touch, then repeating while held (Backspace, arrows);
 // - `tap`: on lift, only if the finger stayed put — the scrollable shortcut row,
-//   where a slide is the row scrolling and never a change of key.
-export type Commit = "lift" | "down" | "tap";
+//   where a slide is the row scrolling and never a change of key;
+// - `hold`: a modifier pressed on the wire for as long as the finger rests on
+//   it — the shortcut row's Shift, Ctrl, Alt and Super, held for the other
+//   thumb or for a tap on the canvas, and never armed for a later key.
+export type Commit = "lift" | "down" | "tap" | "hold";
 
 // A cell's identity within its page: "page:row:col". Never a code — Tab sits in
 // two places on a PC keyboard and both Shifts share a label.
@@ -173,6 +176,8 @@ function commitOf(def: SoftKeyDefinition): Commit {
 interface Key {
   def: SoftKeyDefinition;
   units: number;
+  // A commit of the key's own, over its row's.
+  commit?: Commit;
 }
 
 function p(label: string, code: string, shiftLabel?: string, units = 1): Key {
@@ -190,6 +195,11 @@ function s(label: string, code: string, units = 1): Key {
 
 function c(label: string, codes: string[], units = 1): Key {
   return { def: { type: "combo", label, codes }, units };
+}
+
+// A modifier held on the wire while touched.
+function hold(label: string, code: string): Key {
+  return { def: { type: "special", label, code }, units: 1, commit: "hold" };
 }
 
 function pg(label: string, page: PageId, units = 1): Key {
@@ -213,7 +223,7 @@ function row(
       id: `${page}:${index}:${col}`,
       def: key.def,
       units: key.units,
-      commit: commit ?? commitOf(key.def),
+      commit: key.commit ?? commit ?? commitOf(key.def),
     })),
   };
 }
@@ -230,18 +240,20 @@ function page(
 
 // ── Shortcut rows (scrollable, phone pages) ──
 
+// The held modifiers lead: pressed and released alone, Super is the Start key,
+// and under a finger each one is a real modifier for the other thumb's key or
+// a tap on the canvas. The chords that follow are the ones a browser swallows
+// or a phone cannot otherwise reach; Ctrl+C and its kin are the strip's Ctrl
+// and a letter.
 const SHORTCUTS_ABC: Key[] = [
+  hold("Shift", "ShiftLeft"),
+  hold("Ctrl", "ControlLeft"),
+  hold("Alt", "AltLeft"),
+  hold("Super", "MetaLeft"),
   s("Esc", "Escape"),
   c("Alt+Tab", ["AltLeft", "Tab"]),
   c("Alt+F4", ["AltLeft", "F4"]),
   c("C+A+Del", ["ControlLeft", "AltLeft", "Delete"]),
-  s("Super", "MetaLeft"),
-  c("Ctrl+Esc", ["ControlLeft", "Escape"]),
-  c("Ctrl+Z", ["ControlLeft", "KeyZ"]),
-  c("Ctrl+C", ["ControlLeft", "KeyC"]),
-  c("Ctrl+V", ["ControlLeft", "KeyV"]),
-  c("Ctrl+A", ["ControlLeft", "KeyA"]),
-  c("Ctrl+S", ["ControlLeft", "KeyS"]),
 ];
 
 const SHORTCUTS_FN: Key[] = Array.from({ length: 12 }, (_, i) =>

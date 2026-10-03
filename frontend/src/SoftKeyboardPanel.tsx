@@ -20,7 +20,6 @@ import {
   PAGE_PC,
   PAGES,
   type PageId,
-  type SoftKeyDefinition,
   shiftHeld,
 } from "./softKeyboard.ts";
 import {
@@ -60,8 +59,11 @@ function isPhone(): boolean {
 
 interface SoftKeyboardPanelProps {
   // Presses each DOM code in order then releases in reverse (transient — see
-  // useRemoteDesktop.sendKeyCombo). The panel's only channel to the remote.
+  // useRemoteDesktop.sendKeyCombo).
   sendKeyCombo: (codes: string[]) => void;
+  // Presses or releases one DOM code and leaves it so: the shortcut row's held
+  // modifiers (see useRemoteDesktop.sendKey).
+  sendKey: (code: string, pressed: boolean) => void;
   onClose: () => void;
   // Reports the panel's height (CSS px) while it's docked to the bottom edge
   // (phone), 0 while it floats or when it unmounts. Lets the touch canvas pan
@@ -76,6 +78,7 @@ interface SoftKeyboardPanelProps {
 
 interface EngineHandlers {
   sendKeyCombo: (codes: string[]) => void;
+  sendKey: (code: string, pressed: boolean) => void;
   onFocusDesktop: () => void;
   setPage: (page: PageId) => void;
   setHeld: (held: ReadonlyMap<string, ModifierState>) => void;
@@ -256,6 +259,12 @@ function useSoftKeyEngine(
           h.sendKeyCombo(command.codes);
           focusIfLost(h);
           break;
+        case "key":
+          h.sendKey(command.code, command.pressed);
+          if (command.pressed) {
+            focusIfLost(h);
+          }
+          break;
         case "modifiers":
           h.setHeld(command.held);
           break;
@@ -385,9 +394,13 @@ const ARROW_NAMES: ReadonlyMap<string, string> = new Map([
   ["ArrowRight", "Right"],
 ]);
 
-function nameOf(def: SoftKeyDefinition): string {
+// The accessible name. A held modifier is named apart from the strip's key of
+// the same code, which arms rather than holds.
+function nameOf(cell: LayoutCell): string {
+  const { def } = cell;
   if (def.type === "special") {
-    return ARROW_NAMES.get(def.code) ?? def.label;
+    const name = ARROW_NAMES.get(def.code) ?? def.label;
+    return cell.commit === "hold" ? `Hold ${name}` : name;
   }
   return labelOf(def, false);
 }
@@ -434,8 +447,8 @@ function Cell({ cell, shift, active, modifier }: CellProps) {
     <button
       type="button"
       tabIndex={-1}
-      className={`sk-cell sk-${kind}`}
-      aria-label={nameOf(def)}
+      className={`sk-cell sk-${kind}${cell.commit === "hold" ? " sk-hold" : ""}`}
+      aria-label={nameOf(cell)}
       aria-pressed={kind === "modifier" ? modifier !== undefined : undefined}
       data-cell={cell.id}
       data-active={active ? "" : undefined}
@@ -489,6 +502,7 @@ function Rows({ rows, shift, active, held }: RowsProps) {
 
 export function SoftKeyboardPanel({
   sendKeyCombo,
+  sendKey,
   onClose,
   onDockedHeightChange,
   onFocusDesktop,
@@ -509,6 +523,7 @@ export function SoftKeyboardPanel({
 
   const invalidateGeometry = useSoftKeyEngine(areaRef, page, {
     sendKeyCombo,
+    sendKey,
     onFocusDesktop,
     setPage: setPageId,
     setHeld,
@@ -586,7 +601,7 @@ export function SoftKeyboardPanel({
   const cells = useMemo(() => cellsOf(page), [page]);
   const shift = shiftHeld(held.keys());
 
-  // Held modifiers with no key on this page — a right Alt locked on the Sym
+  // Held modifiers with no key on this page — a right Alt armed on the Sym
   // page, say — are named beside the close button so they are never invisible.
   const unseen = useMemo(() => {
     const onPage = new Set<string>();

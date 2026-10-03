@@ -1342,25 +1342,21 @@ body {
   font-size: 0.7rem;
 }
 
-/* Under a finger, or a modifier held one-shot, held by a finger, or locked —
-   the lock gets a dot so it reads differently from a one-shot. */
+/* A held modifier of the shortcut row: down only while touched, drawn open so
+   it reads apart from the strip's key that arms for the next one. */
+.sk-hold .sk-cap {
+  background: #1b2b47;
+  border-style: dashed;
+}
+
+/* Under a finger, or a modifier armed one-shot, held by a finger, or down on
+   the wire. */
 .sk-cell[data-active] .sk-cap,
 .sk-cell[data-mod] .sk-cap {
   background: linear-gradient(to bottom, #388bfd, #1f6feb);
   border-color: #388bfd;
+  border-style: solid;
   color: #fff;
-}
-
-.sk-cell[data-mod="locked"] .sk-cap::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: 3px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #fff;
-  transform: translateX(-50%);
 }
 
 /* The shortcut row: scrollable, with the close button fixed at its end. Its

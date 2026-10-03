@@ -2159,13 +2159,21 @@ export function useRemoteDesktop(
   const sendKeyCombo = useCallback((codes: string[]) => {
     const send = sendRef.current;
     // Synthetic sends have no CapsLock state; case is expressed by including an
-    // explicit Shift code in `codes` (the soft keyboard's sticky modifier).
+    // explicit Shift code in `codes` (the soft keyboard's one-shot modifier).
     for (const code of codes) {
       send({ type: "key", code, pressed: true, caps: false });
     }
     for (let i = codes.length - 1; i >= 0; i -= 1) {
       send({ type: "key", code: codes[i], pressed: false, caps: false });
     }
+  }, []);
+
+  // Press or release one key and leave it so: the soft keyboard's held
+  // modifiers, down while a finger rests on them. The keyboard releases what it
+  // pressed when the finger lifts, the page blurs or the panel closes; like a
+  // combo, nothing here joins the held-key set the input effect tracks.
+  const sendKey = useCallback((code: string, pressed: boolean) => {
+    sendRef.current({ type: "key", code, pressed, caps: false });
   }, []);
 
   // Ask the server for the remote's clipboard and wait for the answer, which
@@ -2739,6 +2747,7 @@ export function useRemoteDesktop(
     setCamera,
     setMic,
     sendKeyCombo,
+    sendKey,
     requestClipboard,
     sendClipboard,
     setBottomInset,

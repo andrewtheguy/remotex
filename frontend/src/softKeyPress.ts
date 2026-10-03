@@ -5,7 +5,7 @@
 // with every event — so that what a tap, a slide, a hold and two thumbs at once
 // do is decided here, tested here, and the panel only wires the DOM to it.
 //
-// Three ways a cell commits (softKeyboard.ts `Commit`):
+// Four ways a cell commits (softKeyboard.ts `Commit`):
 // - `lift`: the key under the finger when it lifts. The finger may slide to a
 //   neighbour first; the key it is over is shown as it goes. Lifting off the
 //   keyboard commits nothing, and so does a cancel — with `touch-action: none`
@@ -17,13 +17,17 @@
 //   key commits on lift if the finger stayed within the slop. A cancel inside the
 //   slop commits too: the browser cancels a touch the moment it claims a pan, and
 //   its own slop can trip before ours, which used to swallow the tap.
+// - `hold`: a modifier that is a key on the wire — down when touched, up when
+//   the finger lifts or is taken. The remote holds it under whatever happens
+//   meanwhile: the other thumb's keys, a tap on the canvas, a physical key.
 //
-// Modifiers cycle off → one-shot (tap) → locked (tap again, or hold) → off. A
-// one-shot is spent by the next commit, a repeat tick included; a lock survives
-// every commit until tapped off. A modifier under a resting finger wraps the
-// other fingers' commits like a physical chord, and goes back to what it was
-// when the finger lifts. Every held modifier is sent down ahead of the key in
-// the order it was taken, and released after it, through sendKeyCombo.
+// The other modifier keys never reach the wire on their own. A tap arms a
+// one-shot, which the next commit spends, a repeat tick included, and a second
+// tap disarms it. Under a resting finger a modifier chords the other fingers'
+// keys like a physical chord, and is off when the finger lifts. Every such
+// modifier is sent down ahead of the key in the order it was taken, and
+// released after it, through sendKeyCombo; one the wire already holds is left
+// out, since the remote has it.
 import {
   type CellId,
   type Commit,
@@ -51,20 +55,24 @@ export type PressEvent =
   | { kind: "up"; p: PointerSample }
   // pointercancel or lostpointercapture for one pointer.
   | { kind: "cancel"; id: number; t: number }
-  // The page lost focus or was hidden: every finger is forgotten, nothing sends.
+  // The page lost focus or was hidden: every finger is forgotten, nothing sends,
+  // and whatever the wire holds is released.
   | { kind: "cancelAll"; t: number }
   // The host's timer, due at the last result's `nextTickAt`.
   | { kind: "tick"; t: number }
   // The cells changed under the fingers (a page switch).
   | { kind: "layout"; cells: ReadonlyMap<CellId, LayoutCell> };
 
-// `held` is a finger resting on the key.
-export type ModifierState = "oneShot" | "locked" | "held";
+// `oneShot` is armed for the next key; `held` is a finger resting on the key,
+// chording; `down` is a `hold` key pressed on the wire under a finger.
+export type ModifierState = "oneShot" | "held" | "down";
 
 export type PressCommand =
-  // Press these codes in order and release them in reverse: the held modifiers,
-  // then the key's own codes.
+  // Press these codes in order and release them in reverse: the chording
+  // modifiers, then the key's own codes.
   | { kind: "send"; codes: string[] }
+  // Press or release one code and leave it so: a `hold` modifier.
+  | { kind: "key"; code: string; pressed: boolean }
   | { kind: "modifiers"; held: ReadonlyMap<string, ModifierState> }
   // The cells currently under a finger.
   | { kind: "active"; ids: ReadonlySet<CellId> }
@@ -92,7 +100,6 @@ export interface StepResult {
 export interface PressOptions {
   repeatDelayMs: number;
   repeatIntervalMs: number;
-  lockHoldMs: number;
   tapSlopPx: number;
 }
 
@@ -101,7 +108,6 @@ export interface PressOptions {
 export const DEFAULT_PRESS_OPTIONS: PressOptions = {
   repeatDelayMs: 400,
   repeatIntervalMs: 80,
-  lockHoldMs: 500,
   tapSlopPx: 8,
 };
 
@@ -123,9 +129,6 @@ interface Press {
   previous: ModifierState | undefined;
   // Another finger committed while this modifier was held.
   chorded: boolean;
-  // When a resting modifier locks, if the finger is still there.
-  lockAt: number | null;
-  lockedByHold: boolean;
   // When a `down` cell next repeats.
   nextRepeatAt: number | null;
   // The last preview shown for this finger.
@@ -214,12 +217,10 @@ export function createPressEngine(
     }
   };
 
-  // Cycle a modifier the way a tap does.
-  const cycle = (code: string, from: ModifierState | undefined) => {
+  // Arm or disarm a modifier the way a tap does.
+  const toggle = (code: string, from: ModifierState | undefined) => {
     if (from === undefined) {
       held.set(code, "oneShot");
-    } else if (from === "oneShot") {
-      held.set(code, "locked");
     } else {
       held.delete(code);
     }
@@ -232,11 +233,12 @@ export function createPressEngine(
       return;
     }
     press.modifier = null;
-    if (!cancelled && press.lockedByHold) {
-      held.set(code, "locked");
+    if (press.commit === "hold") {
+      held.delete(code);
+      out.push({ kind: "key", code, pressed: false });
       return;
     }
-    if (cancelled || press.chorded) {
+    if (cancelled) {
       if (press.previous === undefined) {
         held.delete(code);
       } else {
@@ -244,37 +246,46 @@ export function createPressEngine(
       }
       return;
     }
-    cycle(code, press.previous);
+    if (press.chorded) {
+      held.delete(code);
+      return;
+    }
+    toggle(code, press.previous);
   };
 
-  // The finger resting on this modifier has been used as a chord: it will go
-  // back to what it was, and it will not lock from being held.
+  // The finger resting on this modifier has been used as a chord.
   const markChorded = (code: string) => {
     for (const other of presses.values()) {
       if (other.modifier === code) {
         other.chorded = true;
-        other.lockAt = null;
       }
     }
   };
 
-  // Send a key with the held modifiers around it, and spend the one-shots.
-  const send = (press: Press, codes: string[]) => {
-    const wrap: string[] = [];
-    for (const [code, state] of held) {
-      if (!codes.includes(code)) {
-        wrap.push(code);
-      }
-      if (state === "held") {
-        markChorded(code);
-      }
-    }
-    out.push({ kind: "send", codes: [...wrap, ...codes] });
+  // A key has been sent: the one-shots are spent, the resting fingers chorded.
+  const spend = () => {
     for (const [code, state] of [...held]) {
       if (state === "oneShot") {
         held.delete(code);
+      } else if (state === "held") {
+        markChorded(code);
       }
     }
+  };
+
+  // Send a key with the chording modifiers around it. A modifier the wire
+  // holds is dropped from both: pressing it again would release it under the
+  // finger that holds it, and the remote has it anyway.
+  const send = (press: Press, codes: string[]) => {
+    const own = codes.filter((code) => held.get(code) !== "down");
+    if (own.length === 0) {
+      return;
+    }
+    const wrap = [...held]
+      .filter(([code, state]) => state !== "down" && !own.includes(code))
+      .map(([code]) => code);
+    out.push({ kind: "send", codes: [...wrap, ...own] });
+    spend();
     haptic(press);
   };
 
@@ -299,7 +310,7 @@ export function createPressEngine(
     const code = modifierCodeOf(id);
     if (code !== null) {
       // Only a `tap` modifier commits this way; the others act on touch.
-      cycle(code, held.get(code));
+      toggle(code, held.get(code));
       haptic(press);
       return;
     }
@@ -316,6 +327,27 @@ export function createPressEngine(
   const forget = (press: Press) => {
     preview(press, null);
     presses.delete(press.id);
+  };
+
+  // A finger landed on a modifier that acts on touch: a `hold` key goes down on
+  // the wire, any other is held for a chord. One already under another finger
+  // is that finger's; this one does nothing.
+  const takeModifier = (press: Press, code: string): boolean => {
+    const state = held.get(code);
+    if (state === "held" || state === "down") {
+      return false;
+    }
+    press.modifier = code;
+    press.previous = state;
+    held.delete(code);
+    if (press.commit === "hold") {
+      held.set(code, "down");
+      out.push({ kind: "key", code, pressed: true });
+    } else {
+      held.set(code, "held");
+    }
+    haptic(press);
+    return true;
   };
 
   const down = (p: PointerSample, target: CellId | null) => {
@@ -340,21 +372,17 @@ export function createPressEngine(
       modifier: null,
       previous: undefined,
       chorded: false,
-      lockAt: null,
-      lockedByHold: false,
       nextRepeatAt: null,
       previewed: null,
     };
-    presses.set(p.id, press);
     const code = modifierCodeOf(id);
     if (code !== null && cell.commit !== "tap") {
-      press.modifier = code;
-      press.previous = held.get(code);
-      held.set(code, "held");
-      press.lockAt = p.t + opts.lockHoldMs;
-      haptic(press);
+      if (takeModifier(press, code)) {
+        presses.set(p.id, press);
+      }
       return;
     }
+    presses.set(p.id, press);
     switch (cell.commit) {
       case "down":
         commit(press, id);
@@ -364,6 +392,7 @@ export function createPressEngine(
         preview(press, id);
         break;
       case "tap":
+      case "hold":
         break;
     }
   };
@@ -432,25 +461,14 @@ export function createPressEngine(
     forget(press);
   };
 
-  const tickPress = (press: Press, t: number) => {
-    if (press.lockAt !== null && t >= press.lockAt) {
-      press.lockAt = null;
-      press.lockedByHold = true;
-      if (press.modifier !== null) {
-        held.set(press.modifier, "locked");
-      }
-    }
-    if (press.nextRepeatAt !== null && t >= press.nextRepeatAt) {
-      if (press.cell !== null) {
-        commit(press, press.cell);
-      }
-      press.nextRepeatAt = t + opts.repeatIntervalMs;
-    }
-  };
-
   const tick = (t: number) => {
     for (const press of presses.values()) {
-      tickPress(press, t);
+      if (press.nextRepeatAt !== null && t >= press.nextRepeatAt) {
+        if (press.cell !== null) {
+          commit(press, press.cell);
+        }
+        press.nextRepeatAt = t + opts.repeatIntervalMs;
+      }
     }
   };
 
@@ -469,10 +487,9 @@ export function createPressEngine(
   const nextTick = (): number | null => {
     let at: number | null = null;
     for (const press of presses.values()) {
-      for (const due of [press.lockAt, press.nextRepeatAt]) {
-        if (due !== null && (at === null || due < at)) {
-          at = due;
-        }
+      const due = press.nextRepeatAt;
+      if (due !== null && (at === null || due < at)) {
+        at = due;
       }
     }
     return at;

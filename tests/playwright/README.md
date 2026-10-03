@@ -60,11 +60,12 @@ asks for the decoder and gets a 404, then selects VP9.
 
 `soft-keyboard.spec.ts` is the soft keyboard, read from the same socket: that a
 key tapped on it is the `key` frames the page sends, down then up; that a tapped
-modifier wraps the next key and is spent, and a twice-tapped one stays; and that a
-phone — a touch screen of a phone's size, which the test declares — gets the docked
-keyboard with its strip, its shortcut row and its Sym page, where a shifted symbol
-is Shift and its key. It asserts frames and accessible state, never repeat, which
-is timing, or where a key is drawn.
+modifier wraps the next key and is spent, and a twice-tapped one is off again; and
+that a phone — a touch screen of a phone's size, which the test declares — gets the
+docked keyboard with its strip, its shortcut row, whose held modifiers are a bare
+press of the key when tapped, and its Sym page, where a shifted symbol is Shift
+and its key. It asserts frames and accessible state, never repeat or how long a
+key is held, which is timing, or where a key is drawn.
 
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
 asserts which socket receives the format and packets, that a session started with
