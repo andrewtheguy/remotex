@@ -144,6 +144,8 @@ test.describe("a target that passes its pipeline over two virtual displays", () 
     const tab = await context.newPage();
     const tabSeen = watchDisplays(tab);
     await tab.goto(new URL("/display/2", BASE_URL).toString());
+    // The tab asks before it takes the display, which one tab shows at a time.
+    await tab.getByRole("button", { name: "Connect" }).click();
     // Painted from the session page's picture: the canvas it is shown on is up
     // once the paint worker has taken the first update across the browser.
     await expect(tab.locator("canvas.graphics")).toBeVisible({
