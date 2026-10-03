@@ -11,7 +11,8 @@
 //! mode: the Mac's physical displays, with their list, selection and density, in
 //! ZRLE rectangles. `subtype = "ard-high-performance"` is High Performance mode:
 //! one virtual display at the session's opening size — the target's kept size, or
-//! the connecting client's screen where the window drives it — with the picture
+//! the connecting client's screen where the window drives it — or two of them
+//! with `virtual_displays = 2`, each a video leg of its own, with the picture
 //! and sound from the Mac's media stream ([`crate::vnc_apple_media`]) alone, the
 //! browser covered by its resize notice until the stream is up. The unofficial
 //! `virtual_display = true` gives `ard` High Performance's display and resizing
@@ -672,6 +673,25 @@ struct DesktopState {
     push_interval_us: u32,
     /// A High Performance session's window-driven resizes — see [`HpResize`].
     hp: HpResize,
+    /// How many virtual displays the session asked the Mac for, one or two: the
+    /// target's `virtual_displays`. Every display configuration names that many.
+    hp_displays: usize,
+    /// The virtual displays as the Mac's last layout placed them, in its order.
+    /// Empty until the first layout. With two, `size` and `scale` are those of the
+    /// one on the session's canvas ([`Self::view`]), not the framebuffer the Mac
+    /// spans over both.
+    virtuals: Vec<Virtual>,
+    /// The framebuffer the Mac spans over two virtual displays, which its
+    /// rectangles are addressed in and stepped over by. `None` wherever the
+    /// desktop is the framebuffer, which is everywhere else.
+    span: Option<(u16, u16)>,
+    /// Which of two virtual displays is shown where.
+    view: HpView,
+    /// The points the second display follows while it is shown in a tab of its
+    /// own in a session started with resize: that tab's window. `None` gives it
+    /// the first display's points, as before the tab reported and once *All
+    /// Displays* is no longer chosen.
+    second_points: Option<(u16, u16)>,
     /// A High Performance layout has arrived: the virtual display the session
     /// asked for exists, and a media-stream offer can name its size.
     laid_out: bool,
@@ -727,6 +747,58 @@ const HP_RESIZE_STUCK: Duration = Duration::from_secs(30);
 /// the answering layout, which arrives inside an update.
 const HP_HOLD_REQUEST: (u16, u16) = (1, 1);
 
+
+/// One of a High Performance session's virtual displays, as the Mac's layout
+/// places it: its backing pixels and density, and where it starts in the
+/// framebuffer the Mac spans over all of them, which is the space pointer
+/// positions are sent in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Virtual {
+    size: (u16, u16),
+    scale: f32,
+    origin: (i32, i32),
+}
+
+/// Which of a High Performance session's two virtual displays the session's
+/// canvas shows, and whether the other is shown beside it: the display picker's
+/// choice, answered here. The Mac sends a stream for each display whatever is
+/// chosen, so a choice asks it for nothing but a keyframe.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct HpView {
+    /// The display on the session's canvas, counted from zero in the Mac's order.
+    active: usize,
+    /// *All Displays*: the first on the canvas and the second in a browser tab of
+    /// its own ([`TabFeed`]).
+    all: bool,
+}
+
+impl HpView {
+    /// The view a picker `id` names, among `count` displays: a display's index,
+    /// or [`DisplayState::COMBINED`] for all of them.
+    fn chosen(id: u32, count: usize) -> Option<Self> {
+        if id == DisplayState::COMBINED {
+            return (count > 1).then_some(Self { active: 0, all: true });
+        }
+        let active = usize::try_from(id).ok().filter(|index| *index < count)?;
+        Some(Self { active, all: false })
+    }
+
+    /// The picker's id for this view.
+    fn id(self) -> u32 {
+        if self.all { DisplayState::COMBINED } else { self.active as u32 }
+    }
+
+    /// The display shown in tab `display`, as the display sockets number them:
+    /// every display but the first, while all are shown.
+    fn tab_leg(self, display: u32, count: usize) -> Option<usize> {
+        let leg = usize::try_from(display.checked_sub(1)?).ok()?;
+        (self.all && leg > 0 && leg < count).then_some(leg)
+    }
+}
+
+/// The number a display socket names a High Performance session's second display
+/// by: `/ws/display?display=2`.
+const HP_TAB_DISPLAY: u32 = 2;
 
 /// Where a High Performance resize is in its exchange with the Mac.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1025,8 +1097,47 @@ impl DesktopState {
     /// The density has to agree too: a 3840×2160 desktop moving from 1x to 2x
     /// keeps every pixel and still needs the new mode sent.
     fn hp_noop(&self, points: (u16, u16)) -> bool {
-        let mode = vnc_apple::virtual_display_mode(points, self.host_density);
-        mode.pixels == self.size && (self.scale - self.host_density).abs() < 0.005
+        let asked = self.hp_modes(points);
+        let sizes = self.hp_sizes();
+        asked.len() == sizes.len()
+            && asked.iter().zip(&sizes).all(|(mode, size)| mode.pixels == *size)
+            && (self.scale - self.host_density).abs() < 0.005
+    }
+
+    /// The mode each virtual display is asked for when the first is `points`: the
+    /// second its tab's window ([`Self::second_points`]), or the first's size.
+    fn hp_modes(&self, points: (u16, u16)) -> Vec<vnc_apple::VirtualMode> {
+        let mode = |points| vnc_apple::virtual_display_mode(points, self.host_density);
+        let mut modes = vec![mode(points)];
+        if self.hp_displays > 1 {
+            modes.push(mode(self.second_points.unwrap_or(points)));
+        }
+        modes
+    }
+
+    /// Each virtual display's backing size, in the Mac's order: what the media
+    /// stream is offered for, a video leg each.
+    fn hp_sizes(&self) -> Vec<(u16, u16)> {
+        if self.virtuals.is_empty() {
+            vec![self.size]
+        } else {
+            self.virtuals.iter().map(|display| display.size).collect()
+        }
+    }
+
+    /// The first virtual display's size in points, as it stands: what a request
+    /// that changes something else, the density or the second display, asks for
+    /// again.
+    fn hp_first_points(&self) -> (u16, u16) {
+        let (size, scale) = self.virtuals.first().map_or((self.size, self.scale), |v| (v.size, v.scale));
+        let point = |v: u16| (f32::from(v) / scale).round().max(1.0) as u16;
+        (point(size.0), point(size.1))
+    }
+
+    /// Where display `leg` starts in the framebuffer the Mac spans over its
+    /// virtual displays, which a pointer position made on it is offset by.
+    fn hp_origin(&self, leg: usize) -> (i32, i32) {
+        self.virtuals.get(leg).map_or((0, 0), |display| display.origin)
     }
 
     /// The `SetDisplayConfiguration` for a High Performance resize that is due,
@@ -1043,8 +1154,7 @@ impl DesktopState {
             "vnc: requesting Apple virtual-display resize to {}x{} points at {}x",
             want.0, want.1, self.host_density,
         );
-        let mode = vnc_apple::virtual_display_mode(want, self.host_density);
-        Some(vnc_apple::set_display_configuration(mode))
+        Some(vnc_apple::set_display_configuration(&self.hp_modes(want)))
     }
 
     /// The region a pixel request asks for: the desktop, or while a High
@@ -1304,6 +1414,10 @@ struct DisplayState {
     /// still a list, and one a browser has to be told: see
     /// [`DisplayState::displays_msg`].
     listed: bool,
+    /// A High Performance session's two virtual displays as the picker names
+    /// them, before the view marks one for a tab: what [`Self::hp_list`] builds
+    /// the list from at a layout and at every choice. Empty on a session with one.
+    hp_infos: Vec<DisplayInfo>,
 }
 
 impl DisplayState {
@@ -1325,6 +1439,36 @@ impl DisplayState {
             active: self.active,
             displays: self.displays.clone(),
         })
+    }
+
+    /// List a High Performance session's two virtual displays as `view` shows
+    /// them, the way an RDP target's are listed: each by its number, the second
+    /// marked for a tab of its own while all are shown, and *All Displays* last.
+    /// Whether the list or the checkmark changed.
+    fn hp_list(&mut self, view: HpView) -> bool {
+        let mut displays: Vec<DisplayInfo> = self
+            .hp_infos
+            .iter()
+            .enumerate()
+            .map(|(index, info)| DisplayInfo {
+                tab: (view.all && index > 0).then_some(index as u32 + 1),
+                ..info.clone()
+            })
+            .collect();
+        displays.push(DisplayInfo {
+            id: Self::COMBINED,
+            label: "All Displays".into(),
+            detail: "One browser tab each".into(),
+            main: false,
+            virtual_display: false,
+            tab: None,
+        });
+        let active = view.id();
+        let changed = self.displays != displays || self.active != active;
+        self.displays = displays;
+        self.active = active;
+        self.listed = true;
+        changed
     }
 
     /// Ask Standard Screen Sharing for the scale appropriate to `selection`, or
@@ -1419,13 +1563,14 @@ struct Apple {
     /// True for High Performance mode, whose setup requested a virtual display.
     /// Layout records do not carry this fact themselves.
     virtual_display: bool,
-    /// The media stream's decoded pictures, on `ard-high-performance`.
-    pictures: Option<Pictures>,
+    /// The media stream's pictures, on `ard-high-performance`: each virtual
+    /// display's, in the Mac's order. Empty on every other session.
+    pictures: Vec<Pictures>,
 }
 
 impl Apple {
     /// The read loop's starting state for either Apple subtype.
-    fn new(virtual_display: bool, pictures: Option<Pictures>) -> Self {
+    fn new(virtual_display: bool, pictures: Vec<Pictures>) -> Self {
         Self {
             virtual_display,
             pictures,
@@ -1437,6 +1582,86 @@ impl Apple {
 /// High Performance's media stream, shared by the engine's two loops, which both
 /// offer it. Locked after [`SharedDesktop`] where both are held.
 type SharedMedia = Arc<std::sync::Mutex<MediaStream>>;
+
+/// A High Performance session's second virtual display, shown in a browser tab of
+/// its own while *All Displays* is chosen: the Mac's second video leg, sent to the
+/// display socket the session handed over ([`ClientMsg::DisplayShown`]) through a
+/// sink and a shadow of its own.
+///
+/// What goes wrong with it ends it and nothing else: its socket is a tab the
+/// person can close, so a failed send lets it go ([`tab_gone`]).
+struct TabFeed {
+    /// Its number on its socket: [`HP_TAB_DISPLAY`].
+    display: u32,
+    sink: VideoSink,
+    shadow: SharedShadow,
+    /// The tab is behind its resize notice, waiting for the stream's first
+    /// picture of its display, as the session's canvas is ([`DesktopState::covered`]).
+    covered: bool,
+}
+
+/// The tab showing the second display, shared by the engine's two loops: the
+/// input loop hears it come and go, and the read loop sends it pictures. Never
+/// held across an await; its sink and shadow are cloned out.
+type SharedTab = Arc<std::sync::Mutex<Option<TabFeed>>>;
+
+/// The tab's sink and shadow, while there is one.
+fn tab_parts(tab: &SharedTab) -> Option<(VideoSink, SharedShadow)> {
+    tab.lock().unwrap().as_ref().map(|tab| (tab.sink.clone(), Arc::clone(&tab.shadow)))
+}
+
+/// Let the tab go after a send to it failed: its socket is closed. Its display's
+/// pictures are dropped at the receiver from here.
+fn tab_gone(tab: &SharedTab, media: Option<&SharedMedia>, error: &anyhow::Error) {
+    if let Some(gone) = tab.lock().unwrap().take() {
+        info!("vnc: display {}'s tab is gone: {error:#}", gone.display);
+        if let Some(media) = media {
+            media.lock().unwrap().show(1, false);
+        }
+    }
+}
+
+/// Send the tab `msgs`, in order, and let it go if its socket is closed.
+async fn tab_send(tab: &SharedTab, media: Option<&SharedMedia>, msgs: Vec<ServerMsg>) {
+    let Some((sink, _)) = tab_parts(tab) else {
+        return;
+    };
+    for msg in msgs {
+        if let Err(e) = sink.msg(msg).await {
+            return tab_gone(tab, media, &e);
+        }
+    }
+}
+
+/// Put the tab behind its resize notice until its display's next picture: the
+/// stream is down for a display change, or was taken down by the Mac.
+async fn tab_cover(tab: &SharedTab, media: Option<&SharedMedia>) {
+    let cover = {
+        let mut tab = tab.lock().unwrap();
+        tab.as_mut().is_some_and(|tab| {
+            // The screen may come back as it was, and a picture the shadow already
+            // holds queues nothing for the notice to follow.
+            tab.shadow.lock().unwrap().forget();
+            !std::mem::replace(&mut tab.covered, true)
+        })
+    };
+    if cover {
+        tab_send(tab, media, vec![ServerMsg::Resizing { active: true }]).await;
+    }
+}
+
+/// Bring the tab's notice down behind the picture about to be sent it, as
+/// [`uncover`] does the canvas's. Not while a resize is in progress.
+fn tab_uncover(tab: &SharedTab, desktop: &SharedDesktop) {
+    let resizing = desktop.lock().unwrap().hp.shown;
+    if let Some(tab) = tab.lock().unwrap().as_mut()
+        && tab.covered
+        && !resizing
+    {
+        tab.covered = false;
+        tab.sink.uncover();
+    }
+}
 
 /// The pixels the browser has already been sent, so an update carrying none of
 /// them costs nothing and one carrying a few is sent as those few.
@@ -1675,6 +1900,8 @@ async fn session(
             microphone,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
+            hp_displays: if virtual_display { usize::from(config.virtual_displays) } else { 1 },
+            plan,
             media,
             passthrough,
         },
@@ -1743,8 +1970,13 @@ struct Flags {
     host_density: f32,
     /// Whether the client drives the update cycle — see [`Connected::poll`].
     poll: bool,
+    /// How many virtual displays a High Performance session asked the Mac for:
+    /// the target's `virtual_displays`, one on every other session.
+    hp_displays: usize,
+    /// What a display shown in a tab of its own is encoded by: the session's plan.
+    plan: RenderPlan,
     /// High Performance's media stream — see [`Connected::media`].
-    media: Option<(MediaStream, Pictures)>,
+    media: Option<(MediaStream, Vec<Pictures>)>,
     /// See [`Connected::passthrough`].
     passthrough: Option<Arc<Listing>>,
 }
@@ -1769,7 +2001,7 @@ struct Connected {
     /// High Performance's media stream, which the picture comes from once it is
     /// up ([`vnc_apple_media`]), and the pictures it decodes: every High
     /// Performance session has one, and every other session `None`.
-    media: Option<(MediaStream, Pictures)>,
+    media: Option<(MediaStream, Vec<Pictures>)>,
     /// The encodings a `wlshare` target lists, with and without
     /// [`ENCODING_WLSHARE_VP9`]: what the read loop lists on its own while the
     /// desktop is past the video ceiling, and with it again once it is back.
@@ -1784,6 +2016,9 @@ struct ServerInit {
     /// The client messages a Mac's enhanced ServerInit says it accepts, or `None`
     /// from any other server. See [`apple_commands`].
     apple_commands: Option<[u8; 16]>,
+    /// The most virtual displays a Mac's enhanced ServerInit says it will create,
+    /// which its session flags carry above bit 4. `None` from any other server.
+    apple_virtual_displays: Option<u32>,
 }
 
 impl ServerInit {
@@ -1981,7 +2216,9 @@ async fn read_server_init<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Resul
     let name = read_bytes(reader).await?;
     debug!("vnc: server desktop {}", describe_desktop(&name));
     anyhow::ensure!(width > 0 && height > 0, "server reported a {width}x{height} desktop");
-    Ok(ServerInit { width, height, apple_commands: apple_commands(&name) })
+    let apple_virtual_displays = is_enhanced_desktop(&name)
+        .then(|| u32::from_be_bytes(name[2..6].try_into().expect("four bytes of flags")) >> 5);
+    Ok(ServerInit { width, height, apple_commands: apple_commands(&name), apple_virtual_displays })
 }
 
 /// Describe ServerInit's name field, which on Apple's revision is not a name.
@@ -2288,6 +2525,18 @@ async fn apple_preface(
          list SetDisplayConfiguration, without which there is no virtual display. Apple's \
          viewer connects it in Standard mode; use subtype = \"ard\" without virtual_display"
     );
+    // How many virtual displays the session asks for. The Mac says how many it
+    // will create, and holds a configuration naming more to that many without a
+    // word, which would leave this side waiting on a display that never comes.
+    let displays = usize::from(config.virtual_displays);
+    if displays > 1 {
+        let most = server.apple_virtual_displays.unwrap_or(1);
+        anyhow::ensure!(
+            most as usize >= displays,
+            "this Mac creates at most {most} virtual display(s), and the target asks for \
+             {displays}; set virtual_displays = {most}"
+        );
+    }
     if virtual_display && !media_stream {
         info!(
             "vnc: opening Standard mode on a virtual display (unofficial: a combination \
@@ -2322,7 +2571,7 @@ async fn apple_preface(
         // reports and screen changes; its dynamic-resolution flag is set here
         // regardless, so every fresh session restores the Mac's checkbox to on.
         uplink
-            .send(&vnc_apple::set_display_configuration(opening))
+            .send(&vnc_apple::set_display_configuration(&vec![opening; displays]))
             .await?;
     }
     uplink.send(&set_pixel_format()).await?;
@@ -2346,7 +2595,7 @@ async fn apple_preface(
         macos,
         apple: true,
         poll: true,
-        media: media_stream.then(|| MediaStream::new(peer, local, pass_media)),
+        media: media_stream.then(|| MediaStream::new(peer, local, pass_media, displays)),
         passthrough: None,
     })
 }
@@ -2441,6 +2690,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         microphone,
         host_density,
         poll,
+        hp_displays,
+        plan,
         media,
         passthrough,
     } = flags;
@@ -2448,8 +2699,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     // a distance.
     let mut wheel = if passthrough.is_some() { Wheel::wlshare() } else { Wheel::new(apple) };
     let (media, pictures) = match media {
-        Some((media, pictures)) => (Some(Arc::new(std::sync::Mutex::new(media))), Some(pictures)),
-        None => (None, None),
+        Some((media, pictures)) => (Some(Arc::new(std::sync::Mutex::new(media))), pictures),
+        None => (None, Vec::new()),
     };
     // The uplink is shared: the read loop answers the server (update requests,
     // re-arming), the input side sends pointer/key/display messages. Neither
@@ -2479,6 +2730,11 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         repaint_owed: false,
         push_interval_us: push_interval_us(media_only),
         hp,
+        hp_displays,
+        virtuals: Vec::new(),
+        span: None,
+        view: HpView::default(),
+        second_points: None,
         laid_out: false,
         media_live: false,
         media_only,
@@ -2491,6 +2747,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     }));
     let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
     let hp_wake = Arc::new(tokio::sync::Notify::new());
+    let tab: SharedTab = Arc::default();
     // The camera socket's traffic comes to this loop through the queues, and the
     // server's decisions go to the bridge from the read loop: both share the link.
     let (camera, mut camera_queues) = match camera {
@@ -2526,6 +2783,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         camera: camera.clone(),
         microphone: microphone.clone(),
         media: media.clone(),
+        tab: Arc::clone(&tab),
+        switch: Arc::default(),
         passthrough,
     };
 
@@ -2543,6 +2802,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     // 003.889 wire this is also the second half of the arming pair the preface
     // began, which is why it is unconditional.
     send(&uplink, &update_request(false, size)).await?;
+    // The input side's own handle on what the two loops share, for what a
+    // display's tab and the picker's choice need of it.
+    let shared_here = shared.clone();
     let mut read_task = tokio::spawn(read_loop(
         downlink,
         shared,
@@ -2616,7 +2878,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
             }
             // A High Performance resize has something due — see [`HpResize`].
             () = hp_resize_due(&desktop, &hp_wake), if virtual_display && resize => {
-                if let Err(e) = hp_resize_step(&uplink, &desktop, media.as_ref(), &sink).await {
+                if let Err(e) = hp_resize_step(&uplink, &desktop, media.as_ref(), &tab, &sink).await {
                     break Err(e);
                 }
             }
@@ -2648,13 +2910,78 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     info!("vnc: input channel closed; session shut down");
                     break Ok(());
                 };
+                // A display socket for the second virtual display came or went.
+                let input = match input {
+                    ClientMsg::DisplayShown { display, feed } => {
+                        hp_tab_shown(&shared_here, display, feed, plan, macos).await;
+                        continue;
+                    }
+                    other => other,
+                };
+                // Input made over that display's tab: a position in it is in its
+                // own pixels, its window sizes it, and its repaint is its own.
+                // Anything else is the session's input like any other.
+                let (input, on_leg) = match input {
+                    ClientMsg::OnDisplay { display: on, input: made } => {
+                        let leg = {
+                            let d = desktop.lock().unwrap();
+                            d.view.tab_leg(on, d.virtuals.len())
+                        };
+                        let open = tab.lock().unwrap().as_ref().is_some_and(|tab| tab.display == on);
+                        match (*made, leg.filter(|_| open)) {
+                            // A release from a tab already gone — the session
+                            // lets go of what its socket left held — still
+                            // reaches the Mac, which would otherwise keep it down.
+                            (
+                                made @ (ClientMsg::Key { pressed: false, .. }
+                                | ClientMsg::MouseButton { pressed: false, .. }),
+                                None,
+                            ) => (made, None),
+                            (_, None) => continue,
+                            (ClientMsg::Refresh, Some(_)) => {
+                                tab_repaint(&shared_here, macos).await;
+                                continue;
+                            }
+                            // The tab's window: the second display's size, in
+                            // points, as the session's own viewport is the first's.
+                            (ClientMsg::Viewport { w, h }, Some(_)) => {
+                                if resize && w > 0 && h > 0 {
+                                    desktop.lock().unwrap().second_points = Some((w, h));
+                                    if let Err(e) =
+                                        request_resize(&uplink, &desktop, ResizeAsk::Density, virtual_display).await
+                                    {
+                                        break Err(e);
+                                    }
+                                }
+                                continue;
+                            }
+                            // The session's window states the density and makes
+                            // the choices; the tab has no menu to make one from.
+                            (
+                                ClientMsg::HostDisplay(_)
+                                | ClientMsg::SelectDisplay { .. }
+                                | ClientMsg::DisplayShown { .. }
+                                | ClientMsg::OnDisplay { .. },
+                                Some(_),
+                            ) => continue,
+                            (made, Some(leg)) => (made, Some(leg)),
+                        }
+                    }
+                    other => (other, None),
+                };
                 // Into the Mac's pointer space before anything is held, while
                 // the framebuffer the position was taken on is still the one
-                // the layout names — see [`DisplayState::apple_pointer`].
+                // the layout names — see [`DisplayState::apple_pointer`] — and
+                // then to where the display it was made on starts in the
+                // framebuffer a Mac spans over two virtual displays.
                 let input = match input {
                     ClientMsg::MouseMove { x, y } => {
                         let (x, y) = display.lock().unwrap().apple_pointer(x, y);
-                        ClientMsg::MouseMove { x, y }
+                        let (left, top) = {
+                            let d = desktop.lock().unwrap();
+                            d.hp_origin(on_leg.unwrap_or(d.view.active))
+                        };
+                        ClientMsg::MouseMove { x: x + left, y: y + top }
                     }
                     other => other,
                 };
@@ -2818,9 +3145,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let d = desktop.lock().unwrap();
                         let live = media.as_ref().filter(|_| d.media_live).map(|m| m.lock().unwrap());
                         if let Some(media) = &live {
-                            media.want_keyframe();
+                            media.want_keyframe(d.view.active);
                         }
-                        live.and_then(|m| m.latest()).filter(|picture| picture.size == d.size)
+                        live.and_then(|m| m.latest(d.view.active)).filter(|picture| picture.size == d.size)
                     };
                     if let Some(picture) = latest
                         && let Err(e) = blit_picture(&shadow, &picture, &sink).await
@@ -2917,6 +3244,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     // whose outputs extension is the one way an RFB 3.8 server says
                     // it has more than one screen to send.
                     let known = display.lock().unwrap().displays.iter().any(|d| d.id == id);
+                    let hp_two = desktop.lock().unwrap().virtuals.len() > 1;
                     if !known {
                         // A screen unplugged since the list was sent — or a target
                         // that never sent one. Dropped rather than forwarded, so
@@ -2924,6 +3252,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         // gone and the checkmark stays where it is.
                         debug!("vnc: ignoring a selection of unknown display {id}");
                         Ok(())
+                    } else if hp_two {
+                        // Two virtual displays are a stream each, and the choice
+                        // between them is answered here.
+                        hp_select(&shared_here, id, &sink, resize).await
                     } else if apple {
                         // `COMBINED` is this gateway's own list entry, not a
                         // screen the Mac named, so it maps back to the
@@ -3055,10 +3387,7 @@ async fn request_resize(
             // request that starts from pixels, and from this end's own. A size
             // still settling is the newer word on the points: a window dragged
             // to another screen reports both, and the density must not undo it.
-            ResizeAsk::Density => d.hp.newest_points().unwrap_or_else(|| {
-                let point = |v: u16| (f32::from(v) / d.scale).round().max(1.0) as u16;
-                (point(d.size.0), point(d.size.1))
-            }),
+            ResizeAsk::Density => d.hp.newest_points().unwrap_or_else(|| d.hp_first_points()),
         };
         if virtual_display {
             // Recorded, not sent: [`hp_resize_step`] asks the Mac once the window
@@ -3085,13 +3414,18 @@ async fn hp_resize_step(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
     media: Option<&SharedMedia>,
+    tab: &SharedTab,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
     loop {
         let step = desktop.lock().unwrap().hp.step(tokio::time::Instant::now());
         match step {
             None => return Ok(()),
-            Some(HpStep::Show) => sink.msg(ServerMsg::Resizing { active: true }).await?,
+            // Every display is behind the notice: the change names them all.
+            Some(HpStep::Show) => {
+                sink.msg(ServerMsg::Resizing { active: true }).await?;
+                tab_cover(tab, media).await;
+            }
             // The display has settled, which is what the media stream waits for:
             // offered mid-change, it is torn down by the change anyway.
             Some(HpStep::Hide) => {
@@ -3144,12 +3478,14 @@ async fn offer_media(
     let Some(media) = media else {
         return Ok(());
     };
-    let (size, offer) = {
+    let (sizes, offer) = {
         let d = desktop.lock().unwrap();
         if !d.media_offerable() {
             return Ok(());
         }
-        (d.size, media.lock().unwrap().offer(d.size))
+        let sizes = d.hp_sizes();
+        let offer = media.lock().unwrap().offer(&sizes);
+        (sizes, offer)
     };
     match offer {
         None => Ok(()),
@@ -3158,7 +3494,8 @@ async fn offer_media(
             send(uplink, &set_encodings(&vnc_apple_media::encodings_with_media_stream())).await
         }
         Some(vnc_apple_media::Offer::Configuration(configuration)) => {
-            info!("vnc: offering the Mac's media stream for its {}x{} display", size.0, size.1);
+            let sizes: Vec<String> = sizes.iter().map(|(w, h)| format!("{w}x{h}")).collect();
+            info!("vnc: offering the Mac's media stream for its {} display", sizes.join(" and "));
             send(uplink, &configuration).await
         }
     }
@@ -3237,7 +3574,13 @@ async fn blit_picture(
 /// picture of it, and uncovers it. A dropped unit is one the next ones predict
 /// from, so the browser starts over at a keyframe, which the Mac is asked for as
 /// soon as a unit is held back waiting for one.
-async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &SharedMedia) -> anyhow::Result<()> {
+async fn pass_unit(
+    shared: &Shared,
+    leg: usize,
+    unit: PassedUnit,
+    sink: &VideoSink,
+    media: &SharedMedia,
+) -> anyhow::Result<()> {
     let first = {
         let mut d = shared.desktop.lock().unwrap();
         if unit.size != d.size || d.hp.holds_pixels() {
@@ -3259,9 +3602,76 @@ async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
     uncover(shared, sink);
     if !sink.pass_hevc(w, h, unit.data, passed).await? {
-        media.lock().unwrap().want_keyframe();
+        media.lock().unwrap().want_keyframe(leg);
     }
     Ok(())
+}
+
+/// Whether a picture or unit of `size` is the second display's as the tab shows
+/// it: one of another size is the old display's last or the new one's before its
+/// layout, and nothing is shown while a resize holds the displays.
+fn tab_takes(shared: &Shared, leg: usize, size: (u16, u16)) -> bool {
+    let d = shared.desktop.lock().unwrap();
+    d.virtuals.get(leg).is_some_and(|display| display.size == size) && !d.hp.holds_pixels()
+}
+
+/// Show the tab a picture the media stream decoded of its display, as
+/// [`show_picture`] shows the session's canvas one.
+async fn tab_picture(shared: &Shared, leg: usize, picture: &vnc_apple_media::Picture) {
+    let Some((sink, shadow)) = tab_parts(&shared.tab) else {
+        return;
+    };
+    if !tab_takes(shared, leg, picture.size) {
+        return;
+    }
+    tab_uncover(&shared.tab, &shared.desktop);
+    if let Err(e) = blit_picture(&shadow, picture, &sink).await {
+        tab_gone(&shared.tab, shared.media.as_ref(), &e);
+    }
+}
+
+/// Pass the tab a unit of its display's HEVC, as [`pass_unit`] passes the
+/// session's canvas one.
+async fn tab_unit(shared: &Shared, leg: usize, unit: PassedUnit, media: &SharedMedia) {
+    let Some((sink, _)) = tab_parts(&shared.tab) else {
+        return;
+    };
+    if !tab_takes(shared, leg, unit.size) {
+        sink.restart_pass();
+        return;
+    }
+    let (w, h) = unit.size;
+    let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
+    tab_uncover(&shared.tab, &shared.desktop);
+    match sink.pass_hevc(w, h, unit.data, passed).await {
+        Ok(true) => {}
+        Ok(false) => media.lock().unwrap().want_keyframe(leg),
+        Err(e) => tab_gone(&shared.tab, Some(media), &e),
+    }
+}
+
+/// Where a display's pictures go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShownOn {
+    /// The session's canvas.
+    Canvas,
+    /// A tab of its own.
+    Tab,
+    /// Nowhere: the receiver drops such a display's pictures itself, and one
+    /// already on its way when the view changed is dropped here.
+    Nowhere,
+}
+
+/// Where display `leg`'s pictures go as the view stands.
+fn shown_on(shared: &Shared, leg: usize) -> ShownOn {
+    let d = shared.desktop.lock().unwrap();
+    if leg == d.view.active {
+        ShownOn::Canvas
+    } else if d.view.all && leg > 0 && shared.tab.lock().unwrap().is_some() {
+        ShownOn::Tab
+    } else {
+        ShownOn::Nowhere
+    }
 }
 
 /// What the media stream handed the read loop next.
@@ -3272,12 +3682,21 @@ enum FromStream {
     Stopped,
 }
 
-/// The next picture the media stream decoded, or unit it passes, on a session that
-/// has one; otherwise never.
-async fn next_picture(apple: &mut Option<Apple>) -> FromStream {
-    let Some(pictures) = apple.as_mut().and_then(|a| a.pictures.as_mut()) else {
-        return std::future::pending().await;
-    };
+/// The next picture the media stream decoded, or unit it passes, and the display
+/// it is of, on a session that has one; otherwise never.
+async fn next_picture(apple: &mut Option<Apple>) -> (usize, FromStream) {
+    match apple.as_mut().map(|apple| apple.pictures.as_mut_slice()) {
+        None | Some([]) => std::future::pending().await,
+        Some([only]) => (0, next_of(only).await),
+        Some([first, second, ..]) => tokio::select! {
+            picture = next_of(first) => (0, picture),
+            picture = next_of(second) => (1, picture),
+        },
+    }
+}
+
+/// The next of one display's pictures.
+async fn next_of(pictures: &mut Pictures) -> FromStream {
     match pictures {
         Pictures::Decoded(pictures) => {
             if pictures.changed().await.is_err() {
@@ -3373,6 +3792,13 @@ struct Shared {
     /// offer it: the read loop at an update boundary, the input loop when a
     /// resize's cover comes down.
     media: Option<SharedMedia>,
+    /// The tab a High Performance session's second display is shown in.
+    tab: SharedTab,
+    /// Held while the canvas changes display, and by the read loop from deciding
+    /// where a picture goes until it has gone: one display's picture is never
+    /// sent into what the canvas holds of the other, which at equal sizes nothing
+    /// else tells apart, and which a passed stream's decoder cannot take.
+    switch: Arc<tokio::sync::Mutex<()>>,
     /// See [`Connected::passthrough`]. `Some` is a session that may be sent
     /// [`ENCODING_WLSHARE_VP9`], and the only one that reads it.
     passthrough: Option<Arc<Listing>>,
@@ -3498,18 +3924,27 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 continue;
             }
 
-            picture = next_picture(&mut apple) => {
+            (leg, picture) = next_picture(&mut apple) => {
+                let _switch = shared.switch.lock().await;
                 match picture {
                     FromStream::Picture(picture) => {
                         if let Some(media) = media {
-                            media.lock().unwrap().pictured(picture.size);
+                            media.lock().unwrap().pictured(leg, picture.size);
                         }
-                        show_picture(&shared, &picture, &sink).await?;
+                        match shown_on(&shared, leg) {
+                            ShownOn::Canvas => show_picture(&shared, &picture, &sink).await?,
+                            ShownOn::Tab => tab_picture(&shared, leg, &picture).await,
+                            ShownOn::Nowhere => {}
+                        }
                     }
                     FromStream::Unit(unit) => {
                         let media = media.as_ref().expect("a passed unit comes from the media stream");
-                        media.lock().unwrap().pictured(unit.size);
-                        pass_unit(&shared, unit, &sink, media).await?;
+                        media.lock().unwrap().pictured(leg, unit.size);
+                        match shown_on(&shared, leg) {
+                            ShownOn::Canvas => pass_unit(&shared, leg, unit, &sink, media).await?,
+                            ShownOn::Tab => tab_unit(&shared, leg, unit, media).await,
+                            ShownOn::Nowhere => {}
+                        }
                     }
                     // The receiver failed. Apple's viewer has no way back to RFB
                     // pixels from a failed stream and ends the session, and so does
@@ -3768,7 +4203,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     // actual display regions have arrived or the bounded request
                     // budget is exhausted, so an incremental request cannot
                     // immediately replace this full one on macOS.
-                    let expected = display.lock().unwrap().repaint_pixels;
+                    // No more than the request covers: of two virtual displays
+                    // it is the one on the canvas, and the layout counts both.
+                    let asked = u64::from(size.0) * u64::from(size.1);
+                    let expected = display.lock().unwrap().repaint_pixels.min(asked);
                     full_repaint = Some(FullRepaint::new(expected));
                     send(uplink, &update_request(false, size)).await?;
                 } else {
@@ -4772,6 +5210,12 @@ async fn read_rect<R: AsyncRead + Unpin>(
         ENCODING_ZLIB => payload = Payload::Zlib,
         vnc_apple::ENCODING_CURSOR_IMAGE if apple.is_some() => {
             read_cursor_image(reader, apple, cursor, (x, y), (w, h), sink).await?;
+            // A display shown in a tab of its own is told the same shape.
+            if shared.tab.lock().unwrap().is_some()
+                && let Some(msg) = cursor_msg(cursor)
+            {
+                tab_send(&shared.tab, shared.media.as_ref(), vec![msg]).await;
+            }
             return Ok(RectEffect::NOTHING);
         }
         vnc_apple::ENCODING_DISPLAY_LAYOUT if apple.is_some() => {
@@ -4848,7 +5292,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
             let mut body = vec![0u8; usize::from(len)];
             reader.read_exact(&mut body).await?;
             let media = shared.media.as_ref().expect("guarded");
-            let cover = media.lock().unwrap().on_reply(&body)? && {
+            let down = media.lock().unwrap().on_reply(&body)?;
+            if down {
+                tab_cover(&shared.tab, Some(media)).await;
+            }
+            let cover = down && {
                 let mut d = desktop.lock().unwrap();
                 d.media_live = false;
                 d.media_only && !d.hp.shown && !std::mem::replace(&mut d.covered, true)
@@ -4892,7 +5340,10 @@ async fn read_rect<R: AsyncRead + Unpin>(
         }
     }
 
-    let size = desktop.lock().unwrap().size;
+    let size = {
+        let d = desktop.lock().unwrap();
+        d.span.unwrap_or(d.size)
+    };
     // Bounds-check before allocating: a rect outside the announced desktop is
     // a protocol violation (and would let a bad length drive the allocation).
     anyhow::ensure!(
@@ -5465,6 +5916,217 @@ async fn read_cursor_image<R: AsyncRead + Unpin>(
     sink.msg(ServerMsg::Cursor(Some(shape))).await
 }
 
+/// A High Performance layout's virtual displays, in the Mac's order: the one the
+/// session asked for, which is the whole framebuffer, or the two, each where its
+/// record places it in the framebuffer spanning both. Empty on a session without
+/// a virtual display.
+fn hp_virtuals(desktop: &SharedDesktop, layout: &vnc_apple::Layout, virtual_display: bool) -> Vec<Virtual> {
+    if !virtual_display {
+        return Vec::new();
+    }
+    let asked = desktop.lock().unwrap().hp_displays;
+    if asked > 1 && layout.displays.len() > 1 {
+        return layout
+            .displays
+            .iter()
+            .take(asked)
+            .map(|display| Virtual {
+                size: display.backing,
+                scale: display.effective_density(),
+                origin: (i32::from(display.backing_at.0), i32::from(display.backing_at.1)),
+            })
+            .collect();
+    }
+    vec![Virtual { size: layout.backing, scale: layout.scale(), origin: (0, 0) }]
+}
+
+/// The Mac laid its virtual displays out again: the tab is told its display's new
+/// size, behind its resize notice until the stream delivers for it.
+async fn tab_laid_out(shared: &Shared, virtuals: &[Virtual]) {
+    let Some((sink, shadow)) = tab_parts(&shared.tab) else {
+        return;
+    };
+    let Some(shown) = virtuals.get(1) else {
+        return;
+    };
+    shadow.lock().unwrap().resize(shown.size.0, shown.size.1);
+    sink.reset_render();
+    let media = shared.media.as_ref();
+    tab_send(
+        &shared.tab,
+        media,
+        vec![ServerMsg::Resize { w: shown.size.0, h: shown.size.1, scale: shown.scale }],
+    )
+    .await;
+    tab_cover(&shared.tab, media).await;
+}
+
+/// Everything a tab socket holding nothing is owed: its display's size, the
+/// remote's system, the pointer, and the display's picture, which is the stream's
+/// newest when the display was already in view and an IDR the Mac is asked for
+/// when it was not, or is passed.
+async fn tab_repaint(shared: &Shared, macos: bool) {
+    let Some((sink, shadow)) = tab_parts(&shared.tab) else {
+        return;
+    };
+    let shown = {
+        let d = shared.desktop.lock().unwrap();
+        d.view.tab_leg(HP_TAB_DISPLAY, d.virtuals.len()).and_then(|leg| Some((leg, *d.virtuals.get(leg)?)))
+    };
+    let Some((leg, shown)) = shown else {
+        return;
+    };
+    shadow.lock().unwrap().forget();
+    sink.reset_render();
+    if let Some(tab) = shared.tab.lock().unwrap().as_mut() {
+        tab.covered = true;
+    }
+    let media = shared.media.as_ref();
+    let mut msgs = vec![
+        ServerMsg::Resize { w: shown.size.0, h: shown.size.1, scale: shown.scale },
+        ServerMsg::RemoteOs { macos },
+    ];
+    msgs.extend(cursor_msg(&shared.cursor));
+    msgs.push(ServerMsg::Resizing { active: true });
+    tab_send(&shared.tab, media, msgs).await;
+    let Some(media) = media else {
+        return;
+    };
+    let latest = {
+        let mut media = media.lock().unwrap();
+        if media.show(leg, true) {
+            None
+        } else {
+            media.want_keyframe(leg);
+            media.latest(leg)
+        }
+    };
+    if let Some(picture) = latest {
+        tab_picture(shared, leg, &picture).await;
+    }
+}
+
+/// A display socket for a High Performance session's second display came, with
+/// where its picture goes, or went. One for a display the view shows in no tab is
+/// dropped: the list that named it has already been replaced, and the session
+/// closes its socket.
+async fn hp_tab_shown(
+    shared: &Shared,
+    display: u32,
+    feed: Option<crate::session::DisplayFeed>,
+    plan: RenderPlan,
+    macos: bool,
+) {
+    let media = shared.media.as_ref();
+    let Some(feed) = feed else {
+        let gone = {
+            let mut tab = shared.tab.lock().unwrap();
+            if tab.as_ref().is_some_and(|tab| tab.display == display) { tab.take() } else { None }
+        };
+        if gone.is_some()
+            && let Some(media) = media
+        {
+            media.lock().unwrap().show(1, false);
+        }
+        return;
+    };
+    let shown = {
+        let d = shared.desktop.lock().unwrap();
+        d.view.tab_leg(display, d.virtuals.len()).and_then(|leg| d.virtuals.get(leg).copied())
+    };
+    let Some(shown) = shown else {
+        debug!("vnc: display {display} is not shown in a tab");
+        return;
+    };
+    info!("vnc: showing display {display} in a tab of its own");
+    *shared.tab.lock().unwrap() = Some(TabFeed {
+        display,
+        sink: VideoSink::new("vnc", feed.frames, plan, feed.feedback, Oversize::Refuse),
+        shadow: Arc::new(std::sync::Mutex::new(Shadow::new("vnc", shown.size.0, shown.size.1))),
+        covered: true,
+    });
+    tab_repaint(shared, macos).await;
+}
+
+/// Take the picker's choice between a High Performance session's two virtual
+/// displays: one of them on the session's canvas, or the first there and the
+/// second in a tab of its own. The Mac sends a stream for each whatever is chosen,
+/// so it is asked for nothing but the keyframe a display coming into view starts
+/// at; the canvas stays behind its resize notice until that picture.
+async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> anyhow::Result<()> {
+    let Shared { uplink, desktop, shadow, display, tab, hp_wake, .. } = shared;
+    let media = shared.media.as_ref();
+    let _switch = shared.switch.lock().await;
+    let (was, now, shown) = {
+        let mut d = desktop.lock().unwrap();
+        let Some(now) = HpView::chosen(id, d.virtuals.len()) else {
+            return Ok(());
+        };
+        if now == d.view {
+            return Ok(());
+        }
+        let was = std::mem::replace(&mut d.view, now);
+        if !now.all {
+            // The second display is the first's size again.
+            d.second_points = None;
+        }
+        (was, now, d.virtuals[now.active])
+    };
+    debug!("vnc: showing {}", if now.all { "all displays".to_owned() } else { format!("display {}", now.active + 1) });
+    if !now.all {
+        // The list below no longer names the tab, and the session closes its socket.
+        tab.lock().unwrap().take();
+    }
+    let tab_open = tab.lock().unwrap().is_some();
+    let mut came = false;
+    if let Some(media) = media {
+        let mut media = media.lock().unwrap();
+        for leg in 0..media.displays() {
+            let fresh = media.show(leg, leg == now.active || (now.all && leg > 0 && tab_open));
+            came |= fresh && leg == now.active;
+        }
+    }
+    if was.active != now.active {
+        if !apply_resize(desktop, shadow, shown.size, shown.scale, sink).await? {
+            // The same size is still another display's pixels.
+            shadow.lock().unwrap().forget();
+            sink.reset_render();
+        }
+        let cover = {
+            let mut d = desktop.lock().unwrap();
+            d.media_only && !d.hp.shown && !std::mem::replace(&mut d.covered, true)
+        };
+        if cover {
+            sink.msg(ServerMsg::Resizing { active: true }).await?;
+        }
+        // A display already in view, in its tab, has a newest picture to show, or
+        // is passed and starts over at an IDR.
+        if !came && let Some(media) = media {
+            let latest = {
+                let media = media.lock().unwrap();
+                media.want_keyframe(now.active);
+                media.latest(now.active)
+            };
+            if let Some(picture) = latest {
+                show_picture(shared, &picture, sink).await?;
+            }
+        }
+    }
+    let msg = {
+        let mut state = display.lock().unwrap();
+        state.hp_list(now);
+        state.displays_msg()
+    };
+    if let Some(msg) = msg {
+        sink.msg(msg).await?;
+    }
+    if resize && was.all && !now.all {
+        request_resize(uplink, desktop, ResizeAsk::Density, true).await?;
+        hp_wake.notify_one();
+    }
+    Ok(())
+}
+
 /// Handle an `AppleDisplayLayout` rect: the Mac's screens, and the geometry it is
 /// rendering them at.
 ///
@@ -5514,27 +6176,49 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // All Displays over too many screens has no picture, whatever its size, and the
     // resize below is where the sink reads it.
     sink.hold_screens(!virtual_display && layout.too_many_screens());
-    let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
+    // A session that asked for two virtual displays is sent a framebuffer spanning
+    // both, and shows one of them: the desktop is that display, not the span.
+    let virtuals = hp_virtuals(desktop, &layout, virtual_display);
+    let (size, scale) = {
+        let mut d = desktop.lock().unwrap();
+        if virtuals.len() < 2 && d.view != HpView::default() {
+            d.view = HpView::default();
+            d.second_points = None;
+        }
+        d.span = (virtuals.len() > 1).then_some(layout.backing);
+        match virtuals.get(d.view.active) {
+            Some(shown) if virtuals.len() > 1 => (shown.size, shown.scale),
+            _ => (layout.backing, layout.scale()),
+        }
+    };
+    let resized = apply_resize(desktop, shadow, size, scale, sink).await?;
     if virtual_display {
-        let cover = {
+        let (cover, changed) = {
             let mut d = desktop.lock().unwrap();
-            d.hp.layout(resized, tokio::time::Instant::now());
+            // Either display's change answers a request, which names both.
+            let changed = resized || (!d.virtuals.is_empty() && d.virtuals != virtuals);
+            d.virtuals.clone_from(&virtuals);
+            d.hp.layout(changed, tokio::time::Instant::now());
             d.laid_out = true;
             // A new display stopped the media stream, whoever asked for it: the
             // browser stays covered until the stream is offered for it and
             // delivers. A change the window asked for covered it at
             // [`HpStep::Show`]; one the Mac made on its own is covered here.
-            resized && {
+            let cover = changed && {
                 d.media_live = false;
                 if let Some(media) = &shared.media {
                     media.lock().unwrap().stopped();
                 }
                 d.media_only && !d.hp.shown && !std::mem::replace(&mut d.covered, true)
-            }
+            };
+            (cover, changed)
         };
         hp_wake.notify_one();
         if cover {
             sink.msg(ServerMsg::Resizing { active: true }).await?;
+        }
+        if changed {
+            tab_laid_out(shared, &virtuals).await;
         }
     }
 
@@ -5546,8 +6230,21 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // Held from the decision to the send, as every scale request is, so the Mac
     // receives them in the order they were decided in.
     let mut out = uplink.lock().await;
-    let (msg, server_scaling) = {
+    let hp_view = (virtuals.len() > 1).then(|| desktop.lock().unwrap().view);
+    let (msg, server_scaling) = if let Some(view) = hp_view {
         let mut state = display.lock().unwrap();
+        state.hp_infos = layout
+            .infos()
+            .into_iter()
+            .take(virtuals.len())
+            .enumerate()
+            .map(|(index, info)| DisplayInfo { id: index as u32, main: index == 0, ..info })
+            .collect();
+        state.repaint_pixels = layout.repaint_pixels();
+        (state.hp_list(view).then(|| state.displays_msg()).flatten(), None)
+    } else {
+        let mut state = display.lock().unwrap();
+        state.hp_infos.clear();
         let mut infos = layout.infos();
         // With more than one screen there is a combined view to go back to, and it
         // has to be listed or a client that picks a screen can never leave it. With
@@ -5595,6 +6292,14 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     drop(out);
     if let Some(msg) = msg {
         sink.msg(msg).await?;
+    }
+    // A layout that no longer has the tab's display takes its place in the list
+    // away, and the session closes its socket for it.
+    if hp_view.is_none() && shared.tab.lock().unwrap().take().is_some() {
+        debug!("vnc: the Mac laid out one display; the second's tab is let go");
+        if let Some(media) = &shared.media {
+            media.lock().unwrap().show(1, false);
+        }
     }
 
     // A layout that answered nothing leaves a High Performance change out, and
@@ -8427,6 +9132,11 @@ mod tests {
             repaint_owed: false,
             push_interval_us: vnc_apple::PUSH_INTERVAL_US,
             hp: HpResize::default(),
+            hp_displays: 1,
+            virtuals: Vec::new(),
+            span: None,
+            view: HpView::default(),
+            second_points: None,
             laid_out: false,
             media_live: false,
             media_only: false,
@@ -8451,6 +9161,8 @@ mod tests {
             camera: None,
             microphone: None,
             media: None,
+            tab: SharedTab::default(),
+            switch: Arc::default(),
             passthrough: None,
         }
     }
@@ -8825,13 +9537,13 @@ mod tests {
         sink: &VideoSink,
     ) -> Option<Vec<u8>> {
         tokio::time::advance(HP_RESIZE_SETTLE).await;
-        hp_resize_step(uplink, desktop, None, sink).await.unwrap();
+        hp_resize_step(uplink, desktop, None, &SharedTab::default(), sink).await.unwrap();
         desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now())
     }
 
     /// The configuration asked for `points` at `density`.
     fn hp_config(points: (u16, u16), density: f32) -> Vec<u8> {
-        vnc_apple::set_display_configuration(vnc_apple::virtual_display_mode(points, density))
+        vnc_apple::set_display_configuration(&[vnc_apple::virtual_display_mode(points, density)])
     }
 
     #[tokio::test(start_paused = true)]
@@ -8841,7 +9553,7 @@ mod tests {
         let desktop = shared_desktop((1024, 768), None, None);
 
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), true).await.unwrap();
-        hp_resize_step(&uplink, &desktop, None, &sink).await.unwrap();
+        hp_resize_step(&uplink, &desktop, None, &SharedTab::default(), &sink).await.unwrap();
         assert!(written(&wire).is_empty(), "nothing goes out before the window settles");
         assert!(matches!(
             forwarded(&sink, &mut rx).await,
@@ -8963,7 +9675,7 @@ mod tests {
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((1600, 1200)), true).await.unwrap();
         assert_eq!(hp_settle(&uplink, &desktop, &sink).await, None, "one request in flight at a time");
         desktop.lock().unwrap().hp.layout(true, tokio::time::Instant::now());
-        hp_resize_step(&uplink, &desktop, None, &sink).await.unwrap();
+        hp_resize_step(&uplink, &desktop, None, &SharedTab::default(), &sink).await.unwrap();
         assert_eq!(
             desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now()),
             Some(hp_config((1600, 1200), 2.0))
@@ -10087,9 +10799,9 @@ mod tests {
         let shared = test_shared(uplink, Arc::clone(&desktop), Arc::clone(&shadow));
 
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true, 1).0));
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
-        pass_unit(&shared, unit, &sink, &media).await.unwrap();
+        pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         assert!(sink.passing());
         sink.flush().await;
         assert_eq!(units(&mut rx).len(), 1, "the passed unit");
@@ -10132,17 +10844,17 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true, 1).0));
 
         // Not a keyframe: dropped for one, and the notice stays up.
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: false, data: vec![0; 16] };
-        pass_unit(&shared, unit, &sink, &media).await.unwrap();
+        pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(!out.iter().any(|m| matches!(m, ServerMsg::Resizing { .. })), "{out:?}");
 
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
-        pass_unit(&shared, unit, &sink, &media).await.unwrap();
+        pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         let video = out.iter().position(|m| matches!(m, ServerMsg::Video(_))).expect("the unit");
@@ -10166,9 +10878,9 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true, 1).0));
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
-        pass_unit(&shared, unit, &sink, &media).await.unwrap();
+        pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(out.iter().any(|m| matches!(m, ServerMsg::Video(_))), "{out:?}");
@@ -11417,6 +12129,160 @@ mod tests {
 
         state.apple_layout = Some(parse_layout(&test_layout(Some(7), &[(7, (1440, 900), (2880, 1800), 0x00)])).unwrap());
         assert_eq!(state.apple_pointer(1440, 900), (1440, 900));
+    }
+
+    /// A session that asked for two virtual displays shows one of the two the
+    /// Mac's layout places, lists them as an RDP target's are listed, and answers
+    /// the picker's choice itself: the canvas takes the chosen display's size
+    /// behind its resize notice, and a pointer position is offset to where that
+    /// display starts in the framebuffer spanning both.
+    #[tokio::test]
+    async fn two_virtual_displays_are_listed_and_chosen_between_here() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((100, 100), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.hp_displays = 2;
+            d.media_only = true;
+            // As a session opens: behind the notice until the stream delivers.
+            d.covered = true;
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)));
+        let payload =
+            layout_payload(None, &[(9, (1600, 1000), (1600, 1000), 0x01), (10, (1280, 800), (1280, 800), 0x00)]);
+        assert!(read_display_layout(&mut payload.as_slice(), &shared, true, &sink).await.unwrap());
+        {
+            let d = desktop.lock().unwrap();
+            assert_eq!(d.size, (1600, 1000), "the first display, not the span");
+            assert_eq!(d.span, Some((2880, 1000)), "which the Mac's rectangles are addressed in");
+            assert_eq!(d.hp_sizes(), [(1600, 1000), (1280, 800)], "a video leg each");
+            assert_eq!((d.hp_origin(0), d.hp_origin(1)), ((0, 0), (1600, 0)));
+        }
+        sink.flush().await;
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 1600, h: 1000, .. })));
+        let listed = |msg: ServerMsg| match msg {
+            ServerMsg::Displays { active, displays } => (
+                active,
+                displays.into_iter().map(|d| (d.id, d.label, d.detail, d.tab)).collect::<Vec<_>>(),
+            ),
+            other => panic!("not a display list: {other:?}"),
+        };
+        let all = (DisplayState::COMBINED, "All Displays".to_owned(), "One browser tab each".to_owned(), None);
+        let first = (0, "Display 1".to_owned(), "1600×1000 at 1x".to_owned(), None);
+        let second = |tab| (1, "Display 2".to_owned(), "1280×800 at 1x".to_owned(), tab);
+        assert_eq!(listed(rx.try_recv().unwrap()), (0, vec![first.clone(), second(None), all.clone()]));
+        assert!(rx.try_recv().is_err());
+        // The stream delivered, and the notice came down.
+        desktop.lock().unwrap().covered = false;
+
+        // The second display alone: the canvas is its size, behind the notice
+        // until its stream's first picture.
+        hp_select(&shared, 1, &sink, false).await.unwrap();
+        assert_eq!(desktop.lock().unwrap().size, (1280, 800));
+        sink.flush().await;
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 1280, h: 800, .. })));
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resizing { active: true })));
+        assert_eq!(listed(rx.try_recv().unwrap()), (1, vec![first.clone(), second(None), all.clone()]));
+        {
+            let d = desktop.lock().unwrap();
+            assert_eq!(d.hp_origin(d.view.active), (1600, 0), "a position on it is offset into the span");
+        }
+        // An id the list does not have changes nothing.
+        hp_select(&shared, 7, &sink, false).await.unwrap();
+        assert!(forwarded(&sink, &mut rx).await.is_none());
+
+        // All of them: the first on the canvas, the second named for a tab.
+        hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
+        assert_eq!(desktop.lock().unwrap().size, (1600, 1000));
+        sink.flush().await;
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 1600, h: 1000, .. })));
+        assert_eq!(
+            listed(rx.try_recv().unwrap()),
+            (DisplayState::COMBINED, vec![first, second(Some(2)), all])
+        );
+    }
+
+    /// The second display's tab is sent its own display: its size, the notice
+    /// until the stream's picture of it, and that picture, which a picture of
+    /// another size is not. A layout of one display takes the tab away.
+    #[tokio::test]
+    async fn the_second_displays_tab_is_fed_its_own_display() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let desktop = shared_desktop((100, 100), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.hp_displays = 2;
+            d.media_only = true;
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)));
+        let two = layout_payload(None, &[(9, (160, 100), (160, 100), 0x01), (10, (128, 80), (128, 80), 0x00)]);
+        read_display_layout(&mut two.as_slice(), &shared, true, &sink).await.unwrap();
+
+        let plan = crate::config::RenderPlan {
+            quality: 60,
+            adaptive: false,
+            chroma: crate::config::Chroma::Subsampled,
+            apple_media: false,
+            rdp_graphics: false,
+            rdp_h264: false,
+        };
+        let feed = || {
+            let (frames, rx) = mpsc::channel(8);
+            (
+                crate::session::DisplayFeed {
+                    frames,
+                    feedback: Arc::new(crate::feedback::LinkFeedback::new()),
+                },
+                rx,
+            )
+        };
+        // No tab while one display is chosen: the list names none.
+        let (early, _early_rx) = feed();
+        hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(early), plan, true).await;
+        assert!(shared.tab.lock().unwrap().is_none());
+
+        hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
+        let (shown, mut tab_rx) = feed();
+        hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(shown), plan, true).await;
+        let (tab_sink, _) = tab_parts(&shared.tab).expect("the tab is fed");
+        tab_sink.flush().await;
+        assert!(matches!(tab_rx.try_recv(), Ok(ServerMsg::Resize { w: 128, h: 80, .. })));
+        assert!(matches!(tab_rx.try_recv(), Ok(ServerMsg::RemoteOs { macos: true })));
+        assert!(matches!(tab_rx.try_recv(), Ok(ServerMsg::Resizing { active: true })));
+        assert_eq!(shown_on(&shared, 1), ShownOn::Tab);
+        assert_eq!(shown_on(&shared, 0), ShownOn::Canvas);
+
+        // The first display's size is not the tab's picture; its own uncovers it.
+        let picture = |size: (u16, u16)| vnc_apple_media::Picture {
+            size,
+            rgb: vec![0x40; usize::from(size.0) * usize::from(size.1) * 3],
+        };
+        tab_picture(&shared, 1, &picture((160, 100))).await;
+        assert!(shared.tab.lock().unwrap().as_ref().unwrap().covered);
+        tab_picture(&shared, 1, &picture((128, 80))).await;
+        assert!(!shared.tab.lock().unwrap().as_ref().unwrap().covered);
+        tab_sink.flush().await;
+        let sent: Vec<ServerMsg> = std::iter::from_fn(|| tab_rx.try_recv().ok()).collect();
+        assert!(sent.iter().any(|msg| matches!(msg, ServerMsg::Video(_))), "{sent:?}");
+        assert!(sent.iter().any(|msg| matches!(msg, ServerMsg::Resizing { active: false })), "{sent:?}");
+
+        // Its window sizes it in a session that follows the window, and the first
+        // display keeps its own.
+        desktop.lock().unwrap().second_points = Some((100, 60));
+        let modes = desktop.lock().unwrap().hp_modes((160, 100));
+        assert_eq!(modes.iter().map(|mode| mode.pixels).collect::<Vec<_>>(), [(160, 100), (100, 60)]);
+        assert!(!desktop.lock().unwrap().hp_noop((160, 100)), "the second display is still 128x80");
+        desktop.lock().unwrap().second_points = Some((128, 80));
+        assert!(desktop.lock().unwrap().hp_noop((160, 100)));
+
+        // The Mac lays out one display: nothing to choose between, and no tab.
+        let one = layout_payload(None, &[(9, (160, 100), (160, 100), 0x01)]);
+        read_display_layout(&mut one.as_slice(), &shared, true, &sink).await.unwrap();
+        assert!(shared.tab.lock().unwrap().is_none());
+        let d = desktop.lock().unwrap();
+        assert_eq!((d.view, d.span, d.second_points), (HpView::default(), None, None));
     }
 
     /// A layout does three things, and the third is the one that is easy to miss:

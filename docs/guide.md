@@ -125,6 +125,11 @@ touch.
   it. Opened while it is not shown, it says it is not available. The passthrough
   row is not offered beside it. Checked against one Windows 11 host.
 
+  Two displays are for a client with two physical displays, one for each, and
+  are not recommended on a client with one. They are not supported on a phone
+  or tablet, though the Display picker there does not stop you choosing between
+  them.
+
 Another RDP server, an older Windows or xrdp say, may happen to work but is not
 tested against. See [The RDP client](rdp-client.md).
 
@@ -158,8 +163,17 @@ connection with the same error as wrong credentials. See
   and puts every window on one virtual display, sized by the session, up to
   3840×2160 backing pixels. Picture and sound come over the Mac's media stream,
   HEVC and AAC-ELD over SRTP:
-  - The Mac sends to the gateway's UDP ports 5900 and 5901, so a firewall or
-    NAT between them must let that through.
+  - **Alpha:** `virtual_displays = 2` asks the Mac for two virtual displays,
+    Apple's viewer's "2 Virtual Displays", the second to the right of the first.
+    The Display picker switches between them, and its *All Displays* keeps the
+    first here and opens the second at `/display/2` in a new tab of the same
+    browser, as on an RDP target; on a session that follows the window that
+    tab's window sizes the second display. The Mac sends a stream for each
+    display, the second to UDP port 5902, and the gateway decodes or passes
+    only the displays shown. As on RDP, it is not recommended on a client with
+    one physical display, and not supported on a phone or tablet.
+  - The Mac sends to the gateway's UDP ports 5900 and 5901, and 5902 for a
+    second display, so a firewall or NAT between them must let that through.
   - A Linux gateway needs `net.core.rmem_max` of at least 4194304 for the
     picture's socket, and the log warns when it is lower: the stock 212992
     loses keyframes at Retina sizes.

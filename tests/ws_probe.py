@@ -22,7 +22,7 @@ resize response.
 
 The probe opens the session socket and display 1's socket beside it, as a page does,
 and reads both. ``--tab`` also opens display 2's socket once the session lists it in a
-tab of its own (an RDP target's *All Displays*, ``--select 0xffffffff``), the way
+tab of its own (*All Displays* over two virtual displays, ``--select 0xffffffff``), the way
 the page at ``/display/2`` does: by the login cookie alone, with no session token.
 """
 
@@ -193,6 +193,13 @@ async def main() -> int:
         help="client screen WIDTHxHEIGHT@SCALE[fit] carried on the connect (the opening size)",
     )
     parser.add_argument("--mouse-width", type=int, default=None)
+    parser.add_argument(
+        "--mouse-delay",
+        type=float,
+        default=0.0,
+        help="seconds to wait before a --mouse or --tab-mouse move goes out, for a "
+        "remote that is still laying its displays out when the resize arrives",
+    )
     parser.add_argument(
         "--sweep",
         type=duration,
@@ -541,6 +548,15 @@ async def main() -> int:
         keys_task = None
         chords_task = None
         sweep_task = None
+        move_tasks = []
+
+        async def move_later(to, prefix: str, position: tuple[int, int]) -> None:
+            """Send one pointer move on `to`, after --mouse-delay."""
+            await asyncio.sleep(args.mouse_delay)
+            x, y = position
+            print(f"  {prefix}-> mouseMove {x},{y}")
+            await to.send(json.dumps({"type": "mouseMove", "x": x, "y": y}))
+
         page_task = None
         audio_task = None
         viewport_task = None
@@ -584,10 +600,8 @@ async def main() -> int:
                                 )
                             if args.tab_mouse is not None and not tab_mouse_sent:
                                 tab_mouse_sent = True
-                                x, y = args.tab_mouse
-                                print(f"  [2] -> mouseMove {x},{y}")
-                                await origin.send(
-                                    json.dumps({"type": "mouseMove", "x": x, "y": y})
+                                move_tasks.append(
+                                    asyncio.create_task(move_later(origin, "[2] ", args.tab_mouse))
                                 )
                         elif data.get("type") != "cursor":
                             print(f"  [2] {data.get('type')}: {json.dumps(data)[:120]}")
@@ -672,11 +686,7 @@ async def main() -> int:
                                 or data["w"] == args.mouse_width
                             )
                         ):
-                            x, y = args.mouse
-                            print(f"  -> mouseMove {x},{y}")
-                            await socket.send(
-                                json.dumps({"type": "mouseMove", "x": x, "y": y})
-                            )
+                            move_tasks.append(asyncio.create_task(move_later(socket, "", args.mouse)))
                             mouse_sent = True
                     elif kind == "displays":
                         print(f"  displays  active={data['active']:#x}")
@@ -773,6 +783,8 @@ async def main() -> int:
                 chords_task.cancel()
             if sweep_task is not None and not sweep_task.done():
                 sweep_task.cancel()
+            for task in move_tasks:
+                task.cancel()
             if page_task is not None and not page_task.done():
                 page_task.cancel()
             if audio_task is not None and not audio_task.done():

@@ -76,7 +76,7 @@ and optimization prioritize them.
 |---|---|---|---|---|---|---|
 | 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker; a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
 | 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | VP9 from the gateway, or the graphics pipeline passed through (beta) |
-| 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density | AAC-ELD, always | no | VP9 from the gateway, or the Mac's HEVC passed through |
+| 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | VP9 from the gateway, or the Mac's HEVC passed through |
 | 3 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
 | baseline | any other VNC server | `vnc` | one framebuffer at the size the server says, at 1x | none | no | VP9 from the gateway |
 
@@ -208,7 +208,8 @@ passed.
 - A session's displays may be shown in more than one tab of the browser that
   holds it, and in no other browser: each display rides a display socket of its
   own, let in by the login cookie the session was claimed under and never by a
-  token. Only an RDP target's *All Displays* does this, for its second display at
+  token. Only *All Displays* over two virtual displays does this, on an RDP target
+  or a High Performance Mac, for the second display at
   `/display/2` (alpha). That is one session shown twice, not a shared one; do not
   let a display socket in for any other login, or hand a tab the claim's token.
 - Size, sound and passthrough are chosen under the target at the picker and
@@ -1357,8 +1358,8 @@ Authentication and desktop ownership are separate:
    opening is the part no repaint replaces. A display socket that attaches after
    its picture lost anything is repainted. The page closes its session socket
    when its display socket drops, and the reattach brings both back. `/ws/display?display=2`
-   is the second display shown in a tab of its own, an RDP target's *All Displays*
-   (alpha); see
+   is the second display shown in a tab of its own, *All Displays* over two
+   virtual displays (alpha); see
    [Display geometry](#display-geometry).
 4. `connect` starts the selected engine with the choices made at the picker.
    `disconnect` stops it and returns to the picker.
@@ -2098,6 +2099,24 @@ is not the claim's token, and it opens nothing but that display. A page at
 without it, no session in this browser, or another tab holding it — says the
 display is not available, why, and offers Retry; it does not keep reconnecting.
 
+An `ard-high-performance` target with `virtual_displays = 2` (alpha) is listed and
+shown the same way, from another source. Its `SetDisplayConfiguration` names two
+virtual displays, Apple's viewer's "2 Virtual Displays", and the Mac creates the
+second to the right of the first and sends each as a video leg of its own in the
+one media stream. So the engine cuts no column out of anything: the display on
+the canvas is one leg's pictures and the display in the tab the other's, decoded
+here or passed, each through a sink of its own, and the leg of a display nobody
+is shown is authenticated and dropped at the receiver, neither decoded nor
+passed. A `selectDisplay` is answered in the gateway and asks the Mac for nothing
+but the keyframe a display coming into view starts at; the canvas stays behind
+its resize notice until that picture, as it does across any display change. The
+framebuffer the Mac spans over both displays is only the space its rectangles,
+stepped over, and pointer positions are addressed in: a position made on the
+second display is offset by where the layout places it. On a session that follows
+the window the tab's window sizes the second display through the same
+configuration, which always names both. The sound is the session's, on the first
+tab. See [Two virtual displays](apple-vnc-889.md#two-virtual-displays).
+
 Where the list is sent, the checkmark moves only when the remote comes back naming
 the screen it is now sending — never on the click. On a Mac the engine prepends an
 *All Displays* entry of its own so a client that picks a screen can get back; see
@@ -2194,7 +2213,8 @@ session sends; the host spans one framebuffer over both and the engine shows one
 column of it, switched from the display picker without asking the host, or —
 on *All Displays* — the second column in a browser tab of its own
 ([Display geometry](#display-geometry)). The key is shared by every target type
-that can create virtual displays and acted on by `rdp` alone today; it is refused
+that can create virtual displays: `rdp`, and `ard-high-performance`, whose two are
+a media stream each rather than columns of one framebuffer. It is refused
 elsewhere, and held to two ([Roadmap](roadmap.md#more-than-two-virtual-displays-on-a-target)).
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
@@ -2365,8 +2385,8 @@ session started with resize, at that screen's density either way. The mode sits 
 native descriptor's fixed 3840×2160 backing ceiling. Once connected, the remote
 Mac's physical displays are disabled and all of its windows are placed on that
 virtual display. Apple's
-official macOS Screen Sharing client can choose up to two virtual displays, while
-Remotex always requests one. The full descriptor enables dynamic resolution on
+official macOS Screen Sharing client can choose up to two virtual displays, and so
+can a target: Remotex requests one, or two with `virtual_displays = 2` (alpha). The full descriptor enables dynamic resolution on
 every fresh session. In a session started with resize, the window continuously drives the
 virtual display through Apple's dynamic-resolution feature: later viewport reports
 resend the same full descriptor with the requested mode, and the Mac's answering
@@ -2384,8 +2404,8 @@ until its stream is hooked up, and a session that passes the stream builds no vi
 encoder at all. A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings
-cursor shapes and layouts. Apple's virtual-display-count and
-resolution-preset controls remain unimplemented.
+cursor shapes and layouts. Apple's resolution-preset control remains
+unimplemented.
 
 The wire constraints remain load-bearing: `SetEncodings` must list both
 `DisplayInfo` (`0x44d`) and the layout (`0x451`), in any order, or the Mac reports

@@ -735,17 +735,21 @@ pub struct TargetConfig {
     /// remote is *asked* for; the list the picker shows is what the remote laid
     /// out, so a server that opens one desktop shows no picker.
     ///
-    /// Shared by every target type that can create virtual displays, and acted
-    /// on today by `rdp` alone: a Windows host lays the displays out from the
+    /// Shared by every target type that can create virtual displays: `rdp` and
+    /// `ard-high-performance`. A Windows host lays the displays out from the
     /// connect-time monitor data ([MS-RDPBCGR] 2.2.1.3.6) and from each monitor
-    /// layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2). Refused on every
-    /// other target, where it would be silently inert, and beside the pipeline's
-    /// passthrough, which composes the whole desktop in the browser and has no
-    /// view of one display ([`Self::offers`]).
+    /// layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2), as one desktop
+    /// spanning both; beside the pipeline's passthrough it is not offered, since
+    /// that composes the whole desktop in the browser and has no view of one
+    /// display ([`Self::offers`]). A Mac in High Performance mode creates each
+    /// from its `SetDisplayConfiguration` descriptor and sends each as a media
+    /// stream of its own, which is Apple's viewer's "2 Virtual Displays", passed
+    /// through or not. Refused on every other target, where it would be silently
+    /// inert.
     ///
-    /// Alpha: checked against one Windows 11 host; the second display's windows,
-    /// its pointer and its density follow the first's, and nothing of it has been
-    /// measured against Microsoft's own client.
+    /// Alpha: checked against one Windows 11 host and one Mac, a virtual one; the
+    /// second display's density follows the first's, and nothing of it has been
+    /// measured against Microsoft's or Apple's own client.
     #[serde(default = "one_display")]
     pub virtual_displays: u8,
     /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a
@@ -1769,8 +1773,9 @@ impl ConfigFile {
                 if target.protocol == Protocol::Rdp { ", or egfx = false" } else { "" }
             );
             // A count of virtual displays is a count the engine asks the remote
-            // for, and only the RDP engine asks today: on any other target the key
-            // would be read and change nothing.
+            // for, and two remotes create them: a Windows host and a Mac in High
+            // Performance mode. On any other target the key would be read and
+            // change nothing.
             anyhow::ensure!(
                 (1..=MAX_VIRTUAL_DISPLAYS).contains(&target.virtual_displays),
                 "target {:?} sets virtual_displays = {}, which must be 1 to {MAX_VIRTUAL_DISPLAYS}",
@@ -1778,12 +1783,14 @@ impl ConfigFile {
                 target.virtual_displays
             );
             anyhow::ensure!(
-                target.virtual_displays == 1 || target.protocol == Protocol::Rdp,
-                "target {:?} sets virtual_displays = {} on a {} target, and only rdp lays \
-                 out more than one virtual display today. Remove the key.",
+                target.virtual_displays == 1
+                    || target.protocol == Protocol::Rdp
+                    || target.subtype == Some(Subtype::ArdHighPerformance),
+                "target {:?} sets virtual_displays = {}, and only an rdp target or one with \
+                 subtype = \"ard-high-performance\" lays out more than one virtual display. \
+                 Remove the key.",
                 target.name,
-                target.virtual_displays,
-                target.protocol.name()
+                target.virtual_displays
             );
             // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
             // `wlshare` target. Neither Apple's Screen Sharing nor a VNC server read
@@ -3606,11 +3613,12 @@ mod tests {
     }
 
     /// A count of virtual displays is one unless asked, at most two, and a key
-    /// only an rdp target takes: everywhere else it would change nothing. Beside
-    /// more than one the pipeline's passthrough has no row, since a passed pipeline
-    /// is composed whole in the browser.
+    /// only an rdp target and a High Performance Mac take: everywhere else it
+    /// would change nothing. Beside more than one the pipeline's passthrough has
+    /// no row, since a passed pipeline is composed whole in the browser; a Mac's
+    /// displays are a stream each, and keep theirs.
     #[test]
-    fn virtual_displays_are_one_unless_asked_and_only_on_rdp() {
+    fn virtual_displays_are_one_unless_asked_and_only_where_they_are_created() {
         let one = ConfigFile::parse(&rdp_toml("")).unwrap().targets.remove(0);
         assert_eq!(one.virtual_displays, 1);
         assert_eq!(one.offers().passthrough, Some(Passthrough::RdpGraphics));
@@ -3630,7 +3638,21 @@ mod tests {
         }
         let err = ConfigFile::parse(&vnc_toml("virtual_displays = 2
 vnc_password = \"x\"")).unwrap_err();
-        assert!(format!("{err:#}").contains("only rdp lays out"), "{err:#}");
+        assert!(format!("{err:#}").contains("lays out more than one virtual display"), "{err:#}");
+        // Standard mode's unofficial virtual display is one.
+        let err = ConfigFile::parse(&vnc_toml(
+            "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\nvirtual_display = true\nvirtual_displays = 2",
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("lays out more than one virtual display"), "{err:#}");
+        let mac = ConfigFile::parse(&vnc_toml(
+            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\nvirtual_displays = 2",
+        ))
+        .unwrap()
+        .targets
+        .remove(0);
+        assert_eq!(mac.virtual_displays, 2);
+        assert_eq!(mac.offers().passthrough, Some(Passthrough::AppleMedia), "each display is a stream of its own");
         // One is every target's default and so is accepted anywhere.
         ConfigFile::parse(&vnc_toml("virtual_displays = 1
 vnc_password = \"x\"")).unwrap();
