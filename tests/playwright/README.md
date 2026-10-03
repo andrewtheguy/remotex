@@ -47,7 +47,7 @@ a batch whose commands draw with H.264 is acknowledged: the acknowledgment follo
 the decode of every access unit in the batch, and a decoder that gave no picture
 says so in the DOM instead.
 
-`software-hevc.spec.ts` is the EXPERIMENTAL software HEVC decoder, in a High
+`software-hevc.spec.ts` is the BETA software HEVC decoder, in a High
 Performance session started with the Mac's stream passed and the page loaded with
 `?hevc_decoder=software`. Against a gateway that has the decoder's archive it
 asserts that the page is cross-origin isolated and says it decodes the Mac's

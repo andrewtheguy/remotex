@@ -56,7 +56,7 @@ export type PainterCommand =
        * and the software HEVC decoder's (hevcPicture.ts).
        */
       graphics: OffscreenCanvas;
-      /** EXPERIMENTAL: decode passed HEVC in software (appleMedia.ts). */
+      /** BETA: decode passed HEVC in software (appleMedia.ts). */
       softwareHevc: boolean;
     }
   | {

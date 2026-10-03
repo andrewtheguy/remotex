@@ -350,7 +350,7 @@ pub enum Passthrough {
     /// nothing a running session can be resumed onto: a reattach reconnects the
     /// host instead.
     ///
-    /// **Experimental.** The compositor the page runs is the gateway's own and is
+    /// **Beta.** The compositor the page runs is the gateway's own and is
     /// unit tested as it is there, and what is passed is checked against a real
     /// host, by the probe and by a headless browser. That is one Windows 11 host,
     /// with sound and the clipboard beside it;
@@ -1417,7 +1417,7 @@ pub struct ConfigFile {
     /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
     #[serde(default)]
     pub meter: Option<MeterSection>,
-    /// The `[hevc_wasm]` table: EXPERIMENTAL, where the page's software HEVC
+    /// The `[hevc_wasm]` table: BETA, where the page's software HEVC
     /// decoder is, for a gateway that keeps it outside its data directory. Absent,
     /// the decoder is served if its archive is there. Top-level for
     /// [`Self::branding`]'s reason.

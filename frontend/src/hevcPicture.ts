@@ -1,4 +1,4 @@
-// EXPERIMENTAL: the software HEVC decoder's pictures (hevcWasmDecoder.ts), shown
+// BETA: the software HEVC decoder's pictures (hevcWasmDecoder.ts), shown
 // from the GPU.
 //
 // A picture is three 8-bit planes in the decoder's memory. Each is uploaded as a

@@ -133,7 +133,7 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
     Ok(())
 }
 
-/// EXPERIMENTAL: read the software HEVC decoder the config resolved to, before the
+/// BETA: read the software HEVC decoder the config resolved to, before the
 /// gateway listens, so an archive it cannot serve is a refused start.
 fn load_hevc_decoder(config: &AppConfig) -> anyhow::Result<Option<remotex::hevc_wasm::HevcDecoder>> {
     let Some(archive) = &config.hevc_wasm else {

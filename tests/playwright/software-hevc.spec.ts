@@ -1,4 +1,4 @@
-// EXPERIMENTAL: the software HEVC decoder (frontend/src/hevcWasmDecoder.ts), which
+// BETA: the software HEVC decoder (frontend/src/hevcWasmDecoder.ts), which
 // a gateway that has its release archive serves at /hevc/ and which the page
 // takes, under `?hevc_decoder=software`, for a High Performance Mac's passed stream.
 //

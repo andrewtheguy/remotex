@@ -93,7 +93,7 @@ export function createDesktopVideo(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
   /**
-   * EXPERIMENTAL: decode a passed HEVC stream in software (hevcWasmDecoder.ts)
+   * BETA: decode a passed HEVC stream in software (hevcWasmDecoder.ts)
    * rather than with the browser's `VideoDecoder`, which appleMedia.ts found does
    * not take it.
    */

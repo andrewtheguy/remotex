@@ -254,7 +254,7 @@ test("the question is asked once, and the answer is not available before it", as
 });
 
 /**
- * EXPERIMENTAL: a page that can run the software HEVC decoder — cross-origin
+ * BETA: a page that can run the software HEVC decoder — cross-origin
  * isolated, with a WebGL 2 canvas that takes the Mac's primaries to present its
  * pictures on — or, with `isolated` false, one that cannot. `webgl` is that
  * canvas's context: whole, without a color space to set, or none. Returns the undo.

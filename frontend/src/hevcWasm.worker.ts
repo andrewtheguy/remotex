@@ -1,4 +1,4 @@
-// EXPERIMENTAL: the decode worker behind hevcWasmDecoder.ts. It loads libavcodec's
+// BETA: the decode worker behind hevcWasmDecoder.ts. It loads libavcodec's
 // HEVC decoder (andrewtheguy/hevc-wasm, which the gateway serves at /hevc/) once,
 // runs one decoder per stream the paint worker opens, and answers every unit with
 // one picture or none.
