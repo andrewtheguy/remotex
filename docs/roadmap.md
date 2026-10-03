@@ -233,7 +233,7 @@ The decision is recorded in
 
 `virtual_displays` is held to two. A browser tab shows one display, and the
 gateway encodes only the displays shown: the one on the session's page, and on an
-RDP target's *All Displays* the second in a tab of its own at `/display/2`. Each
+RDP target's *All Displays* (alpha) the second in a tab of its own at `/display/2`. Each
 further display is a desktop the host renders for nobody but a further tab, and
 two is the most the picker, the input offset, the tab's feed and the span the host
 builds have been checked with. RDP would allow sixteen in a row (MS-RDPBCGR 2.2.1.3.6). A Mac's High
