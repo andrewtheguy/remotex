@@ -2,6 +2,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -539,6 +540,12 @@ function WindowSection({
   );
 }
 
+// A remote display's pixels and the density it draws them at, as the Info card says
+// it of the display on its page and a second display's menu says it of its own.
+export function remoteSizeLabel(size: RemoteSize): string {
+  return `${size.w}×${size.h} at ${densityLabel(size.scale * 100)} (${dpiLabel(size.scale * 100)})`;
+}
+
 // What the remote is drawing against what this browser is, at the top of the Info
 // card so the two can be read off one another.
 //
@@ -580,9 +587,7 @@ function ScreenHelp({
               desktop" state: a placeholder reading 0×0 would be a worse answer
               than saying so. */}
           <dd>
-            {size
-              ? `${size.w}×${size.h} at ${densityLabel(size.scale * 100)} (${dpiLabel(size.scale * 100)})`
-              : "Waiting for the remote desktop"}
+            {size ? remoteSizeLabel(size) : "Waiting for the remote desktop"}
           </dd>
         </div>
         <div className="help-item">
@@ -633,45 +638,38 @@ function ScreenHelp({
   );
 }
 
-// Every display the remote lists, with the size and density each is drawn at, under
-// the session's own rows: the row above is the one on this page's canvas, and a
-// session over two displays has another that is otherwise read only in the Display
-// picker, one at a time. A display shown in a tab of its own carries the link that
-// opens it, the same one the picker has. Absent where the remote lists none.
-function DisplaysHelp({
-  displays,
-  activeDisplayId,
-}: {
-  displays: DisplayInfo[];
-  activeDisplayId: number | null;
-}) {
-  if (displays.length === 0) {
+// The displays of a session that shows one in a tab of its own, which is All
+// Displays on a target with two: the one on this page, and each other with the link
+// that opens it, the same one the Display picker has. It names them and nothing
+// more: what this page's is drawn at is the Remote desktop row above, and what
+// another's is drawn at is known to the tab showing it, whose menu says so. Absent on
+// every other session, where the Display picker is the whole of it.
+function DisplaysHelp({ shown }: { shown: DisplayInfo[] }) {
+  if (shown.length === 0) {
     return null;
   }
   return (
     <>
       <h3>Displays</h3>
       <dl className="help-list">
-        {displays.map((display) => (
+        {shown.map((display) => (
           <div key={display.id} className="help-item">
             <dt>
               {display.label}
-              {display.id === activeDisplayId ? " (chosen)" : ""}
+              {display.tab === null ? " (Current)" : ""}
             </dt>
             <dd>
-              {display.detail}
-              {display.tab !== null && (
-                <>
-                  {" · "}
-                  <a
-                    className="dp-tab-link"
-                    href={gatewayUrl(`/display/${display.tab}`)}
-                    target="_blank"
-                    rel="noopener"
-                  >
-                    Open in a new tab ↗
-                  </a>
-                </>
+              {display.tab === null ? (
+                "On this page"
+              ) : (
+                <a
+                  className="dp-tab-link"
+                  href={gatewayUrl(`/display/${display.tab}`)}
+                  target="_blank"
+                  rel="noopener"
+                >
+                  Open in a new tab ↗
+                </a>
               )}
             </dd>
           </div>
@@ -679,6 +677,19 @@ function DisplaysHelp({
       </dl>
     </>
   );
+}
+
+// The displays a session shows at once, one on this page and the rest in tabs of
+// their own: every display but the chosen entry, which is All Displays itself.
+// Empty on a session that shows one display, whatever the picker lists.
+function displaysShown(
+  displays: DisplayInfo[],
+  activeDisplayId: number | null,
+): DisplayInfo[] {
+  if (!displays.some((display) => display.tab !== null)) {
+    return [];
+  }
+  return displays.filter((display) => display.id !== activeDisplayId);
 }
 
 // The direct audio toggle is also the user gesture required to create a
@@ -1126,6 +1137,10 @@ export default function FloatingMenu({
     setModal(null);
     modalOpenerRef.current?.focus();
   }, []);
+  const shown = useMemo(
+    () => displaysShown(displays, activeDisplayId),
+    [displays, activeDisplayId],
+  );
   const backToInfo = useCallback(() => setModal("info"), []);
 
   // A soft key is input, and the drawer standing over a view-only desktop says
@@ -1367,7 +1382,7 @@ export default function FloatingMenu({
             }}
             videoStream={videoStream}
           />
-          <DisplaysHelp displays={displays} activeDisplayId={activeDisplayId} />
+          <DisplaysHelp shown={shown} />
           <div className="help-actions">
             <ThroughputButton onOpen={() => setModal("throughput")} />
             <button

@@ -372,6 +372,7 @@ export default function RemoteDesktop({
           <DisplayMenu
             display={tabDisplay}
             connected={status === "connected"}
+            size={size}
             isMacHost={isMacHost}
             onLocalShortcut={onLocalShortcut}
             onFocusDesktop={focusDesktop}

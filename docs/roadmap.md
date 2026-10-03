@@ -171,9 +171,9 @@ What it lacks:
   cannot leave the tab that holds it, so the session needs a way of its own to
   send a window across. A Mac needs none: a window dragged halfway over the edge
   is moved to the second display.
-- **Telling the displays apart.** The session page's Info lists both displays
-  with their sizes and links to the second, but nothing on the remote's screens
-  says which display is which.
+- **Telling the displays apart.** The session page's Info names both displays
+  and links to the second, but nothing on the remote's screens says which
+  display is which.
 
 Fixing those does not take it out of alpha by itself. It also needs more testing
 than it has had, on both kinds of target, before it is offered as anything else.
