@@ -1,9 +1,21 @@
 # remotex
 
-Remote desktop in a browser. remotex is a small gateway you run next to your
-machines: it speaks RDP and VNC to them and serves one web page that shows the
-desktop. Anything with a browser, on Windows, macOS, Linux, iOS or Android,
-reaches every one of them, with no client to install.
+Remote desktop in a browser, for the remote desktop server each platform
+already has. remotex is a small gateway you run next to your machines. It
+connects to:
+
+- **Windows 10 and 11's own Remote Desktop**, over RDP with its modern graphics
+  pipeline.
+- **macOS's built-in Screen Sharing**, in both of its modes: Standard and High
+  Performance.
+- **Linux**, through [wlshare](https://github.com/andrewtheguy/wlshare), our own
+  VNC server for wlroots compositors.
+- Other RDP and VNC servers, through each protocol's baseline.
+
+Windows and macOS need nothing installed on the host, only their own sharing
+switched on. The gateway serves one web page that shows the desktop, so anything
+with a browser, on Windows, macOS, Linux, iOS or Android, reaches every one of
+them with no client to install either.
 
 ```text
 browser ── HTTPS or localhost ── remotex ── RDP / VNC ── your desktops
