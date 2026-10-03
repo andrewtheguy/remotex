@@ -2,9 +2,10 @@
 
 An `ard-high-performance` target sends its picture as HEVC and its sound as
 AAC-ELD. The sound goes to the browser as the Mac sent it, and the browser
-decodes it. The picture the gateway decodes, to send as VP9, with a library
-that is in no release artifact, because its licence keeps it out. Install it on
-the host that runs the gateway:
+tries to decode it; a browser that cannot still runs the session without sound
+and says why in the Audio row. The picture the gateway decodes, to send as VP9,
+with a library that is in no release artifact, because its licence keeps it
+out. Install it on the host that runs the gateway:
 
 | Library | Decodes | Version | Licence |
 |---|---|---|---|
@@ -159,15 +160,18 @@ vnc: refusing a session that does not pass the Mac's picture: the HEVC decoder, 
 ## Without the decoder
 
 A gateway without it still serves an `ard-high-performance` target, with the
-picture passed through, to a browser that decodes the Mac's HEVC itself: Chrome
-and Safari do, Firefox does not. The picker shows the passthrough as already
-chosen there. The HEVC goes to that browser as the Mac sent it, and nothing is
-decoded on the gateway. For a browser that cannot decode it the target's Start
-is greyed, with the reason, so the Mac is never dialled.
+picture passed through, when the page's startup probe finds an HEVC decoder
+path, either native or the optional software decoder described in
+[`remotex.example.toml`](../remotex.example.toml). Support depends on the
+browser, platform and GPU, so the picker is the answer rather than a
+browser-name table. It shows the passthrough as already chosen there. The HEVC
+goes to that browser as the Mac sent it, and nothing is decoded on the gateway.
+Without a decoder path the target's Start is greyed, with the reason, so the Mac
+is never dialled.
 
 The sound needs nothing on the gateway either way: every session is sent the
-Mac's AAC-ELD, which the browser decodes. A browser that cannot plays the
-session without sound and says so under Audio in the menu.
+Mac's AAC-ELD, which the browser tries to decode. A browser that cannot decode
+it plays the session without sound and says so under Audio in the menu.
 
 See [The media stream](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound)
 for what the stream carries, and

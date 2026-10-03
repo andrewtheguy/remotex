@@ -4,11 +4,15 @@
 
 Install a native package from the
 [latest release](https://github.com/andrewtheguy/remotex/releases/latest). The
-package manager owns the gateway executable, config example and licence; the web client is compiled into the executable. It does not
-own the live config, so an upgrade or removal never replaces or deletes
-credentials.
+package manager owns the gateway executable, config example and licence; the
+web client is compiled into the executable. It does not own the live config, so
+an upgrade or removal never replaces or deletes credentials.
 
-### Debian and Ubuntu (`.deb`)
+Linux release binaries require glibc 2.39 or newer: Debian 13, Ubuntu 24.04,
+or later releases, and RPM distributions with the same baseline. The package
+format alone does not make the binary compatible with an older distribution.
+
+### Debian 13+ and Ubuntu 24.04+ (`.deb`)
 
 Releases provide `remotex-linux-amd64.deb` and
 `remotex-linux-arm64.deb`:
@@ -26,7 +30,7 @@ Use the `arm64` filename on an arm64 host. The package installs:
 /usr/share/doc/remotex/LICENSE
 ```
 
-### Fedora, RHEL, and other RPM distributions (`.rpm`)
+### RPM distributions with glibc 2.39+ (`.rpm`)
 
 Releases provide `remotex-linux-amd64.rpm` and
 `remotex-linux-arm64.rpm`:
@@ -56,9 +60,6 @@ It installs:
 /usr/local/share/doc/remotex/remotex.example.toml
 /usr/local/share/doc/remotex/LICENSE
 ```
-
-The library decodes a wlshare target's sound. It is the package's own copy, in a
-folder of its own, and the installed gateway uses no other.
 
 The package is unsigned and not notarized. A browser download is quarantined,
 so fetch it with `curl` as shown and install it from the terminal. The `.pkg`
@@ -95,7 +96,8 @@ The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add
 The config contains the web-login hash and target credentials. Create it as the
 account that will run `remotex serve`, mode `0600`. The package ships only the
 public [`remotex.example.toml`](../remotex.example.toml) from which to create it.
-The same account owns the state directory, where a `[meter]` database is kept.
+The same account owns the state directory, where an enabled `[meter]` keeps its
+database by default.
 
 On Linux:
 
@@ -139,13 +141,32 @@ the gateway in the foreground:
 remotex serve
 ```
 
-For a Mac target, configure `protocol = "vnc"`, `subtype = "ard"`, and the Mac
-account's username and password. The gateway connects directly to macOS Screen
-Sharing; nothing is installed on the target Mac.
+Then open <http://localhost:52380>. [Using remotex](guide.md) says how each
+kind of target is set up and how the page is reached from another machine.
 
-`subtype = "ard-high-performance"` needs a library on the gateway's host that
-no package contains, FFmpeg. See
+A Mac target with `subtype = "ard-high-performance"` needs a library on the
+gateway's host that no package contains, FFmpeg. See
 [High Performance decoder](high-performance-decoder.md) for installing it.
+
+## Container
+
+```sh
+docker run -d --name remotex -p 52380:52380 \
+  -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro \
+  ghcr.io/andrewtheguy/remotex:latest
+```
+
+Set `[server].listen = "0.0.0.0:52380"` in the mounted config, or pass the same
+address as `-e REMOTEX_LISTEN=0.0.0.0:52380`. With `[meter].enabled` set, mount
+a volume at `/opt/remotex/var` too, or the records go with the container. Images
+are published for Linux amd64 and arm64 with `latest` and `v<version>` tags. The
+image has no `remotex tui`.
+
+Generate the required web-login credential with:
+
+```sh
+docker run --rm -it ghcr.io/andrewtheguy/remotex:latest gen-passwd admin
+```
 
 ## Upgrade
 

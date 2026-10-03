@@ -15,18 +15,6 @@ clipboard, sound, and the browser's camera and microphone. Touch is not carried,
 and is [under consideration](#touch-on-an-rdp-target-ms-rdpei) rather than
 planned.
 
-The clipboard, sound, camera, and microphone are done. Their protocol and engine
-paths are recorded in [The RDP client](rdp-client.md) rather than here;
-MS-RDPECLIP, MS-RDPEA, MS-RDPECAM, and MS-RDPEAI live under
-`rdp_client/proto/`, with their gateway adapters beside `src/rdp.rs`.
-
-EGFX is in, as [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
-describes; what is left of it
-beyond the decoders is under
-[H.264 in the RDP graphics pipeline](#h264-in-the-rdp-graphics-pipeline)
-rather than here, because that payoff is a picture's cost, not a control
-restored.
-
 #### Licensing on a Remote Desktop Session Host
 
 The licensing step accepts exactly one PDU: an `ERROR_ALERT` carrying
@@ -169,12 +157,9 @@ with the notice whatever its size.
 
 ### Touch on an RDP target (MS-RDPEI)
 
-Taken up if the need for it shows. Touch was carried by the engine before this
-client, from FreeRDP's `rdpei` plugin, and is not carried *here*: `proto` is the
-gateway's own now, so it is a channel to write rather than a dependency to
-configure, and it is refused where it would otherwise build a control with
-nothing behind it, by having no key at all — whether touch exists is the host's
-answer, and this client never asks.
+Taken up if the need for it shows. The RDP client does not carry touch: it is a
+channel to write, and it has no config key, since whether touch exists is the
+host's answer and this client never asks.
 
 Everything on either side of the channel is already written and shipped: the
 browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchReady`
