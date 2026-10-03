@@ -2533,7 +2533,8 @@ async fn apple_preface(
         let most = server.apple_virtual_displays.unwrap_or(1);
         anyhow::ensure!(
             most as usize >= displays,
-            "this Mac creates at most {most} virtual display(s), and the target asks for              {displays}; set virtual_displays = {most}"
+            "this Mac creates at most {most} virtual display(s), and the target asks for \
+             {displays}; set virtual_displays = {most}"
         );
     }
     if virtual_display && !media_stream {

@@ -2404,8 +2404,8 @@ until its stream is hooked up, and a session that passes the stream builds no vi
 encoder at all. A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings
-cursor shapes and layouts. Apple's virtual-display-count and
-resolution-preset controls remain unimplemented.
+cursor shapes and layouts. Apple's resolution-preset control remains
+unimplemented.
 
 The wire constraints remain load-bearing: `SetEncodings` must list both
 `DisplayInfo` (`0x44d`) and the layout (`0x451`), in any order, or the Mac reports

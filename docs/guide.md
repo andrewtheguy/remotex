@@ -166,8 +166,8 @@ connection with the same error as wrong credentials. See
     tab's window sizes the second display. The Mac sends a stream for each
     display, the second to UDP port 5902, and the gateway decodes or passes
     only the displays shown.
-  - The Mac sends to the gateway's UDP ports 5900 and 5901, so a firewall or
-    NAT between them must let that through.
+  - The Mac sends to the gateway's UDP ports 5900 and 5901, and 5902 for a
+    second display, so a firewall or NAT between them must let that through.
   - A Linux gateway needs `net.core.rmem_max` of at least 4194304 for the
     picture's socket, and the log warns when it is lower: the stock 212992
     loses keyframes at Retina sizes.

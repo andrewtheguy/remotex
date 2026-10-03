@@ -507,10 +507,11 @@ password = "change-me"
 # where the window drives it, at that screen's density either way. Once connected, the
 # Mac's physical displays are disabled and all of its windows are placed on this
 # virtual display. Apple's official macOS Screen Sharing client can choose up to
-# two virtual displays; remotex requests one. In a session started with resize,
-# viewport reports continuously replace the virtual display's mode as the window
-# changes.
-# Apple's display-count and fixed-resolution-preset controls are not implemented.
+# two virtual displays; remotex requests one, or two with `virtual_displays = 2`
+# on the target (alpha, described with the key above). In a session started with
+# resize, viewport reports continuously replace the virtual display's mode as the
+# window changes.
+# Apple's fixed-resolution-preset control is not implemented.
 # The native Apple pasteboard is carried in both directions.
 #
 # The picture comes as HEVC and the sound as AAC-ELD, over the media stream the
@@ -519,9 +520,9 @@ password = "change-me"
 # Mac's reading of your input. The browser stays behind its resize notice until
 # the stream sends its first picture, at connect and across display changes, and
 # a stream that fails ends the session, as it does in Apple's viewer.
-# The Mac sends to this gateway's address on UDP 5900 and 5901, so a firewall or
-# NAT between them must let that through, or the session ends 10 seconds after
-# the stream is offered.
+# The Mac sends to this gateway's address on UDP 5900 and 5901, and 5902 for a
+# second display, so a firewall or NAT between them must let that through, or the
+# session ends 10 seconds after the stream is offered.
 #
 # The picture and the sound go together: the Mac refuses one without the other,
 # and mutes its own speakers while it streams. So a session always carries
