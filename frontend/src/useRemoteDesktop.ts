@@ -18,7 +18,11 @@ import {
 } from "./cursorCss.ts";
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { desktopPainterFor } from "./desktopPainter.ts";
-import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
+import {
+  gatewayDisplaySocketUrl,
+  gatewayFetch,
+  gatewaySocketUrl,
+} from "./gateway.ts";
 import { versionMismatch } from "./gatewayVersion.ts";
 import { HeldModifiers, modifierFlags } from "./heldModifiers.ts";
 import { type MicSender, startMicSender } from "./micSender.ts";
@@ -245,6 +249,13 @@ function overClipboardLimit(text: string): boolean {
 
 // Close code sent when another browser force-claims the slot.
 const CLOSE_EVICTED = 4001;
+// Close codes a display socket opened in a tab of its own is refused or let go
+// with: not this browser's session (4000), or a display the session no longer
+// shows in a tab (4002), as well as 4001 above.
+const CLOSE_INVALID = 4000;
+const CLOSE_UNSUPPORTED = 4002;
+// The display a page shows unless it is one opened in a tab of its own.
+const FIRST_DISPLAY = 1;
 const MAX_RETRY_DELAY_MS = 15_000;
 // How many failed attempts in a row are reported as nothing but "Reconnecting…"
 // before the reason is shown as well. Four, because the backoff above reaches its
@@ -498,6 +509,11 @@ export function useRemoteDesktop(
   overlayRef: React.RefObject<HTMLElement | null>,
   pointerRef: React.RefObject<HTMLImageElement | null>,
   onUnauthorized: () => void,
+  // The display this page shows in a tab of its own (`/display/N`), or null on the
+  // page that holds the session. Such a page claims nothing: it opens that
+  // display's socket, which carries its picture and the input made over it, and
+  // nothing else.
+  tabDisplay: number | null = null,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
@@ -895,7 +911,14 @@ export function useRemoteDesktop(
   // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
   useEffect(() => {
     let disposed = false;
+    // The session socket: the claim's, carrying everything but the picture. None
+    // on a page showing a display in a tab of its own.
     let ws: WebSocket | null = null;
+    // The display socket: the picture, its size and pointer, and the paint
+    // acknowledgments that pace it (src/ws.rs). Opened beside the session socket,
+    // and on a page showing a display in a tab of its own, alone — input then
+    // goes on it too.
+    let displayWs: WebSocket | null = null;
     // Sound has a socket of its own, so that it never queues behind a picture — see
     // src/ws.rs. Opening it *is* the subscription; there is no message for audio.
     let audioWs: WebSocket | null = null;
@@ -955,7 +978,7 @@ export function useRemoteDesktop(
           paintGenerationRef,
           generation,
           paintSocket,
-          ws,
+          displayWs,
           sequence,
           queuedMs,
           drawMs,
@@ -1085,11 +1108,22 @@ export function useRemoteDesktop(
       setStatus(failure.stale ? "stale" : "failed");
     };
 
-    // Claim the session slot, then open the WebSocket with the token.
+    // A page showing a display in a tab of its own claims nothing — a claim would
+    // take the session from the tab that holds it — and opens that display's
+    // socket. Every other page claims the session.
     const connect = async (force: boolean) => {
       if (disposed) {
         return;
       }
+      if (tabDisplay !== null) {
+        openDisplay(tabDisplay);
+        return;
+      }
+      await claimAndOpen(force);
+    };
+
+    // Claim the session slot, then open the WebSocket with the token.
+    const claimAndOpen = async (force: boolean) => {
       const claimed = await claim(force);
       if (disposed) {
         return;
@@ -1176,6 +1210,130 @@ export function useRemoteDesktop(
       sendRef.current(msg);
     };
 
+    const dispatchControl = (text: string) => {
+      let msg: ControlMsg;
+      try {
+        msg = JSON.parse(text) as ControlMsg;
+      } catch {
+        return;
+      }
+      handleControlMsg(msg);
+    };
+
+    const closeDisplay = () => {
+      if (displayWs) {
+        const old = displayWs;
+        displayWs = null; // silence its onclose before closing
+        if (paintSocket === old) {
+          paintSocket = null;
+        }
+        if (tabDisplay !== null) {
+          wsRef.current = null;
+        }
+        old.close();
+      }
+    };
+
+    // A display socket closed.
+    const displayClosed = (socket: WebSocket, code: number) => {
+      if (disposed || displayWs !== socket) {
+        return; // superseded by a newer connection
+      }
+      displayWs = null;
+      if (paintSocket === socket) {
+        paintSocket = null;
+      }
+      if (tabDisplay !== null) {
+        tabClosed(tabDisplay, code);
+        return;
+      }
+      // The session's picture went with its socket, so the session socket goes
+      // too, and the reattach brings both back — the one path that rebuilds what
+      // a socket that held nothing needs. An eviction is the session socket's
+      // to report.
+      if (code !== CLOSE_EVICTED) {
+        ws?.close();
+      }
+    };
+
+    // The socket of the display a tab of its own shows closed.
+    const tabClosed = (display: number, code: number) => {
+      wsRef.current = null;
+      if (
+        code === CLOSE_EVICTED ||
+        code === CLOSE_INVALID ||
+        code === CLOSE_UNSUPPORTED
+      ) {
+        // The session no longer shows this display here, or is not this
+        // browser's: nothing to wait for. Opening it again is the Retry.
+        clearDesktop();
+        setConnectError(
+          `Display ${display} is not shown in a tab of its own. Choose All Displays in the session's display menu, then open it again.`,
+        );
+        setStatus("failed");
+        return;
+      }
+      scheduleRetry();
+    };
+
+    // A display's socket, which carries no claim: the gateway lets it in by the
+    // login cookie this browser carries (src/session.rs, `attach_display`).
+    const openDisplay = (display: number) => {
+      const socket = new WebSocket(gatewayDisplaySocketUrl(display));
+      const generation = advancePaintGeneration(paintGenerationRef);
+      paintSocket = socket;
+      socket.binaryType = "arraybuffer";
+      displayWs = socket;
+      if (tabDisplay !== null) {
+        // The input made over this page goes on its one socket.
+        wsRef.current = socket;
+      }
+      socket.onopen = () => {
+        if (disposed || displayWs !== socket || tabDisplay === null) {
+          return;
+        }
+        setStatus("connected");
+        setMode("desktop");
+      };
+      socket.onclose = (ev) => displayClosed(socket, ev.code);
+      // Binary frames go straight to the paint worker, buffer transferred, in
+      // arrival order — postMessage order *is* the draw order, so the promise
+      // queue that used to hold draws and draw-ordered control messages in
+      // line on this thread lives in the worker now. The control messages
+      // whose effects touch what draws touch still keep their place there:
+      // `resize` and `videoFormat` post commands behind the frames already
+      // sent, and `picker` posts `clear` the same way (see
+      // desktopPainterWorker.ts for why the clear must hold its place too).
+      // Their *state* halves run on arrival now rather than behind the
+      // backlog, which is fine because every mode they switch to hides the
+      // canvas behind an overlay until the worker's queue has caught up.
+      // Everything else always ran on arrival: a cursor shape or a clipboard
+      // answer gains nothing by queueing behind the worker's draws.
+      //
+      // Ownership is checked at dispatch — a superseded socket keeps firing
+      // `onmessage` until its close lands, and its frames and control messages
+      // must not reach the new attachment's worker or state. That check is
+      // also what lets the worker run on order alone: a dead socket's frames
+      // stop being posted before `clearDesktop` posts the clear that ends
+      // their attachment, so nothing can arrive there out of place.
+      socket.onmessage = (ev) => {
+        if (disposed || displayWs !== socket) {
+          return;
+        }
+        const data = ev.data;
+        if (typeof data !== "string") {
+          // Sound is on its own socket, so this one carries batches and
+          // nothing else; the worker still reads the kind byte rather than
+          // assuming it.
+          if (data instanceof ArrayBuffer) {
+            painter?.draw(data, generation);
+          }
+          return;
+        }
+        dispatchControl(data);
+      };
+    };
+
     const open = (sessionId: string) => {
       session = sessionId;
       // The URL names this window's screen and what its decoder takes, so a
@@ -1190,11 +1348,11 @@ export function useRemoteDesktop(
           rdpH264: decodesRdpH264(),
         }),
       );
-      const generation = advancePaintGeneration(paintGenerationRef);
-      paintSocket = socket;
-      socket.binaryType = "arraybuffer";
       ws = socket;
       wsRef.current = socket;
+      // Opened together; the gateway holds the picture for the display's socket
+      // when it is the slower of the two.
+      openDisplay(FIRST_DISPLAY);
 
       socket.onopen = () => {
         if (disposed || ws !== socket) {
@@ -1212,9 +1370,7 @@ export function useRemoteDesktop(
         }
         ws = null;
         wsRef.current = null;
-        if (paintSocket === socket) {
-          paintSocket = null;
-        }
+        closeDisplay();
         // Before either branch below: the link that owed us a clipboard reply
         // is gone, so fail any fetch now rather than leaving the button on
         // "Fetching…" until its timeout expires for an answer that cannot come.
@@ -1229,51 +1385,12 @@ export function useRemoteDesktop(
         // longer closes the socket; the server returns it to the picker.)
         scheduleRetry();
       };
-      // Binary frames go straight to the paint worker, buffer transferred, in
-      // arrival order — postMessage order *is* the draw order, so the promise
-      // queue that used to hold draws and draw-ordered control messages in
-      // line on this thread lives in the worker now. The control messages
-      // whose effects touch what draws touch still keep their place there:
-      // `resize` and `videoFormat` post commands behind the frames already
-      // sent, and `connected`/`picker` post `clear` the same way (see
-      // desktopPainterWorker.ts for why the clear must hold its place too).
-      // Their *state* halves run on arrival now rather than behind the
-      // backlog, which is fine because every mode they switch to hides the
-      // canvas behind an overlay until the worker's queue has caught up.
-      // Everything else always ran on arrival: a cursor shape or a clipboard
-      // answer gains nothing by queueing behind the worker's draws.
-      //
-      // `owned` is checked at dispatch — a superseded socket keeps firing
-      // `onmessage` until its close lands, and its frames and control messages
-      // must not reach the new attachment's worker or state. That check is
-      // also what lets the worker run on order alone: a dead socket's frames
-      // stop being posted before `clearDesktop` posts the clear that ends
-      // their attachment, so nothing can arrive there out of place.
-      const owned = () => !disposed && ws === socket;
-      const dispatchControl = (text: string) => {
-        let msg: ControlMsg;
-        try {
-          msg = JSON.parse(text) as ControlMsg;
-        } catch {
-          return;
-        }
-        handleControlMsg(msg);
-      };
+      // Text only: the picture is the display socket's.
       socket.onmessage = (ev) => {
-        if (!owned()) {
+        if (disposed || ws !== socket || typeof ev.data !== "string") {
           return;
         }
-        const data = ev.data;
-        if (typeof data !== "string") {
-          // Sound is on its own socket, so this one carries batches and
-          // nothing else; the worker still reads the kind byte rather than
-          // assuming it.
-          if (data instanceof ArrayBuffer) {
-            painter?.draw(data, generation);
-          }
-          return;
-        }
-        dispatchControl(data);
+        dispatchControl(ev.data);
       };
     };
 
@@ -1833,6 +1950,7 @@ export function useRemoteDesktop(
         wsRef.current = null;
         old.close();
       }
+      closeDisplay();
       void connect(force);
     };
     startRef.current = start;
@@ -1907,6 +2025,7 @@ export function useRemoteDesktop(
       dprQuery?.removeEventListener("change", onDprChange);
       clearTimeout(resizeTimer);
       ws?.close();
+      displayWs?.close();
       // The worker outlives this effect — its canvas element can only be
       // transferred once, and StrictMode reruns the effect on the same element
       // (see desktopPainter.ts) — but what it holds must not: that includes a
@@ -1925,6 +2044,7 @@ export function useRemoteDesktop(
     releaseAudio,
     stopCamera,
     stopMic,
+    tabDisplay,
   ]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
@@ -2226,7 +2346,8 @@ export function useRemoteDesktop(
   // Best-effort clipboard push on focus, when reads are permitted. Oversized
   // values are skipped locally; the explicit panel reports the limit.
   useEffect(() => {
-    if (mode !== "desktop") {
+    // The clipboard is the session socket's; a display in a tab of its own has none.
+    if (mode !== "desktop" || tabDisplay !== null) {
       return;
     }
     const pushBrowserClipboardOnFocus = () => {
@@ -2274,7 +2395,7 @@ export function useRemoteDesktop(
         pushBrowserClipboardOnFocus,
       );
     };
-  }, [mode]);
+  }, [mode, tabDisplay]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is

@@ -266,7 +266,7 @@ async fn session(
     if let Err(e) = active_loop(
         &session,
         events,
-        Flags { resize, pass_graphics: plan.rdp_graphics },
+        Flags { resize, pass_graphics: plan.rdp_graphics, plan },
         (width, height),
         applied,
         view,
@@ -430,6 +430,8 @@ struct Flags {
     /// Whether the host's graphics pipeline is passed to the browser rather than
     /// composed here ([`RenderPlan::rdp_graphics`]).
     pass_graphics: bool,
+    /// The render dial, for the sink of a display shown in a tab ([`Tab`]).
+    plan: RenderPlan,
 }
 
 /// How dense a desktop this session has asked the RDP server to render.
@@ -585,6 +587,12 @@ fn span(layout: Layout, columns: u16) -> (u32, u32) {
 /// browser keeps no display state of its own, so the list goes out again whenever
 /// the desktop or the selection changes, and — once it has been sent at all — when
 /// it shrinks to one, so a browser is not left offering a display the host took away.
+///
+/// With more than one column the list ends with *All Displays* ([`ALL_DISPLAYS`]),
+/// which puts the first column on the canvas and every other one in a tab of its
+/// own: the list names each tab ([`DisplayInfo::tab`]), the browser opens it in
+/// another tab of the same browser, and that tab's display socket is handed to
+/// this engine as a [`Tab`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct View {
     /// How many monitors the host laid the desktop out over, each `desktop.0 /
@@ -592,9 +600,16 @@ struct View {
     columns: u16,
     /// The column on the canvas, below `columns`.
     active: u16,
+    /// Whether *All Displays* is chosen: `active` is then the first column, and
+    /// every other one is shown in a tab.
+    all: bool,
     /// Whether a list has ever been sent, so a shrink to one is told as well.
     listed: bool,
 }
+
+/// The id of the list's *All Displays* entry: the sentinel Apple's own list uses
+/// for its entry of the same name.
+const ALL_DISPLAYS: u32 = u32::MAX;
 
 impl View {
     /// What the host laid out at connect, read off the desktop it opened: the
@@ -608,14 +623,19 @@ impl View {
         } else {
             1
         };
-        Self { columns, active: 0, listed: false }
+        Self { columns, active: 0, all: false, listed: false }
     }
 
     /// The host laid the desktop out again, over `monitors` monitors — its answer
     /// to a layout, or its own change. The selection is kept where it still exists.
     fn laid_out(self, monitors: u32) -> Self {
         let columns = narrow(monitors.max(1));
-        Self { columns, active: if self.active < columns { self.active } else { 0 }, ..self }
+        Self {
+            columns,
+            active: if self.active < columns { self.active } else { 0 },
+            all: self.all && columns > 1,
+            ..self
+        }
     }
 
     /// One column's size: what the browser is told the desktop is.
@@ -625,13 +645,30 @@ impl View {
 
     /// Where the active column starts, in the framebuffer.
     fn origin(self, desktop: (u16, u16)) -> (u16, u16) {
-        (self.size(desktop).0 * self.active, 0)
+        self.column_origin(self.active, desktop)
     }
 
     /// The active column, as the inclusive rectangle of the framebuffer it is.
     fn rect(self, desktop: (u16, u16)) -> Rect {
+        self.column_rect(self.active, desktop)
+    }
+
+    /// Where `column` starts, in the framebuffer.
+    fn column_origin(self, column: u16, desktop: (u16, u16)) -> (u16, u16) {
+        (self.size(desktop).0 * column, 0)
+    }
+
+    /// The column shown in tab `display`, while *All Displays* is chosen: every
+    /// column but the first, numbered from one as the display sockets number them.
+    fn tab_column(self, display: u32) -> Option<u16> {
+        let column = u16::try_from(display.checked_sub(1)?).ok()?;
+        (self.all && column > 0 && column < self.columns).then_some(column)
+    }
+
+    /// `column`, as the inclusive rectangle of the framebuffer it is.
+    fn column_rect(self, column: u16, desktop: (u16, u16)) -> Rect {
         let (w, h) = self.size(desktop);
-        let (left, top) = self.origin(desktop);
+        let (left, top) = self.column_origin(column, desktop);
         Rect {
             left,
             top,
@@ -643,9 +680,19 @@ impl View {
     /// Take the picker's choice: `None` for an id the list does not have, else
     /// whether the view moved.
     fn select(&mut self, id: u32) -> Option<bool> {
+        if id == ALL_DISPLAYS {
+            if self.columns <= 1 {
+                return None;
+            }
+            let moved = self.active != 0;
+            self.active = 0;
+            self.all = true;
+            return Some(moved);
+        }
         let column = u16::try_from(id).ok().filter(|column| *column < self.columns)?;
         let moved = column != self.active;
         self.active = column;
+        self.all = false;
         Some(moved)
     }
 
@@ -660,7 +707,7 @@ impl View {
         let (w, h) = self.size(desktop);
         let points = |pixels: u16| (f32::from(pixels) / density.scale()).round() as u32;
         let detail = format!("{}×{} at {}x", points(w), points(h), density.percent() / 100);
-        let displays = (0..self.columns)
+        let mut displays: Vec<DisplayInfo> = (0..self.columns)
             .map(|column| DisplayInfo {
                 id: u32::from(column),
                 label: format!("Display {}", column + 1),
@@ -669,9 +716,21 @@ impl View {
                 // The host made each of them for this session; none is a screen
                 // of its own.
                 virtual_display: true,
+                tab: (self.all && column > 0).then_some(u32::from(column) + 1),
             })
             .collect();
-        Some(ServerMsg::Displays { active: u32::from(self.active), displays })
+        if self.columns > 1 {
+            displays.push(DisplayInfo {
+                id: ALL_DISPLAYS,
+                label: "All Displays".into(),
+                detail: "One browser tab each".into(),
+                main: false,
+                virtual_display: false,
+                tab: None,
+            });
+        }
+        let active = if self.all { ALL_DISPLAYS } else { u32::from(self.active) };
+        Some(ServerMsg::Displays { active, displays })
     }
 }
 
@@ -747,7 +806,95 @@ impl Pointer {
     /// pointer PDU.
     fn attached(&mut self) -> ServerMsg {
         self.changed = false;
+        self.current()
+    }
+
+    /// The pointer as it stands, for a display shown beside the one this is
+    /// tracked for: a tab is told the same shape, without taking the change.
+    fn current(&self) -> ServerMsg {
         ServerMsg::Cursor(self.shape.clone())
+    }
+}
+
+/// A display shown in a browser tab of its own while *All Displays* is chosen: a
+/// column of the same framebuffer beside the one on the session's canvas, with a
+/// sink, an encoder and a shadow of its own, sent to the display socket the
+/// session handed over ([`ClientMsg::DisplayShown`]).
+///
+/// What goes wrong with it ends it and nothing else: its socket is a tab the
+/// person can close, so a failed send marks it `failed`, and the loop lets it go.
+struct Tab {
+    /// Its number on its socket: its column, plus one.
+    display: u32,
+    /// Shared so the loop's flush timer can wait on it beside everything else.
+    sink: Arc<VideoSink>,
+    shadow: Shadow,
+    failed: bool,
+}
+
+impl Tab {
+    fn column(&self) -> u16 {
+        narrow(self.display.saturating_sub(1))
+    }
+
+    fn note(&mut self, result: anyhow::Result<()>) {
+        if let Err(e) = result
+            && !std::mem::replace(&mut self.failed, true)
+        {
+            info!("rdp: display {}'s tab is gone: {e:#}", self.display);
+        }
+    }
+
+    async fn msg(&mut self, msg: ServerMsg) {
+        if !self.failed {
+            let result = self.sink.msg(msg).await;
+            self.note(result);
+        }
+    }
+
+    async fn frame(&mut self) {
+        if !self.failed {
+            let result = self.sink.frame().await;
+            self.note(result);
+        }
+    }
+
+    /// Whatever part of `rect` falls in this tab's column.
+    async fn damage(&mut self, framebuffer: &Framebuffer, rect: Rect, view: View, desktop: (u16, u16)) {
+        if !self.failed {
+            let column = view.column_rect(self.column(), desktop);
+            let result = send_damage(framebuffer, rect, column, &mut self.shadow, &self.sink).await;
+            self.note(result);
+        }
+    }
+
+    /// The desktop was laid out again at `size`: what the tab is told, ahead of
+    /// the repaint the host is asked for.
+    async fn resized(&mut self, size: (u16, u16), density: Density) {
+        self.shadow.resize(size.0, size.1);
+        self.sink.reset_render();
+        self.msg(ServerMsg::Resize { w: size.0, h: size.1, scale: density.scale() }).await;
+    }
+
+    /// Everything a socket holding nothing is owed: the size, the remote's system,
+    /// the pointer, and every pixel of the column.
+    async fn repaint(
+        &mut self,
+        framebuffer: &Framebuffer,
+        view: View,
+        desktop: (u16, u16),
+        density: Density,
+        pointer: ServerMsg,
+    ) {
+        self.shadow.forget();
+        self.sink.reset_render();
+        let (w, h) = view.size(desktop);
+        self.msg(ServerMsg::Resize { w, h, scale: density.scale() }).await;
+        self.msg(ServerMsg::RemoteOs { macos: false }).await;
+        self.msg(pointer).await;
+        let column = view.column_rect(self.column(), desktop);
+        self.damage(framebuffer, column, view, desktop).await;
+        self.frame().await;
     }
 }
 
@@ -1020,7 +1167,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, pass_graphics } = flags;
+    let Flags { resize, pass_graphics, plan } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -1044,6 +1191,9 @@ async fn active_loop(
     let mut wheel = WheelRotation::default();
     // The pointer shape, on its way to the browser that draws it.
     let mut pointer = Pointer::default();
+    // The display shown in a tab of its own, while *All Displays* is chosen and its
+    // socket is attached. One at most: a session has two columns at most.
+    let mut tab: Option<Tab> = None;
 
     // The density the desktop is *known* to be at — known, because this only moves
     // when a resize proves it.
@@ -1118,6 +1268,18 @@ async fn active_loop(
                 None => sink.round_returned().await,
             }
         };
+        // The same, for the display in a tab. Owned rather than borrowed, so the
+        // branches below can change the tab.
+        let tab_sink = tab.as_ref().filter(|tab| !tab.failed).map(|tab| Arc::clone(&tab.sink));
+        let tab_flush = async move {
+            match tab_sink {
+                Some(sink) => match sink.due_at().await {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => sink.round_returned().await,
+                },
+                None => std::future::pending().await,
+            }
+        };
         // Damage waiting out its accumulation interval — see `pending_damage` above.
         let damage_flush = async {
             match damage_due {
@@ -1146,7 +1308,7 @@ async fn active_loop(
                     // out now — not in up-to-16ms, and never cut in half.
                     Event::Frame => {
                         frame_marks = true;
-                        flush_damage(framebuffer, &mut pending_damage, view.rect(desktop), &mut shadow, sink)
+                        flush_damage(framebuffer, &mut pending_damage, (view, desktop), &mut shadow, sink, &mut tab)
                             .await?;
                         damage_flushed = Instant::now();
                         damage_due = None;
@@ -1230,6 +1392,13 @@ async fn active_loop(
                             last_pos.1.min(desktop.1.saturating_sub(1)),
                         );
                         sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await?;
+                        // A tab whose column the host took away goes with it.
+                        if tab.as_ref().is_some_and(|tab| view.tab_column(tab.display).is_none()) {
+                            tab = None;
+                        }
+                        if let Some(tab) = &mut tab {
+                            tab.resized((w, h), applied).await;
+                        }
                         if let Some(msg) = view.displays(desktop, applied) {
                             sink.msg(msg).await?;
                         }
@@ -1338,6 +1507,11 @@ async fn active_loop(
                     match view.select(id) {
                         None => debug!("rdp: ignoring a selection of unknown display {id}"),
                         Some(moved) => {
+                            // Leaving *All Displays* ends the tab; the list below,
+                            // which names no tab, closes its socket.
+                            if !view.all {
+                                tab = None;
+                            }
                             if moved {
                                 info!("rdp: showing display {} of {}", view.active + 1, view.columns);
                                 pending_damage.clear();
@@ -1363,6 +1537,54 @@ async fn active_loop(
                                 sink.frame().await?;
                             }
                         }
+                    }
+                    continue;
+                }
+                // A display socket for a tab came or went. One for a column the
+                // view shows in no tab is dropped: the list that named it has
+                // already been replaced, and the session closes its socket.
+                if let ClientMsg::DisplayShown { display, feed } = msg {
+                    match feed {
+                        Some(feed) if view.tab_column(display).is_some() => {
+                            info!("rdp: showing display {display} in a tab of its own");
+                            let (w, h) = view.size(desktop);
+                            let mut shown = Tab {
+                                display,
+                                sink: Arc::new(VideoSink::new(
+                                    "rdp",
+                                    feed.frames,
+                                    plan,
+                                    feed.feedback,
+                                    Oversize::Refuse,
+                                )),
+                                shadow: Shadow::new("rdp", w, h),
+                                failed: false,
+                            };
+                            shown.repaint(framebuffer, view, desktop, applied, pointer.current()).await;
+                            tab = Some(shown);
+                        }
+                        Some(_) => debug!("rdp: display {display} is not shown in a tab"),
+                        None => {
+                            if tab.as_ref().is_some_and(|tab| tab.display == display) {
+                                tab = None;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // Input made over a tab: its positions are in its column. A tab's
+                // repaint is its own.
+                if let ClientMsg::OnDisplay { display, input: made } = msg {
+                    let Some(shown) = tab.as_mut().filter(|tab| tab.display == display) else {
+                        continue;
+                    };
+                    if matches!(*made, ClientMsg::Refresh) {
+                        shown.repaint(framebuffer, view, desktop, applied, pointer.current()).await;
+                        continue;
+                    }
+                    let origin = view.column_origin(shown.column(), desktop);
+                    for event in translate_input(*made, &mut last_pos, &mut wheel, origin) {
+                        event.apply(input);
                     }
                     continue;
                 }
@@ -1502,20 +1724,32 @@ async fn active_loop(
                 sink.frame().await?;
                 continue;
             }
+            _ = tab_flush => {
+                if let Some(tab) = &mut tab {
+                    tab.frame().await;
+                }
+                continue;
+            }
             _ = damage_flush => {
-                flush_damage(framebuffer, &mut pending_damage, view.rect(desktop), &mut shadow, sink).await?;
+                flush_damage(framebuffer, &mut pending_damage, (view, desktop), &mut shadow, sink, &mut tab).await?;
                 damage_flushed = Instant::now();
                 damage_due = None;
                 // The flush is a frame boundary of its own: under a video plan those
                 // blits just landed in the mirror, and nothing else may come to
                 // collect them.
                 sink.frame().await?;
+                if let Some(tab) = &mut tab {
+                    tab.frame().await;
+                }
                 continue;
             }
         }
 
         if let Some(msg) = pointer.change() {
             sink.msg(msg).await?;
+            if let Some(tab) = &mut tab {
+                tab.msg(pointer.current()).await;
+            }
         }
         // Two flush regimes, chosen by whether the server marks its frames.
         //
@@ -1536,7 +1770,7 @@ async fn active_loop(
                     damage_due = Some(Instant::now() + FRAME_NET);
                 }
             } else if damage_flushed.elapsed() >= DAMAGE_INTERVAL {
-                flush_damage(framebuffer, &mut pending_damage, view.rect(desktop), &mut shadow, sink).await?;
+                flush_damage(framebuffer, &mut pending_damage, (view, desktop), &mut shadow, sink, &mut tab).await?;
                 damage_flushed = Instant::now();
                 damage_due = None;
             } else if damage_due.is_none() {
@@ -1548,6 +1782,12 @@ async fn active_loop(
         // stop accumulating and encode. Most turns of this loop redraw nothing, which
         // is why this is a no-op when nothing was blitted rather than a frame per PDU.
         sink.frame().await?;
+        if let Some(tab) = &mut tab {
+            tab.frame().await;
+        }
+        if tab.as_ref().is_some_and(|tab| tab.failed) {
+            tab = None;
+        }
     }
 
     shadow.report();
@@ -1867,6 +2107,9 @@ fn translate_input(
         // Answered by the active loop, out of the framebuffer, before translation:
         // the host has no message for it and is asked for nothing.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
+        // A tab's socket and the input made over it, both answered by the active
+        // loop before translation.
+        ClientMsg::DisplayShown { .. } | ClientMsg::OnDisplay { .. } => Vec::new(),
     }
 }
 
@@ -1939,16 +2182,21 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
     pending[pick] = union(&pending[pick], &rect);
 }
 
-/// Drain the staged damage into the mirror, the part of it inside `view`.
+/// Drain the staged damage into the mirror, the part of it inside the view's
+/// column — and into the tab's, the part inside its column.
 async fn flush_damage(
     framebuffer: &Framebuffer,
     pending: &mut Vec<Rect>,
-    view: Rect,
+    (view, desktop): (View, (u16, u16)),
     shadow: &mut Shadow,
     sink: &VideoSink,
+    tab: &mut Option<Tab>,
 ) -> anyhow::Result<()> {
     for rect in pending.drain(..) {
-        send_damage(framebuffer, rect, view, shadow, sink).await?;
+        send_damage(framebuffer, rect, view.rect(desktop), shadow, sink).await?;
+        if let Some(tab) = tab {
+            tab.damage(framebuffer, rect, view, desktop).await;
+        }
     }
     Ok(())
 }
@@ -2357,8 +2605,13 @@ mod tests {
         assert_eq!(active, 0);
         assert_eq!(
             displays.iter().map(|d| (d.id, d.label.as_str(), d.detail.as_str(), d.main)).collect::<Vec<_>>(),
-            vec![(0, "Display 1", "1280×800 at 1x", true), (1, "Display 2", "1280×800 at 1x", false)]
+            vec![
+                (0, "Display 1", "1280×800 at 1x", true),
+                (1, "Display 2", "1280×800 at 1x", false),
+                (ALL_DISPLAYS, "All Displays", "One browser tab each", false),
+            ]
         );
+        assert!(displays.iter().all(|d| d.tab.is_none()), "no tab until All Displays is chosen");
         // At 2x the detail is in points.
         let ServerMsg::Displays { displays, .. } = view.displays((5120, 1600), Density::Two).unwrap() else {
             panic!("not a list")
@@ -2378,6 +2631,24 @@ mod tests {
         };
         assert_eq!(active, 1);
 
+        // All Displays puts the first column on the canvas and names the second's
+        // tab; leaving it takes the tab away.
+        assert_eq!(view.select(ALL_DISPLAYS), Some(true));
+        assert_eq!((view.active, view.all), (0, true));
+        assert_eq!(view.tab_column(2), Some(1));
+        assert_eq!(view.tab_column(1), None, "the first display is the canvas, not a tab");
+        assert_eq!(view.tab_column(3), None);
+        assert_eq!(view.column_rect(1, (2560, 800)), rect(1280, 0, 2559, 799));
+        let ServerMsg::Displays { active, displays } = view.displays((2560, 800), Density::One).unwrap() else {
+            panic!("not a list")
+        };
+        assert_eq!(active, ALL_DISPLAYS);
+        assert_eq!(displays.iter().map(|d| d.tab).collect::<Vec<_>>(), vec![None, Some(2), None]);
+        assert_eq!(view.select(ALL_DISPLAYS), Some(false));
+        assert!(!view.laid_out(1).all, "one monitor has nothing to show beside it");
+        assert_eq!(view.select(1), Some(true));
+        assert_eq!(view.tab_column(2), None);
+
         // A host that lays the desktop out over one monitor again shrinks the view
         // to it, the selection with it — and a browser that was sent a list is sent
         // the shorter one, so it stops offering the display that went away.
@@ -2387,7 +2658,9 @@ mod tests {
         let ServerMsg::Displays { displays, .. } = one.displays((1280, 800), Density::One).unwrap() else {
             panic!("a list once sent is sent again")
         };
-        assert_eq!(displays.len(), 1);
+        assert_eq!(displays.len(), 1, "and one display offers no All Displays");
+        let mut one_view = View::opened(1, per, (1280, 800));
+        assert_eq!(one_view.select(ALL_DISPLAYS), None);
         // One that never had a list has none to send.
         assert!(View::opened(1, per, (1280, 800)).displays((1280, 800), Density::One).is_none());
         // A reset over two monitors confirms a layout against their union.

@@ -96,11 +96,12 @@ test.describe("v4 batch envelope", () => {
     const badKinds: number[] = [];
 
     page.on("websocket", (ws) => {
-      // The page opens two sockets, and only one of them carries pixels: sound has
-      // `/ws/audio` to itself. Watching both would fail the assertion below on an
-      // audio frame's 0x03, which would be the wrong reading entirely — audio never
-      // appearing here is precisely what this change bought.
-      if (new URL(ws.url()).pathname !== "/ws") {
+      // The page opens several sockets, and only the display's carries pixels:
+      // sound has `/ws/audio` to itself, and the session socket carries text.
+      // Watching the audio one would fail the assertion below on an audio frame's
+      // 0x03, which would be the wrong reading entirely — audio never appearing
+      // here is precisely what giving it a socket bought.
+      if (new URL(ws.url()).pathname !== "/ws/display") {
         return;
       }
       ws.on("framereceived", ({ payload }) => {

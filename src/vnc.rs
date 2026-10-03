@@ -5372,6 +5372,7 @@ fn output_info(entry: &[u8; OUTPUT_ENTRY], name: &[u8]) -> DisplayInfo {
         // to mark.
         main: false,
         virtual_display: entry[12] & OUTPUT_HEADLESS != 0,
+        tab: None,
     }
 }
 
@@ -5566,6 +5567,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
                     detail,
                     main: false,
                     virtual_display: false,
+                    tab: None,
                 },
             );
         }
@@ -5977,6 +5979,9 @@ fn translate_input(
         | ClientMsg::Disconnect
         | ClientMsg::PaintAck { .. }
         | ClientMsg::CameraFormat { .. } => Vec::new(),
+        // The session layer's words about a second display's socket, which this
+        // engine never has: it shows one framebuffer on one display socket.
+        ClientMsg::DisplayShown { .. } | ClientMsg::OnDisplay { .. } => Vec::new(),
         // Intercepted by the input loop, which is where the requested screen is
         // checked — see the `SelectDisplay` branch there. The Apple extension
         // supplies the selectable list on either transport, and wlshare's outputs

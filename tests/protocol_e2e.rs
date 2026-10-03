@@ -1364,7 +1364,10 @@ async fn next_scroll_request(rx: &mut mpsc::UnboundedReceiver<ScrollRequest>) ->
 }
 
 /// Read from the socket until it closes; returns the close code (if any).
-async fn expect_close(ws: &mut Ws) -> Option<u16> {
+async fn expect_close<S>(ws: &mut S) -> Option<u16>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg {
@@ -1446,6 +1449,27 @@ async fn websocket_without_a_valid_token_is_closed_with_4000() {
     // A made-up token.
     let mut ws = connect_ws(addr, "not-a-real-token", &cookie).await;
     assert_eq!(expect_close(&mut ws).await, Some(4000));
+}
+
+/// A display socket carries no token and is let in by the login alone: the login
+/// the session was claimed under, which another login is not, and only for a
+/// display the session shows — the first always, the second only in a tab.
+#[tokio::test]
+async fn a_display_socket_is_the_claiming_logins_and_shows_only_a_listed_tab() {
+    let addr = spawn_app_dead_rdp().await;
+    let owner = common::login(addr).await;
+    let other = common::login(addr).await;
+    let _token = common::claim_session(addr, &owner).await;
+
+    let mut ws = common::connect_display_ws(addr, &other, 1).await;
+    assert_eq!(expect_close(&mut ws).await, Some(4000), "another login holds no session");
+    let mut ws = common::connect_display_ws(addr, &owner, 2).await;
+    assert_eq!(expect_close(&mut ws).await, Some(4002), "no display is shown in a tab");
+    let mut ws = common::connect_display_ws(addr, &owner, 1).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), expect_close(&mut ws)).await.is_err(),
+        "the claiming login's first display stays open"
+    );
 }
 
 /// The audio endpoint answers a bad token the same way, and that sameness is the
@@ -1613,7 +1637,7 @@ async fn an_oversize_vnc_desktop_holds_the_session_without_a_picture() {
     expect_no_picture(&mut ws).await;
 
     // A reattach is told the same, and still sent no picture.
-    ws.close(None).await.unwrap();
+    futures_util::SinkExt::close(&mut ws).await.unwrap();
     drop(ws);
     let (status, body) =
         common::post_session(addr, &cookie, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
@@ -1726,7 +1750,7 @@ async fn detach_keeps_the_engine_and_reattach_repaints() {
     expect_frame(&mut ws).await;
 
     // Detach: the browser goes away, the engine keeps running.
-    ws.close(None).await.unwrap();
+    futures_util::SinkExt::close(&mut ws).await.unwrap();
     drop(ws);
 
     // Reattach (same token, reclaim): the engine must re-announce the size

@@ -384,7 +384,9 @@ session out any other way — stacked, offset, unequal — so a caller that show
 column never cuts a layout it does not know the shape of. At connect the caller
 reads the count off the size. The client composes and reports the span as
 it does any desktop. Which part of it a browser sees, and the pointer offset
-into it, is the engine's (`View` in `src/rdp.rs`).
+into it, is the engine's (`View` in `src/rdp.rs`), and so is *All Displays*, which
+shows the second column on a socket of its own (`Tab`): nothing of it reaches
+the RDP client, which composes the one span either way.
 
 Measured 2026-10-03 against a Windows 11 host, through `tests/ws_probe.py`: a
 kept-size session asked for two 1440×900 monitors opened a 2880×900 desktop,

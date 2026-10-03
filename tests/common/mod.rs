@@ -152,9 +152,128 @@ pub async fn claim_session(addr: SocketAddr, cookie: &str) -> String {
         .to_owned()
 }
 
-pub type Ws = tokio_tungstenite::WebSocketStream<
+/// One WebSocket to the gateway.
+pub type Socket = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
+
+/// A browser's view of its session: the session socket and the first display's
+/// socket beside it, read as one stream, as the page reads them into one handler.
+///
+/// Messages leave on the session socket, except a paint acknowledgment, which
+/// belongs to the display socket whose batch it acknowledges. The stream ends when
+/// both sockets have.
+pub struct Ws {
+    session: Socket,
+    display: Socket,
+    session_done: bool,
+    display_done: bool,
+    /// Which socket is polled first next time, so neither starves the other.
+    display_first: bool,
+}
+
+impl futures_util::Stream for Ws {
+    type Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        let this = &mut *self;
+        this.display_first = !this.display_first;
+        for display in [this.display_first, !this.display_first] {
+            let (socket, done) = if display {
+                (&mut this.display, &mut this.display_done)
+            } else {
+                (&mut this.session, &mut this.session_done)
+            };
+            if *done {
+                continue;
+            }
+            match std::pin::Pin::new(socket).poll_next(cx) {
+                Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
+                Poll::Ready(None) => *done = true,
+                Poll::Pending => {}
+            }
+        }
+        if this.session_done && this.display_done {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl futures_util::Sink<tokio_tungstenite::tungstenite::Message> for Ws {
+    type Error = tokio_tungstenite::tungstenite::Error;
+
+    fn poll_ready(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        use std::task::Poll;
+        let this = &mut *self;
+        match std::pin::Pin::new(&mut this.session).poll_ready(cx) {
+            Poll::Ready(Ok(())) => std::pin::Pin::new(&mut this.display).poll_ready(cx),
+            other => other,
+        }
+    }
+
+    fn start_send(
+        mut self: std::pin::Pin<&mut Self>,
+        item: tokio_tungstenite::tungstenite::Message,
+    ) -> Result<(), Self::Error> {
+        let to_display = matches!(&item, tokio_tungstenite::tungstenite::Message::Text(text)
+            if text.as_str().contains(r#""type":"paintAck""#));
+        let this = &mut *self;
+        if to_display {
+            std::pin::Pin::new(&mut this.display).start_send(item)
+        } else {
+            std::pin::Pin::new(&mut this.session).start_send(item)
+        }
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        use std::task::Poll;
+        let this = &mut *self;
+        match std::pin::Pin::new(&mut this.session).poll_flush(cx) {
+            Poll::Ready(Ok(())) => std::pin::Pin::new(&mut this.display).poll_flush(cx),
+            other => other,
+        }
+    }
+
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        use std::task::Poll;
+        let this = &mut *self;
+        match std::pin::Pin::new(&mut this.session).poll_close(cx) {
+            Poll::Ready(Ok(())) => std::pin::Pin::new(&mut this.display).poll_close(cx),
+            other => other,
+        }
+    }
+}
+
+/// Open display `display`'s socket with nothing but the login cookie, as a page
+/// of the browser holding the session does.
+#[allow(dead_code)]
+pub async fn connect_display_ws(addr: SocketAddr, cookie: &str, display: u32) -> Socket {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let mut request = format!("ws://{addr}/ws/display?display={display}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Cookie", cookie.parse().unwrap());
+    let (ws, _resp) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws
+}
 
 /// One `VIDEO` record parsed out of a batch frame: an access unit of the desktop's
 /// stream. No test here decodes the VP9 inside; what is checked is the envelope and
@@ -233,7 +352,8 @@ pub fn init_logging() {
     let _ = env_logger::try_init();
 }
 
-/// Open the session WebSocket with a claim token and the login cookie.
+/// Open the session WebSocket with a claim token and the login cookie, and the
+/// first display's socket beside it.
 ///
 /// `chroma=444` is what a browser whose decoder takes VP9 profile 1 states, and
 /// `apple_media=false` one that takes no Mac's stream; the session socket requires
@@ -273,8 +393,9 @@ pub async fn connect_ws_stating(
     request
         .headers_mut()
         .insert("Cookie", cookie.parse().unwrap());
-    let (ws, _resp) = tokio_tungstenite::connect_async(request).await.unwrap();
-    ws
+    let (session, _resp) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let display = connect_display_ws(addr, cookie, 1).await;
+    Ws { session, display, session_done: false, display_done: false, display_first: false }
 }
 
 /// Open the audio WebSocket with a claim token and the login cookie.
@@ -282,7 +403,7 @@ pub async fn connect_ws_stating(
 /// The same shape as [`connect_ws`] and deliberately so — a second endpoint that took
 /// its credential differently would be a second thing to get wrong.
 #[allow(dead_code)]
-pub async fn connect_audio_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
+pub async fn connect_audio_ws(addr: SocketAddr, token: &str, cookie: &str) -> Socket {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
     let mut request = format!("ws://{addr}/ws/audio?session={token}")
@@ -299,7 +420,7 @@ pub async fn connect_audio_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws
 /// [`connect_audio_ws`] opens the audio one. Its first message must be the
 /// `cameraFormat` that plugs the camera.
 #[allow(dead_code)]
-pub async fn connect_camera_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
+pub async fn connect_camera_ws(addr: SocketAddr, token: &str, cookie: &str) -> Socket {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
     let mut request = format!("ws://{addr}/ws/camera?session={token}")
@@ -316,7 +437,7 @@ pub async fn connect_camera_ws(addr: SocketAddr, token: &str, cookie: &str) -> W
 /// [`connect_audio_ws`] opens the audio one. Opening it is the browser enabling its
 /// microphone.
 #[allow(dead_code)]
-pub async fn connect_mic_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
+pub async fn connect_mic_ws(addr: SocketAddr, token: &str, cookie: &str) -> Socket {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
     let mut request = format!("ws://{addr}/ws/mic?session={token}")

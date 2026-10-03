@@ -350,6 +350,21 @@ pub enum ClientMsg {
     /// list. A client that never receives [`ServerMsg::Displays`] never has an id to
     /// name here, which is how the panel stays hidden on those engines.
     SelectDisplay { id: u32 },
+    /// Not a wire message. The session layer's word to an engine that a display
+    /// socket other than the first ([`crate::session::SessionManager::attach_display`])
+    /// has attached for `display`, with where its picture goes, or has gone (`None`).
+    /// The first display's socket needs no such word: its frames leave on the
+    /// engine's own channel, and its attach is a [`Self::Refresh`].
+    #[serde(skip)]
+    DisplayShown {
+        display: u32,
+        feed: Option<crate::session::DisplayFeed>,
+    },
+    /// Not a wire message. `input` arrived on the socket showing `display`, a
+    /// display other than the first, so a position in it is in that display's
+    /// pixels. Input from the first display's socket arrives bare.
+    #[serde(skip)]
+    OnDisplay { display: u32, input: Box<ClientMsg> },
     /// One touch contact's transition, in framebuffer coordinates: the
     /// touchscreen mode, where fingers are forwarded as the contacts they are
     /// instead of being interpreted into a mouse. `id` names the finger from its
@@ -898,6 +913,13 @@ pub struct DisplayInfo {
     /// screens, so a client can say which is which: a Mac's High Performance
     /// virtual display, or a compositor's headless output.
     pub virtual_display: bool,
+    /// Where an engine shows this display in a tab of its own beside the first
+    /// display rather than instead of it: the number a display socket names it by
+    /// (`/ws/display?display=N`, and the page at `/display/N`). `None` for a
+    /// display the picker switches the one canvas to. Set by the RDP engine for
+    /// every column but the first while its *All displays* entry is active, and
+    /// by nothing else.
+    pub tab: Option<u32>,
 }
 
 /// Why a desktop has no picture: see [`ServerMsg::Oversize`].
@@ -1301,9 +1323,31 @@ struct WireDisplay<'a> {
     main: bool,
     #[serde(rename = "virtual")]
     virtual_display: bool,
+    tab: Option<u32>,
 }
 
 impl ServerMsg {
+    /// Whether this message is a display's — its picture, size, pointer and what
+    /// goes with them — and so travels on a display socket, rather than the
+    /// session's, which travels on the session socket ([`crate::ws`]). The
+    /// session layer routes an engine's output by this.
+    pub fn is_display(&self) -> bool {
+        matches!(
+            self,
+            ServerMsg::Video(_)
+                | ServerMsg::Graphics(_)
+                | ServerMsg::GraphicsStart
+                | ServerMsg::VideoFormat { .. }
+                | ServerMsg::Resize { .. }
+                | ServerMsg::Cursor(_)
+                | ServerMsg::Mosaic { .. }
+                | ServerMsg::Oversize { .. }
+                | ServerMsg::Resizing { .. }
+                | ServerMsg::RemoteOs { .. }
+                | ServerMsg::TouchReady
+        )
+    }
+
     /// The JSON text frame for a control message, or `None` for a binary one.
     ///
     /// `None` rather than a panic or a placeholder because an access unit has no
@@ -1412,6 +1456,7 @@ impl ServerMsg {
                         detail: &display.detail,
                         main: display.main,
                         virtual_display: display.virtual_display,
+                        tab: display.tab,
                     })
                     .collect(),
             }),
@@ -1840,6 +1885,7 @@ mod tests {
                     detail: "1920×1080 at 1x".to_owned(),
                     main: true,
                     virtual_display: false,
+                    tab: None,
                 },
                 DisplayInfo {
                     id: 9,
@@ -1847,6 +1893,7 @@ mod tests {
                     detail: "3200×2000 at 2x".to_owned(),
                     main: false,
                     virtual_display: true,
+                    tab: None,
                 },
             ],
         })
@@ -1855,7 +1902,7 @@ mod tests {
             // `virtual` on the wire: reserved in Rust, ordinary in JavaScript.
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"displays","active":7,"displays":[{"id":7,"label":"Display 1","detail":"1920×1080 at 1x","main":true,"virtual":false},{"id":9,"label":"Virtual display","detail":"3200×2000 at 2x","main":false,"virtual":true}]}"#
+                r#"{"type":"displays","active":7,"displays":[{"id":7,"label":"Display 1","detail":"1920×1080 at 1x","main":true,"virtual":false,"tab":null},{"id":9,"label":"Virtual display","detail":"3200×2000 at 2x","main":false,"virtual":true,"tab":null}]}"#
             ),
             None => panic!("displays must be a text frame"),
         }

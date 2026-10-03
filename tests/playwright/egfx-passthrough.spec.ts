@@ -167,7 +167,8 @@ interface Session {
   decodesH264?: string | null;
 }
 
-/// Watch the session socket. Registered before navigation, so nothing is missed.
+/// Watch the session socket, and the display socket that carries its picture.
+/// Registered before navigation, so nothing is missed.
 function watchSession(page: Page): Session {
   const seen: Session = {
     controlTypes: [],
@@ -178,12 +179,31 @@ function watchSession(page: Page): Session {
   };
   page.on("websocket", (ws) => {
     const url = new URL(ws.url());
-    if (url.pathname !== "/ws") {
+    if (url.pathname === "/ws") {
+      seen.decodesH264 = url.searchParams.get("rdp_h264");
+      ws.on("framereceived", ({ payload }) => {
+        if (typeof payload !== "string") {
+          return;
+        }
+        const message = JSON.parse(payload);
+        if (typeof message.type !== "string") {
+          return;
+        }
+        seen.controlTypes.push(message.type);
+        if (message.type === "connected") {
+          seen.connected = { render: message.render };
+        }
+      });
       return;
     }
-    seen.decodesH264 = url.searchParams.get("rdp_h264");
-    // Whether this session's pipeline has been announced: a socket's own, and a
-    // session's own on it, so the one before cannot answer for the one after.
+    if (url.pathname !== "/ws/display") {
+      return;
+    }
+    // A display socket is an attachment of its own, whose batches and
+    // acknowledgments are numbered from one. Whether its pipeline has been
+    // announced is its own too, so the socket before cannot answer for it.
+    seen.batches = [];
+    seen.acknowledged = [];
     let started = false;
     ws.on("framesent", ({ payload }) => {
       if (typeof payload !== "string") {
@@ -200,13 +220,7 @@ function watchSession(page: Page): Session {
         return;
       }
       seen.controlTypes.push(message.type);
-      if (message.type === "connected") {
-        seen.connected = { render: message.render };
-        // A session that starts is a socket's count starting over.
-        seen.batches = [];
-        seen.acknowledged = [];
-        started = false;
-      } else if (message.type === "graphicsStart") {
+      if (message.type === "graphicsStart") {
         started = true;
       }
     };

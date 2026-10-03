@@ -855,6 +855,7 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
                 detail: format!("{}×{}{suffix}", logical.0, logical.1),
                 main: flags & 0x01 != 0,
                 virtual_display,
+                tab: None,
             },
             density,
             viewer_scale,

@@ -478,7 +478,7 @@ async fn until_node(container: &Arc<common::Container>, prefix: &str, present: b
 
 /// The next control message on an uplink socket, whose only text is the remote's
 /// decisions.
-async fn uplink_signal(ws: &mut common::Ws) -> serde_json::Value {
+async fn uplink_signal(ws: &mut common::Socket) -> serde_json::Value {
     loop {
         match ws.next().await {
             Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).expect("uplink signal is JSON"),

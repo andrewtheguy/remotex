@@ -164,6 +164,11 @@ export interface DisplayInfo {
   main: boolean;
   // A display the remote made for this purpose rather than one of its screens.
   virtual: boolean;
+  // Where this display is shown in a browser tab of its own, beside the one on
+  // the canvas: the number its page (`/display/N`) and its display socket name
+  // it by. Null for a display the picker switches the canvas to. Only an RDP
+  // target's All Displays sets it (alpha).
+  tab: number | null;
 }
 
 // A rectangle in whole pixels or points, origin at the top left.

@@ -132,11 +132,16 @@ function SessionCovers({
 
 export default function RemoteDesktop({
   branding,
+  tabDisplay,
   onLogout,
   onUnauthorized,
 }: {
   /** Deployment display name shown on the interstitials. */
   branding: string;
+  /** The display this page shows in a tab of its own (`/display/N`), beside the
+   *  session another tab of this browser holds: its picture and input, and no
+   *  menu or picker. Null on the page that holds the session. */
+  tabDisplay: number | null;
   onLogout: () => void;
   onUnauthorized: () => void;
 }) {
@@ -208,6 +213,7 @@ export default function RemoteDesktop({
     overlayRef,
     pointerRef,
     onUnauthorized,
+    tabDisplay,
   );
 
   // A speaker on the tab title while sound is playing, and a camera and a
@@ -222,8 +228,9 @@ export default function RemoteDesktop({
       mode === "desktop"
         ? `${cameraEnabled ? "🎥 " : ""}${micEnabled ? "🎤 " : ""}${audioEnabled ? "🔊 " : ""}`
         : "";
-    document.title = `${marks}${branding}`;
-  }, [mode, audioEnabled, cameraEnabled, micEnabled, branding]);
+    const shown = tabDisplay === null ? "" : `Display ${tabDisplay} · `;
+    document.title = `${marks}${shown}${branding}`;
+  }, [mode, audioEnabled, cameraEnabled, micEnabled, branding, tabDisplay]);
 
   // The status overlay covers the connection lifecycle (connecting/reconnecting)
   // and the claim conflicts (busy/takenOver); in the desktop it also covers the
@@ -272,7 +279,7 @@ export default function RemoteDesktop({
 
       {/* The floating menu is desktop-only; its End session button returns to
           the picker (see FloatingMenu.tsx), and Log out ends the login. */}
-      {mode === "desktop" && (
+      {mode === "desktop" && tabDisplay === null && (
         <FloatingMenu
           onLogout={onLogout}
           onUnauthorized={onUnauthorized}
@@ -324,7 +331,7 @@ export default function RemoteDesktop({
 
       {/* The post-login target picker: shown once the slot is held and no
           target is connected. */}
-      {status === "connected" && mode === "picker" && (
+      {status === "connected" && mode === "picker" && tabDisplay === null && (
         <TargetPicker
           branding={branding}
           connect={connect}

@@ -12,11 +12,14 @@
 // screens plus an "All Displays" entry. High Performance mode sends one virtual
 // display, leaving nothing to choose. A wlshare desktop sends the compositor's
 // outputs, one of which it is capturing. An RDP target asked for virtual
-// displays (alpha) sends the row the host laid out, and shows one of them; every
-// other RDP or VNC session exposes one framebuffer and no list.
+// displays (alpha) sends the row the host laid out, and shows one of them — or,
+// on its All Displays, the first here and each other one in a browser tab of its
+// own, which this panel links to; every other RDP or VNC session exposes one
+// framebuffer and no list.
 
 import { useRef } from "react";
 import { useDockedHeight, useIsDesktop } from "./dockedPanel.ts";
+import { gatewayUrl } from "./gateway.ts";
 import type { DisplayInfo } from "./protocol.ts";
 
 interface Props {
@@ -36,6 +39,7 @@ export default function DisplayPanel({
 }: Props) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   useDockedHeight(panelRef, !useIsDesktop(), onDockedHeightChange);
+  const tabs = displays.filter((display) => display.tab !== null);
 
   return (
     <div className="panel" ref={panelRef}>
@@ -83,6 +87,26 @@ export default function DisplayPanel({
           );
         })}
       </div>
+
+      {/* A display shown in a tab of its own opens in this browser, which is
+          what lets its page in: it carries the login cookie, and is given no
+          session token. `noopener`, so the new tab shares nothing of this one's
+          page state — the session token in this tab's storage included. */}
+      {tabs.length > 0 && (
+        <div className="dp-tabs">
+          {tabs.map((display) => (
+            <a
+              key={display.id}
+              className="dp-tab-link"
+              href={gatewayUrl(`/display/${display.tab}`)}
+              target="_blank"
+              rel="noopener"
+            >
+              Open {display.label} in a new tab ↗
+            </a>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

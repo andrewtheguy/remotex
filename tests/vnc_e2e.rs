@@ -260,7 +260,7 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
     // same token, and reattach. The still-running engine must re-announce the
     // geometry the session is *now* at — the configured size, not the server's
     // own before it — and repaint the full desktop through a real server.
-    ws.close(None).await.unwrap();
+    futures_util::SinkExt::close(&mut ws).await.unwrap();
     drop(ws);
 
     let (status, body) =

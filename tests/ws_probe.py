@@ -19,6 +19,11 @@ default.
 
 Use ``--burst`` to send every requested viewport without waiting for the preceding
 resize response.
+
+The probe opens the session socket and display 1's socket beside it, as a page does,
+and reads both. ``--tab`` also opens display 2's socket once the session lists it in a
+tab of its own (an RDP target's *All Displays*, ``--select 0xffffffff``), the way
+the page at ``/display/2`` does: by the login cookie alone, with no session token.
 """
 
 import argparse
@@ -160,6 +165,18 @@ async def main() -> int:
         action="append",
         default=[],
         help="display id to select once the list arrives (repeatable)",
+    )
+    parser.add_argument(
+        "--tab",
+        action="store_true",
+        help="open display 2's socket once the session shows it in a tab of its own, "
+        "and report what arrives on it",
+    )
+    parser.add_argument(
+        "--tab-mouse",
+        type=coordinates,
+        default=None,
+        help="after display 2's first resize, move the pointer there, in its pixels",
     )
     parser.add_argument("--mouse", type=coordinates, default=None)
     parser.add_argument(
@@ -311,11 +328,41 @@ async def main() -> int:
         "audio": args.sound,
         "passthrough": args.passthrough,
     }
+    # A display socket carries no token: the login cookie is what lets it in.
+    headers = {"Cookie": f"remotex_session={cookie}"}
+
+    def display_url(display: int) -> str:
+        return f"ws://127.0.0.1:{args.port}/ws/display?display={display}"
+
     # No cap on a message, as a browser has none: a keyframe of a whole desktop is
     # one batch, which a 2x screen can put past the library's 1 MiB default.
-    async with websockets.connect(
-        url, additional_headers={"Cookie": f"remotex_session={cookie}"}, max_size=None
-    ) as socket:
+    async with (
+        websockets.connect(url, additional_headers=headers, max_size=None) as socket,
+        websockets.connect(
+            display_url(1), additional_headers=headers, max_size=None
+        ) as display_socket,
+    ):
+        # Every socket's messages in one queue, each with the display it came from:
+        # 0 for the session socket.
+        inbox: asyncio.Queue = asyncio.Queue()
+
+        async def feed(source: int, ws) -> None:
+            try:
+                async for message in ws:
+                    await inbox.put((source, ws, message))
+            except websockets.ConnectionClosed:
+                pass
+            finally:
+                close = ws.close_code, ws.close_reason
+                await inbox.put((source, ws, close))
+
+        feeders = [
+            asyncio.create_task(feed(0, socket)),
+            asyncio.create_task(feed(1, display_socket)),
+        ]
+        tab_socket = None
+        tab_frames = 0
+        tab_mouse_sent = False
         connect = {"type": "connect", "target": args.target, "choices": choices}
         if args.display is not None:
             connect["display"] = args.display
@@ -491,7 +538,45 @@ async def main() -> int:
         viewport_task = None
         try:
             async with asyncio.timeout(args.seconds):
-                async for message in socket:
+                while True:
+                    source, origin, message = await inbox.get()
+                    if isinstance(message, tuple):
+                        code, reason = message
+                        print(f"  [{source}] socket closed  code={code}  {reason}")
+                        if source in (0, 1):
+                            break
+                        continue
+                    if source == 2:
+                        if isinstance(message, bytes):
+                            tab_frames += 1
+                            if len(message) >= 8 and message[0] == 0x02:
+                                sequence = int.from_bytes(message[4:8], "little")
+                                await origin.send(
+                                    json.dumps(
+                                        {
+                                            "type": "paintAck",
+                                            "sequence": sequence,
+                                            "queuedMs": 0,
+                                            "drawMs": 0,
+                                        }
+                                    )
+                                )
+                            continue
+                        data = json.loads(message)
+                        if data.get("type") == "resize":
+                            print(
+                                f"  [2] resize  {data['w']}x{data['h']}  scale={data['scale']}"
+                            )
+                            if args.tab_mouse is not None and not tab_mouse_sent:
+                                tab_mouse_sent = True
+                                x, y = args.tab_mouse
+                                print(f"  [2] -> mouseMove {x},{y}")
+                                await origin.send(
+                                    json.dumps({"type": "mouseMove", "x": x, "y": y})
+                                )
+                        elif data.get("type") != "cursor":
+                            print(f"  [2] {data.get('type')}: {json.dumps(data)[:120]}")
+                        continue
                     if isinstance(message, bytes):
                         frames += 1
                         if args.records and len(message) >= 8 and message[0] == 0x02:
@@ -502,7 +587,7 @@ async def main() -> int:
                         # would stall the engine behind a window that never opens.
                         if len(message) >= 8 and message[0] == 0x02:
                             sequence = int.from_bytes(message[4:8], "little")
-                            await socket.send(
+                            await origin.send(
                                 json.dumps(
                                     {
                                         "type": "paintAck",
@@ -583,11 +668,19 @@ async def main() -> int:
                         for display in data["displays"]:
                             mark = "*" if display["id"] == data["active"] else " "
                             main_display = " (main)" if display["main"] else ""
+                            tab = f"  tab={display['tab']}" if display["tab"] else ""
                             print(
                                 f"    {mark} id={display['id']:#x}  "
                                 f"{display['label']!r}  {display['detail']!r}"
-                                f"{main_display}"
+                                f"{main_display}{tab}"
                             )
+                        tabbed = any(d["tab"] == 2 for d in data["displays"])
+                        if args.tab and tabbed and tab_socket is None:
+                            print("  [2] -> open display 2's socket")
+                            tab_socket = await websockets.connect(
+                                display_url(2), additional_headers=headers, max_size=None
+                            )
+                            feeders.append(asyncio.create_task(feed(2, tab_socket)))
                         if pending:
                             pick = pending.pop(0)
                             print(f"  -> selectDisplay {pick:#x}")
@@ -677,7 +770,13 @@ async def main() -> int:
                 viewport_task.cancel()
             if gap_task is not None and not gap_task.done():
                 gap_task.cancel()
+        for feeder in feeders:
+            feeder.cancel()
+        if tab_socket is not None:
+            await tab_socket.close()
         print(f"\n  {frames} binary frames")
+        if args.tab:
+            print(f"  [2] {tab_frames} binary frames")
         if args.records:
             print(f"  {video_units} video records")
         if args.audio:
