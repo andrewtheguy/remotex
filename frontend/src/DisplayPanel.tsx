@@ -15,8 +15,8 @@
 // one framebuffer and no list.
 
 import { useRef } from "react";
+import { useDockedHeight, useIsDesktop } from "./dockedPanel.ts";
 import type { DisplayInfo } from "./protocol.ts";
-import { useDockedHeight } from "./SoftKeyboardPanel.tsx";
 
 interface Props {
   displays: DisplayInfo[];
@@ -34,7 +34,7 @@ export default function DisplayPanel({
   onDockedHeightChange,
 }: Props) {
   const panelRef = useRef<HTMLDivElement | null>(null);
-  useDockedHeight(panelRef, onDockedHeightChange);
+  useDockedHeight(panelRef, !useIsDesktop(), onDockedHeightChange);
 
   return (
     <div className="panel" ref={panelRef}>

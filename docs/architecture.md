@@ -138,6 +138,11 @@ area and points here; read the area's section before changing what it covers.
 - Pointer clients present the remote desktop at 100%; oversized desktops scroll.
   Do not add fit-to-window, zoom-to-fit, or viewport-derived scaling. Mobile,
   gated by `CAN_PINCH_ZOOM`, is the sole fit-to-width/pinch-zoom exception.
+- The soft keyboard has one press engine (`softKeyPress.ts`), listening on the
+  key area, for every layout; a key is data (`softKeyboard.ts`) and never has a
+  handler of its own. A phone — a touch screen of a phone's size — docks it and
+  insets the canvas; every other client floats it. See
+  [Browser SPA](#browser-spa).
 - Neither the gateway nor the browser rescales what a remote sends: frames are
   presented at `w / scale` by the density the remote confirmed. When the size or
   density is wrong for the browser, ask the remote to render the right one and
@@ -2315,7 +2320,7 @@ for. The translator reads the same flags for itself, because it can hold keys fo
 Command the page never saw go down — ⌘-Tab into the window, then ⌘V with Command still
 held — and so one `heldModifiers.ts` cannot lapse: any event reporting Command up
 ends what the translator held under it, the synthetic Control of a mapped chord
-included, without the bare tap a seen release would send. The soft keyboard's sticky
+included, without the bare tap a seen release would send. The soft keyboard's
 modifiers are outside it: the page holds those, and no event's flags know them.
 
 The canvas is presented at the remote's point size, derived from framebuffer
@@ -2389,6 +2394,28 @@ live there: the ✕, a click on the dimmed layer, the chord that hides the menu,
 drawer button that closed the drawer behind it. The soft keyboard is the one control in this menu that is itself
 keyboard input, so a key pressed there takes the drawer down as it sends — the
 label never stands over a remote being typed on.
+
+The soft keyboard (`SoftKeyboardPanel.tsx`) is pages of keys (`softKeyboard.ts`),
+each a DOM code the backend already maps, and one press engine
+(`softKeyPress.ts`) that turns fingers into keys for all of them. The engine
+listens on the key area, not on the keys: a key is a cell that meets its
+neighbours edge to edge, so there is no gap a finger can land in, and where a
+finger is comes from a measured table of the cells (`softKeyGeometry.ts`) rather
+than from the DOM under it. A letter commits when the finger lifts, after any
+slide to a neighbour, and the key under the finger is shown over it as it goes;
+Backspace, Delete, the arrows, Space, Tab and the page keys commit on touch and
+repeat while held; the scrollable shortcut row commits on a tap that stayed put
+and lets a slide scroll. A modifier tapped once wraps the next key and is spent,
+tapped again or held it locks until tapped off, and under a resting finger it
+chords the other fingers' keys; every held modifier goes down ahead of the key
+in the order it was taken and up after it, a repeat tick included. The key area
+refuses every browser gesture (`touch-action: none`), so a cancelled touch means
+the system took the finger and commits nothing; the shortcut row alone allows
+the horizontal pan it scrolls by. A phone — a touch screen whose short side is a
+phone's (`tabletGuestSize.ts`) — gets the keyboard docked along the bottom edge in
+either orientation, padded above the home indicator, and the canvas insets
+above it; every other client, tablets and narrow windows included, gets the
+floating PC grid.
 
 Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or

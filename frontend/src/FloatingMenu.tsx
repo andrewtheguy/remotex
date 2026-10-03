@@ -396,6 +396,7 @@ function DockedPanel({
   onClose,
   onDockedHeightChange,
   sendKeyCombo,
+  onFocusDesktop,
   remoteClipboard,
   onSendClipboard,
   displays,
@@ -406,6 +407,7 @@ function DockedPanel({
   onClose: () => void;
   onDockedHeightChange: (px: number) => void;
   sendKeyCombo: (codes: string[]) => void;
+  onFocusDesktop: () => void;
   remoteClipboard: RemoteClipboard | null;
   onSendClipboard: (text: string) => void;
   displays: DisplayInfo[];
@@ -419,6 +421,7 @@ function DockedPanel({
           sendKeyCombo={sendKeyCombo}
           onClose={onClose}
           onDockedHeightChange={onDockedHeightChange}
+          onFocusDesktop={onFocusDesktop}
         />
       );
     case "clipboard":
@@ -1614,6 +1617,7 @@ export default function FloatingMenu({
         onClose={closePanel}
         onDockedHeightChange={onDockedHeight}
         sendKeyCombo={onSoftKey}
+        onFocusDesktop={onFocusDesktop}
         remoteClipboard={remoteClipboard}
         onSendClipboard={onSendClipboard}
         displays={displays}
