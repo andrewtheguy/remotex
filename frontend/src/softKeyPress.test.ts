@@ -444,6 +444,32 @@ test("turning Sticky off drops what was armed", () => {
   assert.deepEqual(f.sent, [["KeyA"]]);
 });
 
+test("a modifier held when Sticky goes off chords until it lifts, then is off", () => {
+  const f = new Fingers();
+  f.down("ctrl", 0, 1);
+  f.tap("sticky", 100, 2);
+  assert.deepEqual(f.modifiers(), [["ControlLeft", "held"]]);
+  f.tap("a", 200, 2);
+  assert.deepEqual(f.sent, [["ControlLeft", "KeyA"]]);
+  f.up("ctrl", 300, 1);
+  assert.deepEqual(f.modifiers(), []);
+
+  // Unchorded, and armed before: still off, lifted or taken.
+  f.tap("sticky", 400);
+  f.tap("shift", 500);
+  f.down("shift", 600, 1);
+  f.tap("sticky", 700, 2);
+  f.up("shift", 800, 1);
+  assert.deepEqual(f.modifiers(), []);
+  f.tap("sticky", 900);
+  f.tap("shift", 1000);
+  f.down("shift", 1100, 1);
+  f.tap("sticky", 1200, 2);
+  f.cancel(1, 1300);
+  assert.deepEqual(f.modifiers(), []);
+  assert.equal(f.sent.length, 1);
+});
+
 test("a page key switches on lift and drops the other fingers' keys", () => {
   const f = new Fingers();
   f.down("a", 0, 2);

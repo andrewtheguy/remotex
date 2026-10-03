@@ -241,6 +241,11 @@ export function createPressEngine(
       return;
     }
     press.modifier = null;
+    // Sticky went off under the finger: there is nothing to arm or restore.
+    if (!sticky) {
+      held.delete(code);
+      return;
+    }
     if (cancelled) {
       if (press.previous === undefined) {
         held.delete(code);
