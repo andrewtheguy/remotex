@@ -172,6 +172,9 @@ test.describe("the soft keyboard on a phone", () => {
     await key(page, "?123").tap();
     await expect(key(page, "ABC")).toBeVisible();
     await expect(key(page, "Left")).toBeVisible();
+    // The held modifiers lead this row too, ahead of the F-keys.
+    await expect(key(page, "Hold Alt")).toBeVisible();
+    await expect(key(page, "F1")).toBeVisible();
     await key(page, "_").tap();
     await expect.poll(() => keys.slice(12)).toEqual([
       down("ShiftLeft"),

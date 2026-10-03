@@ -240,25 +240,32 @@ function page(
 
 // ── Shortcut rows (scrollable, phone pages) ──
 
-// The held modifiers lead: pressed and released alone, Super is the Start key,
-// and under a finger each one is a real modifier for the other thumb's key or
-// a tap on the canvas. The chords that follow are the ones a browser swallows
-// or a phone cannot otherwise reach; Ctrl+C and its kin are the strip's Ctrl
-// and a letter.
-const SHORTCUTS_ABC: Key[] = [
+// The held modifiers lead both shortcut rows: pressed and released alone,
+// Super is the Start key, and under a finger each one is a real modifier for
+// the other thumb's key — a letter below, an F-key beside it on the Sym page —
+// or a tap on the canvas.
+const HELD_MODIFIERS: Key[] = [
   hold("Shift", "ShiftLeft"),
   hold("Ctrl", "ControlLeft"),
   hold("Alt", "AltLeft"),
   hold("Super", "MetaLeft"),
+];
+
+// The chords that follow the modifiers are the ones a browser swallows or a
+// phone cannot otherwise reach; Ctrl+C and its kin are the strip's Ctrl and a
+// letter.
+const SHORTCUTS_ABC: Key[] = [
+  ...HELD_MODIFIERS,
   s("Esc", "Escape"),
   c("Alt+Tab", ["AltLeft", "Tab"]),
   c("Alt+F4", ["AltLeft", "F4"]),
   c("C+A+Del", ["ControlLeft", "AltLeft", "Delete"]),
 ];
 
-const SHORTCUTS_FN: Key[] = Array.from({ length: 12 }, (_, i) =>
-  s(`F${i + 1}`, `F${i + 1}`),
-);
+const SHORTCUTS_FN: Key[] = [
+  ...HELD_MODIFIERS,
+  ...Array.from({ length: 12 }, (_, i) => s(`F${i + 1}`, `F${i + 1}`)),
+];
 
 // ── The strip: modifiers and arrows, on every phone page ──
 
