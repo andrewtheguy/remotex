@@ -32,8 +32,10 @@ soft keyboard.
 An installed app has **Window → Size to _width_×_height_**, which resizes the
 local window to the remote desktop's size through
 [`window.resizeTo()`](https://developer.mozilla.org/en-US/docs/Web/API/Window/resizeTo).
-It works in installed Chrome and Edge app windows; ordinary tabs and mobile
-browsers cannot resize their window.
+It resizes the local window and never scales or resizes the remote desktop. It
+works in installed Chrome and Edge app windows and is best-effort in other
+browsers; ordinary tabs cannot resize their window, and mobile browsers ignore
+the request.
 
 On macOS the window's rounded corners are masked over the page, so a window
 sized to the desktop loses the framebuffer's corner pixels. The radius is a
@@ -44,7 +46,8 @@ defaults write -g NSConvolutionOverride1 -float 1
 ```
 
 Quit and reopen the browser app to pick it up.
-`defaults delete -g NSConvolutionOverride1` restores Apple's radius.
+`defaults delete -g NSConvolutionOverride1` restores Apple's radius: 26 points
+on macOS 26, 10 before it.
 
 ## Starting a session
 
@@ -132,8 +135,9 @@ connection with the same error as wrong credentials. See
 [Remote Management access](apple-vnc-889.md#remote-management-access).
 
 - **`subtype = "ard"`** is Screen Sharing's Standard mode: the Mac's physical
-  displays, one or all of them, at their own density. It has no resize and no
-  sound; the Mac keeps playing on its own output.
+  displays, one or all of them, at their own density and full fidelity. It has
+  no resize and no sound; the Mac keeps playing on its own output.
+- Every Apple subtype carries the Mac's native pasteboard.
 - **`subtype = "ard-high-performance"`** is High Performance mode as Apple's
   viewer has it, and is **experimental**. The Mac disables its physical displays
   and puts every window on one virtual display, sized by the session, up to
@@ -141,8 +145,9 @@ connection with the same error as wrong credentials. See
   HEVC and AAC-ELD over SRTP:
   - The Mac sends to the gateway's UDP ports 5900 and 5901, so a firewall or
     NAT between them must let that through.
-  - A Linux gateway wants `net.core.rmem_max` of at least 4194304; the log warns
-    when it is lower.
+  - A Linux gateway needs `net.core.rmem_max` of at least 4194304 for the
+    picture's socket, and the log warns when it is lower: the stock 212992
+    loses keyframes at Retina sizes.
   - The gateway decodes the picture with the host's FFmpeg (libavcodec), which
     no release artifact contains: install it as
     [High Performance decoder](high-performance-decoder.md) says. Without it the

@@ -87,6 +87,22 @@ higher tier comes first when work for two competes.
 - **Tier 3** is decoded in the gateway and encoded as VP9. Nothing of it is
   passed through.
 
+All three have these in common:
+
+- **The desktop outlives the viewer.** A Windows host holds a disconnected
+  session for the next logon, and a Mac's or a wlshare desktop keeps running
+  with nobody watching. A browser coming back from a reload or a dropped
+  connection resumes where it was. A different browser, a phone picking up what
+  a desktop started, say, starts at the picker and chooses its own size, sound
+  and passthrough; starting the target returns it to the same desktop, with its
+  windows as they were left.
+- **HiDPI and Retina.** Each renders at the pixel density of the browser's
+  screen, or says which density its pixels are, so the desktop is sharp on a
+  Retina display and is shown at its true size.
+- **The pointer travels apart from the picture.** It arrives as its own shape
+  and the browser wears it on its own pointer, so it moves with the hand rather
+  than a network round trip behind it.
+
 Every other VNC server is a plain `vnc` target, reached through the RFB
 baseline and worked on as needed rather than ahead of the tiers. Another RDP
 server, an older Windows or xrdp say, may happen to work but is not a target and

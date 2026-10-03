@@ -143,6 +143,26 @@ A Mac target with `subtype = "ard-high-performance"` needs a library on the gate
 no package contains, FFmpeg. See
 [High Performance decoder](high-performance-decoder.md) for installing it.
 
+## Container
+
+```sh
+docker run -d --name remotex -p 52380:52380 \
+  -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro \
+  ghcr.io/andrewtheguy/remotex:latest
+```
+
+Set `[server].listen = "0.0.0.0:52380"` in the mounted config, or pass the same
+address as `-e REMOTEX_LISTEN=0.0.0.0:52380`. With `[meter].enabled` set, mount
+a volume at `/opt/remotex/var` too, or the records go with the container. Images
+are published for Linux amd64 and arm64 with `latest` and `v<version>` tags. The
+image has no `remotex tui`.
+
+Generate the required web-login credential with:
+
+```sh
+docker run --rm -it ghcr.io/andrewtheguy/remotex:latest gen-passwd admin
+```
+
 ## Upgrade
 
 Download the new asset and hand it to the same package manager:

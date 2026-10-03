@@ -13,9 +13,9 @@ It is a single-user tool: one login, a list of your targets, one session at a
 time.
 
 > **No backward compatibility.** A release may change or remove a configuration
-> key or a feature, with nothing that reads the old form. Check
-> [`remotex.example.toml`](remotex.example.toml) against your config when you
-> upgrade.
+> key, the WebSocket protocol or a feature, with nothing that reads the old
+> form. Check [`remotex.example.toml`](remotex.example.toml) against your config
+> when you upgrade.
 
 ## Features
 
@@ -119,6 +119,7 @@ removal.
 | [Roadmap](docs/roadmap.md) | what is planned, and what is not |
 | [Architecture](docs/architecture.md) | the design and its constraints, the client protocol, the engines |
 | [The RDP client](docs/rdp-client.md), [Apple RFB 003.889](docs/apple-vnc-889.md) | each protocol as implemented and measured |
+| [Development](docs/development.md) | running from a checkout, checks, end-to-end tests, builds |
 | [Packaging](packaging/README.md) | package layouts, build scripts, releases |
 
 ## Development
@@ -146,6 +147,7 @@ The end-to-end tests under `tests/` are ignored by default: the VNC and wlshare
 ones need Docker or Podman (`cargo test --test vnc_e2e --test wlshare_e2e --
 --ignored`), the RDP probes borrow a real Windows host, and the headless browser
 tests are described in [`tests/playwright`](tests/playwright/README.md).
+[Development](docs/development.md) has the details, and
 [Packaging](packaging/README.md) covers release builds.
 
 ## Licence
