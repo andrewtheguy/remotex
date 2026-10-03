@@ -118,9 +118,12 @@ touch.
   them; the gateway encodes only the one shown. Its *All Displays* keeps the
   first display here and links to the second, which opens at `/display/2` in a
   new tab of the same browser: just that display, with its own pointer and
-  keyboard, and no menu. It needs the login of the browser holding the session,
-  and closes when another display is chosen. The passthrough row is not offered
-  beside it. Checked against one Windows 11 host.
+  keyboard, and no menu. On a session that follows the window, that tab's window
+  sizes display 2. It needs the login of the browser holding the session, opens
+  in one tab at a time — another says it is open elsewhere — and closes when
+  another display is chosen; choosing *All Displays* again lets another tab take
+  it. Opened while it is not shown, it says it is not available. The passthrough
+  row is not offered beside it. Checked against one Windows 11 host.
 
 Another RDP server, an older Windows or xrdp say, may happen to work but is not
 tested against. See [The RDP client](rdp-client.md).

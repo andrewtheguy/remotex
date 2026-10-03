@@ -16,6 +16,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   busy: "Session in use",
   takenOver: "Session taken over",
   failed: "Cannot open the session",
+  unavailable: "Display not available",
   stale: "Page out of date",
 };
 
@@ -391,7 +392,7 @@ export default function RemoteDesktop({
               </button>
             </>
           )}
-          {status === "failed" && (
+          {(status === "failed" || status === "unavailable") && (
             <button type="button" className="status-action" onClick={retry}>
               Retry
             </button>

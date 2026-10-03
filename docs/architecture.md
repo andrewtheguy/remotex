@@ -2075,10 +2075,27 @@ socket in only while the engine's last list names the tab, and hands the engine 
 feed for it (`ClientMsg::DisplayShown`): a sink, an encoder and a shadow of its
 own over the second column, the same pointer shape, and a repaint when it
 attaches or asks. Its input arrives wrapped as `ClientMsg::OnDisplay` and is
-offset into its column. Choosing a display, a host that lays out one monitor, or
-the engine ending takes the tab away, and the session closes its socket; a closed
-tab only ends the feed. The root page is always the first display, so there is no
-`/display/1`.
+offset into its column. On a session that follows the window the tab's window is
+the second monitor's size: its viewport, sent on its own socket, makes the next
+layout a row of two sizes, top-aligned, and the second keeps that size for as long
+as *All Displays* is chosen — a tab reloading does not reset it — and is the
+first's again once it is not. Choosing a display, a host that lays out one
+monitor, or the engine ending takes the tab away, and the session closes its
+socket; a closed tab only ends the feed. The root page is always the first
+display, so there is no `/display/1`.
+
+The display is one tab's. The first socket for it after the engine lists its tab is
+given a token, sent first on it as `displayToken`; the tab keeps it in its
+`sessionStorage` and presents it on every display socket it opens after
+(`/ws/display?display=2&token=…`), so a reload gets back in. Any other socket for
+the display — a second tab, or one holding a token from before — is closed with
+4003. The token lasts while the tab is listed: choosing another display and then
+*All Displays* again frees the display for whichever tab opens it next, as does a
+host laying out one monitor, the engine ending, or the claim or login changing. It
+is not the claim's token, and it opens nothing but that display. A page at
+`/display/2` whose display is not shown — *All Displays* not chosen, a target
+without it, no session in this browser, or another tab holding it — says the
+display is not available, why, and offers Retry; it does not keep reconnecting.
 
 Where the list is sent, the checkmark moves only when the remote comes back naming
 the screen it is now sending — never on the click. On a Mac the engine prepends an

@@ -101,6 +101,11 @@ export type ConnectionStatus =
   // leaving "Connecting…" up over a connection that had stopped being attempted,
   // with no way out but a reload; the overlay offers Retry on this one.
   | "failed"
+  // A page showing a display in a tab of its own (`/display/2`) whose display the
+  // session does not show there: All Displays is not chosen, the target has none,
+  // there is no session in this browser, or another tab shows it. Nothing is
+  // attempted until Retry.
+  | "unavailable"
   // The gateway is another version than this page (gatewayVersion.ts). Apart from
   // "failed" because trying again cannot change it: the overlay offers Reload.
   | "stale";
@@ -1276,32 +1281,96 @@ export function useRemoteDesktop(
       }
     };
 
+    // Why the display a tab of its own shows is not available, by the code its
+    // socket closed with; null for a close worth reconnecting after.
+    const unavailableReason = (display: number, code: number) => {
+      switch (code) {
+        case CLOSE_TAKEN:
+          return `Display ${display} is open in another tab. To show it here instead, choose another display and then All Displays again in the session's display menu.`;
+        case CLOSE_INVALID:
+          return "This browser has no session open. Start one in another tab first.";
+        case CLOSE_EVICTED:
+        case CLOSE_UNSUPPORTED:
+          return `Display ${display} is shown here only while All Displays is chosen in the session's display menu, on a target that offers it.`;
+        default:
+          return null;
+      }
+    };
+
     // The socket of the display a tab of its own shows closed.
     const tabClosed = (display: number, code: number) => {
       wsRef.current = null;
-      if (code === CLOSE_TAKEN) {
-        clearDesktop();
-        setConnectError(
-          `Display ${display} is open in another tab. To show it here instead, choose another display and then All Displays again in the session's display menu.`,
-        );
-        setStatus("failed");
+      const reason = unavailableReason(display, code);
+      if (reason === null) {
+        scheduleRetry();
         return;
       }
+      // Nothing to wait for: opening it again is the Retry.
+      clearDesktop();
+      setConnectError(reason);
+      setStatus("unavailable");
+    };
+
+    // The window a tab of its own shows its display in, deduped like the session's
+    // viewport: the display follows it on a session that follows the window, and
+    // the gateway drops it on one that does not. Not on a pinch-zoom client, which
+    // never lets its window reach the remote.
+    let lastTabViewport: { w: number; h: number } | null = null;
+    const sendTabViewport = () => {
       if (
-        code === CLOSE_EVICTED ||
-        code === CLOSE_INVALID ||
-        code === CLOSE_UNSUPPORTED
+        tabDisplay === null ||
+        CAN_PINCH_ZOOM ||
+        !displayWs ||
+        displayWs.readyState !== WebSocket.OPEN
       ) {
-        // The session no longer shows this display here, or is not this
-        // browser's: nothing to wait for. Opening it again is the Retry.
-        clearDesktop();
-        setConnectError(
-          `Display ${display} is not shown in a tab of its own. Choose All Displays in the session's display menu, then open it again.`,
-        );
-        setStatus("failed");
         return;
       }
-      scheduleRetry();
+      const el = document.documentElement;
+      const msg = viewportMsg({ w: el.clientWidth, h: el.clientHeight });
+      if (lastTabViewport?.w === msg.w && lastTabViewport.h === msg.h) {
+        return;
+      }
+      lastTabViewport = { w: msg.w, h: msg.h };
+      displayWs.send(JSON.stringify(msg));
+    };
+
+    // The display socket the gateway has said something on. A tab's display is
+    // up from then: a socket it refuses opens too, and closes straight after with
+    // the reason.
+    let attachedSocket: WebSocket | null = null;
+
+    // One message on display socket `socket`, whose batches carry `generation`.
+    const displayMessage = (
+      socket: WebSocket,
+      generation: number,
+      data: unknown,
+    ) => {
+      if (disposed || displayWs !== socket) {
+        return;
+      }
+      if (attachedSocket !== socket) {
+        attachedSocket = socket;
+        tabAttached();
+      }
+      if (typeof data === "string") {
+        dispatchControl(data);
+      } else if (data instanceof ArrayBuffer) {
+        // Sound is on its own socket, so this one carries batches and nothing
+        // else; the worker still reads the kind byte rather than assuming it.
+        painter?.draw(data, generation);
+      }
+    };
+
+    // The gateway let a tab's display socket in: the display is up, and told the
+    // window it is shown in.
+    const tabAttached = () => {
+      if (tabDisplay === null) {
+        return;
+      }
+      setStatus("connected");
+      setMode("desktop");
+      lastTabViewport = null;
+      sendTabViewport();
     };
 
     // A display's socket, which carries no claim: the gateway lets it in by the
@@ -1321,13 +1390,6 @@ export function useRemoteDesktop(
         // The input made over this page goes on its one socket.
         wsRef.current = socket;
       }
-      socket.onopen = () => {
-        if (disposed || displayWs !== socket || tabDisplay === null) {
-          return;
-        }
-        setStatus("connected");
-        setMode("desktop");
-      };
       socket.onclose = (ev) => displayClosed(socket, ev.code);
       // Binary frames go straight to the paint worker, buffer transferred, in
       // arrival order — postMessage order *is* the draw order, so the promise
@@ -1349,22 +1411,7 @@ export function useRemoteDesktop(
       // also what lets the worker run on order alone: a dead socket's frames
       // stop being posted before `clearDesktop` posts the clear that ends
       // their attachment, so nothing can arrive there out of place.
-      socket.onmessage = (ev) => {
-        if (disposed || displayWs !== socket) {
-          return;
-        }
-        const data = ev.data;
-        if (typeof data !== "string") {
-          // Sound is on its own socket, so this one carries batches and
-          // nothing else; the worker still reads the kind byte rather than
-          // assuming it.
-          if (data instanceof ArrayBuffer) {
-            painter?.draw(data, generation);
-          }
-          return;
-        }
-        dispatchControl(data);
-      };
+      socket.onmessage = (ev) => displayMessage(socket, generation, ev.data);
     };
 
     const open = (sessionId: string) => {
@@ -2015,6 +2062,7 @@ export function useRemoteDesktop(
         );
         syncCursor();
         sendViewport();
+        sendTabViewport();
         // A window that just resized may have been dragged to another display;
         // `window.screen` follows it and the dedupe makes an unchanged one free.
         sendHostDisplay();

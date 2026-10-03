@@ -178,6 +178,13 @@ async def main() -> int:
         default=None,
         help="after display 2's first resize, move the pointer there, in its pixels",
     )
+    parser.add_argument(
+        "--tab-viewport",
+        type=dimensions,
+        default=None,
+        help="after display 2's first resize, report its tab's window as this size, "
+        "which a session started with --resize lays the second monitor out at",
+    )
     parser.add_argument("--mouse", type=coordinates, default=None)
     parser.add_argument(
         "--display",
@@ -363,6 +370,7 @@ async def main() -> int:
         tab_socket = None
         tab_frames = 0
         tab_mouse_sent = False
+        tab_viewport_sent = False
         connect = {"type": "connect", "target": args.target, "choices": choices}
         if args.display is not None:
             connect["display"] = args.display
@@ -567,6 +575,13 @@ async def main() -> int:
                             print(
                                 f"  [2] resize  {data['w']}x{data['h']}  scale={data['scale']}"
                             )
+                            if args.tab_viewport is not None and not tab_viewport_sent:
+                                tab_viewport_sent = True
+                                w, h = args.tab_viewport
+                                print(f"  [2] -> viewport {w}x{h}")
+                                await origin.send(
+                                    json.dumps({"type": "viewport", "w": w, "h": h})
+                                )
                             if args.tab_mouse is not None and not tab_mouse_sent:
                                 tab_mouse_sent = True
                                 x, y = args.tab_mouse

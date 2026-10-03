@@ -185,11 +185,10 @@ pub enum Event {
     /// to, and the framebuffer is blank until it does; a caller that cannot show a
     /// blank desktop should follow this with [`Input::refresh`].
     ///
-    /// `monitors` is how many monitors the server laid the desktop out over, from
-    /// the graphics reset that redefined it: the row [`Connect::monitors`] asked for,
-    /// or one. Each is `width / monitors` wide, since every monitor asked for is the
-    /// same size.
-    Resize { width: u32, height: u32, monitors: u32 },
+    /// `monitors` is the size of each monitor the server laid the desktop out over,
+    /// left to right, from the graphics reset that redefined it: the row
+    /// [`Connect::monitors`] asked for, each of its own size, or the one desktop.
+    Resize { width: u32, height: u32, monitors: Vec<(u32, u32)> },
     /// The server offered Display Control, so [`Input::resize`] now has somewhere
     /// to go. Only ever sent on a session configured with [`Connect::resize`], and
     /// not at all by a server that does not implement MS-RDPEDISP.
@@ -687,14 +686,12 @@ struct Active<'a> {
     graphics: Option<Graphics>,
     /// The frames of a pipeline that is passed on, between the caller and the host.
     passed: PassedFrames,
-    /// How many monitors each layout asks for — [`Connect::monitors`].
-    monitors: u32,
     /// Whether [`Event::ResizeReady`] has gone out.
     resize_ready: bool,
     /// The most recent size asked for before the channel was ready — only the most
     /// recent, since a resize supersedes every earlier one rather than queueing
     /// behind it.
-    pending_resize: Option<(u32, u32, u32)>,
+    pending_resize: Option<(Vec<(u32, u32)>, u32)>,
     /// Whether the server has sent Monitor Ready, which is what opens the clipboard:
     /// nothing may be said on that channel before this end's capabilities answer it.
     clip_ready: bool,
@@ -929,7 +926,6 @@ impl<'a> Active<'a> {
                 false => Graphics::new(),
             }),
             passed: PassedFrames::default(),
-            monitors: config.monitors.clamp(1, display::MAX_MONITORS),
             resize_ready: false,
             pending_resize: None,
             clip_ready: false,
@@ -1252,7 +1248,7 @@ impl<'a> Active<'a> {
                 // every resize — is in the coordinates of this desktop, not the one
                 // the Demand Active described.
                 gfx::Update::Reset { width, height, monitors } => {
-                    info!("rdp: graphics reset, desktop {width}x{height} over {monitors} monitors");
+                    info!("rdp: graphics reset, desktop {width}x{height} over monitors {monitors:?}");
                     self.share.width = width;
                     self.share.height = height;
                     self.announce_desktop(width, height, monitors).await;
@@ -1537,11 +1533,12 @@ impl<'a> Active<'a> {
     }
 
     /// The framebuffer has been resized and cleared; tell the caller.
-    async fn announce_desktop(&mut self, width: u32, height: u32, monitors: u32) {
+    async fn announce_desktop(&mut self, width: u32, height: u32, monitors: Vec<(u32, u32)>) {
         // Rectangles of the desktop that just went away name pixels that no longer
         // exist; the caller starts over from the resize anyway.
         self.damage.clear();
-        self.send(Event::Resize { width, height, monitors: monitors.max(1) }).await;
+        let monitors = if monitors.is_empty() { vec![(width, height)] } else { monitors };
+        self.send(Event::Resize { width, height, monitors }).await;
     }
 
     /// Send the pending monitor layout, if there is one and a channel to carry it.
@@ -1554,30 +1551,33 @@ impl<'a> Active<'a> {
         let (Some(control), Some(dynamic)) = (self.dynamics.control, self.dynamic) else {
             return Ok(());
         };
-        let Some((width, height, scale)) = self.pending_resize.take() else {
+        let Some((sizes, scale)) = self.pending_resize.take() else {
             return Ok(());
         };
         // Held to what the server said it lays out. A layout past either limit is
         // one a conforming server ignores in silence, which from the caller's end
         // is a resize that never comes, so it is not sent at all.
         let caps = self.dynamics.caps.unwrap_or(display::Capabilities { monitors: 1, area: u64::MAX });
-        let Some(monitors) = monitors_within(self.monitors, width, height, caps) else {
+        let Some(monitors) = monitors_within(&sizes, caps) else {
             warn!(
-                "rdp: not sending a {width}x{height} monitor layout: one monitor is past the \
+                "rdp: not sending a {sizes:?} monitor layout: the first monitor is past the \
                  {} pixels the host lays out",
                 caps.area
             );
             return Ok(());
         };
-        if monitors != self.monitors {
+        if monitors != sizes.len() {
             info!(
                 "rdp: the host lays out {} monitor(s) over {} pixels, so {monitors} of the {} asked \
                  for go in the layout",
-                caps.monitors, caps.area, self.monitors
+                caps.monitors,
+                caps.area,
+                sizes.len()
             );
         }
-        debug!("rdp: sending a {width}x{height} monitor layout at {scale}%, {monitors} monitors");
-        let layout = display::monitor_layout(width, height, scale, monitors);
+        let sizes = &sizes[..monitors];
+        debug!("rdp: sending a monitor layout of {sizes:?} at {scale}%");
+        let layout = display::monitor_layout(sizes, scale);
         self.write_channel(dynamic, &dvc::data(control, &layout)?).await
     }
 
@@ -1601,8 +1601,8 @@ impl<'a> Active<'a> {
                     match other {
                         Command::Shutdown => return Ok(true),
                         Command::Refresh => self.refresh().await?,
-                        Command::Resize { width, height, scale_percent } => {
-                            self.pending_resize = Some((width, height, scale_percent));
+                        Command::Resize { sizes, scale_percent } => {
+                            self.pending_resize = Some((sizes, scale_percent));
                             self.send_layout().await?;
                         }
                         Command::Clipboard(what) => self.send_clipboard(what).await?,
@@ -1862,16 +1862,21 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
 
 /// A desktop dimension as the `u16` the protocol counts in, saturating rather than
 /// wrapping: nothing real exceeds RDP's own 8192 a side.
-/// How many of the `asked` monitors of `width` by `height` a layout may name under
-/// the server's Display Control capabilities: at most the monitors it lays out,
-/// and as many as together stay under its area. `None` when even one does not fit,
-/// which is a layout no server would apply. The size is the one the layout will
-/// carry, adjusted as [`display::monitor_layout`] adjusts it.
-fn monitors_within(asked: u32, width: u32, height: u32, caps: display::Capabilities) -> Option<u32> {
-    let (width, height) = display::adjust_size(width, height);
-    let each = u64::from(width) * u64::from(height);
-    let most = asked.clamp(1, caps.monitors.max(1));
-    (1..=most).rev().find(|monitors| u64::from(*monitors) * each <= caps.area)
+/// How many of the row of `sizes`, from the left, a layout may name under the
+/// server's Display Control capabilities: at most the monitors it lays out, and as
+/// many as together stay under its area. `None` when even the first does not fit,
+/// which is a layout no server would apply. The sizes are the ones the layout will
+/// carry, adjusted as [`display::monitor_layout`] adjusts them.
+fn monitors_within(sizes: &[(u32, u32)], caps: display::Capabilities) -> Option<usize> {
+    let areas: Vec<u64> = sizes
+        .iter()
+        .map(|&(width, height)| {
+            let (width, height) = display::adjust_size(width, height);
+            u64::from(width) * u64::from(height)
+        })
+        .collect();
+    let most = areas.len().clamp(1, caps.monitors.max(1) as usize).min(areas.len());
+    (1..=most).rev().find(|monitors| areas[..*monitors].iter().sum::<u64>() <= caps.area)
 }
 
 fn narrow(v: u32) -> u16 {
@@ -2036,20 +2041,24 @@ mod tests {
     #[test]
     fn a_layout_is_held_to_the_hosts_monitor_count_and_area() {
         let roomy = display::Capabilities { monitors: 16, area: 8192 * 8192 * 16 };
-        assert_eq!(monitors_within(2, 1280, 800, roomy), Some(2));
-        assert_eq!(monitors_within(1, 1280, 800, roomy), Some(1));
+        let two = [(1280, 800), (1280, 800)];
+        assert_eq!(monitors_within(&two, roomy), Some(2));
+        assert_eq!(monitors_within(&two[..1], roomy), Some(1));
         let one = display::Capabilities { monitors: 1, area: 8192 * 8192 };
-        assert_eq!(monitors_within(2, 1280, 800, one), Some(1), "a host that lays out one");
+        assert_eq!(monitors_within(&two, one), Some(1), "a host that lays out one");
         // Room for one of these, not two.
         let tight = display::Capabilities { monitors: 16, area: 1280 * 800 + 1 };
-        assert_eq!(monitors_within(2, 1280, 800, tight), Some(1));
-        assert_eq!(monitors_within(2, 1281, 800, tight), Some(1), "at the size the layout carries");
+        assert_eq!(monitors_within(&two, tight), Some(1));
+        assert_eq!(monitors_within(&[(1281, 800), (1280, 800)], tight), Some(1), "at the size the layout carries");
+        // A smaller second monitor fits where an equal one would not.
+        let room = display::Capabilities { monitors: 16, area: 1280 * 800 + 640 * 400 };
+        assert_eq!(monitors_within(&[(1280, 800), (640, 400)], room), Some(2));
         // Room for neither.
         let none = display::Capabilities { monitors: 16, area: 1280 * 800 - 1 };
-        assert_eq!(monitors_within(2, 1280, 800, none), None);
+        assert_eq!(monitors_within(&two, none), None);
         // A zero monitor count from a host is read as one rather than as nothing.
         let zero = display::Capabilities { monitors: 0, area: u64::MAX };
-        assert_eq!(monitors_within(2, 1280, 800, zero), Some(1));
+        assert_eq!(monitors_within(&two, zero), Some(1));
     }
 
     #[test]

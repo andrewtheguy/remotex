@@ -1490,14 +1490,16 @@ async fn display(
                     room.notify_one();
                 }
                 // What is made over a display — the pointer, the keys, touches —
-                // and its repaint. What concerns the session goes on its socket.
+                // its repaint, and the window it is shown in. What concerns the
+                // session goes on its socket.
                 Ok(
                     input @ (ClientMsg::MouseMove { .. }
                     | ClientMsg::MouseButton { .. }
                     | ClientMsg::Wheel { .. }
                     | ClientMsg::Key { .. }
                     | ClientMsg::Touch { .. }
-                    | ClientMsg::Refresh),
+                    | ClientMsg::Refresh
+                    | ClientMsg::Viewport { .. }),
                 ) => sessions.forward_display_input(id, input),
                 Ok(other) => warn!("ws: a display socket sent a session message: {other:?}"),
                 Err(e) => warn!("ws: bad client message: {e} (raw: {text})"),

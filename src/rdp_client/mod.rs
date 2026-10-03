@@ -83,7 +83,8 @@
 //!   plain TLS security, where the credentials go to whoever answered.
 //! - **No Kerberos.** CredSSP runs NTLM with the target's user name and password.
 //! - **Monitors in a row, or one.** [`Connect::monitors`] asks for a row of
-//!   same-sized monitors, and the framebuffer spans them; the caller shows what it
+//!   same-sized monitors at connect, and each layout after names each monitor's own
+//!   size; the framebuffer spans the row, top-aligned, and the caller shows what it
 //!   will of it. Nothing here lays monitors out any other way.
 
 mod camera;

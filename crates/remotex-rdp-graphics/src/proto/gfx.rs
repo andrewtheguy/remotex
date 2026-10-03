@@ -124,31 +124,35 @@ pub struct MonitorDef {
     pub flags: u32,
 }
 
-/// How many monitors of `monitors` make up the output as a row of equal columns:
-/// the layout this client asks for, monitor `i` filling `[i * w, (i + 1) * w)` of
-/// a `width` that is a whole number of them, each the output's full height. That
-/// many when they do, and one when the host laid the session out any other way —
-/// unequal, stacked, offset, or with no definitions at all — since a caller that
-/// shows one column of the output can only cut it right along a row it knows the
-/// shape of. A session laid out otherwise is shown whole, as one display.
-pub fn row(width: u32, height: u32, monitors: &[MonitorDef]) -> u32 {
-    let count = u32::try_from(monitors.len()).unwrap_or(u32::MAX);
-    if count <= 1 || width == 0 || height == 0 || !width.is_multiple_of(count) {
-        return 1;
+/// The size of each monitor of `monitors` when they make up the output as a row:
+/// the layout this client asks for, monitor `i` starting at the right edge of the
+/// one before it, the first at the left edge, every one at the top, the row as
+/// wide as the output and as tall as its tallest. Monitors in a row may differ in
+/// size — a display shown in a browser tab follows that tab's window. One size,
+/// the output's, when the host laid the session out any other way — stacked,
+/// offset, out of order, or with no definitions at all — since a caller that shows
+/// one column of the output can only cut it along a row it knows the shape of. A
+/// session laid out otherwise is shown whole, as one display.
+pub fn row(width: u32, height: u32, monitors: &[MonitorDef]) -> Vec<(u32, u32)> {
+    let whole = vec![(width, height)];
+    if monitors.len() <= 1 || width == 0 || height == 0 {
+        return whole;
     }
-    let column = width / count;
-    let expected = |index: u32| MonitorDef {
-        left: (index * column) as i32,
-        top: 0,
-        right: ((index + 1) * column) as i32 - 1,
-        bottom: height as i32 - 1,
-        flags: 0,
-    };
-    let in_place = monitors.iter().enumerate().all(|(index, def)| {
-        let want = expected(index as u32);
-        (def.left, def.top, def.right, def.bottom) == (want.left, want.top, want.right, want.bottom)
-    });
-    if in_place { count } else { 1 }
+    let mut sizes = Vec::with_capacity(monitors.len());
+    let mut left = 0_i64;
+    for def in monitors {
+        let (w, h) = (i64::from(def.right) - i64::from(def.left) + 1, i64::from(def.bottom) - i64::from(def.top) + 1);
+        if i64::from(def.left) != left || def.top != 0 || w <= 0 || h <= 0 {
+            return whole;
+        }
+        left += w;
+        sizes.push((w as u32, h as u32));
+    }
+    let tallest = sizes.iter().map(|(_, h)| *h).max().unwrap_or(0);
+    if left != i64::from(width) || tallest != height {
+        return whole;
+    }
+    sizes
 }
 
 /// `RECTANGLE_16`, with exclusive right and bottom edges.
@@ -669,24 +673,27 @@ mod tests {
         );
     }
 
-    /// Only the row of equal columns this client asks for is cut into columns;
-    /// anything else the host lays out is one display shown whole.
+    /// Only a row like the one this client asks for is cut into columns, of
+    /// whatever widths and heights its monitors have; anything else the host lays
+    /// out is one display shown whole.
     #[test]
-    fn a_row_of_equal_columns_is_counted_and_any_other_layout_is_one_display() {
+    fn a_row_is_cut_into_its_monitors_and_any_other_layout_is_one_display() {
         let two = [monitor(0, 0, 1279, 799), monitor(1280, 0, 2559, 799)];
-        assert_eq!(row(2560, 800, &two), 2);
-        assert_eq!(row(2560, 800, &two[..1]), 1, "one definition is one display");
-        assert_eq!(row(2560, 800, &[]), 1, "no definitions is one display");
+        assert_eq!(row(2560, 800, &two), vec![(1280, 800), (1280, 800)]);
+        assert_eq!(row(2560, 800, &two[..1]), vec![(2560, 800)], "one definition is one display");
+        assert_eq!(row(2560, 800, &[]), vec![(2560, 800)], "no definitions is one display");
+        // Unequal, top-aligned, the row as tall as its tallest.
+        let unequal = [monitor(0, 0, 1599, 899), monitor(1600, 0, 2879, 767)];
+        assert_eq!(row(2880, 900, &unequal), vec![(1600, 900), (1280, 768)]);
         // The same two the other way round are not in their places.
-        assert_eq!(row(2560, 800, &[two[1], two[0]]), 1);
-        // Stacked, offset, unequal, or not filling the output.
-        assert_eq!(row(1280, 1600, &[monitor(0, 0, 1279, 799), monitor(0, 800, 1279, 1599)]), 1);
-        assert_eq!(row(2560, 800, &[monitor(0, 0, 1279, 799), monitor(1280, 100, 2559, 899)]), 1);
-        assert_eq!(row(2560, 800, &[monitor(0, 0, 1599, 799), monitor(1600, 0, 2559, 799)]), 1);
-        assert_eq!(row(2561, 800, &two), 1, "a width that is not a whole number of columns");
-        assert_eq!(row(2560, 800, &[monitor(0, 0, 1279, 767), monitor(1280, 0, 2559, 767)]), 1);
+        assert_eq!(row(2560, 800, &[two[1], two[0]]), vec![(2560, 800)]);
+        // Stacked, offset, or not filling the output.
+        assert_eq!(row(1280, 1600, &[monitor(0, 0, 1279, 799), monitor(0, 800, 1279, 1599)]), vec![(1280, 1600)]);
+        assert_eq!(row(2560, 900, &[monitor(0, 0, 1279, 799), monitor(1280, 100, 2559, 899)]), vec![(2560, 900)]);
+        assert_eq!(row(2561, 800, &two), vec![(2561, 800)], "a row narrower than the output");
+        assert_eq!(row(2560, 800, &[monitor(0, 0, 1279, 767), monitor(1280, 0, 2559, 767)]), vec![(2560, 800)]);
         let three = [monitor(0, 0, 999, 599), monitor(1000, 0, 1999, 599), monitor(2000, 0, 2999, 599)];
-        assert_eq!(row(3000, 600, &three), 3);
+        assert_eq!(row(3000, 600, &three).len(), 3);
     }
 
     #[test]
