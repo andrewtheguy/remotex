@@ -2413,13 +2413,11 @@ and lets a slide scroll. A modifier tapped once wraps the next key and is spent,
 tapped again it is off, and under a resting finger it chords the other fingers'
 keys; nothing locks. Every such modifier goes down ahead of the key in the order
 it was taken and up after it, a repeat tick included, and never reaches the wire
-on its own. The shortcut rows' Shift, Ctrl, Alt and Super are the other kind: a
-key on the wire, down while the finger rests on it and up when it lifts, so the
-remote holds it under the other thumb's keys, a tap on the canvas or a physical
-key, and a tap on one is a bare press of it — Super alone is the Start key. A
-key sent while the wire holds a modifier leaves that modifier out. The Sym
-page's row has the same four ahead of F1 to F12, so Alt and an F-key is one
-thumb on each. The key area
+on its own. The shortcut rows' Shift, Ctrl, Alt and Super, drawn dashed, are
+not that kind: each is a key of the row like the Esc beside it, so a tap that
+stayed put sends it alone, down then up — Super alone is the Start key — a
+slide scrolls the row and sends nothing, and it arms nothing. The Sym page's
+row has the same four ahead of F1 to F12. The key area
 refuses every browser gesture (`touch-action: none`), so a cancelled touch means
 the system took the finger and commits nothing; the shortcut row alone allows
 the horizontal pan it scrolls by. A phone — a touch screen whose short side is a

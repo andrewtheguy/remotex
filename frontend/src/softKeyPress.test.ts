@@ -41,17 +41,7 @@ const CELLS: LayoutCell[] = [
     "lift",
   ),
   cell("ctrl", { type: "special", label: "Ctrl", code: "ControlLeft" }, "lift"),
-  // The shortcut row's held modifiers: keys on the wire while touched.
-  cell(
-    "hctrl",
-    { type: "special", label: "Ctrl", code: "ControlLeft" },
-    "hold",
-  ),
-  cell(
-    "hshift",
-    { type: "special", label: "Shift", code: "ShiftLeft" },
-    "hold",
-  ),
+  cell("esc", { type: "special", label: "Esc", code: "Escape" }, "tap"),
 ];
 
 const LAYOUT = new Map(CELLS.map((c) => [c.id, c]));
@@ -69,8 +59,6 @@ const hit: HitTester = (x, y) => {
 class Fingers {
   readonly engine: PressEngine;
   readonly sent: string[][] = [];
-  // Every press and release of a held modifier, as [code, pressed].
-  readonly keys: [string, boolean][] = [];
   readonly log: PressCommand[] = [];
   nextTickAt: number | null = null;
   haptics = 0;
@@ -86,9 +74,6 @@ class Fingers {
       this.log.push(c);
       if (c.kind === "send") {
         this.sent.push(c.codes);
-      }
-      if (c.kind === "key") {
-        this.keys.push([c.code, c.pressed]);
       }
       if (c.kind === "haptic") {
         this.haptics += 1;
@@ -308,98 +293,16 @@ test("a chorded modifier is off when the finger lifts, armed or not before", () 
   assert.deepEqual(f.modifiers(), []);
 });
 
-test("a held modifier is down on the wire while touched, and up when the finger lifts or is taken", () => {
-  const f = new Fingers();
-  f.down("hctrl", 0);
-  assert.deepEqual(f.keys, [["ControlLeft", true]]);
-  assert.deepEqual(f.modifiers(), [["ControlLeft", "down"]]);
-  assert.equal(f.nextTickAt, null);
-  f.up("hctrl", 2000);
-  assert.deepEqual(f.keys.at(-1), ["ControlLeft", false]);
-  assert.deepEqual(f.modifiers(), []);
-  assert.deepEqual(f.sent, []);
-
-  f.down("hctrl", 3000);
-  f.cancel(1, 3100);
-  assert.deepEqual(f.keys.slice(2), [
-    ["ControlLeft", true],
-    ["ControlLeft", false],
-  ]);
-  assert.deepEqual(f.modifiers(), []);
-});
-
-test("a key under a held modifier is sent bare, and a one-shot wraps only what the wire lacks", () => {
-  const f = new Fingers();
-  f.down("hctrl", 0, 1);
-  f.tap("a", 100, 2);
-  assert.deepEqual(f.sent, [["KeyA"]]);
-  assert.deepEqual(f.modifiers(), [["ControlLeft", "down"]]);
-  f.tap("shift", 200, 2);
-  f.tap("a", 300, 2);
-  assert.deepEqual(f.sent.at(-1), ["ShiftLeft", "KeyA"]);
-  assert.deepEqual(f.modifiers(), [["ControlLeft", "down"]]);
-  f.up("hctrl", 400, 1);
-
-  // A shifted symbol under a held Shift is its code alone.
-  f.down("hshift", 500, 1);
-  f.tap("under", 600, 2);
-  assert.deepEqual(f.sent.at(-1), ["Minus"]);
-  f.up("hshift", 700, 1);
-  assert.deepEqual(f.keys, [
-    ["ControlLeft", true],
-    ["ControlLeft", false],
-    ["ShiftLeft", true],
-    ["ShiftLeft", false],
-  ]);
-});
-
-test("a held modifier takes over an armed one-shot of the same code", () => {
-  const f = new Fingers();
-  f.tap("ctrl", 0);
-  assert.deepEqual(f.modifiers(), [["ControlLeft", "oneShot"]]);
-  f.down("hctrl", 100);
-  assert.deepEqual(f.modifiers(), [["ControlLeft", "down"]]);
-  f.up("hctrl", 200);
-  assert.deepEqual(f.modifiers(), []);
-  assert.deepEqual(f.keys, [
-    ["ControlLeft", true],
-    ["ControlLeft", false],
-  ]);
-});
-
 test("a modifier under another finger is that finger's; a second touch on it is nothing", () => {
   const f = new Fingers();
-  f.down("hctrl", 0, 1);
+  f.down("ctrl", 0, 1);
   f.down("ctrl", 100, 2);
-  assert.deepEqual(f.modifiers(), [["ControlLeft", "down"]]);
-  f.up("ctrl", 200, 2);
-  assert.deepEqual(f.modifiers(), [["ControlLeft", "down"]]);
-  f.up("hctrl", 300, 1);
-  assert.deepEqual(f.keys, [
-    ["ControlLeft", true],
-    ["ControlLeft", false],
-  ]);
-
-  f.down("ctrl", 400, 1);
-  f.down("hctrl", 500, 2);
   assert.deepEqual(f.modifiers(), [["ControlLeft", "held"]]);
-  assert.equal(f.keys.length, 2);
-  f.up("hctrl", 600, 2);
-  f.up("ctrl", 700, 1);
+  f.up("ctrl", 200, 2);
+  assert.deepEqual(f.modifiers(), [["ControlLeft", "held"]]);
+  f.up("ctrl", 300, 1);
   assert.deepEqual(f.modifiers(), [["ControlLeft", "oneShot"]]);
-});
-
-test("a cancel of everything releases what the wire holds", () => {
-  const f = new Fingers();
-  f.down("hshift", 0, 1);
-  f.down("a", 50, 2);
-  f.cancelAll(100);
-  assert.deepEqual(f.keys, [
-    ["ShiftLeft", true],
-    ["ShiftLeft", false],
-  ]);
   assert.deepEqual(f.sent, []);
-  assert.deepEqual(f.modifiers(), []);
 });
 
 test("modifiers go down in the order they were taken", () => {
@@ -458,12 +361,39 @@ test("a shortcut-row key that scrolled commits nothing, whoever ended it", () =>
   assert.deepEqual(f.sent, []);
 });
 
-test("a shortcut-row modifier toggles on lift, not on touch", () => {
+test("a shortcut-row modifier is sent alone on a tap, like the Esc beside it, and arms nothing", () => {
   const f = new Fingers();
   f.down("super");
+  assert.deepEqual(f.sent, []);
   assert.deepEqual(f.modifiers(), []);
   f.up("super", 50);
-  assert.deepEqual(f.modifiers(), [["MetaLeft", "oneShot"]]);
+  assert.deepEqual(f.sent, [["MetaLeft"]]);
+  assert.deepEqual(f.modifiers(), []);
+  f.tap("esc", 100);
+  assert.deepEqual(f.sent.at(-1), ["Escape"]);
+  f.tap("a", 200);
+  assert.deepEqual(f.sent.at(-1), ["KeyA"]);
+});
+
+test("a shortcut-row modifier that scrolled sends nothing, whoever ended it", () => {
+  const f = new Fingers();
+  f.down("super", 0);
+  f.moveTo(xOf("super") + 20, 20, 20);
+  f.upAt(xOf("super") + 20, 20, 40);
+
+  f.down("super", 100);
+  f.moveTo(xOf("super") + 20, 20, 120);
+  f.cancel(1, 140);
+  assert.deepEqual(f.sent, []);
+  assert.deepEqual(f.modifiers(), []);
+});
+
+test("a shortcut-row modifier is wrapped by an armed one and spends it", () => {
+  const f = new Fingers();
+  f.tap("ctrl", 0);
+  f.tap("super", 100);
+  assert.deepEqual(f.sent, [["ControlLeft", "MetaLeft"]]);
+  assert.deepEqual(f.modifiers(), []);
 });
 
 test("a page key switches on lift and drops the other fingers' keys", () => {

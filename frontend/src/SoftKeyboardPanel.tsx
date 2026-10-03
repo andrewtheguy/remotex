@@ -17,6 +17,7 @@ import {
   type LayoutRow,
   labelOf,
   MODIFIER_KEYS,
+  modifierOf,
   PAGE_PC,
   PAGES,
   type PageId,
@@ -61,9 +62,6 @@ interface SoftKeyboardPanelProps {
   // Presses each DOM code in order then releases in reverse (transient — see
   // useRemoteDesktop.sendKeyCombo).
   sendKeyCombo: (codes: string[]) => void;
-  // Presses or releases one DOM code and leaves it so: the shortcut row's held
-  // modifiers (see useRemoteDesktop.sendKey).
-  sendKey: (code: string, pressed: boolean) => void;
   onClose: () => void;
   // Reports the panel's height (CSS px) while it's docked to the bottom edge
   // (phone), 0 while it floats or when it unmounts. Lets the touch canvas pan
@@ -78,7 +76,6 @@ interface SoftKeyboardPanelProps {
 
 interface EngineHandlers {
   sendKeyCombo: (codes: string[]) => void;
-  sendKey: (code: string, pressed: boolean) => void;
   onFocusDesktop: () => void;
   setPage: (page: PageId) => void;
   setHeld: (held: ReadonlyMap<string, ModifierState>) => void;
@@ -264,12 +261,6 @@ function useSoftKeyEngine(
           h.sendKeyCombo(command.codes);
           focusIfLost(h);
           break;
-        case "key":
-          h.sendKey(command.code, command.pressed);
-          if (command.pressed) {
-            focusIfLost(h);
-          }
-          break;
         case "modifiers":
           h.setHeld(command.held);
           break;
@@ -410,13 +401,19 @@ const ARROW_NAMES: ReadonlyMap<string, string> = new Map([
   ["ArrowRight", "Right"],
 ]);
 
-// The accessible name. A held modifier is named apart from the strip's key of
-// the same code, which arms rather than holds.
+// A modifier of the shortcut row: a key sent alone on a tap, where every other
+// row's modifier sticks.
+function isBareModifier(cell: LayoutCell): boolean {
+  return cell.commit === "tap" && modifierOf(cell.def) !== null;
+}
+
+// The accessible name. A bare modifier is named apart from the strip's key of
+// the same code, which arms rather than sends.
 function nameOf(cell: LayoutCell): string {
   const { def } = cell;
   if (def.type === "special") {
     const name = ARROW_NAMES.get(def.code) ?? def.label;
-    return cell.commit === "hold" ? `Hold ${name}` : name;
+    return isBareModifier(cell) ? `${name} key` : name;
   }
   return labelOf(def, false);
 }
@@ -455,15 +452,16 @@ function Cell({ cell, shift, active, modifier }: CellProps) {
     def.shiftLabel !== def.label.toUpperCase()
       ? def.shiftLabel
       : null;
+  const bare = isBareModifier(cell);
   const kind =
-    def.type === "special" && MODIFIER_KEYS.has(def.code)
+    def.type === "special" && MODIFIER_KEYS.has(def.code) && !bare
       ? "modifier"
       : def.type;
   return (
     <button
       type="button"
       tabIndex={-1}
-      className={`sk-cell sk-${kind}${cell.commit === "hold" ? " sk-hold" : ""}`}
+      className={`sk-cell sk-${kind}${bare ? " sk-bare" : ""}`}
       aria-label={nameOf(cell)}
       aria-pressed={kind === "modifier" ? modifier !== undefined : undefined}
       data-cell={cell.id}
@@ -490,7 +488,9 @@ function modifierStateOf(
   cell: LayoutCell,
   held: ReadonlyMap<string, ModifierState>,
 ): ModifierState | undefined {
-  return cell.def.type === "special" ? held.get(cell.def.code) : undefined;
+  return cell.def.type === "special" && !isBareModifier(cell)
+    ? held.get(cell.def.code)
+    : undefined;
 }
 
 function Rows({ rows, shift, active, held }: RowsProps) {
@@ -518,7 +518,6 @@ function Rows({ rows, shift, active, held }: RowsProps) {
 
 export function SoftKeyboardPanel({
   sendKeyCombo,
-  sendKey,
   onClose,
   onDockedHeightChange,
   onFocusDesktop,
@@ -539,7 +538,6 @@ export function SoftKeyboardPanel({
 
   const invalidateGeometry = useSoftKeyEngine(areaRef, page, {
     sendKeyCombo,
-    sendKey,
     onFocusDesktop,
     setPage: setPageId,
     setHeld,

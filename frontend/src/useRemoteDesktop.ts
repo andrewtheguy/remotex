@@ -2168,14 +2168,6 @@ export function useRemoteDesktop(
     }
   }, []);
 
-  // Press or release one key and leave it so: the soft keyboard's held
-  // modifiers, down while a finger rests on them. The keyboard releases what it
-  // pressed when the finger lifts, the page blurs or the panel closes; like a
-  // combo, nothing here joins the held-key set the input effect tracks.
-  const sendKey = useCallback((code: string, pressed: boolean) => {
-    sendRef.current({ type: "key", code, pressed, caps: false });
-  }, []);
-
   // Ask the server for the remote's clipboard and wait for the answer, which
   // also lands in `remoteClipboard` on its way past. Resolves with the snapshot,
   // or `null` when nothing came back — the socket was down, the session
@@ -2747,7 +2739,6 @@ export function useRemoteDesktop(
     setCamera,
     setMic,
     sendKeyCombo,
-    sendKey,
     requestClipboard,
     sendClipboard,
     setBottomInset,

@@ -1,7 +1,7 @@
 // The soft keyboard, read off the session socket: that a key tapped on it is the
 // `key` frames the page sends, down then up; that a tapped modifier wraps the next
 // key and is spent, and a twice-tapped one is off again; that a phone gets the
-// docked keyboard, its strip, its shortcut row with its held modifiers and its
+// docked keyboard, its strip, its shortcut row with its bare modifiers and its
 // Sym page, and that a shifted symbol there is Shift and the key.
 //
 // Everything asserted is a system decision: the frames the page sent, parsed by
@@ -157,23 +157,21 @@ test.describe("the soft keyboard on a phone", () => {
       up("AltLeft"),
     ]);
 
-    // The shortcut row's held modifiers are the key itself, down for as long
-    // as it is touched: a tap on one is a bare press of it, and it arms nothing.
-    const heldSuper = key(page, "Hold Super");
-    await heldSuper.tap();
+    // The shortcut row's modifiers are keys like its Esc: a tap on one is a
+    // bare press of it, and it arms nothing.
+    await key(page, "Super key").tap();
     await expect.poll(() => keys.slice(10)).toEqual([
       down("MetaLeft"),
       up("MetaLeft"),
     ]);
-    await expect(heldSuper).toHaveAttribute("aria-pressed", "false");
     await expect(key(page, "Super")).toHaveAttribute("aria-pressed", "false");
 
     // The Sym page: a shifted symbol is Shift and its key, and the strip stays.
     await key(page, "?123").tap();
     await expect(key(page, "ABC")).toBeVisible();
     await expect(key(page, "Left")).toBeVisible();
-    // The held modifiers lead this row too, ahead of the F-keys.
-    await expect(key(page, "Hold Alt")).toBeVisible();
+    // The bare modifiers lead this row too, ahead of the F-keys.
+    await expect(key(page, "Alt key")).toBeVisible();
     await expect(key(page, "F1")).toBeVisible();
     await key(page, "_").tap();
     await expect.poll(() => keys.slice(12)).toEqual([

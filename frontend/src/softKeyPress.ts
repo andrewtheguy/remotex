@@ -16,18 +16,15 @@
 // - `tap`: the scrollable shortcut row, where a slide is the row scrolling. The
 //   key commits on lift if the finger stayed within the slop. A cancel inside the
 //   slop commits too: the browser cancels a touch the moment it claims a pan, and
-//   its own slop can trip before ours, which used to swallow the tap.
-// - `hold`: a modifier that is a key on the wire — down when touched, up when
-//   the finger lifts or is taken. The remote holds it under whatever happens
-//   meanwhile: the other thumb's keys, a tap on the canvas, a physical key.
+//   its own slop can trip before ours, which used to swallow the tap. A modifier
+//   on this row is a key like the Esc beside it: a tap sends it, alone.
 //
-// The other modifier keys never reach the wire on their own. A tap arms a
-// one-shot, which the next commit spends, a repeat tick included, and a second
-// tap disarms it. Under a resting finger a modifier chords the other fingers'
-// keys like a physical chord, and is off when the finger lifts. Every such
-// modifier is sent down ahead of the key in the order it was taken, and
-// released after it, through sendKeyCombo; one the wire already holds is left
-// out, since the remote has it.
+// The modifier keys of every other row never reach the wire on their own. A tap
+// arms a one-shot, which the next commit spends, a repeat tick included, and a
+// second tap disarms it. Under a resting finger a modifier chords the other
+// fingers' keys like a physical chord, and is off when the finger lifts. Every
+// such modifier is sent down ahead of the key in the order it was taken, and
+// released after it, through sendKeyCombo.
 import {
   type CellId,
   type Commit,
@@ -55,8 +52,8 @@ export type PressEvent =
   | { kind: "up"; p: PointerSample }
   // pointercancel or lostpointercapture for one pointer.
   | { kind: "cancel"; id: number; t: number }
-  // The page lost focus or was hidden: every finger is forgotten, nothing sends,
-  // and whatever the wire holds is released.
+  // The page lost focus or was hidden: every finger is forgotten and nothing
+  // sends.
   | { kind: "cancelAll"; t: number }
   // The host's timer, due at the last result's `nextTickAt`.
   | { kind: "tick"; t: number }
@@ -64,15 +61,13 @@ export type PressEvent =
   | { kind: "layout"; cells: ReadonlyMap<CellId, LayoutCell> };
 
 // `oneShot` is armed for the next key; `held` is a finger resting on the key,
-// chording; `down` is a `hold` key pressed on the wire under a finger.
-export type ModifierState = "oneShot" | "held" | "down";
+// chording.
+export type ModifierState = "oneShot" | "held";
 
 export type PressCommand =
   // Press these codes in order and release them in reverse: the chording
   // modifiers, then the key's own codes.
   | { kind: "send"; codes: string[] }
-  // Press or release one code and leave it so: a `hold` modifier.
-  | { kind: "key"; code: string; pressed: boolean }
   | { kind: "modifiers"; held: ReadonlyMap<string, ModifierState> }
   // The cells currently under a finger.
   | { kind: "active"; ids: ReadonlySet<CellId> }
@@ -233,11 +228,6 @@ export function createPressEngine(
       return;
     }
     press.modifier = null;
-    if (press.commit === "hold") {
-      held.delete(code);
-      out.push({ kind: "key", code, pressed: false });
-      return;
-    }
     if (cancelled) {
       if (press.previous === undefined) {
         held.delete(code);
@@ -273,18 +263,10 @@ export function createPressEngine(
     }
   };
 
-  // Send a key with the chording modifiers around it. A modifier the wire
-  // holds is dropped from both: pressing it again would release it under the
-  // finger that holds it, and the remote has it anyway.
+  // Send a key with the chording modifiers around it.
   const send = (press: Press, codes: string[]) => {
-    const own = codes.filter((code) => held.get(code) !== "down");
-    if (own.length === 0) {
-      return;
-    }
-    const wrap = [...held]
-      .filter(([code, state]) => state !== "down" && !own.includes(code))
-      .map(([code]) => code);
-    out.push({ kind: "send", codes: [...wrap, ...own] });
+    const wrap = [...held.keys()].filter((code) => !codes.includes(code));
+    out.push({ kind: "send", codes: [...wrap, ...codes] });
     spend();
     haptic(press);
   };
@@ -301,17 +283,11 @@ export function createPressEngine(
     }
   };
 
-  // What a committed cell does.
+  // What a committed cell does. A modifier gets here only from the shortcut
+  // row, where it is sent like any key; the others act on touch.
   const commit = (press: Press, id: CellId) => {
     const cell = cellOf(id);
     if (!cell) {
-      return;
-    }
-    const code = modifierCodeOf(id);
-    if (code !== null) {
-      // Only a `tap` modifier commits this way; the others act on touch.
-      toggle(code, held.get(code));
-      haptic(press);
       return;
     }
     if (cell.def.type === "page") {
@@ -329,23 +305,17 @@ export function createPressEngine(
     presses.delete(press.id);
   };
 
-  // A finger landed on a modifier that acts on touch: a `hold` key goes down on
-  // the wire, any other is held for a chord. One already under another finger
-  // is that finger's; this one does nothing.
+  // A finger landed on a modifier that acts on touch: it is held for a chord.
+  // One already under another finger is that finger's; this one does nothing.
   const takeModifier = (press: Press, code: string): boolean => {
     const state = held.get(code);
-    if (state === "held" || state === "down") {
+    if (state === "held") {
       return false;
     }
     press.modifier = code;
     press.previous = state;
     held.delete(code);
-    if (press.commit === "hold") {
-      held.set(code, "down");
-      out.push({ kind: "key", code, pressed: true });
-    } else {
-      held.set(code, "held");
-    }
+    held.set(code, "held");
     haptic(press);
     return true;
   };
@@ -392,7 +362,6 @@ export function createPressEngine(
         preview(press, id);
         break;
       case "tap":
-      case "hold":
         break;
     }
   };

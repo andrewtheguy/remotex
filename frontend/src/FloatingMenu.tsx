@@ -396,7 +396,6 @@ function DockedPanel({
   onClose,
   onDockedHeightChange,
   sendKeyCombo,
-  sendKey,
   onFocusDesktop,
   remoteClipboard,
   onSendClipboard,
@@ -408,7 +407,6 @@ function DockedPanel({
   onClose: () => void;
   onDockedHeightChange: (px: number) => void;
   sendKeyCombo: (codes: string[]) => void;
-  sendKey: (code: string, pressed: boolean) => void;
   onFocusDesktop: () => void;
   remoteClipboard: RemoteClipboard | null;
   onSendClipboard: (text: string) => void;
@@ -421,7 +419,6 @@ function DockedPanel({
       return (
         <SoftKeyboardPanel
           sendKeyCombo={sendKeyCombo}
-          sendKey={sendKey}
           onClose={onClose}
           onDockedHeightChange={onDockedHeightChange}
           onFocusDesktop={onFocusDesktop}
@@ -943,7 +940,6 @@ export default function FloatingMenu({
   onUnauthorized,
   onSwitchTarget,
   sendKeyCombo,
-  sendKey,
   onKeyboardInset,
   remoteClipboard,
   onFetchClipboard,
@@ -992,7 +988,6 @@ export default function FloatingMenu({
   // current session without ending the login. See useRemoteDesktop.
   onSwitchTarget: () => void;
   sendKeyCombo: (codes: string[]) => void;
-  sendKey: (code: string, pressed: boolean) => void;
   // Reports the open docked panel's height so the touch canvas can inset above
   // it (0 when the panel closes or floats). See useRemoteDesktop. Both panels
   // share this channel, which is safe because only one is ever open.
@@ -1312,15 +1307,6 @@ export default function FloatingMenu({
     },
     [sendKeyCombo],
   );
-  const onSoftKeyHeld = useCallback(
-    (code: string, pressed: boolean) => {
-      if (pressed) {
-        setOpen(false);
-      }
-      sendKey(code, pressed);
-    },
-    [sendKey],
-  );
 
   // Open the on-screen keyboard and collapse the drawer so the panel has the
   // screen to itself; toggling the button again closes the panel.
@@ -1631,7 +1617,6 @@ export default function FloatingMenu({
         onClose={closePanel}
         onDockedHeightChange={onDockedHeight}
         sendKeyCombo={onSoftKey}
-        sendKey={onSoftKeyHeld}
         onFocusDesktop={onFocusDesktop}
         remoteClipboard={remoteClipboard}
         onSendClipboard={onSendClipboard}

@@ -51,28 +51,23 @@ test("the phone pages have the same rows, so the keyboard keeps its height", () 
   );
   for (const page of PHONE_PAGES) {
     for (const cell of page.rows[0].cells) {
-      assert.ok(cell.commit === "tap" || cell.commit === "hold", cell.id);
+      assert.equal(cell.commit, "tap", cell.id);
     }
   }
 });
 
-test("each shortcut row leads with a held Shift, Ctrl, Alt and Super, and ABC has no Ctrl chord", () => {
+test("each shortcut row leads with a bare Shift, Ctrl, Alt and Super, and ABC has no Ctrl chord", () => {
   for (const page of PHONE_PAGES) {
     const row = page.rows[0].cells;
     assert.deepEqual(
       row
-        .filter((cell) => cell.commit === "hold")
+        .slice(0, 4)
         .map((cell) => (cell.def.type === "special" ? cell.def.code : "")),
       ["ShiftLeft", "ControlLeft", "AltLeft", "MetaLeft"],
       page.id,
     );
-    assert.deepEqual(
-      row.slice(0, 4).map((cell) => cell.commit),
-      ["hold", "hold", "hold", "hold"],
-      page.id,
-    );
   }
-  // The Sym row's F-keys sit beside them, so Alt+F4 is a held Alt and F4.
+  // The Sym row's F-keys sit beside them.
   const sym = PAGE_SYM.rows[0].cells.map((cell) =>
     cell.def.type === "special" ? cell.def.code : "",
   );
@@ -88,14 +83,11 @@ test("each shortcut row leads with a held Shift, Ctrl, Alt and Super, and ABC ha
   }
 });
 
-test("a held cell is always a modifier, and only the shortcut row has one", () => {
+test("only the shortcut row commits on a tap", () => {
   for (const page of PAGES.values()) {
     for (const row of [...page.rows, ...page.side]) {
       for (const cell of row.cells) {
-        if (cell.commit === "hold") {
-          assert.notEqual(modifierOf(cell.def), null, cell.id);
-          assert.equal(row.kind, "shortcut", cell.id);
-        }
+        assert.equal(cell.commit === "tap", row.kind === "shortcut", cell.id);
       }
     }
   }
