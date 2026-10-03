@@ -56,7 +56,8 @@ pub enum Update {
     /// inside a frame. Reported before the first paint, which is what a consumer
     /// that paces frames itself needs to know before it receives one.
     Confirmed,
-    /// The output is now this size, laid out over this many monitors. The
+    /// The output is now this size, laid out as a row of this many equal columns
+    /// — one, when the host laid it out any other way ([`gfx::row`]). The
     /// framebuffer has already been resized and cleared; the caller is what tells
     /// the world.
     Reset { width: u32, height: u32, monitors: u32 },
@@ -411,7 +412,8 @@ impl Graphics {
                 }
                 Some(Message::ResetGraphics { width, height, monitors }) => {
                     affordable(width, height)?;
-                    debug!("rdp: graphics reset to {width}x{height} over {monitors} monitors");
+                    let monitors = gfx::row(width, height, &monitors);
+                    debug!("rdp: graphics reset to {width}x{height}, a row of {monitors}");
                     self.output = Some((width, height));
                     cut(&mut updates, &mut from, command.start, None);
                     updates.push(Update::Reset { width, height, monitors });
@@ -434,7 +436,8 @@ impl Graphics {
             Message::ResetGraphics { width, height, monitors } => {
                 self.tally.command(gfx::CMD_RESET_GRAPHICS);
                 affordable(width, height)?;
-                debug!("rdp: graphics reset to {width}x{height} over {monitors} monitors");
+                let monitors = gfx::row(width, height, &monitors);
+                debug!("rdp: graphics reset to {width}x{height}, a row of {monitors}");
                 framebuffer.resize(width, height);
                 self.output = Some((width, height));
                 // The surfaces stay, blank, until the server draws into them again;
@@ -869,7 +872,10 @@ mod tests {
         w.u32_le(width);
         w.u32_le(height);
         w.u32_le(1); // monitorCount
-        w.zeros(340 - 8 - 12); // one monitor definition, and the PDU's padding
+        for field in [0, 0, width - 1, height - 1, 1] {
+            w.u32_le(field); // the one monitor, primary
+        }
+        w.zeros(340 - 8 - 12 - 20); // the PDU's padding
         pdu(CMD_RESET_GRAPHICS, &w.finish())
     }
 

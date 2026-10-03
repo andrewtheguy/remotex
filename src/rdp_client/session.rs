@@ -1557,8 +1557,27 @@ impl<'a> Active<'a> {
         let Some((width, height, scale)) = self.pending_resize.take() else {
             return Ok(());
         };
-        debug!("rdp: sending a {width}x{height} monitor layout at {scale}%, {} monitors", self.monitors);
-        let layout = display::monitor_layout(width, height, scale, self.monitors);
+        // Held to what the server said it lays out. A layout past either limit is
+        // one a conforming server ignores in silence, which from the caller's end
+        // is a resize that never comes, so it is not sent at all.
+        let caps = self.dynamics.caps.unwrap_or(display::Capabilities { monitors: 1, area: u64::MAX });
+        let Some(monitors) = monitors_within(self.monitors, width, height, caps) else {
+            warn!(
+                "rdp: not sending a {width}x{height} monitor layout: one monitor is past the \
+                 {} pixels the host lays out",
+                caps.area
+            );
+            return Ok(());
+        };
+        if monitors != self.monitors {
+            info!(
+                "rdp: the host lays out {} monitor(s) over {} pixels, so {monitors} of the {} asked \
+                 for go in the layout",
+                caps.monitors, caps.area, self.monitors
+            );
+        }
+        debug!("rdp: sending a {width}x{height} monitor layout at {scale}%, {monitors} monitors");
+        let layout = display::monitor_layout(width, height, scale, monitors);
         self.write_channel(dynamic, &dvc::data(control, &layout)?).await
     }
 
@@ -1843,6 +1862,18 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
 
 /// A desktop dimension as the `u16` the protocol counts in, saturating rather than
 /// wrapping: nothing real exceeds RDP's own 8192 a side.
+/// How many of the `asked` monitors of `width` by `height` a layout may name under
+/// the server's Display Control capabilities: at most the monitors it lays out,
+/// and as many as together stay under its area. `None` when even one does not fit,
+/// which is a layout no server would apply. The size is the one the layout will
+/// carry, adjusted as [`display::monitor_layout`] adjusts it.
+fn monitors_within(asked: u32, width: u32, height: u32, caps: display::Capabilities) -> Option<u32> {
+    let (width, height) = display::adjust_size(width, height);
+    let each = u64::from(width) * u64::from(height);
+    let most = asked.clamp(1, caps.monitors.max(1));
+    (1..=most).rev().find(|monitors| u64::from(*monitors) * each <= caps.area)
+}
+
 fn narrow(v: u32) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
 }
@@ -2000,6 +2031,27 @@ mod tests {
     /// would lay out was about a channel that no longer exists. The Close is echoed,
     /// which is the response the server waits for; one for a channel never held earns
     /// nothing.
+    /// A layout names no more monitors than the host lays out, and no more than
+    /// fit its area together; one that does not fit at all is not sent.
+    #[test]
+    fn a_layout_is_held_to_the_hosts_monitor_count_and_area() {
+        let roomy = display::Capabilities { monitors: 16, area: 8192 * 8192 * 16 };
+        assert_eq!(monitors_within(2, 1280, 800, roomy), Some(2));
+        assert_eq!(monitors_within(1, 1280, 800, roomy), Some(1));
+        let one = display::Capabilities { monitors: 1, area: 8192 * 8192 };
+        assert_eq!(monitors_within(2, 1280, 800, one), Some(1), "a host that lays out one");
+        // Room for one of these, not two.
+        let tight = display::Capabilities { monitors: 16, area: 1280 * 800 + 1 };
+        assert_eq!(monitors_within(2, 1280, 800, tight), Some(1));
+        assert_eq!(monitors_within(2, 1281, 800, tight), Some(1), "at the size the layout carries");
+        // Room for neither.
+        let none = display::Capabilities { monitors: 16, area: 1280 * 800 - 1 };
+        assert_eq!(monitors_within(2, 1280, 800, none), None);
+        // A zero monitor count from a host is read as one rather than as nothing.
+        let zero = display::Capabilities { monitors: 0, area: u64::MAX };
+        assert_eq!(monitors_within(2, 1280, 800, zero), Some(1));
+    }
+
     #[test]
     fn closing_display_control_forgets_what_it_said_it_would_do() {
         let said = display::Capabilities { monitors: 1, area: 4 };

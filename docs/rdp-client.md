@@ -368,15 +368,21 @@ without the flag is asked for one monitor and the one desktop it always gave. An
 in every monitor layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2), one
 `DISPLAYCONTROL_MONITOR_LAYOUT` per monitor at the same size and scale factor, the
 first flagged primary. The server's `MaxNumMonitors` and area ceiling arrive in
-its capabilities as before; `Event::ResizeReady` carries the area over every
+its capabilities as before, and every layout is held to both: no more monitors
+than the server lays out, and no more than fit its area together, since a layout
+past either is one a conforming server ignores in silence. A size that does not
+fit even once is not sent. `Event::ResizeReady` carries the area over every
 monitor together.
 
 The host answers with one desktop spanning the row: a Demand Active naming the
-union at connect, and a `ResetGraphics` naming it, with its monitor count, after
-each layout. The framebuffer is that span, and the host maps one surface onto the
-output per monitor. `Event::Resize` carries the reset's monitor count so the
-caller can tell a row from a single desktop the host chose instead; at connect
-the caller reads it off the size. The client composes and reports the span as
+union at connect, and a `ResetGraphics` naming it, with its monitor definitions,
+after each layout. The framebuffer is that span, and the host maps one surface
+onto the output per monitor. The definitions are read against the row asked for
+(`row` in the graphics crate's `proto/gfx.rs`): `Event::Resize` carries their
+count when they are that row of equal columns, and one when the host laid the
+session out any other way — stacked, offset, unequal — so a caller that shows one
+column never cuts a layout it does not know the shape of. At connect the caller
+reads the count off the size. The client composes and reports the span as
 it does any desktop. Which part of it a browser sees, and the pointer offset
 into it, is the engine's (`View` in `src/rdp.rs`).
 
