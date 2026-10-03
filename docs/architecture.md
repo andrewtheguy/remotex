@@ -1874,12 +1874,16 @@ support, or refuses the request, keeps its own size. Standard `ard` is the only
 engine with no size to state, and `size` is refused on it at config load.
 
 What a kept size says about density follows each vendor's own client on a Mac.
-An RDP session at a kept size states no scale factor, so the host keeps its own
-scaling, which is how Microsoft's client behaves with "Optimize for Retina
-displays" unchecked; only a session started with resize renders at the client's
-density.
+An RDP session at a kept size states no scale factor to a pointer client's host,
+so the host keeps its own scaling, which is how Microsoft's client behaves with
+"Optimize for Retina displays" unchecked; a session started with resize renders
+at the client's density.
 A High Performance Mac opens its virtual display at the client screen's density
 whatever names the points, which is how Apple's Screen Sharing opens one.
+A `HostDisplay::fit` client gets that on RDP too: it fits the desktop to its
+width, usually on a phone's or tablet's 2x or 3x screen, so an RDP session at a
+kept size states the client's density at connect, as a High Performance Mac opens
+at it. Without resize there is no Display Control channel to restate it later.
 
 What is engine-specific is the mechanism:
 
