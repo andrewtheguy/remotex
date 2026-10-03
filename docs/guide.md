@@ -58,9 +58,9 @@ config key.
 
 | Target | Window drives the size | Sound | Passthrough |
 |---|---|---|---|
-| `rdp` | yes | off, Opus or lossless | the graphics pipeline (experimental) |
+| `rdp` | yes | off, Opus or FLAC | the graphics pipeline (experimental) |
 | `vnc` | no | none | — |
-| `vnc`, `wlshare` | yes | off, Opus or lossless | — (its VP9 is always passed) |
+| `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) |
 | `vnc`, `ard` | no | none | — |
 | `vnc`, `ard` with `virtual_display` | yes | none | — |
 | `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC |
@@ -69,7 +69,7 @@ config key.
   or 1440×900 where it sets none, or follows the window: the remote is asked to
   render at the window's size and the browser's density, rather than being
   scaled on the client. A phone is offered the kept sizes only.
-- **Sound.** Opus, or lossless FLAC. A session started without
+- **Sound.** Opus, or FLAC, which is lossless. A session started without
   sound asks the remote for none, so the host keeps playing where it did. In the
   session, Mute and Unmute change only whether this browser listens.
 - **Passthrough.** Sends the remote's own stream to the browser as it came, for

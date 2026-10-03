@@ -155,7 +155,7 @@ test.describe("the picker's options", () => {
       .getByRole("radio");
     await expect(formats).toHaveCount(2);
     await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
-    await expect(item.getByRole("radio", { name: /^Lossless/ })).not.toBeChecked();
+    await expect(item.getByRole("radio", { name: /^FLAC/ })).not.toBeChecked();
     await expect(item.getByRole("checkbox", { name: PASSED })).not.toBeChecked();
     await expect(
       item.getByRole("button", { name: "Start", exact: true }),

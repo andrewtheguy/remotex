@@ -219,14 +219,14 @@ site_passwd = ""
 # fixed 3840×2160 backing ceiling. An "rdp" desktop is resized through its
 # graphics pipeline, so `egfx = false` leaves it at the size it keeps.
 #
-# Sound takes the remote's sound, as Opus or lossless. An "rdp" target negotiates
+# Sound takes the remote's sound, as Opus or FLAC. An "rdp" target negotiates
 # sound redirection (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM,
 # and a Windows host sends nothing on the channel until something plays. A
 # "wlshare" target lists wlshare's audio extension. Started with it off, neither
 # is asked, and the host keeps playing where it did.
 #
-# Opus is sent at the rates the audio keys below hold. Lossless is
-# FLAC, which the page decodes in a WebAssembly module of its own: a "wlshare"
+# Opus is sent at the rates the audio keys below hold. FLAC is lossless,
+# and the page decodes it in a WebAssembly module of its own: a "wlshare"
 # target's sound is coded by wlshare in whichever format was chosen and passed to
 # the browser as it came, so the gateway codes none of it, and an "rdp" target's
 # PCM is coded here, as FLAC by libFLAC. Music is roughly a megabit a second,
