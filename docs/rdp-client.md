@@ -203,7 +203,7 @@ and commands it carried when it ends, at `info`.
 
 ### The pipeline, passed on
 
-**Experimental**, for the reason
+**Beta**, for the reason
 [RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)
 gives. `Connect::pass_graphics` — a session started with the passthrough — has the session hand the
 pipeline's commands to its caller instead of composing them. The channel is

@@ -1,4 +1,4 @@
-// EXPERIMENTAL: the software HEVC decoder's `VideoDecoder` shape, as far as it
+// BETA: the software HEVC decoder's `VideoDecoder` shape, as far as it
 // goes without its worker.
 import assert from "node:assert/strict";
 import { test } from "node:test";

@@ -1,11 +1,12 @@
-//! EXPERIMENTAL: the page's software HEVC decoder, for a browser whose own
+//! BETA: the page's software HEVC decoder, for a browser whose own
 //! `VideoDecoder` refuses a High Performance Mac's 4:4:4 picture
 //! (`frontend/src/hevcWasmDecoder.ts`).
 //!
 //! It is libavcodec's HEVC decoder compiled to WebAssembly, a release of
 //! andrewtheguy/hevc-wasm published to the private
-//! andrewtheguy/hevc-wasm-archives, and no build of this binary holds it: an
-//! operator who wants it downloads the release archive into the gateway's data
+//! andrewtheguy/hevc-wasm-archives, and no build of this binary holds it, since
+//! FFmpeg's licence keeps it out of every artifact as it keeps the native
+//! decoder out ([`crate::libav`]): an operator who wants it downloads the release archive into the gateway's data
 //! directory, or anywhere else and names it in `[hevc_wasm]`. The
 //! gateway reads that archive once at start-up, refuses it unless it is exactly the
 //! release pinned here — the page's worker calls the module's exports as this

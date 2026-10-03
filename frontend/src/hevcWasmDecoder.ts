@@ -1,4 +1,4 @@
-// EXPERIMENTAL: a software decoder for a High Performance Mac's passed HEVC, for a
+// BETA: a software decoder for a High Performance Mac's passed HEVC, for a
 // browser whose `VideoDecoder` does not take it (appleMedia.ts decides).
 //
 // libavcodec's HEVC decoder compiled to WebAssembly (andrewtheguy/hevc-wasm), with

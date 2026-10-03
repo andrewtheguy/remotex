@@ -162,7 +162,7 @@ const PASSTHROUGH: Record<
   }
 > = {
   "rdp-graphics": {
-    label: "Pass the graphics pipeline through (experimental)",
+    label: "Pass the graphics pipeline through (beta)",
     note: "The host's drawing is composed in this browser instead of encoded as video. For a LAN.",
     cannot:
       "This browser cannot compose it: that needs WebGL 2 and a cross-origin isolated page.",

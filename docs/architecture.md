@@ -37,7 +37,7 @@ whose AAC-ELD sound every session passes to the browser, and whose HEVC a sessio
 started with the passthrough passes too rather than re-encoding it — see
 [Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
 session started with its passthrough is not decoded here either: the host's
-graphics pipeline is passed on for the browser to compose, which is experimental — see
+graphics pipeline is passed on for the browser to compose, which is in beta — see
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 How a session's desktop is sized, whether it takes the remote's sound and whether
 it passes the remote's stream are chosen at the picker before it starts — see
@@ -133,7 +133,7 @@ is not tested against.
   crate under `crates/`. It has no threads, needs no shared memory, and builds
   on stable. Do not fold one module into the other, or add a third without a
   stream that needs it.
-- The only versioned client asset read at run time is the EXPERIMENTAL software
+- The only versioned client asset read at run time is the BETA software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
   `/hevc/`. An operator-configured path in `[branding].logo` is read per request
@@ -393,7 +393,7 @@ decoder of its own, may decode, compose or present the pipeline its own way
 (on the GPU, say) where that brings a measured gain. The host answers a
 repaint out of its caches, so a reattach starts such a session over; do not
 resume one on a repaint. A host that draws with bitmap updates is encoded here
-as VP9. Call it experimental wherever it is named to an operator.
+as VP9. Call it beta wherever it is named to an operator.
 
 H.264 stays refused in the capability advertise of every pipeline the gateway
 composes: a host would hand the parts of the desktop that move like video to a
@@ -756,12 +756,13 @@ Three controls with similar names therefore remain separate:
   missing from the device's list), so the "no" was right.
   A browser that decodes the sound but not the picture, as that one did, loses
   nothing by being sent both re-encoded.
-- **EXPERIMENTAL: the picture in software.** A gateway that has its release
+- **BETA: the picture in software.** A gateway that has its release
   archive serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm),
   libavcodec's HEVC decoder compiled to WebAssembly with SIMD128 and slice threads,
   at `/hevc/`; its threads share their memory through the cross-origin isolation
   every gateway serves the page with (`src/assets.rs`). No build holds the
-  decoder: the operator downloads the
+  decoder, for the licence reason that keeps libavcodec out of every artifact:
+  the operator downloads the
   release archive from the private `andrewtheguy/hevc-wasm-archives` into
   `share/remotex` in the gateway's release tree, beside `share/doc/remotex`,
   where the gateway looks for it and, finding it, serves it with nothing
@@ -872,7 +873,7 @@ costs is the browser's work, and the quality walk: what the host draws with is
 sent as it is, so `video_quality`, `render_chroma` and `render_adaptive` reach
 nothing of it.
 
-**Experimental.** The compositor the page runs is the gateway's own, unit tested
+**Beta.** The compositor the page runs is the gateway's own, unit tested
 as it is there, and the module built from it is tested as the page loads it.
 What is passed is checked against a real host: `tests/rdp_client_probe.rs`
 composes a passed pipeline beside the session that passed it, and
@@ -1337,7 +1338,7 @@ and `GET /api/targets` carries it:
 
 | Target | Window drives the size | Sound | Passthrough |
 |---|---|---|---|
-| `rdp` | yes | shown | shown: the graphics pipeline, experimental |
+| `rdp` | yes | shown | shown: the graphics pipeline, beta |
 | `vnc` | no | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture |
 | `vnc`, `ard` | no | hidden | hidden |

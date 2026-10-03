@@ -102,7 +102,7 @@ export function createFramePainter(options: {
    */
   makeGraphicsVideo?: () => EgfxVideo;
   /**
-   * EXPERIMENTAL: where the software HEVC decoder's pictures are drawn, the same
+   * BETA: where the software HEVC decoder's pictures are drawn, the same
    * canvas (hevcPicture.ts). A painter given none presents none.
    */
   makeHevcPicture?: () => HevcPicture;
@@ -113,7 +113,7 @@ export function createFramePainter(options: {
    * desktop's, and only the page can show or hide it.
    */
   onGraphicsShown?: (shown: boolean) => void;
-  /** EXPERIMENTAL: decode passed HEVC in software (see `createDesktopVideo`). */
+  /** BETA: decode passed HEVC in software (see `createDesktopVideo`). */
   softwareHevc?: boolean;
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and

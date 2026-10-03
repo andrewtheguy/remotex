@@ -36,7 +36,7 @@ pub struct AppState {
     pub auth: Arc<AuthSessions>,
     /// Every browser socket's byte counters, and the database `[meter]` records them in.
     pub throughput: Throughput,
-    /// EXPERIMENTAL: the software HEVC decoder, read at start-up.
+    /// BETA: the software HEVC decoder, read at start-up.
     pub hevc_decoder: Option<HevcDecoder>,
 }
 

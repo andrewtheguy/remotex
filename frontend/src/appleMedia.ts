@@ -28,7 +28,7 @@
 //   yes to both forms, so a yes only narrows the forms worth decoding and decoding
 //   picks one.
 //
-// EXPERIMENTAL: a picture the browser's `VideoDecoder` refuses can still be decoded
+// BETA: a picture the browser's `VideoDecoder` refuses can still be decoded
 // in software — libavcodec's HEVC decoder compiled to WebAssembly, with SIMD128 and
 // slice threads (hevcWasmDecoder.ts) — where the gateway has the decoder's
 // archive, and so serves it, and the browser runs shared-memory SIMD
