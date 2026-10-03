@@ -36,9 +36,11 @@ side.
   Mac's HEVC can instead pass unchanged, or a Windows host's graphics pipeline
   can pass for the browser to compose; those two do not adapt to the browser
   link.
-- **Remote sound where the server provides it.** RDP and wlshare sessions choose
-  off, Opus or FLAC, which is lossless. A High Performance Mac always sends
-  its AAC-ELD sound. Standard Screen Sharing and plain VNC carry none.
+- **Remote sound in the browser, as adaptive Opus or lossless FLAC.** An RDP
+  or wlshare session plays the remote's sound here, as Opus at a bitrate that
+  follows the browser link or as FLAC, lossless for a LAN. A High Performance
+  Mac always sends its AAC-ELD sound. Standard Screen Sharing and plain VNC
+  carry none.
 - **Clipboard text in both directions.** RDP and Apple Screen Sharing carry
   Unicode. VNC carries Unicode with Extended Clipboard and otherwise falls back
   to Latin-1. Automatic browser clipboard sync is used where the browser permits
