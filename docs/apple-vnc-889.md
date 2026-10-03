@@ -927,8 +927,10 @@ dials the Mac.
 ### Negotiation
 
 After the first layout the viewer sends a second `SetEncodings`, the opening list
-with encoding 1010 (`0x3f2`) appended, then message `0x1c`
-(`RFBMediaStreamServerConfiguration`, version 3):
+with encoding 1010 (`0x3f2`) appended. The Mac answers it with message 1, below,
+naming its ports, and Apple's viewer makes its offer only then: message `0x1c`
+(`RFBMediaStreamServerConfiguration`, version 3). Remotex sends the offer right
+behind the `SetEncodings`, without waiting:
 
 ```text
 +0x00 u8   0x1c
@@ -954,11 +956,13 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
   a leg. Apple's viewer requires it on audio and video 1; remotex also requires
   video 2 off because it offered one display. The measured ports were always
   5900 and 5901, the RFB port and the next. The viewer receives on the same
-  numbers.
+  numbers. The Mac sends message 1 once for the `SetEncodings` naming 1010, and
+  again after each display change, never in reply to an offer.
 - **message 2**, AVConference's answer: the common eight-byte header, `u16`
   lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
   those blobs. Remotex checks that their lengths describe the whole body and
   that video 2 is empty. The answer sometimes comes twice for one offer.
+  Apple's viewer disregards an answer that comes before message 1.
 - **message 3**, a 16-byte error: the common header, then `u32` type and `u32`
   sub-code.
 
@@ -989,6 +993,12 @@ picker offers no choice of it. The stream takes over the Mac's sound, AirPlay in
 mode never touches the sound output, so a Mac there plays to its speakers or to
 an AirPlay receiver outside remotex as usual; in a High Performance session it
 plays nothing to one, which was confirmed on a physical Mac.
+
+**Either order.** The Mac sends message 1 and the answer from separate paths, so
+when the offer goes out before message 1 has come, as remotex sends it, the two
+come in either order. The session's first message 1 names the ports of its first
+offer either way. The Mac sends it once: an offer made again in its place gets
+an answer and no ports.
 
 **One offer at a time.** A second `0x1c` sent while the first one's capture was
 still starting left the capture failed (`didStart: 0 error: 32000`). When the
@@ -1240,7 +1250,8 @@ way to the browser.
 ### Reaching the gateway
 
 The Mac sends from its own address to the viewer's address on the TCP connection,
-so a NAT between them has to pass it. The viewer's reports go out from the same
+from each port it named to the same port number at the viewer, so a NAT between
+them has to pass it. The viewer's reports go out from the same
 ports every second, which opens a port-preserving NAT's mapping. Every Mac uses the
 same port numbers, so remotex binds them with address and port reuse and connects
 each socket to its Mac. Several gateways on one host can then share the numbers,

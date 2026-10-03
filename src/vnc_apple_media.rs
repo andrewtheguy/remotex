@@ -1648,6 +1648,8 @@ pub struct MediaStream {
     asked: bool,
     /// An offer is out that the Mac has not answered.
     pending: bool,
+    /// The Mac has named its ports since the encodings naming the stream went out.
+    announced: bool,
     /// The size the live (or starting) stream was offered for; `None` while there
     /// is none, as after a display change.
     offered: Option<(u16, u16)>,
@@ -1731,6 +1733,7 @@ impl MediaStream {
             local: local.ip(),
             asked: false,
             pending: false,
+            announced: false,
             offered: None,
             owed: Owed::Nothing,
             offer_made: std::sync::Arc::default(),
@@ -1912,12 +1915,17 @@ impl MediaStream {
     /// which is what it does after a display change of its own, with no stream
     /// behind the announcement.
     ///
+    /// The session's first ports answer the encodings that name the stream, not the
+    /// offer behind them, so they come ahead of its answer or behind it, and are
+    /// that offer's either way.
+    ///
     /// An error ends the session: the Mac refused the stream, or described one this
     /// side cannot receive. Apple's viewer shows the refusal and closes.
     pub fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<bool> {
         match parse_media_reply(body)? {
             MediaReply::Ports { audio_port, video_port } => {
-                if !self.pending {
+                let first = self.asked && !std::mem::replace(&mut self.announced, true);
+                if !self.pending && !first {
                     log::debug!("vnc: the Mac re-announced its media streams unasked; they are down until offered");
                     self.stopped();
                     return Ok(true);
@@ -3091,6 +3099,29 @@ mod tests {
         let ports = unhex("0001000100000000170c00000001170d0000000100000000000000000000000000000000");
         assert!(m.on_reply(&ports).unwrap());
         assert!(m.offer((1600, 1000)).is_some());
+    }
+
+    /// The session's first ports answer the encodings naming the stream, not its
+    /// offer, so they may come behind the offer's answer, and are its ports still.
+    /// Named again with no offer out, they are a display change of the Mac's own,
+    /// and so are they after a later offer, which the Mac names no ports for.
+    #[test]
+    fn the_first_ports_named_after_the_answer_open_the_stream() {
+        let answer = unhex("000200020000000000000000000000000000");
+        let ports = unhex("0001000100000000170c00000001170d0000000100000000000000000000000000000000");
+        let mut m = media();
+        m.offer((1600, 1000)).unwrap();
+        assert!(!m.on_reply(&answer).unwrap());
+        // Taken as the offer's ports: binding them is what fails here, at an
+        // address that is not this host's.
+        let opened = m.on_reply(&ports).unwrap_err();
+        assert!(format!("{opened:#}").contains("for the Mac's media stream"), "{opened:#}");
+        assert!(m.offer((1600, 1000)).is_none(), "the stream is still offered for this display");
+
+        assert!(m.on_reply(&ports).unwrap());
+        m.offer((1600, 1000)).unwrap();
+        assert!(!m.on_reply(&answer).unwrap());
+        assert!(m.on_reply(&ports).unwrap(), "a later offer is owed no ports");
     }
 
     /// An offer owes its display's first picture and the first sound within
