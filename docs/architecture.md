@@ -2427,7 +2427,9 @@ the horizontal pan it scrolls by. A phone — a touch screen whose short side is
 phone's (`tabletGuestSize.ts`) — gets the keyboard docked along the bottom edge in
 either orientation, padded above the home indicator, and the canvas insets
 above it; every other client, tablets and narrow windows included, gets the
-floating PC grid.
+floating PC grid. The keyboard is dismissed whenever the desktop is not what
+is on screen — reconnecting, an error, a claim conflict, the picker, the login —
+and stays closed when the desktop returns.
 
 Each tab stores its claim token in `sessionStorage`, allowing reconnects to
 reclaim the same slot. Busy and evicted states require explicit takeover or

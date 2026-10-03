@@ -318,6 +318,7 @@ export default function RemoteDesktop({
           onLocalShortcut={onLocalShortcut}
           onFocusDesktop={focusDesktop}
           onViewOnlyChange={setViewOnly}
+          desktopShown={!showStatus}
         />
       )}
 

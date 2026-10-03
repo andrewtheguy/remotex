@@ -980,6 +980,7 @@ export default function FloatingMenu({
   onLocalShortcut,
   onFocusDesktop,
   onViewOnlyChange,
+  desktopShown,
 }: {
   onLogout: () => void;
   // The throughput read came back 401: the login expired. See ThroughputPanel.
@@ -1084,6 +1085,9 @@ export default function FloatingMenu({
   // desktop view-only for as long as it does. The input path is the other side of
   // the page, so this is reported rather than read. See useRemoteDesktop.
   onViewOnlyChange: (viewOnly: boolean) => void;
+  // False while the status overlay stands over the desktop: connecting,
+  // reconnecting, an error, a claim conflict, or the gap before the first frame.
+  desktopShown: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // The one modal card, and which face it shows: Info, or the "Throughput" view its
@@ -1394,6 +1398,14 @@ export default function FloatingMenu({
           maxHeight: `${maxHeight}px`,
         };
   }, [resolvedPosition, viewport, floor]);
+
+  // The soft keyboard types on the desktop, so it goes when the desktop does,
+  // and is not there again when the desktop comes back.
+  useEffect(() => {
+    if (!desktopShown) {
+      setPanel((current) => (current === "keyboard" ? null : current));
+    }
+  }, [desktopShown, setPanel]);
 
   const viewOnly = useViewOnly(open, hidden, modal, panel, onViewOnlyChange);
   // A click on the cover takes down what put it there. A modal card has a
