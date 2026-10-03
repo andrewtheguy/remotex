@@ -18,11 +18,11 @@ const version = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? "dev";
 const outDir = process.env.REMOTEX_FRONTEND_OUT_DIR ?? "dist";
 
 export default defineConfig({
-  // Relative asset URLs, and safe here rather than by luck: there is no
-  // client-side router, so the document is only ever at `/` or at a one-segment
-  // path the SPA fallback answered — and `./assets/…` resolves to `/assets/…`
-  // from both.
-  base: "./",
+  // Absolute asset URLs: the gateway serves the page from an origin root, and
+  // the document is not always one segment deep — a display shown in a tab of its
+  // own is the page at `/display/2`, where `./assets/…` would resolve to
+  // `/display/assets/…` and come back as the SPA fallback's HTML.
+  base: "/",
   define: {
     __APP_VERSION__: JSON.stringify(version),
   },
