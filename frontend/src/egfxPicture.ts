@@ -52,8 +52,11 @@ export interface GraphicsPicture {
     pixels: Uint8Array,
   ): void;
   /**
-   * The picture at this size, black: the desktop's canvas was replaced at it, and
-   * the pipeline's reset that draws the new desktop has not been composed yet.
+   * The canvas at this size, black: the desktop's canvas was replaced at it. The
+   * picture is kept, since the picker's switch between displays replaces the
+   * canvas too and shows another part of the same picture; the `window` that
+   * follows draws it. A host that lays the span out again redraws it in a run
+   * whose reset resizes the picture.
    */
   blank(width: number, height: number): void;
   /**
@@ -240,8 +243,13 @@ export function createGraphicsPicture(
       if (w === 0 || h === 0) {
         return;
       }
-      resize(w, h);
-      present();
+      // Not the texture: a resize to a display's size is, over a span, a switch
+      // between its displays, and the span is what the window after it is of.
+      if (canvas.width !== w || canvas.height !== h) {
+        surface.resize(w, h);
+      }
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
     },
     close() {
       gl.deleteTexture(texture);

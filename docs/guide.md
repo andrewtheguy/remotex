@@ -128,7 +128,8 @@ touch.
   is not available. With the passthrough, the browser holding the session
   composes both displays once and shows one; the second display's tab is painted
   from that same picture, so nothing is decoded twice. Checked against one
-  Windows 11 host, the passthrough over two displays not yet.
+  Windows 11 host, the passthrough over two displays by a headless browser's
+  sockets only, not yet by eye.
 
   The second display's tab has a menu of its own, behind a button showing the
   display's number where the session's page shows ☰. It holds what is that tab's

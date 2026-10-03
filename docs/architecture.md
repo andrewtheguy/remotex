@@ -1064,8 +1064,8 @@ the pipeline.
   as the second display is: the two ends are unit tested against each other,
   `tests/playwright/egfx-two-displays.spec.ts` reads both displays' sockets of a
   headless browser showing a passed span in two tabs against one Windows 11
-  host, and what the copy across the browser costs, or how far the tab runs
-  behind the page, has not been measured.
+  host, it has not been checked by eye, and what the copy across the browser
+  costs, or how far the tab runs behind the page, has not been measured.
 - **The page composes with the gateway's compositor.** The RDP client's graphics
   are a crate, `crates/remotex-rdp-graphics`, that the gateway is built with and
   that `frontend/wasm/egfx` binds for the page, built for

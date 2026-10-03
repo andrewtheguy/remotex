@@ -924,6 +924,34 @@ test("a tab is painted from the session page's picture, not composed", async () 
   assert.equal(relay.closed(), 1);
 });
 
+test("a video format takes the display back from a tab's mirror", async () => {
+  // The session stops passing (a host that draws with bitmap updates after all):
+  // the tab is sent a stream, which is drawn on the desktop's canvas the mirror's
+  // picture covered.
+  const { load } = fakeCompositors();
+  const relay = fakeRelay();
+  const p = graphicsPainter(load, { relay: relay.port });
+  p.mirrorGraphics(2, { x: 32, y: 0, w: 32, h: 48 });
+  relay.deliver({
+    kind: "paint",
+    seq: 1,
+    w: 32,
+    h: 48,
+    rects: [0, 0, 32, 48],
+    pixels: new ArrayBuffer(32 * 48 * 4),
+  });
+  assert.deepEqual(shown, [true]);
+  p.setVideoFormat({ decode: "vp09.00.40.08" });
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  assert.deepEqual(chunkTypes, ["key"]);
+  assert.deepEqual(shown, [true, false]);
+  assert.deepEqual(pictures, { made: 1, closed: 1 });
+  assert.equal(relay.closed(), 1);
+  // A display passed again is mirrored afresh.
+  p.mirrorGraphics(2, { x: 32, y: 0, w: 32, h: 48 });
+  assert.equal(pictures.made, 2);
+});
+
 test("a picture that cannot be blanked ends its pipeline", async () => {
   const { made, load } = fakeCompositors();
   const p = graphicsPainter(load, { blankFails: true });

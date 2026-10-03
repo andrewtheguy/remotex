@@ -77,9 +77,10 @@ export interface FramePainter {
   mirrorGraphics(display: number, part: PicturePart): void;
   /**
    * The desktop's canvas was replaced at this size and filled black. A pipeline's
-   * picture is shown over that canvas, so it is blanked with it: the reset that
-   * draws the new desktop is in a run not composed yet. The software HEVC
-   * decoder's is no longer shown, until the stream's next picture.
+   * picture is shown over that canvas, so its canvas is blanked with it, and what
+   * it holds is kept for the `graphicsView` that follows: over a span, the resize
+   * is the picker's switch between displays. The software HEVC decoder's is no
+   * longer shown, until the stream's next picture.
    */
   blank(w: number, h: number): void;
 }
@@ -667,8 +668,10 @@ export function createFramePainter(options: {
     },
     setVideoFormat(format) {
       // A stream takes the picture back from a pipeline: a host that draws with
-      // bitmap updates after all, which the gateway encodes.
+      // bitmap updates after all, which the gateway encodes. In a tab, from the
+      // mirror of the session page's picture, which shows the display no more.
       releasePipeline();
+      releaseMirror();
       if (refused !== null && format.decode !== refused) {
         // Not the configuration that was refused, so the refusal no longer stands —
         // but the banner stays until a frame paints, as any other complaint's does.
