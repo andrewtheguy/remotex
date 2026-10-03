@@ -2228,8 +2228,8 @@ fn wlshare_encoding_list(audio: Option<bool>, camera: bool, microphone: bool) ->
 /// spread back out when it grows. The density is the client screen's whatever
 /// named the points, as Apple's client has it, so a Retina client gets a sharp
 /// desktop even at a kept size, where an RDP host is left at its own scaling as
-/// Microsoft's client leaves it with "Optimize for Retina displays" unchecked
-/// (`opening_layout` in src/rdp.rs) — quantized to
+/// Microsoft's client leaves it with "Optimize for Retina displays" unchecked,
+/// except for a pinch-zoom client (`states_density` in src/rdp.rs) — quantized to
 /// the 1x or 2x a virtual display can be backed at
 /// ([`crate::protocol::render_density`]): a Mac asked for 1.25x or 1.5x
 /// answers with a small 2x display rather than a rounded one.

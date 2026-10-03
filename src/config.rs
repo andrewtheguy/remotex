@@ -474,8 +474,9 @@ pub enum Sizing {
     /// On RDP this also turns on density matching, because there a density *is* a
     /// resize: the Display Control channel this negotiates is the only way to tell
     /// a live session to render at 200%, so a Retina client gets twice the pixels
-    /// and a UI drawn twice as large. At a kept size an RDP session ignores the
-    /// client's density entirely. An RDP resize is the graphics pipeline's, so a
+    /// and a UI drawn twice as large. At a kept size an RDP session ignores a
+    /// pointer client's density, and states a pinch-zoom client's once at connect.
+    /// An RDP resize is the graphics pipeline's, so a
     /// target with `egfx = false` does not offer it.
     ///
     /// On a virtual display — `ard-high-performance`, or `ard` with
