@@ -63,11 +63,9 @@ body {
   position: absolute;
   inset: 0;
   outline: none;
-  /* Default for engines that composite the cursor into the framebuffer (a VNC
-     server that ignores the Cursor pseudo-encoding): hide the
-     browser's own cursor so only one pointer shows. When the engine sends
-     shapes instead, useRemoteDesktop overrides this inline with the remote
-     shape — see paintCursor. */
+  /* Only until paintCursor's first run, a frame after mount: from then on
+     useRemoteDesktop sets this inline, to the remote's shape when the engine
+     sends shapes and to a black X when it sends none. */
   cursor: none;
 }
 
@@ -118,9 +116,10 @@ body {
 /* Centered connection-state readout, shown until the desktop is streaming.
    A solid background fully hides any stale canvas content behind the readout
    (reconnecting, eviction, waiting) — a plain interstitial, no see-through.
-   It takes the pointer, as .view-only does: the input overlay beneath hides the
-   browser's own cursor for a desktop that draws its own, and with no desktop on
-   screen — connecting, a connection error — that left no pointer at all. */
+   It takes the pointer, as .view-only does: the input overlay beneath shows a
+   black X for a desktop that hands over no pointer shape, and with no desktop
+   on screen — connecting, a connection error — the browser's own is the one
+   that belongs. */
 .status-overlay {
   position: fixed;
   inset: 0;
@@ -991,8 +990,8 @@ body {
    ☰ button and its drawer (z-index 1000) and below every panel and card, so
    everything the menu put on screen still reads at full contrast over it, and
    above the framebuffer it covers. It takes the pointer instead of letting it
-   through: the input overlay beneath hides the browser's own cursor for engines
-   that composite their own into the pixels, and while the menu is up that cursor
+   through: the input overlay beneath wears the remote's shape, or a black X for
+   engines that hand none over, and while the menu is up the browser's own cursor
    is the one the user needs back. A click on it closes the drawer and the
    clipboard panel. See FloatingMenu.tsx. */
 .view-only {

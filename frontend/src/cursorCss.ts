@@ -6,8 +6,8 @@
 // client responsible for the pointer: the hardware pointer wears the shape as a
 // CSS cursor, which is what lets it move with the mouse rather than with the
 // framebuffer. Engines that composite the pointer themselves (a VNC server that
-// ignores the pseudo-encoding) send no `cursor` message at all, and the client
-// keeps its own pointer hidden — see index.css.
+// ignores the pseudo-encoding) send no `cursor` message at all, and the hardware
+// pointer wears a black X instead — see unownedCursor.
 
 export interface CursorImage {
   url: string;
@@ -86,6 +86,54 @@ export function fallbackCursor(): CursorImage {
   return arrow;
 }
 
+let cross: CursorImage | null = null;
+
+// A black X with a white border, worn while no engine has handed a shape over:
+// before a session's first `cursor` message, between attachments, and for a
+// server that sends none at all. The browser's own pointer used to be hidden
+// there, on the reasoning that the remote was drawing one into its pixels, and
+// over a desktop that was not — a blank or sleeping screen — that left no
+// pointer at all. Painted into a canvas for the reason fallbackCursor is.
+export function unownedCursor(): CursorImage {
+  if (cross) {
+    return cross;
+  }
+  const side = 15;
+  const centre = 7;
+  const canvas = document.createElement("canvas");
+  canvas.width = side;
+  canvas.height = side;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    // Both strokes on half-pixel coordinates, so they cross on the centre
+    // pixel, which is the hotspot.
+    ctx.beginPath();
+    ctx.moveTo(3.5, 3.5);
+    ctx.lineTo(11.5, 11.5);
+    ctx.moveTo(11.5, 3.5);
+    ctx.lineTo(3.5, 11.5);
+    ctx.lineCap = "round";
+    // The white pass under the black one leaves a border on every side, so it
+    // reads against any remote background.
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 5;
+    ctx.stroke();
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+  }
+  // Point-sized, as the arrow is.
+  cross = {
+    url: canvas.toDataURL("image/png"),
+    hx: centre,
+    hy: centre,
+    w: side,
+    h: side,
+    pointSized: true,
+  };
+  return cross;
+}
+
 // A cursor image as a CSS url() token. An unquoted token ends at the first
 // `)`, so quoting (and escaping what would close the quote) keeps the image
 // string from spilling into the declaration. Our own base64 can't contain
@@ -94,7 +142,7 @@ export function cssUrl(url: string): string {
   return `url("${url.replace(/["\\]/g, "\\$&")}")`;
 }
 
-// What to draw for the pointer, or null to leave it to the remote.
+// The shape the engine handed over, or null while it has handed none.
 export function cursorImage(remote: RemoteCursor | null): CursorImage | null {
   if (!remote) {
     return null;

@@ -961,10 +961,10 @@ pub enum ServerMsg {
     /// The remote pointer shape changed, and with it the fact that **the
     /// browser** owns pointer rendering for this session — a server that
     /// composites the cursor into the framebuffer (a VNC server that ignores
-    /// the Cursor pseudo-encoding) never sends this, and the browser keeps its
-    /// own pointer hidden. `None` means the remote hid the pointer, or named a
-    /// shape this end will not send; the browser draws its own arrow, because a
-    /// pointer you cannot see is worse than a generic one.
+    /// the Cursor pseudo-encoding) never sends this, and the browser shows a
+    /// black X for its own pointer. `None` means the remote hid the pointer, or
+    /// named a shape this end will not send; the browser draws its own arrow,
+    /// because a pointer you cannot see is worse than a generic one.
     Cursor(Option<CursorShape>),
     /// A fatal session error the client should surface. The session then
     /// returns to the picker, so the browser shows this against the picker.
