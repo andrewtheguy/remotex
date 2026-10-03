@@ -347,6 +347,24 @@ and selects a stored one when it is zero. A shape is a `w·h·4` BGRA pixmap fol
 by a separate `w·h` alpha plane. Each stored shape is its own zlib stream, so a bad
 one can be skipped without disturbing the next or the framebuffer's stream.
 
+**The cursor can stay the arrow while a selection tool is up on the Mac.** A
+tool that takes over the screen to let the user pick something gives the Mac's
+own cursor a new shape, and a remote session keeps showing the shape from before
+it. The tool itself still works: clicks and moves go in as usual. Apple's own
+viewer does the same, so this is not a remotex fault and there is nothing to fix.
+
+The cause is on the Mac. Its cursor changes as soon as the tool starts, but it
+sends no cursor shape while the tool is up. The new shape goes out only when the
+tool ends, after `MiscStatus` 12, with the ordinary shape right behind it. The
+Mac re-reads its cursor when it sees the mouse move, and by all appearances such
+a tool keeps those moves to itself. Nothing a viewer sends makes the Mac send the
+shape sooner. Cursors that change on hover, such as the hand over a link, are
+unaffected.
+
+Seen so far with the camera of Shift-Command-4's window selection and of
+QuickTime's screen recording. For another tool, check Apple's viewer first: if
+the cursor stays the same there too, it is this.
+
 ## Displays
 
 ### The display layout

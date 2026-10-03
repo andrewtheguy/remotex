@@ -60,3 +60,33 @@ tried from the client's side, such as answering the host's network detection,
 which this client does not. It is recorded so that the rectangle is recognised
 as the host's encoding rather than investigated as a fault in the page's
 decoders or the compositor.
+
+## The cursor stays the arrow while a selection tool is up, on a Mac
+
+**What it looks like.** In a session to a Mac, a tool that takes over the screen
+to let the user pick something shows its own cursor on the Mac and the old one in
+the session. Two have been seen:
+
+- Shift-Command-4 and then Space, to take a screenshot of a window: the Mac's
+  cursor becomes a camera, the session's stays the arrow.
+- A screen recording started in QuickTime Player, while choosing what to record:
+  the same camera on the Mac, the same arrow in the session.
+
+The tool still works in both: a click takes the screenshot or starts the
+recording. Cursors that change on hover, such as the hand over a link, are
+unaffected.
+
+**What has been ruled out.** That it is remotex's. Apple's own Screen Sharing
+viewer keeps the arrow in both cases too. The Mac's cursor changes as soon as the
+tool starts, and the Mac sends no cursor shape for as long as the tool is up: the
+camera goes out only when the tool ends, with the ordinary shape right behind it,
+so there is nothing for a client to draw in between. See the cursor cache under
+[The record layer](apple-vnc-889.md#the-record-layer).
+
+**What would move it.** Nothing known: no message a viewer sends makes the Mac
+send the shape sooner. Other tools of the same kind may do it and have not been
+tried; for one, check Apple's viewer first, and add it to the list above if the
+cursor stays the same there too. It is recorded so that a cursor that does not
+change during a screenshot or a recording is recognised as the Mac's rather than
+investigated as a fault in the gateway's cursor handling or the page. It was
+measured in Standard mode; High Performance has not been tried.
