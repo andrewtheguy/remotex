@@ -1,414 +1,553 @@
 import {
+  type CSSProperties,
   type RefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
+import { useDockedHeight } from "./dockedPanel.ts";
 import {
-  DESKTOP_ARROW_ROW_1,
-  DESKTOP_ARROW_ROW_2,
-  DESKTOP_BOTTOM_LEFT,
-  DESKTOP_BOTTOM_RIGHT,
-  DESKTOP_FUNCTION_ROW,
-  DESKTOP_HOME_ROW,
-  DESKTOP_NAV_ROW_1,
-  DESKTOP_NAV_ROW_2,
-  DESKTOP_NUMBER_ROW,
-  DESKTOP_QWERTY_ROW,
-  DESKTOP_SHIFT_LEFT,
-  DESKTOP_SHIFT_RIGHT,
-  DESKTOP_SPACE_KEY,
-  DESKTOP_ZXCV_ROW,
-  FUNCTION_KEY_ROW,
-  GUI_COMBO_ROW,
+  type CellId,
+  cellsOf,
+  type LayoutCell,
+  type LayoutPage,
+  type LayoutRow,
+  labelOf,
   MODIFIER_KEYS,
-  modifierOf,
-  PRIMARY_SCREEN_ROWS,
-  type PrintableSoftKey,
-  ROW_HOME,
-  SECONDARY_SCREEN_ROWS,
-  type SoftKeyboardScreen,
-  type SoftKeyDefinition,
-  type SoftKeyModifiers,
+  PAGE_PC,
+  PAGES,
+  type PageId,
   shiftHeld,
 } from "./softKeyboard.ts";
+import {
+  createHitTester,
+  type GeometryRow,
+  type Rect,
+} from "./softKeyGeometry.ts";
+import {
+  createPressEngine,
+  type HitTester,
+  type ModifierState,
+  type PointerKind,
+  type PointerSample,
+  type PressCommand,
+  type PressEngine,
+  type StepResult,
+} from "./softKeyPress.ts";
+import { TABLET_MIN_SHORT_SIDE } from "./tabletGuestSize.ts";
+import { CAN_PINCH_ZOOM } from "./useRemoteDesktop.ts";
 
-// A held non-modifier key repeats after this initial delay, then at this
-// interval — matching a physical keyboard's typematic feel.
-const REPEAT_DELAY_MS = 400;
-const REPEAT_INTERVAL_MS = 80;
+// The soft keyboard: a docked phone keyboard, or a floating PC grid for
+// everything else. Both are pages of softKeyboard.ts rendered as cells, and
+// one press engine (softKeyPress.ts) listening on the key area turns fingers
+// into keys for both — no cell has a handler of its own.
 
-// How far a finger may travel *along the scroll axis* before a tap on a
-// scrollable row counts as a scroll instead.
-//
-// The scrollable rows cannot fire on pointer-down the way the fixed rows do —
-// that would send a key every time the row is flicked sideways. They used to use
-// `onClick`, which has the opposite failure: a click needs the press and release
-// on the same element with no scroll intervening, so a tap with a few pixels of
-// drift is swallowed and the key never sends at all. Tracking the pointer gives
-// both — the row still scrolls, and a tap that stayed put still counts.
-//
-// Only horizontal travel disqualifies a tap: these rows scroll on one axis, and
-// vertical drift is just what a sloppy tap looks like. Keep this at or below
-// the browsers' own scroll slop (~8–10px) — the tap also fires on
-// `pointercancel` when it stayed inside this budget, so a threshold above the
-// browser's would let a slow deliberate scroll send a key.
-const SCROLL_DRAG_THRESHOLD_PX = 8;
-
-// A finger that has slid several key-heights *off* the row before lifting is a
-// change of mind, not tap jitter — abandon the key instead of firing it.
-const VERTICAL_ABANDON_THRESHOLD_PX = 32;
+// A phone is a touch device whose screen's short side is a phone's, in either
+// orientation: the one client whose keyboard docks along the bottom and insets
+// the canvas, because its screen cannot spare the room a floating card takes
+// and its desktop pans (CAN_PINCH_ZOOM) rather than scrolls. Tablets and
+// pointer clients, narrow windows included, get the floating grid.
+function isPhone(): boolean {
+  return (
+    CAN_PINCH_ZOOM &&
+    Math.min(screen.width, screen.height) < TABLET_MIN_SHORT_SIDE
+  );
+}
 
 interface SoftKeyboardPanelProps {
   // Presses each DOM code in order then releases in reverse (transient — see
-  // useRemoteDesktop.sendKeyCombo). The panel's only channel to the remote.
+  // useRemoteDesktop.sendKeyCombo).
   sendKeyCombo: (codes: string[]) => void;
+  // Presses or releases one DOM code and leaves it so: the shortcut row's held
+  // modifiers (see useRemoteDesktop.sendKey).
+  sendKey: (code: string, pressed: boolean) => void;
   onClose: () => void;
   // Reports the panel's height (CSS px) while it's docked to the bottom edge
-  // (mobile), 0 while it floats (desktop) or when it unmounts. Lets the touch
-  // canvas pan up above the keyboard instead of hiding under it.
+  // (phone), 0 while it floats or when it unmounts. Lets the touch canvas pan
+  // up above the keyboard instead of hiding under it.
   onDockedHeightChange?: (px: number) => void;
+  // Hands focus back to the desktop surface when a key finds it lost: the
+  // physical keyboard's listeners live there.
+  onFocusDesktop: () => void;
 }
 
-// ── Helpers ──
+// ── The engine's host: DOM events in, state and keys out ──
 
-// React key for a definition: a code is unique within a row and, unlike a
-// label, tells the desktop grid's two Shifts (or Alts, or Ctrls) apart. Combos
-// have no single code, so their label stands in.
-function keyOf(def: SoftKeyDefinition): string {
-  return def.type === "combo" ? def.label : def.code;
+interface EngineHandlers {
+  sendKeyCombo: (codes: string[]) => void;
+  sendKey: (code: string, pressed: boolean) => void;
+  onFocusDesktop: () => void;
+  setPage: (page: PageId) => void;
+  setHeld: (held: ReadonlyMap<string, ModifierState>) => void;
+  setActive: (ids: ReadonlySet<CellId>) => void;
+  setPreviews: (
+    update: (
+      prev: ReadonlyMap<number, Preview>,
+    ) => ReadonlyMap<number, Preview>,
+  ) => void;
 }
 
-// Whether this key is a sticky modifier the panel is currently holding.
-function isHeld(def: SoftKeyDefinition, modifiers: SoftKeyModifiers): boolean {
-  return (
-    modifierOf(def) !== null && def.type !== "combo" && modifiers.has(def.code)
-  );
+interface Preview {
+  id: CellId;
+  // The cell's centre x and top y, relative to the key area.
+  x: number;
+  y: number;
 }
 
-function getDisplayLabel(def: SoftKeyDefinition, shift: boolean): string {
-  if (def.type === "printable" && shift) {
-    return def.shiftLabel ?? def.label.toUpperCase();
+function toRect(r: DOMRect): Rect {
+  return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+}
+
+// Measure every key of the area into a hit tester. The shortcut row is left
+// out: its keys commit on tap where they are touched and scroll under a slide,
+// so a slide never resolves into it, and the area's bounds start below it.
+function measure(area: HTMLElement): HitTester {
+  const rows: GeometryRow[] = [];
+  let top = area.getBoundingClientRect().top;
+  for (const rowEl of area.querySelectorAll<HTMLElement>("[data-row]")) {
+    if (rowEl.dataset.row === "shortcut") {
+      top = Math.max(top, rowEl.getBoundingClientRect().bottom);
+      continue;
+    }
+    const cells = [...rowEl.querySelectorAll<HTMLElement>("[data-cell]")].map(
+      (el) => ({
+        id: el.dataset.cell ?? "",
+        rect: toRect(el.getBoundingClientRect()),
+        spacer: el.dataset.spacer === "true",
+      }),
+    );
+    if (cells.length > 0) {
+      rows.push({ rect: toRect(rowEl.getBoundingClientRect()), cells });
+    }
   }
-  return def.label;
+  const bounds = { ...toRect(area.getBoundingClientRect()), top };
+  return createHitTester(rows, bounds);
 }
 
-// ── SoftKeyButton ──
-
-interface SoftKeyButtonProps {
-  def: SoftKeyDefinition;
-  // Whether a Shift is held, which decides the glyph shown.
-  shift: boolean;
-  onPress: (def: SoftKeyDefinition) => void;
-  onRelease: (def: SoftKeyDefinition) => void;
-  isActive?: boolean;
-  scrollable?: boolean;
-  extraClass?: string;
+function pointerKind(type: string): PointerKind {
+  return type === "touch" || type === "pen" ? type : "mouse";
 }
 
-function SoftKeyButton({
-  def,
-  shift,
-  onPress,
-  onRelease,
-  isActive,
-  scrollable,
-  extraClass,
-}: SoftKeyButtonProps) {
-  const repeatTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const repeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pressedRef = useRef(false);
-  // Scrollable rows only: where the finger went down, and whether it has since
-  // travelled far enough to be a scroll rather than a tap.
-  const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
-  const draggedRef = useRef(false);
+// Where a cell sits, for the preview bubble over it.
+function previewOf(area: HTMLElement, id: CellId): Preview | null {
+  const el = area.querySelector<HTMLElement>(`[data-cell="${id}"]`);
+  if (!el) {
+    return null;
+  }
+  const a = area.getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  return { id, x: r.left - a.left + r.width / 2, y: r.top - a.top };
+}
 
-  const clearRepeat = useCallback(() => {
-    if (repeatTimerRef.current) {
-      clearTimeout(repeatTimerRef.current);
-      repeatTimerRef.current = null;
-    }
-    if (repeatIntervalRef.current) {
-      clearInterval(repeatIntervalRef.current);
-      repeatIntervalRef.current = null;
-    }
-  }, []);
+// The cell a pointer went down on, as the DOM has it, or `skip` for a control
+// in the key area with a click of its own (the close button). A spacer is no
+// cell: the hit tester gives the finger to the neighbouring key.
+function cellUnder(e: PointerEvent): { cell: CellId | null; skip: boolean } {
+  const target = e.target instanceof Element ? e.target : null;
+  const cellEl = target?.closest<HTMLElement>("[data-cell]") ?? null;
+  if (cellEl) {
+    const spacer = cellEl.dataset.spacer === "true";
+    return { cell: spacer ? null : (cellEl.dataset.cell ?? null), skip: false };
+  }
+  return { cell: null, skip: target?.closest("button") !== null };
+}
 
-  // Cleanup on unmount.
-  useEffect(() => clearRepeat, [clearRepeat]);
+// Every pointer is captured by the key area, which outlives the keys: a mouse
+// released outside the panel would otherwise be lost, and a touch would
+// otherwise stay with the key it landed on, which a page switch replaces under
+// a resting thumb, taking its lift with it.
+function capture(area: HTMLElement, e: PointerEvent) {
+  try {
+    area.setPointerCapture(e.pointerId);
+  } catch {
+    // A pointer that is already gone: its up or cancel follows.
+  }
+}
 
-  const handlePointerDown = useCallback(
-    (e: React.PointerEvent) => {
-      e.preventDefault();
-      pressedRef.current = true;
-      onPress(def);
+// A key is being typed; if focus has fallen to the body, the physical keyboard
+// has gone silent with it.
+function focusIfLost(h: EngineHandlers) {
+  if (
+    document.activeElement === null ||
+    document.activeElement === document.body
+  ) {
+    h.onFocusDesktop();
+  }
+}
 
-      // Modifiers toggle (no repeat) and combos fire once.
-      if (modifierOf(def) || def.type === "combo") {
-        return;
+function withPreview(
+  prev: ReadonlyMap<number, Preview>,
+  pointerId: number,
+  preview: Preview | null,
+): ReadonlyMap<number, Preview> {
+  const next = new Map(prev);
+  if (preview) {
+    next.set(pointerId, preview);
+  } else {
+    next.delete(pointerId);
+  }
+  return next;
+}
+
+// A tick of feedback where the device has it (Android); iOS has no such API.
+function vibrate() {
+  if (typeof navigator.vibrate === "function") {
+    navigator.vibrate(10);
+  }
+}
+
+// Keep the engine for the panel's life, listen on the key area, and run its
+// commands. The handlers are read through a ref so the listeners are attached
+// once and never go stale. Returns the call that forgets the keys' measured
+// positions, for whatever moves them without changing the page (the floating
+// panel's drag).
+function useSoftKeyEngine(
+  areaRef: RefObject<HTMLDivElement | null>,
+  page: LayoutPage,
+  handlers: EngineHandlers,
+): () => void {
+  const handlersRef = useRef(handlers);
+  useLayoutEffect(() => {
+    handlersRef.current = handlers;
+  });
+
+  const geometryRef = useRef<HitTester | null>(null);
+  const engineRef = useRef<PressEngine | null>(null);
+  if (engineRef.current === null) {
+    engineRef.current = createPressEngine((x, y, prefer) => {
+      if (geometryRef.current === null) {
+        const area = areaRef.current;
+        geometryRef.current = area ? measure(area) : () => null;
       }
+      return geometryRef.current(x, y, prefer);
+    }, cellsOf(page));
+  }
 
-      clearRepeat();
-      repeatTimerRef.current = setTimeout(() => {
-        repeatIntervalRef.current = setInterval(() => {
-          onPress(def);
-        }, REPEAT_INTERVAL_MS);
-      }, REPEAT_DELAY_MS);
-    },
-    [def, onPress, clearRepeat],
-  );
-
-  const stopPress = useCallback(
-    (e: React.PointerEvent) => {
-      e.preventDefault();
-      if (!pressedRef.current) {
-        return;
-      }
-      pressedRef.current = false;
-      clearRepeat();
-      onRelease(def);
-    },
-    [def, onRelease, clearRepeat],
-  );
-
-  // No `preventDefault` on this path: the row under it has to keep panning, and
-  // the key is decided on pointer-up.
-  const startScrollableTap = useCallback((e: React.PointerEvent) => {
-    pointerStartRef.current = { x: e.clientX, y: e.clientY };
-    draggedRef.current = false;
+  // The keys moved: measure again at the next touch.
+  const invalidateGeometry = useCallback(() => {
+    geometryRef.current = null;
   }, []);
 
-  const trackScrollableTap = useCallback((e: React.PointerEvent) => {
-    const start = pointerStartRef.current;
-    if (!start || draggedRef.current) {
+  useLayoutEffect(() => {
+    const area = areaRef.current;
+    if (!area) {
       return;
     }
-    const dx = e.clientX - start.x;
-    const dy = e.clientY - start.y;
-    if (
-      Math.abs(dx) > SCROLL_DRAG_THRESHOLD_PX ||
-      Math.abs(dy) > VERTICAL_ABANDON_THRESHOLD_PX
-    ) {
-      draggedRef.current = true;
-    }
-  }, []);
-
-  // Decides the tap on pointer-up *and* pointer-cancel. The cancel matters:
-  // the browser fires it the moment it claims the gesture for scrolling, and
-  // its slop can trip before pointer-up ever arrives — under the old
-  // cancel-means-drop rule that tap was silently swallowed. If the finger
-  // never crossed the drag threshold, it was a tap, whoever ended it.
-  const finishScrollableTap = useCallback(() => {
-    if (pointerStartRef.current && !draggedRef.current) {
-      onPress(def);
-    }
-    pointerStartRef.current = null;
-  }, [def, onPress]);
-
-  // A mouse pointer that leaves the key mid-press is not a tap on this key.
-  // (Touch never gets here mid-gesture: touch pointers are implicitly captured
-  // by the element that received pointer-down.)
-  const cancelScrollableTap = useCallback(() => {
-    pointerStartRef.current = null;
-  }, []);
-
-  const label = getDisplayLabel(def, shift);
-  const isSingleChar = label.length === 1;
-  const widthClass = def.width
-    ? `sk-wide-${String(def.width).replace(".", "_")}`
-    : "";
-  const showShiftHint =
-    def.type === "printable" &&
-    !shift &&
-    def.shiftLabel &&
-    def.shiftLabel !== def.label.toUpperCase();
-
-  return (
-    <div
-      className={`sk-button ${widthClass} ${extraClass ?? ""} ${isActive ? "sk-active" : ""} ${isSingleChar ? "sk-single-char" : ""}`}
-      {...(scrollable
-        ? {
-            onPointerDown: startScrollableTap,
-            onPointerMove: trackScrollableTap,
-            onPointerUp: finishScrollableTap,
-            onPointerLeave: cancelScrollableTap,
-            onPointerCancel: finishScrollableTap,
-          }
-        : {
-            onPointerDown: handlePointerDown,
-            onPointerUp: stopPress,
-            onPointerLeave: stopPress,
-            onPointerCancel: stopPress,
-          })}
-    >
-      {label}
-      {showShiftHint && (
-        <span className="sk-shift-hint">
-          {(def as PrintableSoftKey).shiftLabel}
-        </span>
-      )}
-    </div>
-  );
-}
-
-// ── Viewport detection ──
-
-// Wide viewports render a full PC keyboard grid; narrow ones the compact
-// mobile layout with a screen toggle. Exported because every docking panel
-// makes the same docked-vs-floating call off the same breakpoint.
-export function useIsDesktop(breakpoint = 800): boolean {
-  const [desktop, setDesktop] = useState(() => window.innerWidth >= breakpoint);
-  useEffect(() => {
-    const mql = window.matchMedia(`(min-width: ${breakpoint}px)`);
-    const handler = (e: MediaQueryListEvent) => setDesktop(e.matches);
-    mql.addEventListener("change", handler);
-    return () => mql.removeEventListener("change", handler);
-  }, [breakpoint]);
-  return desktop;
-}
-
-// Report a bottom-docked panel's height so the touch canvas can inset above
-// it, and 0 whenever it isn't covering anything — floating on desktop, or
-// unmounted. Every panel that docks to the bottom edge shares one inset
-// channel, so they have to agree on this exactly; keeping it in one place is
-// what makes "only one panel is ever open" safe to rely on.
-export function useDockedHeight(
-  panelRef: RefObject<HTMLDivElement | null>,
-  onDockedHeightChange: ((px: number) => void) | undefined,
-) {
-  const isDesktop = useIsDesktop();
-  useEffect(() => {
-    const report = onDockedHeightChange;
-    if (!report) {
-      return;
-    }
-    if (isDesktop) {
-      report(0);
-      return;
-    }
-    const panel = panelRef.current;
-    if (!panel) {
-      return;
-    }
-    const measure = () => report(panel.getBoundingClientRect().height);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(panel);
+    const observer = new ResizeObserver(invalidateGeometry);
+    observer.observe(area);
+    window.addEventListener("resize", invalidateGeometry);
     return () => {
       observer.disconnect();
-      report(0);
+      window.removeEventListener("resize", invalidateGeometry);
     };
-  }, [isDesktop, onDockedHeightChange, panelRef]);
+  }, [areaRef, invalidateGeometry]);
+
+  // Runs a result's commands and arms the next tick. Set by the listener
+  // effect below for the page effect after it, which never outlives it.
+  const applyRef = useRef<(result: StepResult) => void>(() => {});
+
+  useEffect(() => {
+    const area = areaRef.current;
+    const engine = engineRef.current;
+    if (!area || !engine) {
+      return;
+    }
+    let timer: number | null = null;
+
+    const run = (command: PressCommand) => {
+      const h = handlersRef.current;
+      switch (command.kind) {
+        case "send":
+          h.sendKeyCombo(command.codes);
+          focusIfLost(h);
+          break;
+        case "key":
+          h.sendKey(command.code, command.pressed);
+          if (command.pressed) {
+            focusIfLost(h);
+          }
+          break;
+        case "modifiers":
+          h.setHeld(command.held);
+          break;
+        case "active":
+          h.setActive(command.ids);
+          break;
+        case "preview": {
+          const { pointerId, id } = command;
+          const preview = id === null ? null : previewOf(area, id);
+          h.setPreviews((prev) => withPreview(prev, pointerId, preview));
+          break;
+        }
+        case "page":
+          h.setPage(command.page);
+          break;
+        case "haptic":
+          vibrate();
+          break;
+      }
+    };
+
+    const apply = (result: StepResult) => {
+      for (const command of result.commands) {
+        run(command);
+      }
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      if (result.nextTickAt !== null) {
+        const delay = Math.max(0, result.nextTickAt - performance.now());
+        timer = window.setTimeout(() => {
+          timer = null;
+          apply(engine.handle({ kind: "tick", t: performance.now() }));
+        }, delay);
+      }
+    };
+    applyRef.current = apply;
+
+    const sample = (e: PointerEvent): PointerSample => ({
+      id: e.pointerId,
+      kind: pointerKind(e.pointerType),
+      x: e.clientX,
+      y: e.clientY,
+      t: performance.now(),
+    });
+    const onDown = (e: PointerEvent) => {
+      if (e.pointerType === "mouse" && e.button !== 0) {
+        return;
+      }
+      const { cell, skip } = cellUnder(e);
+      if (skip) {
+        return;
+      }
+      // No focus change, no text selection, no compatibility mouse events.
+      e.preventDefault();
+      capture(area, e);
+      apply(engine.handle({ kind: "down", p: sample(e), cell }));
+    };
+    const onMove = (e: PointerEvent) =>
+      apply(engine.handle({ kind: "move", p: sample(e) }));
+    const onUp = (e: PointerEvent) =>
+      apply(engine.handle({ kind: "up", p: sample(e) }));
+    const onCancel = (e: PointerEvent) =>
+      apply(
+        engine.handle({
+          kind: "cancel",
+          id: e.pointerId,
+          t: performance.now(),
+        }),
+      );
+    const cancelAll = () =>
+      apply(engine.handle({ kind: "cancelAll", t: performance.now() }));
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        cancelAll();
+      }
+    };
+    // Android's long-press menu would otherwise cancel a held key; the
+    // compatibility mousedown would otherwise move focus in WebKit.
+    const swallow = (e: Event) => {
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest("[data-cell]")) {
+        e.preventDefault();
+      }
+    };
+
+    area.addEventListener("pointerdown", onDown);
+    area.addEventListener("pointermove", onMove);
+    area.addEventListener("pointerup", onUp);
+    area.addEventListener("pointercancel", onCancel);
+    area.addEventListener("lostpointercapture", onCancel);
+    area.addEventListener("contextmenu", swallow);
+    area.addEventListener("mousedown", swallow);
+    window.addEventListener("blur", cancelAll);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      area.removeEventListener("pointerdown", onDown);
+      area.removeEventListener("pointermove", onMove);
+      area.removeEventListener("pointerup", onUp);
+      area.removeEventListener("pointercancel", onCancel);
+      area.removeEventListener("lostpointercapture", onCancel);
+      area.removeEventListener("contextmenu", swallow);
+      area.removeEventListener("mousedown", swallow);
+      window.removeEventListener("blur", cancelAll);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+      // Whatever was held when the panel closed is over.
+      apply(engine.handle({ kind: "cancelAll", t: performance.now() }));
+      applyRef.current = () => {};
+    };
+  }, [areaRef]);
+
+  // A new page: new cells under the fingers, and new positions under the next
+  // touch. The fingers themselves stay — a thumb resting on a modifier keeps
+  // it through the switch, and its lift still arrives, since the key area that
+  // captured it is the same element on every page.
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) {
+      return;
+    }
+    geometryRef.current = null;
+    applyRef.current(engine.handle({ kind: "layout", cells: cellsOf(page) }));
+  }, [page]);
+
+  return invalidateGeometry;
 }
 
-// ── DesktopKeyboardGrid ──
+// ── Cells ──
 
-interface DesktopKeyboardGridProps {
-  modifiers: SoftKeyModifiers;
-  onPress: (def: SoftKeyDefinition) => void;
-  onRelease: (def: SoftKeyDefinition) => void;
+const ARROW_NAMES: ReadonlyMap<string, string> = new Map([
+  ["ArrowLeft", "Left"],
+  ["ArrowUp", "Up"],
+  ["ArrowDown", "Down"],
+  ["ArrowRight", "Right"],
+]);
+
+// The accessible name. A held modifier is named apart from the strip's key of
+// the same code, which arms rather than holds.
+function nameOf(cell: LayoutCell): string {
+  const { def } = cell;
+  if (def.type === "special") {
+    const name = ARROW_NAMES.get(def.code) ?? def.label;
+    return cell.commit === "hold" ? `Hold ${name}` : name;
+  }
+  return labelOf(def, false);
 }
 
-function DesktopKeyboardGrid({
-  modifiers,
-  onPress,
-  onRelease,
-}: DesktopKeyboardGridProps) {
-  const shift = shiftHeld(modifiers);
-  const renderKey = (def: SoftKeyDefinition, extraClass?: string) => (
-    <SoftKeyButton
-      key={keyOf(def)}
-      def={def}
-      shift={shift}
-      onPress={onPress}
-      onRelease={onRelease}
-      isActive={isHeld(def, modifiers)}
-      extraClass={extraClass}
-    />
-  );
+interface CellProps {
+  cell: LayoutCell;
+  shift: boolean;
+  active: boolean;
+  modifier: ModifierState | undefined;
+}
 
+// A cell is the whole hit area, edge to edge with its neighbours; the keycap
+// inside it is drawn inset and is only a picture. It has no handler of its
+// own: the key area's engine decides what a touch on it means. A real button
+// for the semantics and the accessible name, out of the tab order because the
+// physical keyboard types on the remote, not on this one.
+function Cell({ cell, shift, active, modifier }: CellProps) {
+  const style = { "--u": cell.units } as CSSProperties;
+  const { def } = cell;
+  if (def.type === "spacer") {
+    return (
+      <div
+        className="sk-cell sk-spacer"
+        data-cell={cell.id}
+        data-spacer="true"
+        style={style}
+      />
+    );
+  }
+  const label = labelOf(def, shift);
+  const hint =
+    def.type === "printable" &&
+    !shift &&
+    !def.shifted &&
+    def.shiftLabel &&
+    def.shiftLabel !== def.label.toUpperCase()
+      ? def.shiftLabel
+      : null;
+  const kind =
+    def.type === "special" && MODIFIER_KEYS.has(def.code)
+      ? "modifier"
+      : def.type;
   return (
-    <div className="sk-desktop-layout">
-      <div className="sk-desktop-main">
-        <div className="sk-desktop-row sk-desktop-row-fn">
-          {DESKTOP_FUNCTION_ROW.map((def) =>
-            renderKey(def, def.label === "Esc" ? "sk-dk-esc" : undefined),
-          )}
-        </div>
-        <div className="sk-desktop-row">
-          {DESKTOP_NUMBER_ROW.map((def) =>
-            renderKey(def, def.label === "Bksp" ? "sk-dk-bksp" : undefined),
-          )}
-        </div>
-        <div className="sk-desktop-row">
-          {DESKTOP_QWERTY_ROW.map((def) =>
-            renderKey(
-              def,
-              def.label === "Tab"
-                ? "sk-dk-tab"
-                : def.label === "\\"
-                  ? "sk-dk-slash"
-                  : undefined,
-            ),
-          )}
-        </div>
-        <div className="sk-desktop-row">
-          <div className="sk-dk-home-spacer" />
-          {DESKTOP_HOME_ROW.map((def) =>
-            renderKey(def, def.label === "Enter" ? "sk-dk-enter" : undefined),
-          )}
-        </div>
-        <div className="sk-desktop-row">
-          {renderKey(DESKTOP_SHIFT_LEFT, "sk-dk-shift")}
-          {DESKTOP_ZXCV_ROW.map((def) => renderKey(def))}
-          {renderKey(DESKTOP_SHIFT_RIGHT, "sk-dk-shift")}
-        </div>
-        <div className="sk-desktop-row">
-          {DESKTOP_BOTTOM_LEFT.map((def) => renderKey(def, "sk-dk-modifier"))}
-          {renderKey(DESKTOP_SPACE_KEY, "sk-dk-space")}
-          {DESKTOP_BOTTOM_RIGHT.map((def) => renderKey(def, "sk-dk-modifier"))}
-        </div>
-      </div>
-      <div className="sk-desktop-side">
-        <div className="sk-desktop-side-panel sk-desktop-nav">
-          <div className="sk-desktop-side-row">
-            {DESKTOP_NAV_ROW_1.map((def) => renderKey(def, "sk-dk-side"))}
-          </div>
-          <div className="sk-desktop-side-row">
-            {DESKTOP_NAV_ROW_2.map((def) => renderKey(def, "sk-dk-side"))}
-          </div>
-        </div>
-        <div className="sk-desktop-side-panel sk-desktop-arrows">
-          <div className="sk-desktop-side-row">
-            <div />
-            {renderKey(DESKTOP_ARROW_ROW_1[0], "sk-dk-side sk-dk-arrow")}
-            <div />
-          </div>
-          <div className="sk-desktop-side-row">
-            {DESKTOP_ARROW_ROW_2.map((def) =>
-              renderKey(def, "sk-dk-side sk-dk-arrow"),
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
+    <button
+      type="button"
+      tabIndex={-1}
+      className={`sk-cell sk-${kind}${cell.commit === "hold" ? " sk-hold" : ""}`}
+      aria-label={nameOf(cell)}
+      aria-pressed={kind === "modifier" ? modifier !== undefined : undefined}
+      data-cell={cell.id}
+      data-active={active ? "" : undefined}
+      data-mod={modifier}
+      style={style}
+    >
+      <span className={`sk-cap${label.length === 1 ? " sk-glyph" : ""}`}>
+        {label}
+        {hint && <span className="sk-hint">{hint}</span>}
+      </span>
+    </button>
   );
 }
 
-// ── SoftKeyboardPanel ──
+interface RowsProps {
+  rows: LayoutRow[];
+  shift: boolean;
+  active: ReadonlySet<CellId>;
+  held: ReadonlyMap<string, ModifierState>;
+}
+
+function modifierStateOf(
+  cell: LayoutCell,
+  held: ReadonlyMap<string, ModifierState>,
+): ModifierState | undefined {
+  return cell.def.type === "special" ? held.get(cell.def.code) : undefined;
+}
+
+function Rows({ rows, shift, active, held }: RowsProps) {
+  return rows.map((row, index) => (
+    <div
+      // biome-ignore lint/suspicious/noArrayIndexKey: rows are a fixed order
+      key={index}
+      className={`sk-row sk-row-${row.kind}`}
+      data-row={row.kind}
+    >
+      {row.cells.map((cell) => (
+        <Cell
+          key={cell.id}
+          cell={cell}
+          shift={shift}
+          active={active.has(cell.id)}
+          modifier={modifierStateOf(cell, held)}
+        />
+      ))}
+    </div>
+  ));
+}
+
+// ── The panel ──
 
 export function SoftKeyboardPanel({
   sendKeyCombo,
+  sendKey,
   onClose,
   onDockedHeightChange,
+  onFocusDesktop,
 }: SoftKeyboardPanelProps) {
-  const [modifiers, setModifiers] = useState<SoftKeyModifiers>(() => new Set());
-  const [screen, setScreen] = useState<SoftKeyboardScreen>("primary");
-  const isDesktop = useIsDesktop();
+  const phone = useMemo(isPhone, []);
+  const [pageId, setPageId] = useState<PageId>(phone ? "abc" : "pc");
+  const page = PAGES.get(pageId) ?? PAGE_PC;
+  const [held, setHeld] = useState<ReadonlyMap<string, ModifierState>>(
+    () => new Map(),
+  );
+  const [active, setActive] = useState<ReadonlySet<CellId>>(() => new Set());
+  const [previews, setPreviews] = useState<ReadonlyMap<number, Preview>>(
+    () => new Map(),
+  );
 
-  // ── Drag state (desktop floating mode) ──
   const panelRef = useRef<HTMLDivElement>(null);
+  const areaRef = useRef<HTMLDivElement>(null);
+
+  const invalidateGeometry = useSoftKeyEngine(areaRef, page, {
+    sendKeyCombo,
+    sendKey,
+    onFocusDesktop,
+    setPage: setPageId,
+    setHeld,
+    setActive,
+    setPreviews,
+  });
+
+  // ── Drag (floating) ──
   const dragRef = useRef<{
     pointerId: number;
     offsetX: number;
@@ -458,6 +597,8 @@ export function SoftKeyboardPanel({
         return;
       }
       dragRef.current = null;
+      // The keys have moved; the geometry under the next touch is new.
+      invalidateGeometry();
     };
     window.addEventListener("pointermove", handlePointerMove, {
       passive: false,
@@ -469,62 +610,24 @@ export function SoftKeyboardPanel({
       window.removeEventListener("pointerup", stopDrag);
       window.removeEventListener("pointercancel", stopDrag);
     };
-  }, []);
+  }, [invalidateGeometry]);
 
-  // Report the docked height so the touch canvas can inset above the keyboard.
-  // Only the bottom-docked mobile panel covers the canvas — the desktop panel
-  // floats and is draggable, so it reports 0. A ResizeObserver keeps the inset
-  // in sync as the panel reflows (screen toggle, rotation), and the cleanup
-  // clears it when the panel closes or switches to floating.
-  useDockedHeight(panelRef, onDockedHeightChange);
+  useDockedHeight(panelRef, phone, onDockedHeightChange);
 
-  // Fire a key with the sticky modifiers held around it, then clear them —
-  // sticky modifiers are one-shot, like a physical Shift you tap-then-release.
-  // The remote resolves the shifted symbol from the held Shift, so a printable
-  // "1" with Shift active correctly produces "!" on both RDP and VNC.
-  const fireKeyWithModifiers = useCallback(
-    (code: string) => {
-      sendKeyCombo([...modifiers, code]);
-      if (modifiers.size > 0) {
-        setModifiers(new Set());
+  const cells = useMemo(() => cellsOf(page), [page]);
+  const shift = shiftHeld(held.keys());
+
+  // Held modifiers with no key on this page — a right Alt armed on the Sym
+  // page, say — are named beside the close button so they are never invisible.
+  const unseen = useMemo(() => {
+    const onPage = new Set<string>();
+    for (const cell of cells.values()) {
+      if (cell.def.type === "special") {
+        onPage.add(cell.def.code);
       }
-    },
-    [modifiers, sendKeyCombo],
-  );
-
-  const handleKeyPress = useCallback(
-    (def: SoftKeyDefinition) => {
-      if (def.type === "special" && modifierOf(def)) {
-        const { code } = def;
-        setModifiers((prev) => {
-          const next = new Set(prev);
-          if (!next.delete(code)) {
-            next.add(code);
-          }
-          return next;
-        });
-        return;
-      }
-      if (def.type === "combo") {
-        sendKeyCombo(def.codes);
-        return;
-      }
-      // printable / non-modifier special: the DOM code, with any sticky
-      // modifiers held around it.
-      fireKeyWithModifiers(def.code);
-    },
-    [fireKeyWithModifiers, sendKeyCombo],
-  );
-
-  const handleKeyRelease = useCallback((_def: SoftKeyDefinition) => {
-    // Presses are transient (down+up inside sendKeyCombo); pointer-up only
-    // needs to stop key repeat, which SoftKeyButton handles itself.
-  }, []);
-
-  const topRow = screen === "primary" ? GUI_COMBO_ROW : FUNCTION_KEY_ROW;
-  const shift = shiftHeld(modifiers);
-  const mainRows =
-    screen === "primary" ? PRIMARY_SCREEN_ROWS : SECONDARY_SCREEN_ROWS;
+    }
+    return [...held].filter(([code]) => !onPage.has(code));
+  }, [cells, held]);
 
   const panelStyle = dragPosition
     ? {
@@ -535,108 +638,110 @@ export function SoftKeyboardPanel({
       }
     : undefined;
 
+  const shortcutRows = page.rows.filter((row) => row.kind === "shortcut");
+  const keyRows = page.rows.filter((row) => row.kind !== "shortcut");
+
   return (
-    <div className="sk-panel" ref={panelRef} style={panelStyle}>
-      {/* Desktop drag bar + close */}
-      <div className="sk-toolbar">
-        <div className="sk-toolbar-spacer" />
-        <button
-          type="button"
-          className="sk-drag-handle"
-          aria-label="Drag soft keyboard"
-          onPointerDown={handleDragStart}
-        >
-          ⠿
-        </button>
-        <button
-          type="button"
-          className="sk-toolbar-close"
-          aria-label="Close soft keyboard"
-          onClick={() => {
-            if (!dragRef.current) {
-              onClose();
-            }
-          }}
-        >
-          ✕
-        </button>
-      </div>
-
-      {isDesktop ? (
-        <DesktopKeyboardGrid
-          modifiers={modifiers}
-          onPress={handleKeyPress}
-          onRelease={handleKeyRelease}
-        />
-      ) : (
-        <>
-          {/* Top scrollable row: combos (primary) or function keys (secondary) */}
-          <div
-            className={screen === "primary" ? "sk-combo-row" : "sk-fkey-row"}
+    <div
+      className={`sk-panel ${phone ? "sk-docked" : "sk-floating"}`}
+      ref={panelRef}
+      style={panelStyle}
+    >
+      {!phone && (
+        <div className="sk-toolbar">
+          <div className="sk-toolbar-spacer" />
+          <button
+            type="button"
+            className="sk-drag-handle"
+            aria-label="Drag soft keyboard"
+            onPointerDown={handleDragStart}
           >
-            {topRow.map((def) => (
-              <SoftKeyButton
-                key={keyOf(def)}
-                def={def}
-                shift={shift}
-                onPress={handleKeyPress}
-                onRelease={handleKeyRelease}
-                isActive={isHeld(def, modifiers)}
-                scrollable
-              />
-            ))}
-          </div>
-
-          {/* Main rows */}
-          <div className="sk-grid">
-            {mainRows.map((row, rowIndex) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: stable row order
-              <div key={rowIndex} className="sk-row">
-                {row === ROW_HOME && <div className="sk-half-spacer" />}
-                {row.map((def) => (
-                  <SoftKeyButton
-                    key={keyOf(def)}
-                    def={def}
-                    shift={shift}
-                    onPress={handleKeyPress}
-                    onRelease={handleKeyRelease}
-                    isActive={isHeld(def, modifiers)}
-                  />
-                ))}
-                {row === ROW_HOME && <div className="sk-half-spacer" />}
-              </div>
-            ))}
-          </div>
-
-          {/* Screen toggle + modifier indicators + close */}
-          <div className="sk-status-row">
-            <button
-              type="button"
-              className="sk-screen-toggle"
-              onClick={() =>
-                setScreen(screen === "primary" ? "secondary" : "primary")
+            ⠿
+          </button>
+          <button
+            type="button"
+            className="sk-close"
+            aria-label="Close soft keyboard"
+            onClick={() => {
+              if (!dragRef.current) {
+                onClose();
               }
-            >
-              {screen === "primary" ? "Sym/Nav" : "ABC"}
-            </button>
-            <div className="sk-modifier-indicators">
-              {[...modifiers].map((code) => (
-                <span key={code} className="sk-modifier-badge">
-                  {MODIFIER_KEYS.get(code)?.label ?? code}
-                </span>
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      <div className="sk-area" ref={areaRef}>
+        {shortcutRows.map((row) => (
+          <div key={row.kind} className="sk-shortcut" data-row="shortcut">
+            <div className="sk-scroller">
+              {row.cells.map((cell) => (
+                <Cell
+                  key={cell.id}
+                  cell={cell}
+                  shift={shift}
+                  active={active.has(cell.id)}
+                  modifier={modifierStateOf(cell, held)}
+                />
               ))}
             </div>
+            {unseen.length > 0 && (
+              <div className="sk-badges">
+                {unseen.map(([code, state]) => (
+                  <span key={code} className="sk-badge" data-mod={state}>
+                    {MODIFIER_KEYS.get(code)?.label ?? code}
+                  </span>
+                ))}
+              </div>
+            )}
             <button
               type="button"
-              className="sk-mobile-close"
+              className="sk-close"
               aria-label="Close soft keyboard"
               onClick={onClose}
             >
               ✕
             </button>
           </div>
-        </>
-      )}
+        ))}
+
+        {page.side.length > 0 ? (
+          <div className="sk-pc">
+            <div className="sk-pc-main">
+              <Rows rows={keyRows} shift={shift} active={active} held={held} />
+            </div>
+            <div className="sk-pc-side">
+              <Rows
+                rows={page.side}
+                shift={shift}
+                active={active}
+                held={held}
+              />
+            </div>
+          </div>
+        ) : (
+          <Rows rows={keyRows} shift={shift} active={active} held={held} />
+        )}
+
+        {[...previews.values()].map((preview) => {
+          const cell = cells.get(preview.id);
+          if (!cell) {
+            return null;
+          }
+          return (
+            <div
+              key={preview.id}
+              className="sk-preview"
+              aria-hidden="true"
+              style={{ left: `${preview.x}px`, top: `${preview.y}px` }}
+            >
+              {labelOf(cell.def, shift)}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -199,6 +199,7 @@ export default function RemoteDesktop({
     setCamera,
     setMic,
     sendKeyCombo,
+    sendKey,
     requestClipboard,
     sendClipboard,
     setBottomInset,
@@ -278,6 +279,7 @@ export default function RemoteDesktop({
           onUnauthorized={onUnauthorized}
           onSwitchTarget={switchTarget}
           sendKeyCombo={sendKeyCombo}
+          sendKey={sendKey}
           onKeyboardInset={setBottomInset}
           remoteClipboard={remoteClipboard}
           onFetchClipboard={requestClipboard}

@@ -1123,51 +1123,79 @@ body {
   text-align: right;
 }
 
-/* Phase 10: the soft keyboard. It uses this project's GitHub-dark palette. On
-  narrow viewports it docks to the bottom
-   edge (compact layout, screen toggle, sticky-modifier badges); at ≥800px it
-   becomes a draggable floating PC-keyboard grid. Every key routes through the
-   same DOM-code sendKeyCombo the toolbar uses — no bespoke input path. It sits
-   above the FAB/toolbar (z-index) and, on touch, overlaps the canvas: the
-   remote can be panned out from under it with a one-finger drag. */
+/* ── The soft keyboard ───────────────────────────────────────────────────── */
+/* GitHub-dark, like the rest of the page. A phone docks it along the bottom
+   edge and the touch canvas pans up above it; everything else gets a floating,
+   draggable PC grid (SoftKeyboardPanel.tsx decides). Every key routes through
+   the same DOM-code sendKeyCombo the toolbar uses — no bespoke input path.
+
+   A cell is the whole hit area: cells meet edge to edge, with no gap and no
+   negative margin, so there is no dead space a finger can land in. The keycap
+   is a picture drawn inset inside the cell. The pointer handling lives on the
+   key area, not the cells (softKeyPress.ts), so a cell has no `:active` style
+   either: `data-active` is what the engine says is under a finger. */
 .sk-panel {
   position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: rgba(22, 27, 34, 0.98);
-  border-top: 1px solid #30363d;
   z-index: 2000;
-  padding: 6px 4px 8px;
+  background: rgba(22, 27, 34, 0.98);
   color: #e6edf3;
   user-select: none;
   -webkit-user-select: none;
-  touch-action: manipulation;
 }
 
-@media (min-width: 800px) {
-  .sk-panel {
-    bottom: 16px;
-    right: 16px;
-    left: auto;
-    width: 760px;
-    border: 1px solid #30363d;
-    border-radius: 12px;
-    box-shadow: 0 6px 24px rgba(1, 4, 9, 0.6);
+/* Docked: the width of a phone, with the home indicator's band under the
+   bottom row rather than across it (index.html opts into the safe area). */
+.sk-docked {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  border-top: 1px solid #30363d;
+  padding: 4px 3px max(env(safe-area-inset-bottom, 0px), 8px);
+  /* A row's height follows the screen: seven rows fit a phone in portrait with
+     room for the desktop above, and shrink in landscape, where the keyboard
+     would otherwise be most of the screen. */
+  --sk-row-h: clamp(34px, calc(40vh / 7), 44px);
+  --sk-row-s: calc(var(--sk-row-h) * 0.82);
+}
+
+@supports (height: 1dvh) {
+  .sk-docked {
+    --sk-row-h: clamp(34px, calc(40dvh / 7), 44px);
   }
 }
 
-/* Drag bar toolbar — desktop only. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .sk-docked {
+    --sk-row-h: clamp(26px, calc(55vh / 7), 34px);
+    padding-bottom: 6px;
+  }
+
+  @supports (height: 1dvh) {
+    .sk-docked {
+      --sk-row-h: clamp(26px, calc(55dvh / 7), 34px);
+    }
+  }
+}
+
+/* Floating: a card at the bottom right, dragged by its handle. */
+.sk-floating {
+  bottom: 16px;
+  right: 16px;
+  width: 760px;
+  max-width: calc(100vw - 32px);
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(1, 4, 9, 0.6);
+  padding: 6px 6px 8px;
+  --sk-row-h: 34px;
+  --sk-row-s: 30px;
+}
+
+/* Drag bar — floating only. */
 .sk-toolbar {
-  display: none;
-}
-
-@media (min-width: 800px) {
-  .sk-toolbar {
-    display: flex;
-    gap: 0.25rem;
-    margin-bottom: 0.25rem;
-  }
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
 }
 
 .sk-toolbar-spacer {
@@ -1199,11 +1227,13 @@ body {
   background: #30363d;
 }
 
-.sk-toolbar-close,
-.sk-mobile-close {
+.sk-close {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
+  width: 1.4rem;
+  height: 1.4rem;
   border-radius: 6px;
   border: 1px solid rgba(248, 81, 73, 0.4);
   background: rgba(248, 81, 73, 0.12);
@@ -1216,144 +1246,84 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-.sk-toolbar-close {
-  width: 1.4rem;
-  height: 1.4rem;
-}
-
-.sk-mobile-close {
-  margin-left: auto;
-  width: 1.6rem;
-  height: 1.6rem;
-}
-
-.sk-toolbar-close:active,
-.sk-mobile-close:active {
+.sk-close:active {
   background: rgba(248, 81, 73, 0.25);
 }
 
-/* Scrollable top rows (combos / function keys). */
-.sk-combo-row,
-.sk-fkey-row {
-  display: flex;
-  gap: 4px;
-  overflow-x: auto;
-  padding: 0 4px 6px;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.sk-combo-row::-webkit-scrollbar,
-.sk-fkey-row::-webkit-scrollbar {
-  display: none;
-}
-
-/* `pan-x`, not `manipulation`: these rows scroll on one axis only, so the sole
-   gesture the browser may claim from a key is a horizontal pan. Under
-   `manipulation` a few px of vertical tap jitter could start a (useless)
-   vertical pan, firing pointercancel and eating the tap. */
-.sk-combo-row .sk-button {
-  flex: 0 0 auto;
-  padding: 6px 10px;
-  font-size: 0.7rem;
-  touch-action: pan-x;
-}
-
-.sk-fkey-row .sk-button {
-  flex: 0 0 auto;
-  padding: 6px 8px;
-  font-size: 0.68rem;
-  touch-action: pan-x;
-}
-
-/* Grid and rows.
-
-   No gap anywhere, and neighbouring borders collapse into each other — the same
-   treatment `.sk-desktop-row` below already gets, and for a reason that matters
-   far more on a phone: a gutter is dead space. A tap landing in it hits `.sk-row`
-   and does nothing at all — no key, no feedback, no way to tell it apart from a
-   key that was sent and is waiting on a lagging remote. At 3px between ten keys
-   and between five rows that was ~13% of the panel's surface, against a finger
-   that lands within a couple of px of where it meant to. Every pixel now belongs
-   to some key. */
-.sk-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  padding: 0 4px;
+/* The key area: the one element the press engine listens on. No gesture of
+   the browser's may start here — a pan or a pinch would cancel a finger, and
+   on iOS not even say so. `touch-action` does not inherit, so the cells state
+   it again. */
+.sk-area {
+  position: relative;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .sk-row {
   display: flex;
-  gap: 0;
-  justify-content: center;
+  height: var(--sk-row-h);
 }
 
-.sk-row > .sk-button {
-  margin-right: -1px;
+.sk-row-strip {
+  height: var(--sk-row-s);
 }
 
-.sk-row + .sk-row {
-  margin-top: -1px;
-}
-
-/* Half a key of dead margin at each end of the home row, so `a` starts and `l`
-   ends half a key in from the row above — the stagger of a real keyboard. Half
-   *each*, so the nine keys still measure ten units and stay the same width as
-   every other row.
-
-   Inert on purpose: `pointer-events: none` means the inset is the one place on
-   this keyboard a tap is *meant* to do nothing, which is the opposite of the
-   gutters removed above. A tap there belongs to no key and there is no honest
-   key to give it. */
-.sk-half-spacer {
-  flex: 0.5 1 0;
+/* A cell: the hit area, `--u` units of its row wide, the keycap inset in it. A
+   button reset to nothing, so what is left is the semantics. */
+.sk-cell {
+  appearance: none;
+  -webkit-appearance: none;
+  display: flex;
+  flex: var(--u, 1) 1 0;
   min-width: 0;
-  visibility: hidden;
-  pointer-events: none;
-  margin-right: -1px;
-}
-
-/* Individual key button. */
-.sk-button {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  padding: 10px 4px;
-  background: linear-gradient(to bottom, #21262d, #161b22);
-  border: 1px solid #30363d;
-  border-radius: 5px;
-  color: #e6edf3;
-  font-size: 0.78rem;
-  text-align: center;
+  margin: 0;
+  padding: 3px 2px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  touch-action: none;
   cursor: pointer;
-  line-height: 1.1;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  /* Stated on the key rather than left to `.sk-panel`. `touch-action` does not
-     inherit — an ancestor's value constrains a gesture, but it is the hit-test
-     target's own value that decides, so a key that is ever reparented or reused
-     outside the panel keeps its behaviour. `manipulation` is what drops the
-     double-tap-zoom wait. */
-  touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
 
-.sk-button:active,
-.sk-active {
-  background: linear-gradient(to bottom, #388bfd, #1f6feb);
-  border-color: #388bfd;
-  color: #fff;
+.sk-cell:focus {
+  outline: none;
 }
 
-.sk-single-char {
-  font-size: 0.95rem;
+.sk-spacer {
+  visibility: hidden;
+}
+
+.sk-cap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid #30363d;
+  background: linear-gradient(to bottom, #21262d, #161b22);
+  font-size: 0.72rem;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sk-glyph {
+  font-size: 1.05rem;
   font-weight: 500;
 }
 
-/* Shift hint in the corner (the shifted glyph, e.g. "!" over "1"). */
-.sk-shift-hint {
+.sk-row-strip .sk-glyph {
+  font-size: 1.1rem;
+}
+
+/* The shifted glyph in the corner ("!" over "1"). */
+.sk-hint {
   position: absolute;
   top: 2px;
   right: 3px;
@@ -1362,172 +1332,146 @@ body {
   line-height: 1;
 }
 
-/* Width variants (flex-grow multiples). */
-.sk-wide-1_3 {
-  flex: 1.3;
-}
-.sk-wide-1_5 {
-  flex: 1.5;
-}
-.sk-wide-2 {
-  flex: 2;
-}
-.sk-wide-3 {
-  flex: 3;
+.sk-modifier .sk-cap {
+  background: linear-gradient(to bottom, #233a5e, #1b2b47);
+  border-color: #2f4f80;
 }
 
-/* Status row (screen toggle + modifier badges + close). */
-.sk-status-row {
+.sk-page .sk-cap {
+  background: #2d333b;
+  font-size: 0.7rem;
+}
+
+/* A held modifier of the shortcut row: down only while touched, drawn open so
+   it reads apart from the strip's key that arms for the next one. */
+.sk-hold .sk-cap {
+  background: #1b2b47;
+  border-style: dashed;
+}
+
+/* Under a finger, or a modifier armed one-shot, held by a finger, or down on
+   the wire. */
+.sk-cell[data-active] .sk-cap,
+.sk-cell[data-mod] .sk-cap {
+  background: linear-gradient(to bottom, #388bfd, #1f6feb);
+  border-color: #388bfd;
+  border-style: solid;
+  color: #fff;
+}
+
+/* The shortcut row: scrollable, with the close button fixed at its end. Its
+   keys commit on a tap where they are touched and let a slide scroll the row,
+   so `pan-x` is the one gesture the browser may take from them. */
+.sk-shortcut {
+  display: flex;
+  align-items: stretch;
+  height: var(--sk-row-s);
+  margin-bottom: 2px;
+}
+
+.sk-scroller {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  touch-action: pan-x;
+}
+
+.sk-scroller::-webkit-scrollbar {
+  display: none;
+}
+
+.sk-scroller .sk-cell {
+  flex: 0 0 auto;
+  touch-action: pan-x;
+}
+
+.sk-scroller .sk-cap {
+  padding: 0 10px;
+  font-size: 0.7rem;
+}
+
+.sk-shortcut .sk-close {
+  width: 2.4rem;
+  height: auto;
+  margin: 3px 0 3px 4px;
+}
+
+.sk-badges {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 4px 0;
+  gap: 3px;
+  padding-left: 4px;
 }
 
-.sk-screen-toggle {
-  background: #21262d;
-  border: 1px solid #30363d;
-  border-radius: 5px;
-  color: #e6edf3;
-  font-size: 0.72rem;
-  padding: 4px 10px;
-  cursor: pointer;
-}
-
-.sk-screen-toggle:active {
-  background: #1f6feb;
-  border-color: #388bfd;
-  color: #fff;
-}
-
-.sk-modifier-indicators {
-  display: flex;
-  gap: 4px;
-}
-
-.sk-modifier-badge {
+.sk-badge {
   background: #1f6feb;
   color: #fff;
-  font-size: 0.62rem;
-  padding: 2px 6px;
+  font-size: 0.6rem;
+  padding: 2px 5px;
   border-radius: 3px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
-/* ── Desktop PC keyboard layout (≥800px) ── */
+/* The key a touch is resting on, shown above the finger. Decorative and
+   untouchable: it must never be what a hit test finds. */
+.sk-preview {
+  position: absolute;
+  z-index: 1;
+  width: 46px;
+  height: 56px;
+  margin-top: -6px;
+  transform: translate(-50%, -100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid #484f58;
+  background: #2d333b;
+  color: #fff;
+  font-size: 1.5rem;
+  font-weight: 500;
+  box-shadow: 0 4px 14px rgba(1, 4, 9, 0.6);
+  pointer-events: none;
+}
 
-.sk-desktop-layout {
+/* The PC grid: the main block and, beside it, the navigation and arrow
+   cluster, arrows at the bottom as on the hardware. */
+.sk-pc {
   display: grid;
-  /* Side cluster is wide enough for the 4-char nav labels (Home/PgUp/PgDn);
-     at 8rem they truncated to "Ho…"/"Pg…" and PgUp/PgDn were indistinguishable.
-     The panel width is fixed, so this only shaves a couple px off each wide
-     main key. */
   grid-template-columns: 1fr 9.5rem;
   gap: 0.3rem;
-  padding: 0 4px;
 }
 
-.sk-desktop-main {
-  display: grid;
-  gap: 0;
+.sk-pc-main {
+  min-width: 0;
 }
 
-.sk-desktop-row {
-  display: flex;
-  gap: 0;
-}
-
-.sk-desktop-row > .sk-button {
-  margin-right: -1px;
-  border-radius: 0;
-  padding-top: 8px;
-  padding-bottom: 8px;
-}
-
-.sk-desktop-row + .sk-desktop-row {
-  margin-top: -1px;
-}
-
-.sk-desktop-row-fn {
-  margin-bottom: 0.3rem;
-}
-
-.sk-desktop-side {
-  width: 9.5rem;
-  border-left: 1px solid #30363d;
+.sk-pc-side {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  border-left: 1px solid #30363d;
   padding-left: 0.3rem;
 }
 
-.sk-desktop-side-panel {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid #30363d;
-  border-radius: 4px;
-  background: rgba(33, 38, 45, 0.5);
-  overflow: hidden;
+.sk-pc-side .sk-row {
+  height: var(--sk-row-s);
 }
 
-.sk-desktop-nav {
-  gap: 0.15rem;
-  padding: 0.15rem;
-}
-
-.sk-desktop-arrows {
+.sk-pc-side .sk-row:nth-child(3) {
   margin-top: auto;
-  gap: 0.15rem;
-  padding: 0.15rem;
 }
 
-.sk-desktop-side-row {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.15rem;
+.sk-pc-side .sk-cap {
+  font-size: 0.68rem;
 }
 
-/* Desktop key width variants. */
-.sk-dk-esc {
-  flex: 1.2;
-}
-.sk-dk-tab {
-  flex: 1.45;
-}
-.sk-dk-bksp {
-  flex: 1.75;
-}
-.sk-dk-slash {
-  flex: 1.15;
-}
-.sk-dk-enter {
-  flex: 1.95;
-}
-.sk-dk-shift {
-  flex: 1.95;
-}
-.sk-dk-modifier {
-  flex: 1.1;
-}
-.sk-dk-space {
-  flex: 9;
-}
-
-.sk-dk-side {
-  min-width: 0;
-  min-height: 0;
-  padding: 4px 3px;
-  /* Slightly smaller than the main keys so multi-char labels never clip. */
-  font-size: 0.72rem;
-  border-radius: 3px;
-}
-
-.sk-dk-arrow {
-  font-size: 1.1rem;
-}
-
-.sk-dk-home-spacer {
-  flex: 2.1;
+.sk-pc-main .sk-row:first-child {
+  margin-bottom: 0.3rem;
 }
 
 /* ── Docked panels ───────────────────────────────────────────────────────── */

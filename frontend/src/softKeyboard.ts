@@ -6,25 +6,29 @@
 // soft key is just a code, and shifted symbols fall out of holding the real
 // Shift modifier. That reuses the existing pipeline for both engines instead
 // of minting a second, keysym-only input path.
+//
+// This module is data only: pages of rows of cells, each cell a key definition,
+// a width in units and the way it commits. How a finger turns a cell into a
+// key is softKeyPress.ts; where a finger is, softKeyGeometry.ts.
 
-// ── Types ──
+// ── Key definitions ──
 
 export interface PrintableSoftKey {
   type: "printable";
   label: string;
   code: string;
-  // Cosmetic only: the glyph shown when Shift is active (e.g. "!" over "1").
-  // Letters omit it — the display just upper-cases the label. The character
-  // itself is produced by the remote from the held Shift, not from this field.
+  // Cosmetic only: the glyph shown in the corner for Shift (e.g. "!" over "1").
+  // The character itself is produced by the remote from a held Shift.
   shiftLabel?: string;
-  width?: number;
+  // The key *is* the shifted symbol: sent as Shift plus the code, so `_` or `{`
+  // on the Sym page needs no Shift of its own.
+  shifted?: boolean;
 }
 
 export interface SpecialSoftKey {
   type: "special";
   label: string;
   code: string;
-  width?: number;
 }
 
 export interface ComboSoftKey {
@@ -32,15 +36,31 @@ export interface ComboSoftKey {
   label: string;
   // DOM codes pressed in order, released in reverse (see sendKeyCombo).
   codes: string[];
-  width?: number;
+}
+
+// Switches the phone keyboard to another page.
+export interface PageSoftKey {
+  type: "page";
+  label: string;
+  page: PageId;
+}
+
+// Inert width: the half key at each end of the home row, the Caps Lock slot of
+// the PC grid. Drawn as nothing; a finger on it belongs to the neighbouring key.
+export interface SpacerSoftKey {
+  type: "spacer";
 }
 
 export type SoftKeyDefinition =
   | PrintableSoftKey
   | SpecialSoftKey
-  | ComboSoftKey;
+  | ComboSoftKey
+  | PageSoftKey
+  | SpacerSoftKey;
 
-// The sticky modifiers the panel can hold, one entry per physical key: both
+// ── Modifiers ──
+
+// The modifiers the keyboard can hold, one entry per physical key: both
 // sides of Shift, Ctrl, Alt and Super are distinct codes, exactly as a hardware
 // keyboard reports them, and the backend keeps them apart (Alt_R vs Alt_L, the
 // E0-extended scancode) — so a right-hand soft key really is the right-hand key
@@ -66,11 +86,7 @@ export const MODIFIER_KEYS: ReadonlyMap<string, ModifierKey> = new Map([
   ["MetaRight", { kind: "super", side: "right", label: "RSuper" }],
 ]);
 
-// The modifier codes currently held sticky, in the order they were toggled on.
-// Sent down in that order ahead of the key and released after it.
-export type SoftKeyModifiers = ReadonlySet<string>;
-
-// Which sticky modifier a key toggles, or null if it is not a modifier key. A
+// Which modifier a key holds, or null if it is not a modifier key. A
 // modifier inside a combo (Ctrl in Ctrl+C) is not one: only a `special` key
 // whose own code is a modifier is.
 export function modifierOf(def: SoftKeyDefinition): ModifierKey | null {
@@ -80,51 +96,193 @@ export function modifierOf(def: SoftKeyDefinition): ModifierKey | null {
   return MODIFIER_KEYS.get(def.code) ?? null;
 }
 
-// Whether either Shift is held — what decides the glyphs the keys display.
-export function shiftHeld(modifiers: SoftKeyModifiers): boolean {
-  return modifiers.has("ShiftLeft") || modifiers.has("ShiftRight");
+// Whether either Shift is among the held codes — what decides the glyphs the
+// keys display.
+export function shiftHeld(held: Iterable<string>): boolean {
+  for (const code of held) {
+    if (code === "ShiftLeft" || code === "ShiftRight") {
+      return true;
+    }
+  }
+  return false;
 }
 
-export type SoftKeyboardScreen = "primary" | "secondary";
+// ── Layout model ──
+
+export type PageId = "abc" | "sym" | "pc";
+
+// How a cell turns a finger into a key:
+// - `lift`: the key under the finger when it lifts, after any slide to correct;
+// - `down`: at once on touch, then repeating while held (Backspace, arrows);
+// - `tap`: on lift, only if the finger stayed put — the scrollable shortcut row,
+//   where a slide is the row scrolling and never a change of key;
+// - `hold`: a modifier pressed on the wire for as long as the finger rests on
+//   it — the shortcut row's Shift, Ctrl, Alt and Super, held for the other
+//   thumb or for a tap on the canvas, and never armed for a later key.
+export type Commit = "lift" | "down" | "tap" | "hold";
+
+// A cell's identity within its page: "page:row:col". Never a code — Tab sits in
+// two places on a PC keyboard and both Shifts share a label.
+export type CellId = string;
+
+export interface LayoutCell {
+  id: CellId;
+  def: SoftKeyDefinition;
+  // Width as a share of the row: a phone row is ten units.
+  units: number;
+  commit: Commit;
+}
+
+export type RowKind = "shortcut" | "strip" | "main" | "side";
+
+export interface LayoutRow {
+  kind: RowKind;
+  cells: LayoutCell[];
+}
+
+export interface LayoutPage {
+  id: PageId;
+  rows: LayoutRow[];
+  // The PC grid's navigation and arrow cluster, laid beside `rows`.
+  side: LayoutRow[];
+}
+
+// The keys that commit on touch and repeat while held: the editing and cursor
+// keys a physical keyboard's typematic serves, and nothing that types a
+// character a slide could still correct. Enter is deliberately absent — an
+// accidental Enter in a terminal is the costliest mis-hit on this surface.
+export const REPEATING_CODES: ReadonlySet<string> = new Set([
+  "Backspace",
+  "Delete",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "Space",
+  "Tab",
+  "PageUp",
+  "PageDown",
+]);
+
+function commitOf(def: SoftKeyDefinition): Commit {
+  if (def.type === "special" && REPEATING_CODES.has(def.code)) {
+    return "down";
+  }
+  return "lift";
+}
 
 // ── Builders ──
 
-function p(
-  label: string,
-  code: string,
-  shiftLabel?: string,
-  width?: number,
-): PrintableSoftKey {
-  return { type: "printable", label, code, shiftLabel, width };
+interface Key {
+  def: SoftKeyDefinition;
+  units: number;
+  // A commit of the key's own, over its row's.
+  commit?: Commit;
 }
 
-function s(label: string, code: string, width?: number): SpecialSoftKey {
-  return { type: "special", label, code, width };
+function p(label: string, code: string, shiftLabel?: string, units = 1): Key {
+  return { def: { type: "printable", label, code, shiftLabel }, units };
 }
 
-function c(label: string, codes: string[], width?: number): ComboSoftKey {
-  return { type: "combo", label, codes, width };
+// A shifted printable: the key is the shifted symbol itself.
+function ps(label: string, code: string, units = 1): Key {
+  return { def: { type: "printable", label, code, shifted: true }, units };
 }
 
-// ── GUI combo row (scrollable quick-access, primary screen) ──
+function s(label: string, code: string, units = 1): Key {
+  return { def: { type: "special", label, code }, units };
+}
 
-export const GUI_COMBO_ROW: SoftKeyDefinition[] = [
+function c(label: string, codes: string[], units = 1): Key {
+  return { def: { type: "combo", label, codes }, units };
+}
+
+// A modifier held on the wire while touched.
+function hold(label: string, code: string): Key {
+  return { def: { type: "special", label, code }, units: 1, commit: "hold" };
+}
+
+function pg(label: string, page: PageId, units = 1): Key {
+  return { def: { type: "page", label, page }, units };
+}
+
+function gap(units: number): Key {
+  return { def: { type: "spacer" }, units };
+}
+
+function row(
+  page: PageId,
+  index: number,
+  kind: RowKind,
+  keys: Key[],
+  commit?: Commit,
+): LayoutRow {
+  return {
+    kind,
+    cells: keys.map((key, col) => ({
+      id: `${page}:${index}:${col}`,
+      def: key.def,
+      units: key.units,
+      commit: key.commit ?? commit ?? commitOf(key.def),
+    })),
+  };
+}
+
+function page(
+  id: PageId,
+  rows: { kind: RowKind; keys: Key[]; commit?: Commit }[],
+  side: { kind: RowKind; keys: Key[] }[] = [],
+): LayoutPage {
+  const main = rows.map((r, i) => row(id, i, r.kind, r.keys, r.commit));
+  const cluster = side.map((r, i) => row(id, rows.length + i, r.kind, r.keys));
+  return { id, rows: main, side: cluster };
+}
+
+// ── Shortcut rows (scrollable, phone pages) ──
+
+// The held modifiers lead both shortcut rows: pressed and released alone,
+// Super is the Start key, and under a finger each one is a real modifier for
+// the other thumb's key — a letter below, an F-key beside it on the Sym page —
+// or a tap on the canvas.
+const HELD_MODIFIERS: Key[] = [
+  hold("Shift", "ShiftLeft"),
+  hold("Ctrl", "ControlLeft"),
+  hold("Alt", "AltLeft"),
+  hold("Super", "MetaLeft"),
+];
+
+// The chords that follow the modifiers are the ones a browser swallows or a
+// phone cannot otherwise reach; Ctrl+C and its kin are the strip's Ctrl and a
+// letter.
+const SHORTCUTS_ABC: Key[] = [
+  ...HELD_MODIFIERS,
   s("Esc", "Escape"),
   c("Alt+Tab", ["AltLeft", "Tab"]),
   c("Alt+F4", ["AltLeft", "F4"]),
   c("C+A+Del", ["ControlLeft", "AltLeft", "Delete"]),
-  s("Super", "MetaLeft"),
-  c("Ctrl+Esc", ["ControlLeft", "Escape"]),
-  c("Ctrl+Z", ["ControlLeft", "KeyZ"]),
-  c("Ctrl+C", ["ControlLeft", "KeyC"]),
-  c("Ctrl+V", ["ControlLeft", "KeyV"]),
-  c("Ctrl+A", ["ControlLeft", "KeyA"]),
-  c("Ctrl+S", ["ControlLeft", "KeyS"]),
 ];
 
-// ── Primary screen: QWERTY ──
+const SHORTCUTS_FN: Key[] = [
+  ...HELD_MODIFIERS,
+  ...Array.from({ length: 12 }, (_, i) => s(`F${i + 1}`, `F${i + 1}`)),
+];
 
-const ROW_DIGITS: SoftKeyDefinition[] = [
+// ── The strip: modifiers and arrows, on every phone page ──
+
+const STRIP: Key[] = [
+  s("Tab", "Tab", 1.5),
+  s("Ctrl", "ControlLeft", 1.5),
+  s("Alt", "AltLeft", 1.5),
+  s("Super", "MetaLeft", 1.5),
+  s("←", "ArrowLeft"),
+  s("↑", "ArrowUp"),
+  s("↓", "ArrowDown"),
+  s("→", "ArrowRight"),
+];
+
+// ── Phone: ABC page ──
+
+const DIGITS: Key[] = [
   p("1", "Digit1", "!"),
   p("2", "Digit2", "@"),
   p("3", "Digit3", "#"),
@@ -137,253 +295,224 @@ const ROW_DIGITS: SoftKeyDefinition[] = [
   p("0", "Digit0", ")"),
 ];
 
-const ROW_QWERTY: SoftKeyDefinition[] = [
-  p("q", "KeyQ"),
-  p("w", "KeyW"),
-  p("e", "KeyE"),
-  p("r", "KeyR"),
-  p("t", "KeyT"),
-  p("y", "KeyY"),
-  p("u", "KeyU"),
-  p("i", "KeyI"),
-  p("o", "KeyO"),
-  p("p", "KeyP"),
-];
+const letters = (keys: string): Key[] =>
+  [...keys].map((k) => p(k, `Key${k.toUpperCase()}`));
 
-// Exported so the panel can recognise it by identity and bracket it with half-key
-// spacers. Nine keys where the rows around it have ten units, so without them
-// `a`–`l` stretch to the full width, come out wider than the keys above, and stop
-// lining up with the row they are meant to sit under. Identity rather than a row
-// index, so inserting a row above cannot silently indent the wrong one.
-export const ROW_HOME: SoftKeyDefinition[] = [
-  p("a", "KeyA"),
-  p("s", "KeyS"),
-  p("d", "KeyD"),
-  p("f", "KeyF"),
-  p("g", "KeyG"),
-  p("h", "KeyH"),
-  p("j", "KeyJ"),
-  p("k", "KeyK"),
-  p("l", "KeyL"),
-];
+const QWERTY: Key[] = letters("qwertyuiop");
 
-const ROW_ZXCV: SoftKeyDefinition[] = [
+// Nine keys where the rows around it have ten units: half a key of inert
+// margin at each end keeps the stagger of a real keyboard and the key width of
+// the rows above. A finger on the margin goes to `a` or `l`.
+const HOME: Key[] = [gap(0.5), ...letters("asdfghjkl"), gap(0.5)];
+
+const ZXCV: Key[] = [
   s("Shift", "ShiftLeft", 1.5),
-  p("z", "KeyZ"),
-  p("x", "KeyX"),
-  p("c", "KeyC"),
-  p("v", "KeyV"),
-  p("b", "KeyB"),
-  p("n", "KeyN"),
-  p("m", "KeyM"),
+  ...letters("zxcvbnm"),
   s("Bksp", "Backspace", 1.5),
 ];
 
-const ROW_BOTTOM: SoftKeyDefinition[] = [
-  s("Tab", "Tab", 1.3),
-  s("Ctrl", "ControlLeft", 1.3),
-  s("Alt", "AltLeft", 1.3),
-  s("Space", "Space", 3),
-  s("Enter", "Enter", 2),
-];
-
-export const PRIMARY_SCREEN_ROWS: SoftKeyDefinition[][] = [
-  ROW_DIGITS,
-  ROW_QWERTY,
-  ROW_HOME,
-  ROW_ZXCV,
-  ROW_BOTTOM,
-];
-
-// ── Secondary screen: symbols + navigation ──
-
-const ROW_SYMBOLS_1: SoftKeyDefinition[] = [
-  p("`", "Backquote", "~"),
-  p("-", "Minus", "_"),
-  p("=", "Equal", "+"),
-  p("[", "BracketLeft", "{"),
-  p("]", "BracketRight", "}"),
-  p("\\", "Backslash", "|"),
-  p(";", "Semicolon", ":"),
-  p("'", "Quote", '"'),
+const BOTTOM_ABC: Key[] = [
+  pg("?123", "sym", 1.5),
   p(",", "Comma", "<"),
+  s("Space", "Space", 5),
   p(".", "Period", ">"),
+  s("Enter", "Enter", 1.5),
 ];
 
-const ROW_SYMBOLS_2: SoftKeyDefinition[] = [
-  p("/", "Slash", "?"),
+// ── Phone: Sym/Nav page ──
+
+const SYMBOLS: Key[] = [
+  p("`", "Backquote"),
+  p("-", "Minus"),
+  p("=", "Equal"),
+  p("[", "BracketLeft"),
+  p("]", "BracketRight"),
+  p("\\", "Backslash"),
+  p(";", "Semicolon"),
+  p("'", "Quote"),
+  p(",", "Comma"),
+  p(".", "Period"),
+];
+
+// The shifted partners of the row above, each a key of its own.
+const SYMBOLS_SHIFTED: Key[] = [
+  ps("~", "Backquote"),
+  ps("_", "Minus"),
+  ps("+", "Equal"),
+  ps("{", "BracketLeft"),
+  ps("}", "BracketRight"),
+  ps("|", "Backslash"),
+  ps(":", "Semicolon"),
+  ps('"', "Quote"),
+  ps("<", "Comma"),
+  ps(">", "Period"),
+];
+
+const NAV: Key[] = [
+  p("/", "Slash"),
+  ps("?", "Slash"),
   s("Ins", "Insert"),
   s("Del", "Delete"),
   s("Home", "Home"),
   s("End", "End"),
   s("PgUp", "PageUp"),
   s("PgDn", "PageDown"),
+  s("PrtSc", "PrintScreen"),
+  s("Menu", "ContextMenu"),
 ];
 
-const ROW_NAV_ARROWS: SoftKeyDefinition[] = [
-  s("←", "ArrowLeft", 1.5),
-  s("↑", "ArrowUp", 1.5),
-  s("↓", "ArrowDown", 1.5),
-  s("→", "ArrowRight", 1.5),
+// The right-hand modifiers live here and nowhere else on a phone: the ABC
+// page's Shift, Ctrl, Alt and Super are the left keys, so this is the only way
+// a phone reaches AltGr on a Windows or Linux host, or a Mac's right Option.
+const RIGHT_MODIFIERS: Key[] = [
+  s("RShift", "ShiftRight", 2.5),
+  s("RCtrl", "ControlRight", 2.5),
+  s("RAlt", "AltRight", 2.5),
+  s("RSuper", "MetaRight", 2.5),
 ];
 
-// The Sym/Nav screen gets its own bottom row, and it carries the *right-hand*
-// modifiers: the ABC screen's Shift, Ctrl and Alt (and the combo row's Super)
-// are the left keys, so this is where the right ones live — the only way a
-// phone reaches AltGr on a Windows or Linux host, or a Mac's right Option, and
-// the Shift here also makes the shifted symbol glyphs (~ _ + { } | : " < > ?)
-// reachable without switching screens. Space/Enter shrink to make room.
-const ROW_BOTTOM_SECONDARY: SoftKeyDefinition[] = [
-  s("RShift", "ShiftRight", 1.5),
-  s("Tab", "Tab", 1.3),
-  s("RCtrl", "ControlRight", 1.3),
-  s("RAlt", "AltRight", 1.3),
-  s("RSuper", "MetaRight", 1.3),
-  s("Space", "Space", 2),
-  s("Enter", "Enter", 2),
+const BOTTOM_SYM: Key[] = [
+  pg("ABC", "abc", 1.5),
+  p(",", "Comma", "<"),
+  s("Space", "Space", 5),
+  p(".", "Period", ">"),
+  s("Enter", "Enter", 1.5),
 ];
 
-export const SECONDARY_SCREEN_ROWS: SoftKeyDefinition[][] = [
-  ROW_SYMBOLS_1,
-  ROW_SYMBOLS_2,
-  ROW_NAV_ARROWS,
-  ROW_BOTTOM_SECONDARY,
+// ── PC grid (floating, wide and non-phone clients) ──
+
+const PC_FUNCTION_ROW: Key[] = [
+  s("Esc", "Escape", 1.2),
+  ...Array.from({ length: 12 }, (_, i) => s(`F${i + 1}`, `F${i + 1}`)),
 ];
 
-// ── Function key row (scrollable quick-access, secondary screen) ──
-
-export const FUNCTION_KEY_ROW: SoftKeyDefinition[] = [
-  s("F1", "F1"),
-  s("F2", "F2"),
-  s("F3", "F3"),
-  s("F4", "F4"),
-  s("F5", "F5"),
-  s("F6", "F6"),
-  s("F7", "F7"),
-  s("F8", "F8"),
-  s("F9", "F9"),
-  s("F10", "F10"),
-  s("F11", "F11"),
-  s("F12", "F12"),
-];
-
-// ── Desktop PC keyboard layout (wide viewports) ──
-
-export const DESKTOP_FUNCTION_ROW: SoftKeyDefinition[] = [
-  s("Esc", "Escape"),
-  s("F1", "F1"),
-  s("F2", "F2"),
-  s("F3", "F3"),
-  s("F4", "F4"),
-  s("F5", "F5"),
-  s("F6", "F6"),
-  s("F7", "F7"),
-  s("F8", "F8"),
-  s("F9", "F9"),
-  s("F10", "F10"),
-  s("F11", "F11"),
-  s("F12", "F12"),
-];
-
-export const DESKTOP_NUMBER_ROW: SoftKeyDefinition[] = [
+const PC_NUMBER_ROW: Key[] = [
   p("`", "Backquote", "~"),
-  p("1", "Digit1", "!"),
-  p("2", "Digit2", "@"),
-  p("3", "Digit3", "#"),
-  p("4", "Digit4", "$"),
-  p("5", "Digit5", "%"),
-  p("6", "Digit6", "^"),
-  p("7", "Digit7", "&"),
-  p("8", "Digit8", "*"),
-  p("9", "Digit9", "("),
-  p("0", "Digit0", ")"),
+  ...DIGITS,
   p("-", "Minus", "_"),
   p("=", "Equal", "+"),
-  s("Bksp", "Backspace"),
+  s("Bksp", "Backspace", 1.75),
 ];
 
-export const DESKTOP_QWERTY_ROW: SoftKeyDefinition[] = [
-  s("Tab", "Tab"),
-  p("q", "KeyQ"),
-  p("w", "KeyW"),
-  p("e", "KeyE"),
-  p("r", "KeyR"),
-  p("t", "KeyT"),
-  p("y", "KeyY"),
-  p("u", "KeyU"),
-  p("i", "KeyI"),
-  p("o", "KeyO"),
-  p("p", "KeyP"),
+const PC_QWERTY_ROW: Key[] = [
+  s("Tab", "Tab", 1.45),
+  ...QWERTY,
   p("[", "BracketLeft", "{"),
   p("]", "BracketRight", "}"),
-  p("\\", "Backslash", "|"),
+  p("\\", "Backslash", "|", 1.15),
 ];
 
-export const DESKTOP_HOME_ROW: SoftKeyDefinition[] = [
-  p("a", "KeyA"),
-  p("s", "KeyS"),
-  p("d", "KeyD"),
-  p("f", "KeyF"),
-  p("g", "KeyG"),
-  p("h", "KeyH"),
-  p("j", "KeyJ"),
-  p("k", "KeyK"),
-  p("l", "KeyL"),
+const PC_HOME_ROW: Key[] = [
+  gap(2.1),
+  ...letters("asdfghjkl"),
   p(";", "Semicolon", ":"),
   p("'", "Quote", '"'),
-  s("Enter", "Enter"),
+  s("Enter", "Enter", 1.95),
 ];
 
-export const DESKTOP_ZXCV_ROW: SoftKeyDefinition[] = [
-  p("z", "KeyZ"),
-  p("x", "KeyX"),
-  p("c", "KeyC"),
-  p("v", "KeyV"),
-  p("b", "KeyB"),
-  p("n", "KeyN"),
-  p("m", "KeyM"),
+const PC_ZXCV_ROW: Key[] = [
+  s("Shift", "ShiftLeft", 1.95),
+  ...letters("zxcvbnm"),
   p(",", "Comma", "<"),
   p(".", "Period", ">"),
   p("/", "Slash", "?"),
-];
-
-export const DESKTOP_SPACE_KEY: SoftKeyDefinition = s("Space", "Space");
-
-export const DESKTOP_NAV_ROW_1: SoftKeyDefinition[] = [
-  s("Ins", "Insert"),
-  s("Home", "Home"),
-  s("PgUp", "PageUp"),
-];
-
-export const DESKTOP_NAV_ROW_2: SoftKeyDefinition[] = [
-  s("Del", "Delete"),
-  s("End", "End"),
-  s("PgDn", "PageDown"),
-];
-
-export const DESKTOP_ARROW_ROW_1: SoftKeyDefinition[] = [s("▲", "ArrowUp")];
-
-export const DESKTOP_ARROW_ROW_2: SoftKeyDefinition[] = [
-  s("◀", "ArrowLeft"),
-  s("▼", "ArrowDown"),
-  s("▶", "ArrowRight"),
+  s("Shift", "ShiftRight", 1.95),
 ];
 
 // The bottom row of a PC keyboard, as the hardware has it: Ctrl, Super and Alt
 // left of the space bar, Alt, Super and Ctrl right of it, each with its own
 // side's code. Labels match the keycaps rather than naming the side — the
 // position says it, as on the physical board.
-export const DESKTOP_SHIFT_LEFT: SpecialSoftKey = s("Shift", "ShiftLeft");
-export const DESKTOP_SHIFT_RIGHT: SpecialSoftKey = s("Shift", "ShiftRight");
-
-export const DESKTOP_BOTTOM_LEFT: SpecialSoftKey[] = [
-  s("Ctrl", "ControlLeft"),
-  s("Super", "MetaLeft"),
-  s("Alt", "AltLeft"),
+const PC_BOTTOM_ROW: Key[] = [
+  s("Ctrl", "ControlLeft", 1.1),
+  s("Super", "MetaLeft", 1.1),
+  s("Alt", "AltLeft", 1.1),
+  s("Space", "Space", 9),
+  s("Alt", "AltRight", 1.1),
+  s("Super", "MetaRight", 1.1),
+  s("Ctrl", "ControlRight", 1.1),
 ];
 
-export const DESKTOP_BOTTOM_RIGHT: SpecialSoftKey[] = [
-  s("Alt", "AltRight"),
-  s("Super", "MetaRight"),
-  s("Ctrl", "ControlRight"),
+const PC_SIDE: { kind: RowKind; keys: Key[] }[] = [
+  {
+    kind: "side",
+    keys: [s("Ins", "Insert"), s("Home", "Home"), s("PgUp", "PageUp")],
+  },
+  {
+    kind: "side",
+    keys: [s("Del", "Delete"), s("End", "End"), s("PgDn", "PageDown")],
+  },
+  { kind: "side", keys: [gap(1), s("▲", "ArrowUp"), gap(1)] },
+  {
+    kind: "side",
+    keys: [s("◀", "ArrowLeft"), s("▼", "ArrowDown"), s("▶", "ArrowRight")],
+  },
 ];
+
+// ── Pages ──
+
+export const PAGE_ABC: LayoutPage = page("abc", [
+  { kind: "shortcut", keys: SHORTCUTS_ABC, commit: "tap" },
+  { kind: "strip", keys: STRIP },
+  { kind: "main", keys: DIGITS },
+  { kind: "main", keys: QWERTY },
+  { kind: "main", keys: HOME },
+  { kind: "main", keys: ZXCV },
+  { kind: "main", keys: BOTTOM_ABC },
+]);
+
+export const PAGE_SYM: LayoutPage = page("sym", [
+  { kind: "shortcut", keys: SHORTCUTS_FN, commit: "tap" },
+  { kind: "strip", keys: STRIP },
+  { kind: "main", keys: SYMBOLS },
+  { kind: "main", keys: SYMBOLS_SHIFTED },
+  { kind: "main", keys: NAV },
+  { kind: "main", keys: RIGHT_MODIFIERS },
+  { kind: "main", keys: BOTTOM_SYM },
+]);
+
+export const PAGE_PC: LayoutPage = page(
+  "pc",
+  [
+    { kind: "main", keys: PC_FUNCTION_ROW },
+    { kind: "main", keys: PC_NUMBER_ROW },
+    { kind: "main", keys: PC_QWERTY_ROW },
+    { kind: "main", keys: PC_HOME_ROW },
+    { kind: "main", keys: PC_ZXCV_ROW },
+    { kind: "main", keys: PC_BOTTOM_ROW },
+  ],
+  PC_SIDE,
+);
+
+export const PAGES: ReadonlyMap<PageId, LayoutPage> = new Map([
+  ["abc", PAGE_ABC],
+  ["sym", PAGE_SYM],
+  ["pc", PAGE_PC],
+]);
+
+// Every cell of a page by id, main rows and side cluster alike — what the
+// press engine is handed on a page switch.
+export function cellsOf(page: LayoutPage): ReadonlyMap<CellId, LayoutCell> {
+  const cells = new Map<CellId, LayoutCell>();
+  for (const r of [...page.rows, ...page.side]) {
+    for (const cell of r.cells) {
+      cells.set(cell.id, cell);
+    }
+  }
+  return cells;
+}
+
+// The label a cell shows: a printable's shifted glyph while a Shift is held.
+export function labelOf(def: SoftKeyDefinition, shift: boolean): string {
+  switch (def.type) {
+    case "spacer":
+      return "";
+    case "printable":
+      if (shift && !def.shifted) {
+        return def.shiftLabel ?? def.label.toUpperCase();
+      }
+      return def.label;
+    default:
+      return def.label;
+  }
+}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDockedHeight, useIsDesktop } from "./dockedPanel.ts";
 import { MAX_CLIPBOARD_BYTES, type RemoteClipboard } from "./protocol.ts";
-import { useDockedHeight } from "./SoftKeyboardPanel.tsx";
 
 // Deliberately follows tmp/remotex-old's clipboard state machine: the remote
 // value starts as a metadata card, revealing it turns that same slot into the
@@ -53,7 +53,7 @@ export function ClipboardPanel({
   const panelRef = useRef<HTMLDivElement>(null);
   const clipboardInputRef = useRef<HTMLTextAreaElement>(null);
 
-  useDockedHeight(panelRef, onDockedHeightChange);
+  useDockedHeight(panelRef, !useIsDesktop(), onDockedHeightChange);
 
   const isRemoteMetadataMode = remoteClipboard !== null && !isManualInputActive;
   // The remote's clipboard was refused for its size, so there is nothing to
