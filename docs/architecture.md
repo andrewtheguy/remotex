@@ -65,29 +65,22 @@ area and points here; read the area's section before changing what it covers.
 
 ### Server tiers
 
-The three prioritized servers are ranked in tiers by how the picture reaches
-the browser. Design, testing and optimization start from the first tier, and a
-higher tier comes first when work for two competes.
+The three prioritized servers are ranked in tiers by how seamlessly each
+integrates with remotex and with its host's operating system: how its displays
+are chosen and resized, whether it carries sound and the browser's camera and
+microphone, and how its picture reaches the browser. The ranking is not the
+order work is done in: Windows and macOS are the common use case, so testing
+and optimization prioritize them.
 
-| Tier | Server | Target | Picture |
-|---|---|---|---|
-| 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | wlshare's own VP9, passed through, walked by the browser's link |
-| 2 | Windows 10 and 11's Remote Desktop | `rdp` | encoded here as VP9, or the host's graphics pipeline passed through |
-| 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | encoded here as VP9, or the Mac's HEVC passed through |
-| 3 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | encoded here as VP9 |
+| Tier | Server | Target | Displays | Sound | Camera and microphone | Picture |
+|---|---|---|---|---|---|---|
+| 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker; a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
+| 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density | Opus or FLAC | yes, experimental | VP9 from the gateway, or the graphics pipeline passed through (beta) |
+| 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density | AAC-ELD, always | no | VP9 from the gateway, or the Mac's HEVC passed through |
+| 3 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
+| baseline | any other VNC server | `vnc` | one framebuffer at the size the server says, at 1x | none | no | VP9 from the gateway |
 
-- **Tier 1** is the ideal: wlshare codes the desktop as VP9 itself, at the
-  quality and chroma the target asks for, and walks that quality by the
-  browser's link, so the gateway passes its stream untouched and the session
-  still adapts to a slow link. Because wlshare is ours, what RFB lacks is added
-  to it as an extension.
-- **Tier 2** is the host's own stream, passed to the browser for a LAN. A passed
-  stream does not adapt to the browser's link; a session started without the
-  passthrough is the gateway's VP9, which does.
-- **Tier 3** is decoded in the gateway and encoded as VP9. Nothing of it is
-  passed through.
-
-All three have these in common:
+The three native servers have these in common:
 
 - **The desktop outlives the viewer.** A Windows host holds a disconnected
   session for the next logon, and a Mac's or a wlshare desktop keeps running
@@ -103,10 +96,69 @@ All three have these in common:
   and the browser wears it on its own pointer, so it moves with the hand rather
   than a network round trip behind it.
 
-Every other VNC server is a plain `vnc` target, reached through the RFB
-baseline and worked on as needed rather than ahead of the tiers. Another RDP
-server, an older Windows or xrdp say, may happen to work but is not a target and
-is not tested against.
+#### Tier 1: wlshare on Linux
+
+[wlshare](https://github.com/andrewtheguy/wlshare), this project's own VNC
+server for wlroots-based Wayland desktops, is the ideal. It codes the desktop as
+VP9 itself, at the quality and chroma the target asks for, and walks that quality
+by the browser's link, so the gateway passes its stream through untouched and
+the session still adapts to a slow link. Because wlshare is ours, what RFB
+lacks is added to it as an extension: pixel density, switching outputs,
+sound, and the browser's camera and microphone. It is a `vnc` target with
+`subtype = "wlshare"`, which is what makes the gateway list those extensions and
+ask for the stream. See
+[wlshare's VP9 and the `wlshare` subtype](#wlshares-vp9-and-the-wlshare-subtype).
+
+#### Tier 2: modern Windows' Remote Desktop, and a Mac's High Performance Screen Sharing
+
+The host's own stream, passed through to the browser for a LAN:
+
+- **Modern Windows' own Remote Desktop server**, in a session started with the
+  passthrough: the host's graphics pipeline (MS-RDPEGFX), composed in the browser
+  by the gateway's own compositor built to WebAssembly, which takes nearly all of
+  the picture's work off the gateway. It is in **beta**: run against one
+  Windows 11 host, with sound and the clipboard beside it, and not yet with the
+  camera or the microphone. A target with `egfx_h264 = true`, more experimental
+  still, lets the host draw video with H.264 on that pipeline, which the browser
+  decodes; without the key what is passed is lossless. See
+  [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
+- **macOS Screen Sharing's High Performance mode** (`ard-high-performance`), in a
+  session started with the passthrough: the Mac's HEVC picture, to a browser
+  that decodes it (Chrome and Safari; not Firefox). Its AAC-ELD sound is passed
+  in every session. See
+  [Apple's media stream, passed through](#apples-media-stream-passed-through).
+
+The passthrough is a choice made at the picker, greyed for a browser that cannot
+take the stream. A passed stream does not adapt to a slow link: the Mac's own
+rate control keeps it between 20 and 60 Mbit/s, and a Windows host's pipeline is
+sent as drawn. A session started without it is the gateway's VP9, which does
+adapt and is the answer for a slow link. VP9 also serves a browser that cannot
+decode the Mac's stream, and a Windows host that draws with plain bitmap updates
+rather than the pipeline. On RDP the passthrough is the only way past VP9:
+without it the gateway composes the host's pipeline, or takes its bitmap updates,
+and encodes the picture as VP9.
+
+#### Tier 3: a Mac's Standard Screen Sharing
+
+Screen Sharing's Standard mode (`ard`, including the unofficial
+`virtual_display = true`) is decoded in the gateway and encoded as VP9, adapting
+to the link. Nothing of it is passed through.
+
+#### Other servers, not prioritized
+
+Every other VNC server is a plain `vnc` target, reached through the RFB baseline
+and always encoded as VP9 in the gateway, at 1x and without sound. The gateway
+reads the standard lossless encodings, ZRLE first, then zlib, Hextile, RRE and
+Raw, with CopyRect beside them; Tight and the other vendor or lossy ones are not
+listed. A wlshare server behind a plain target is read the same way: its
+fallback for ordinary VNC clients. Plain VNC stays supported, and is worked on
+as needed rather than ahead of the tiers.
+
+Another RDP server, an older Windows or xrdp say, may happen to work if it
+speaks what the client implements ([The RDP client](rdp-client.md)), but it is
+not a target: it is not tested against. Its picture follows Windows' rule,
+encoded as VP9 in the gateway unless the session was started with the pipeline
+passed.
 
 ### The client and its bundle
 
