@@ -38,10 +38,18 @@ pub struct Connect {
     pub username: String,
     pub password: String,
     pub domain: Option<String>,
-    /// The desktop size to ask for. The server may answer with something else,
-    /// which arrives as [`Event::Connected`] and, later, as [`Event::Resize`].
+    /// The desktop size to ask for — one monitor's. The server may answer with
+    /// something else, which arrives as [`Event::Connected`] and, later, as
+    /// [`Event::Resize`].
     pub width: u32,
     pub height: u32,
+    /// How many monitors of that size to ask for, in a row with the primary at the
+    /// left: in the connect-time monitor data, where the server reads it, and in
+    /// every layout [`Input::resize`] sends. One is the single desktop every server
+    /// opens; more is held to [`display::MAX_MONITORS`]. The desktop the server opens
+    /// is the row's union, and whether it laid out the row is read off that size
+    /// at connect and off each [`Event::Resize`] after.
+    pub monitors: u32,
     /// The desktop scale factor to open at, as a percentage — 100 for an ordinary
     /// desktop, 200 for a 2x one — sent in the core data so the server logs on at
     /// it. Unlike a later [`Input::resize`] it needs no Display Control. Zero, or
@@ -176,7 +184,12 @@ pub enum Event {
     /// [`Input::resize`]. A server normally repaints afterwards but is not obliged
     /// to, and the framebuffer is blank until it does; a caller that cannot show a
     /// blank desktop should follow this with [`Input::refresh`].
-    Resize { width: u32, height: u32 },
+    ///
+    /// `monitors` is how many monitors the server laid the desktop out over, from
+    /// the graphics reset that redefined it: the row [`Connect::monitors`] asked for,
+    /// or one. Each is `width / monitors` wide, since every monitor asked for is the
+    /// same size.
+    Resize { width: u32, height: u32, monitors: u32 },
     /// The server offered Display Control, so [`Input::resize`] now has somewhere
     /// to go. Only ever sent on a session configured with [`Connect::resize`], and
     /// not at all by a server that does not implement MS-RDPEDISP.
@@ -186,7 +199,7 @@ pub enum Event {
     /// [`Input::resize`].
     ///
     /// `max_area` is the largest total monitor area the server will accept, in
-    /// pixels; this client asks for one monitor, so it bounds `width * height`.
+    /// pixels, over every monitor of a layout together.
     ResizeReady { max_area: u64 },
     /// The server closed Display Control after [`Event::ResizeReady`]: a resize has
     /// nowhere to go until another `ResizeReady` arrives.
@@ -674,6 +687,8 @@ struct Active<'a> {
     graphics: Option<Graphics>,
     /// The frames of a pipeline that is passed on, between the caller and the host.
     passed: PassedFrames,
+    /// How many monitors each layout asks for — [`Connect::monitors`].
+    monitors: u32,
     /// Whether [`Event::ResizeReady`] has gone out.
     resize_ready: bool,
     /// The most recent size asked for before the channel was ready — only the most
@@ -914,6 +929,7 @@ impl<'a> Active<'a> {
                 false => Graphics::new(),
             }),
             passed: PassedFrames::default(),
+            monitors: config.monitors.clamp(1, display::MAX_MONITORS),
             resize_ready: false,
             pending_resize: None,
             clip_ready: false,
@@ -1235,11 +1251,11 @@ impl<'a> Active<'a> {
                 // follows too: a Refresh Rect asked for later — and one is, after
                 // every resize — is in the coordinates of this desktop, not the one
                 // the Demand Active described.
-                gfx::Update::Reset { width, height } => {
-                    info!("rdp: graphics reset, desktop {width}x{height}");
+                gfx::Update::Reset { width, height, monitors } => {
+                    info!("rdp: graphics reset, desktop {width}x{height} over {monitors} monitors");
                     self.share.width = width;
                     self.share.height = height;
-                    self.announce_desktop(width, height).await;
+                    self.announce_desktop(width, height, monitors).await;
                 }
                 gfx::Update::Paint(rect) => self.paint(rect),
                 // Handed over, not finished: the frame a run ends is acknowledged
@@ -1521,11 +1537,11 @@ impl<'a> Active<'a> {
     }
 
     /// The framebuffer has been resized and cleared; tell the caller.
-    async fn announce_desktop(&mut self, width: u32, height: u32) {
+    async fn announce_desktop(&mut self, width: u32, height: u32, monitors: u32) {
         // Rectangles of the desktop that just went away name pixels that no longer
         // exist; the caller starts over from the resize anyway.
         self.damage.clear();
-        self.send(Event::Resize { width, height }).await;
+        self.send(Event::Resize { width, height, monitors: monitors.max(1) }).await;
     }
 
     /// Send the pending monitor layout, if there is one and a channel to carry it.
@@ -1541,8 +1557,8 @@ impl<'a> Active<'a> {
         let Some((width, height, scale)) = self.pending_resize.take() else {
             return Ok(());
         };
-        debug!("rdp: sending a {width}x{height} monitor layout at {scale}%");
-        let layout = display::monitor_layout(width, height, scale);
+        debug!("rdp: sending a {width}x{height} monitor layout at {scale}%, {} monitors", self.monitors);
+        let layout = display::monitor_layout(width, height, scale, self.monitors);
         self.write_channel(dynamic, &dvc::data(control, &layout)?).await
     }
 

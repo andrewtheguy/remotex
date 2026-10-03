@@ -325,6 +325,16 @@ password = "change-me"
 # `egfx = false`.
 #egfx_h264 = true
 
+# ALPHA. Ask the host for this many virtual displays side by side, each the
+# session's size. The floating menu's Display picker switches between them, and
+# the gateway encodes only the one shown; the host renders the other for the
+# windows left on it. 1 is the one desktop every target opens; at most 2. RDP
+# only today — the key is shared by target types that can create virtual
+# displays, and refused where none does — and the pipeline's passthrough is not
+# offered beside 2, since the browser composes a passed pipeline whole. Checked
+# against one Windows 11 host.
+#virtual_displays = 2
+
 # The clipboard has no key: every target shares its clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which

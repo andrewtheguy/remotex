@@ -345,6 +345,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         width: OPENING.0,
         height: OPENING.1,
         scale_percent: 0,
+        monitors: 1,
         // A resize is the pipeline's graphics reset; the bitmap path has none.
         resize: egfx(),
         egfx: egfx(),
@@ -499,7 +500,7 @@ async fn pump(
             Event::FramesMarked => {}
             Event::Graphics { .. } => panic!("a session that composes here was handed the pipeline's commands"),
             Event::Cursor(_) => tally.cursors += 1,
-            Event::Resize { width, height } => tally.resizes.push((width, height)),
+            Event::Resize { width, height, .. } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,
             Event::ResizeGone => tally.resize_ready = false,
             Event::ClipboardReady => tally.clipboard_ready = true,
@@ -1019,6 +1020,7 @@ async fn pass_the_pipeline() {
         width: OPENING.0,
         height: OPENING.1,
         scale_percent: 0,
+        monitors: 1,
         resize: true,
         egfx: true,
         pass_graphics: true,
@@ -1094,7 +1096,7 @@ async fn pass_the_pipeline() {
                 }
                 Event::Frame => passed.frames += 1,
                 Event::Paint(rect) => panic!("a session that passes its pipeline painted {rect:?} itself"),
-                Event::Resize { width, height } => passed.resizes.push((width, height)),
+                Event::Resize { width, height, .. } => passed.resizes.push((width, height)),
                 Event::ResizeReady { .. } => passed.resize_ready = true,
                 Event::ResizeGone => passed.resize_ready = false,
                 Event::Ended(result) => panic!("the session ended: {result:?}"),
@@ -1214,6 +1216,7 @@ async fn pass_h264() {
         width: OPENING.0,
         height: OPENING.1,
         scale_percent: 0,
+        monitors: 1,
         resize: false,
         egfx: true,
         pass_graphics: true,

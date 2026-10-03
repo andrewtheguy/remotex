@@ -229,6 +229,21 @@ progressive form, are not supported, so there is nothing for the flag to change.
 The decision is recorded in
 [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx).
 
+### More than two virtual displays on a target
+
+`virtual_displays` is held to two. A browser shows one display at a time and the
+gateway encodes only that one, so each further display is a desktop the host
+renders for nobody and a column of the framebuffer kept for a switch; two is the
+most the picker, the input offset and the span the host builds have been checked
+with. RDP would allow sixteen in a row (MS-RDPBCGR 2.2.1.3.6). A Mac's High
+Performance mode advertises how many virtual displays it will create, and that
+count may well be two itself, so two might be the limit there whatever this
+gateway asked for. What holds the ceiling is that nothing shows more: a person at
+a browser looks at one screen, and a third display that is never on it is work
+the host does for a menu entry. Raising it means first wanting the view that
+would use it, such as the Mac's All Displays composed across virtual displays,
+which is not planned either.
+
 ### Multiple sessions
 
 **Concurrent sessions, shared sessions, and a session broker are outside the

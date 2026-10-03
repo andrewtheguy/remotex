@@ -56,9 +56,10 @@ pub enum Update {
     /// inside a frame. Reported before the first paint, which is what a consumer
     /// that paces frames itself needs to know before it receives one.
     Confirmed,
-    /// The output is now this size. The framebuffer has already been resized and
-    /// cleared; the caller is what tells the world.
-    Reset { width: u32, height: u32 },
+    /// The output is now this size, laid out over this many monitors. The
+    /// framebuffer has already been resized and cleared; the caller is what tells
+    /// the world.
+    Reset { width: u32, height: u32, monitors: u32 },
     /// This rectangle of the framebuffer was painted.
     Paint(Rect),
     /// The server finished frame `id`, and this client has finished `decoded` in all.
@@ -413,7 +414,7 @@ impl Graphics {
                     debug!("rdp: graphics reset to {width}x{height} over {monitors} monitors");
                     self.output = Some((width, height));
                     cut(&mut updates, &mut from, command.start, None);
-                    updates.push(Update::Reset { width, height });
+                    updates.push(Update::Reset { width, height, monitors });
                 }
                 Some(Message::EndFrame { frame }) => cut(&mut updates, &mut from, command.end, Some(frame)),
                 _ => {}
@@ -442,7 +443,7 @@ impl Graphics {
                     surface.pixels.fill(0);
                     surface.invalid.clear();
                 }
-                updates.push(Update::Reset { width, height });
+                updates.push(Update::Reset { width, height, monitors });
             }
             Message::CreateSurface { surface, width, height, format } => {
                 self.tally.command(gfx::CMD_CREATE_SURFACE);
@@ -867,8 +868,8 @@ mod tests {
         let mut w = Writer::new();
         w.u32_le(width);
         w.u32_le(height);
-        w.u32_le(0);
-        w.zeros(340 - 8 - 12);
+        w.u32_le(1); // monitorCount
+        w.zeros(340 - 8 - 12); // one monitor definition, and the PDU's padding
         pdu(CMD_RESET_GRAPHICS, &w.finish())
     }
 
@@ -999,7 +1000,7 @@ mod tests {
         let framebuffer = Framebuffer::new();
         let mut graphics = Graphics::new();
         let updates = receive(&mut graphics, &framebuffer, &[reset(4, 4), create(1, 4, 4), map(1, 0, 0)]);
-        assert_eq!(updates, vec![Update::Reset { width: 4, height: 4 }]);
+        assert_eq!(updates, vec![Update::Reset { width: 4, height: 4, monitors: 1 }]);
         framebuffer.with(|frame| assert_eq!((frame.width, frame.height), (4, 4)));
 
         // Two BGRX pixels at (1, 2) and (2, 2).
@@ -1106,7 +1107,7 @@ mod tests {
             end(2),
         ]);
         assert_eq!(updates, vec![
-            Update::Reset { width: 4, height: 4 },
+            Update::Reset { width: 4, height: 4, monitors: 1 },
             Update::Paint(Rect { x: 3, y: 3, width: 1, height: 1 }),
             Update::Frame { id: 2, decoded: 2 },
         ]);
@@ -1313,7 +1314,7 @@ mod tests {
         w.u32_le(0); // flags
         let confirm = pdu(CMD_CAPS_CONFIRM, &w.finish());
         let updates = receive(&mut graphics, &framebuffer, &[confirm, reset(4, 4)]);
-        assert_eq!(updates, vec![Update::Confirmed, Update::Reset { width: 4, height: 4 }]);
+        assert_eq!(updates, vec![Update::Confirmed, Update::Reset { width: 4, height: 4, monitors: 1 }]);
     }
 
     fn confirm() -> Vec<u8> {
@@ -1340,7 +1341,7 @@ mod tests {
         assert_eq!(updates, vec![
             Update::Confirmed,
             Update::Passed { commands: opening[0].clone(), frame: None },
-            Update::Reset { width: 4, height: 4 },
+            Update::Reset { width: 4, height: 4, monitors: 1 },
             Update::Passed { commands: [&opening[1..], &first[..]].concat().concat(), frame: Some(1) },
             Update::Passed { commands: second.concat(), frame: None },
         ]);
@@ -1366,7 +1367,7 @@ mod tests {
         let head = [reset(4, 4), create(1, 4, 4), map(1, 0, 0), start(7)];
         let tail = [solidfill(1, [1, 2, 3, 0], &[(0, 0, 4, 4)]), end(7)];
         assert_eq!(receive(&mut graphics, &framebuffer, &head), vec![
-            Update::Reset { width: 4, height: 4 },
+            Update::Reset { width: 4, height: 4, monitors: 1 },
             Update::Passed { commands: head.concat(), frame: None },
         ]);
         assert_eq!(receive(&mut graphics, &framebuffer, &tail), vec![Update::Passed {

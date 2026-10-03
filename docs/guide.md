@@ -113,6 +113,10 @@ touch.
 - **Experimental:** `egfx_h264 = true` lets the host draw video with H.264 on a
   passed pipeline, which the browser decodes. Without it a passed pipeline is
   lossless.
+- **Alpha:** `virtual_displays = 2` asks the host for two displays side by side,
+  each the session's size. The floating menu's Display picker switches between
+  them; the gateway encodes only the one shown. The passthrough row is not
+  offered beside it. Checked against one Windows 11 host.
 
 Another RDP server, an older Windows or xrdp say, may happen to work but is not
 tested against. See [The RDP client](rdp-client.md).
