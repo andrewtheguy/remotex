@@ -2692,6 +2692,7 @@ Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
 flow and protocol engines. Containerized dummy servers cover plain VNC and
 wlshare; RDP end-to-end probes borrow a real Windows host.
+[Development](development.md) says how each is run.
 
 Stable headless browser tests under
 [`tests/playwright`](../tests/playwright/README.md) cover deterministic DOM,

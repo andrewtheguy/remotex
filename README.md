@@ -17,12 +17,16 @@ side.
 > **No backward compatibility.** A release may change or remove a configuration
 > key, the WebSocket protocol or a feature, with nothing that reads the old
 > form. Check [`remotex.example.toml`](remotex.example.toml) against your config
-> when you upgrade.
+> when you upgrade. The page and the gateway are one release too: a tab left
+> open across an upgrade names both versions and asks to be reloaded.
 
 ## Features
 
-- **One browser client.** It runs on Windows, macOS, Linux, iOS and Android:
-  Chrome or Edge on a desktop and on Android, and Safari on an iPhone or iPad.
+- **One browser client.** It needs WebCodecs and nothing else: Chrome, Edge or
+  Safari on a desktop, Chrome on Android, and Safari on an iPhone or iPad.
+  Firefox runs it too, but its native decoders take neither a High Performance
+  Mac's HEVC nor its AAC-ELD. For desktop use, install the page as a Chrome or
+  Edge app.
 - **Remote-sized, density-aware display.** RDP with its default graphics
   pipeline, wlshare and a Mac's virtual display can follow the browser window at
   its screen density. A Mac's physical displays are shown at the density they

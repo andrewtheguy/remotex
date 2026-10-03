@@ -248,13 +248,15 @@ is serving. Open <http://remotex.localhost:52380>; each running instance is at
 
 | Key | Action |
 |---|---|
+| `↑`/`↓`, `k`/`j` | select an instance |
 | `n` | create an instance |
-| `e` | edit its `remotex.toml` in `$VISUAL` or `$EDITOR` (`vi`, or Notepad on Windows) |
+| `e` | edit its `remotex.toml` in `$VISUAL` or `$EDITOR` (`vi`, or Notepad on Windows); the edit is checked, and applies when the instance is restarted |
 | `s`, `x`, `r` | start, stop, restart it |
 | `a` | start every stopped one |
 | `o` | open a running one in the browser |
 | Enter | show its settings |
-| `q` | stop every instance and quit |
+| `R` | rescan the instances directory |
+| `q`, Esc | stop every instance and quit |
 
 Each immediate subdirectory of the instances root is one instance:
 `~/.local/share/remotex/instances` on Linux (or
