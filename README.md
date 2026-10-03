@@ -22,14 +22,17 @@ time.
 - **A client on every OS.** The client is a web page, so it runs on Windows,
   macOS, Linux, iOS and Android, with nothing to install: Chrome or Edge on a
   desktop and on Android, and Safari on an iPhone or iPad.
-- **A sharp desktop at its true size**, HiDPI and Retina included. The remote
-  is asked to render at your window's size and your screen's density, rather
-  than being scaled in the browser.
-- **A picture that follows the link**, encoded as VP9, or on a LAN the remote's
-  own stream passed through untouched.
-- **Sound**, as Opus or lossless.
+- **A sharp desktop at its true size**, HiDPI and Retina included. A resizable
+  remote renders at the window's size and density; a fixed one is shown at the
+  density it reports rather than scaled in the browser. Plain VNC, which cannot
+  report density, is shown at 1x.
+- **A picture that follows the link**, as adaptive VP9 encoded by the gateway or
+  wlshare; on a LAN, a Mac's HEVC or a Windows host's graphics pipeline can be
+  passed through untouched.
+- **Sound**, as Opus or lossless FLAC, or passed through as the remote made it.
 - **A shared clipboard.**
-- **Your camera and microphone** on the remote, for a call (experimental).
+- **Your camera and microphone** redirected to an RDP or wlshare remote, for a
+  call (experimental).
 - **Sessions that survive you.** Reload, drop the connection or pick up another
   device: the remote desktop is where you left it.
 - **Desktop and touch.** Install the page as an app in Chrome or Edge to get the
@@ -55,7 +58,7 @@ protocol's baseline; other RDP servers may work and are not tested against.
 
 Install the package for your platform from the
 [latest release](https://github.com/andrewtheguy/remotex/releases/latest). On
-Debian or Ubuntu:
+Debian 13 or Ubuntu 24.04 and later:
 
 ```sh
 curl -fsSLO https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-linux-amd64.deb

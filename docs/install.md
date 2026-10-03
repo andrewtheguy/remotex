@@ -4,11 +4,15 @@
 
 Install a native package from the
 [latest release](https://github.com/andrewtheguy/remotex/releases/latest). The
-package manager owns the gateway executable, config example and licence; the web client is compiled into the executable. It does not
-own the live config, so an upgrade or removal never replaces or deletes
-credentials.
+package manager owns the gateway executable, config example and licence; the
+web client is compiled into the executable. It does not own the live config, so
+an upgrade or removal never replaces or deletes credentials.
 
-### Debian and Ubuntu (`.deb`)
+Linux release binaries require glibc 2.39 or newer: Debian 13, Ubuntu 24.04,
+or later releases, and RPM distributions with the same baseline. The package
+format alone does not make the binary compatible with an older distribution.
+
+### Debian 13+ and Ubuntu 24.04+ (`.deb`)
 
 Releases provide `remotex-linux-amd64.deb` and
 `remotex-linux-arm64.deb`:
@@ -26,7 +30,7 @@ Use the `arm64` filename on an arm64 host. The package installs:
 /usr/share/doc/remotex/LICENSE
 ```
 
-### Fedora, RHEL, and other RPM distributions (`.rpm`)
+### RPM distributions with glibc 2.39+ (`.rpm`)
 
 Releases provide `remotex-linux-amd64.rpm` and
 `remotex-linux-arm64.rpm`:
@@ -92,7 +96,8 @@ The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add
 The config contains the web-login hash and target credentials. Create it as the
 account that will run `remotex serve`, mode `0600`. The package ships only the
 public [`remotex.example.toml`](../remotex.example.toml) from which to create it.
-The same account owns the state directory, where a `[meter]` database is kept.
+The same account owns the state directory, where an enabled `[meter]` keeps its
+database by default.
 
 On Linux:
 
@@ -139,8 +144,8 @@ remotex serve
 Then open <http://localhost:52380>. [Using remotex](guide.md) says how each
 kind of target is set up and how the page is reached from another machine.
 
-A Mac target with `subtype = "ard-high-performance"` needs a library on the gateway's host that
-no package contains, FFmpeg. See
+A Mac target with `subtype = "ard-high-performance"` needs a library on the
+gateway's host that no package contains, FFmpeg. See
 [High Performance decoder](high-performance-decoder.md) for installing it.
 
 ## Container

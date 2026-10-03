@@ -76,9 +76,10 @@ cargo test --test vnc_e2e -- --ignored
 reachable from the machine running the tests; an SSH config alias is not
 resolved for the tests' direct VNC connections.
 
-RDP has no container to test against: the gateway's RDP client speaks NLA to a
-current Windows host and nothing else, so its end-to-end tests borrow a real
-machine — see [`tests/rdp_proto_probe.rs`](../tests/rdp_proto_probe.rs) and
+RDP has no container that represents the server this project supports first:
+Windows' own Remote Desktop over NLA. Its end-to-end tests therefore borrow a
+real Windows machine — see
+[`tests/rdp_proto_probe.rs`](../tests/rdp_proto_probe.rs) and
 [`tests/rdp_client_probe.rs`](../tests/rdp_client_probe.rs).
 
 Stable headless browser checks for DOM/control-plane flows live under

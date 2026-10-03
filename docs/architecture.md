@@ -740,12 +740,14 @@ Three controls with similar names therefore remain separate:
   ES_Descriptor — while both browsers' `isConfigSupported` say yes to the form they
   cannot decode ([The sound](apple-vnc-889.md#the-sound)). The page asks
   `isConfigSupported` about the bare form, then the ES_Descriptor, decodes the unit
-  in each it says yes to, and keeps the first that produced sound. Only a definite
-  "yes" to both offers the stream; VP9 and Opus are what every browser here
-  decodes, so a "no", an answer with no verdict, a decoder that fails or never
-  answers, and a question that throws all keep them. Measured, Chrome and Safari,
-  desktop and mobile, decode the stream picture for picture and unit for unit,
-  and Firefox none of it.
+  in each it says yes to, and keeps the first that produced sound. The picture
+  answer alone controls the passthrough: a definite native "yes", or the software
+  decoder below, offers it. If the native question says no, gives no verdict or
+  throws, and no software decoder is served, the picture stays on VP9. The sound
+  probe starts at load but is not part of that choice. If neither form produces
+  sound, the picture still plays and the Audio row names the failure. Measured,
+  Chrome and Safari's native decoders, desktop and mobile, decode the stream
+  picture for picture and unit for unit; Firefox's native decoders take neither.
   Chrome on Windows decodes HEVC only in hardware, through D3D11. `FFmpegVideoDecoder`
   refuses HEVC, so there is no software fallback. It decodes this stream only where
   the GPU driver reports HEVC Range Extensions 8-bit 4:4:4 as a decoder profile. An
@@ -2492,6 +2494,13 @@ on either of them, because a browser picks the family and a master left holding
 `[::1]:<port>` would keep routing to its own workers. Nothing asks the kernel
 for a port — an ephemeral one is a control plane nobody can be told how to
 reach, and `SharedPort::bind` refuses `0` on every path, tests included.
+
+The loopback boundary is the machine, not the OS account. The master gives any
+local caller the selected worker's session cookie before proxying it, so any
+local user can list and drive every running instance. The owner-only instance
+directories and worker endpoints protect the configs and the private transport;
+they do not authenticate the public loopback surface. Do not run the TUI on a
+machine shared with users who must not reach its desktops.
 
 Each hidden worker binds its private endpoint, prints one JSON readiness line —
 `{"endpoint","token"}` — after binding, reads only that instance's

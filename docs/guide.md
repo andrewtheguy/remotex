@@ -13,9 +13,9 @@ The client is the page the gateway serves, compiled into the gateway binary.
 It needs:
 
 - **A secure context.** The gateway speaks plain HTTP and has no TLS listener,
-  so reach it on loopback (`localhost`, `127.0.0.1`, any `.localhost` name) or
-  through a TLS-terminating reverse proxy. A LAN address over plain `http://`
-  is refused, by name.
+  so reach it on loopback (`localhost`, `127.0.0.1`, `[::1]`, any `.localhost`
+  name) or through a TLS-terminating reverse proxy. A LAN address over plain
+  `http://` is refused, by name.
 - **WebCodecs**: `VideoDecoder` and `AudioDecoder`. There are no fallback paths
   for a browser without them.
 
@@ -77,10 +77,13 @@ config key.
   cannot take the stream. A passed stream does not follow the browser's link:
   on a slow one, start the session without it.
 
-One gateway holds one session. A reload or a dropped connection resumes it; a
-different browser is asked whether to take it over, and then starts at the
-picker with its own choices. The remote keeps its own desktop either way, so
-starting the target again returns to the same windows.
+One gateway holds one session. A reload or a dropped connection normally
+resumes it; a passed RDP graphics pipeline instead reconnects the engine,
+because the browser's compositor state is gone. A different browser that finds
+the owner attached is asked whether to take over; one arriving during the
+owner's reattach grace may claim the slot directly. Either starts at the picker
+with its own choices. The remote keeps its own desktop, so starting the target
+again returns to the same windows.
 
 See [What a session is started with](architecture.md#what-a-session-is-started-with).
 
@@ -135,8 +138,9 @@ connection with the same error as wrong credentials. See
 [Remote Management access](apple-vnc-889.md#remote-management-access).
 
 - **`subtype = "ard"`** is Screen Sharing's Standard mode: the Mac's physical
-  displays, one or all of them, at their own density and full fidelity. It has
-  no resize and no sound; the Mac keeps playing on its own output.
+  displays, one or all of them, at their own density. Its lossless ZRLE source
+  is decoded by the gateway and encoded as VP9, adaptive by default. It has no
+  resize and no sound; the Mac keeps playing on its own output.
 - Every Apple subtype carries the Mac's native pasteboard.
 - **`subtype = "ard-high-performance"`** is High Performance mode as Apple's
   viewer has it, and is **experimental**. The Mac disables its physical displays
@@ -152,10 +156,13 @@ connection with the same error as wrong credentials. See
     no release artifact contains: install it as
     [High Performance decoder](high-performance-decoder.md) says. Without it the
     picture can only be passed through.
-  - The passthrough sends the HEVC to a browser that decodes it: Chrome and
-    Safari, not Firefox.
+  - The passthrough sends the HEVC only when the page's startup probe finds a
+    decoder path. Support depends on the browser, platform and GPU, so the
+    picker is authoritative. The gateway can also serve the optional software
+    picture decoder described in [`remotex.example.toml`](../remotex.example.toml).
   - The Mac mutes its own speakers while it streams, so a session always
-    carries sound, which the browser decodes.
+    carries AAC-ELD sound. The page probes that separately; if it cannot decode
+    the sound, the session continues without audio and the menu says why.
 - **Unofficial:** `virtual_display = true` on an `ard` target opens Standard
   mode on such a virtual display, with resize and without the media stream or
   sound. Apple's viewer never offers this combination; it was tested on macOS 26
@@ -185,6 +192,10 @@ untouched and adapts to the browser's link, pixel density, the output list,
 sound, and with `camera = true` or `microphone = true` the browser's camera and
 microphone as PipeWire devices on the desktop. Without the subtype the same
 server is read as any VNC server is.
+
+The example uses the account wlshare runs as, checked through PAM over
+RSA-AES. If wlshare instead has a `password_file`, set that server password as
+`vnc_password` and omit `username` and `password`.
 
 See [density](wlshare-density.md), [outputs](wlshare-outputs.md),
 [audio](wlshare-audio.md), [camera](wlshare-camera.md) and
@@ -254,5 +265,11 @@ another. The root is private to your account, because the configs hold
 credentials. An instance's config has the same `[branding]` and `[[targets]]`
 as a gateway's and no `[server]` block: the TUI owns the port and proxies each
 subdomain to that instance's private Unix socket or named pipe.
+
+The private files and worker endpoints protect credentials from other local
+users, but the shared loopback listener does not authenticate the OS user: any
+account on the machine can open the landing page and drive a running instance.
+Do not run `remotex tui` on a machine shared with users who must not reach those
+desktops.
 
 See [Local multi-instance control plane](architecture.md#local-multi-instance-control-plane).
