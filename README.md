@@ -57,36 +57,36 @@ side.
   tablet, fingers act as a trackpad with pinch zoom and a soft keyboard; they
   are not sent to the remote as touchscreen contacts.
 
-## Supported remotes
+## Supported servers
 
-remotex is built around the native remote desktop server on Windows and macOS,
-and around [wlshare](https://github.com/andrewtheguy/wlshare), this project's
-wlroots VNC server on Linux. They are ranked by how the picture reaches the
-browser:
+remotex is built around the remote desktop servers native to each platform:
+Windows' own Remote Desktop, macOS's built-in Screen Sharing, and on Linux
+[wlshare](https://github.com/andrewtheguy/wlshare), our own. They are ranked in
+tiers by how seamlessly each integrates with remotex and with its host's
+operating system. The ranking is not the order work is done in: Windows and
+macOS are the common use case, so testing and optimization prioritize them.
 
-| Tier | Remote | Target | Picture |
-|---|---|---|---|
-| **1** | wlshare on Linux | `vnc`, `subtype = "wlshare"` | wlshare's adaptive VP9, passed through the gateway |
-| **2** | Windows 10 and 11 Remote Desktop | `rdp` | adaptive VP9 from the gateway, or the host's graphics pipeline passed for browser composition |
-| **2** | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | adaptive VP9 from the gateway, or the Mac's HEVC passed through |
-| **3** | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"` | adaptive VP9 from the gateway |
-| baseline | any standard VNC server | `vnc` | adaptive VP9 from the gateway, presented at 1x |
+- **Tier 1: wlshare on Linux** (`vnc`, `subtype = "wlshare"`). Because the
+  server is ours, what RFB lacks is added to it: it switches outputs, follows
+  the window at its density, carries Opus or FLAC sound and the browser's camera
+  and microphone, and codes its own VP9 for the gateway to pass through,
+  adapting to the browser's link.
+- **Tier 2: Windows 10 and 11's Remote Desktop** (`rdp`) **and a Mac's High
+  Performance Screen Sharing** (`vnc`, `subtype = "ard-high-performance"`).
+  Both follow the window at its density and carry sound: Windows as Opus or
+  FLAC, with the camera and microphone beside it; the Mac always as AAC-ELD, on
+  one virtual display. Their picture is VP9 from the gateway or, for a LAN,
+  their own stream passed through, the host's graphics pipeline (beta) or the
+  Mac's HEVC, which does not adapt to the browser's link.
+- **Tier 3: a Mac's Standard Screen Sharing** (`vnc`, `subtype = "ard"`). The
+  Mac's physical displays, one or all, at their own size and density, as VP9
+  from the gateway, with no sound, camera or microphone.
 
-Tier 1 is the preferred path: wlshare encodes the desktop itself and adjusts it
-from feedback that reaches the browser, so the gateway does no video encoding
-and a slow browser link still lowers the stream. Tier 2 can pass the remote's
-own picture path to remove most gateway video work on a LAN. Neither passed path
-has the gateway's browser-link quality walk: the Mac's rate feedback stops at
-the gateway, and the Windows pipeline is sent as the host draws it. Starting the
-same target without passthrough uses the gateway's adaptive VP9. Tier 3 always
-decodes the remote picture and encodes it again as VP9.
-
-Design, testing and optimization follow that order when work competes. Standard
-VNC remains supported through the RFB baseline but has no remotex extensions for
-density, sound, camera or microphone. Other RDP servers may work if they speak
-what the built-in client implements, but they are not tested. See
-[server tiers](docs/architecture.md#server-tiers) for the design rules behind
-the ranking.
+Every other VNC server is a plain `vnc` target reached through the RFB
+baseline: one framebuffer at 1x, no sound, VP9 from the gateway. Another RDP
+server may happen to work but is not tested against. See
+[Server tiers](docs/architecture.md#server-tiers) for the comparison table,
+what the tiers share, and what each passes.
 
 ## Quick start
 
@@ -146,18 +146,16 @@ removal.
 
 ## Documentation
 
-| | |
-|---|---|
-| [Using remotex](docs/guide.md) | the browser client, starting a session, setting up Windows, Mac, wlshare and VNC targets, `remotex tui` |
-| [Installing remotex](docs/install.md) | packages, first configuration, upgrade, removal |
-| [`remotex.example.toml`](remotex.example.toml) | every configuration key, annotated |
-| [High Performance decoder](docs/high-performance-decoder.md) | the FFmpeg library a High Performance Mac target needs |
-| [Known issues](docs/known-issues.md) | faults worth recognising rather than re-investigating |
-| [Roadmap](docs/roadmap.md) | what is planned, and what is not |
-| [Architecture](docs/architecture.md) | the design and its constraints, the client protocol, the engines |
-| [The RDP client](docs/rdp-client.md), [Apple RFB 003.889](docs/apple-vnc-889.md) | each protocol as implemented and measured |
-| [Development](docs/development.md) | running from a checkout, checks, end-to-end tests, builds |
-| [Packaging](packaging/README.md) | package layouts, build scripts, releases |
+- [Using remotex](docs/guide.md): the browser client, starting a session, setting up Windows, Mac, wlshare and VNC targets, `remotex tui`
+- [Installing remotex](docs/install.md): packages, first configuration, upgrade, removal
+- [`remotex.example.toml`](remotex.example.toml): every configuration key, annotated
+- [High Performance decoder](docs/high-performance-decoder.md): the FFmpeg library a High Performance Mac target needs
+- [Known issues](docs/known-issues.md): faults worth recognising rather than re-investigating
+- [Roadmap](docs/roadmap.md): what is planned, and what is not
+- [Architecture](docs/architecture.md): the design and its constraints, the client protocol, the engines
+- [The RDP client](docs/rdp-client.md), [Apple RFB 003.889](docs/apple-vnc-889.md): each protocol as implemented and measured
+- [Development](docs/development.md): running from a checkout, checks, end-to-end tests, builds
+- [Packaging](packaging/README.md): package layouts, build scripts, releases
 
 ## Development
 
