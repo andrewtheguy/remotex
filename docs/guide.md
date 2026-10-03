@@ -118,12 +118,20 @@ touch.
   them; the gateway encodes only the one shown. Its *All Displays* keeps the
   first display here and links to the second, which opens at `/display/2` in a
   new tab of the same browser: just that display, with its own pointer and
-  keyboard, and no menu. On a session that follows the window, that tab's window
-  sizes display 2. It needs the login of the browser holding the session, opens
-  in one tab at a time — another says it is open elsewhere — and closes when
-  another display is chosen; choosing *All Displays* again lets another tab take
-  it. Opened while it is not shown, it says it is not available. The passthrough
+  keyboard. While *All Displays* is chosen the menu's **Info** names both
+  displays and carries the same link. The page asks before it shows the display: **Connect** takes
+  the display for that tab. On a session that follows the window, that tab's
+  window sizes display 2. It needs the login of the browser holding the session
+  and is shown in one tab at a time — another says it is open elsewhere — until
+  that tab's menu **Disconnect**s, which lets another tab connect, or another
+  display is chosen, which closes it. Opened while it is not shown, it says it
+  is not available. The passthrough
   row is not offered beside it. Checked against one Windows 11 host.
+
+  The second display's tab has a menu of its own, behind a button showing the
+  display's number where the session's page shows ☰. It holds what is that tab's
+  alone, **Immersive full screen**, that display's size and density, and
+  **Disconnect**; everything else stays in the menu on the session's page.
 
   The second display's tab is for a client with two physical displays, one for
   each, and *All Displays* is not recommended on a client with one. It is not

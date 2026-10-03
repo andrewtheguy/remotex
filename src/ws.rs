@@ -63,6 +63,8 @@
 //!   for this display.
 //! - `4003` — another tab shows this display: the socket's `token` is not the one
 //!   that tab was given.
+//! - `4004` — sent by the browser, not to it: the tab showing a display in a tab of
+//!   its own gives the display up, and the next tab to open it is let in.
 //!
 //! Any other close on the session socket detaches the browser. The owner reattaching
 //! within the grace period restores the picker or live engine; a different claim's
@@ -109,6 +111,9 @@ const CLOSE_EVICTED: u16 = 4001;
 const CLOSE_UNSUPPORTED: u16 = 4002;
 /// Close code: another tab shows this display ([`DisplayRefused::Taken`]).
 const CLOSE_TAKEN: u16 = 4003;
+/// Close code, from the browser: the tab showing this display gives it up, for
+/// another tab to take ([`SessionManager::release_display`]).
+const CLOSE_RELEASED: u16 = 4004;
 /// Standard internal-error close. The browser treats it as reconnectable, so a
 /// fresh attachment gets a fresh sequence space rather than reusing one.
 const CLOSE_SEQUENCE_EXHAUSTED: u16 = 1011;
@@ -1490,6 +1495,8 @@ async fn display(
     // Whether this end gave up on the socket, rather than the browser closing it
     // or the slot letting it go.
     let mut gave_up = false;
+    // Whether the tab gave the display up, which frees it for another tab.
+    let mut released = false;
     let mut heartbeat_check = interval(heartbeat_timings.interval);
     heartbeat_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_heartbeat = Instant::now();
@@ -1540,7 +1547,11 @@ async fn display(
                 Ok(other) => warn!("ws: a display socket sent a session message: {other:?}"),
                 Err(e) => warn!("ws: bad client message: {e} (raw: {text})"),
             },
-            Some(Ok(Message::Close(_))) | None => break,
+            Some(Ok(Message::Close(frame))) => {
+                released = frame.is_some_and(|frame| frame.code == CLOSE_RELEASED);
+                break;
+            }
+            None => break,
             Some(Ok(Message::Pong(payload))) => {
                 paint.lock().unwrap().ponged(&payload);
                 room.notify_one();
@@ -1564,7 +1575,11 @@ async fn display(
         outbound.abort();
         outbound_done = true;
     }
-    sessions.detach_display(id);
+    if released {
+        sessions.release_display(id);
+    } else {
+        sessions.detach_display(id);
+    }
     if !outbound_done
         && tokio::time::timeout(std::time::Duration::from_secs(5), &mut outbound)
             .await

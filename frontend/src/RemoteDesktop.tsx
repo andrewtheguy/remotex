@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
+import DisplayMenu from "./DisplayMenu.tsx";
 import FloatingMenu from "./FloatingMenu.tsx";
 import type { DisplayInfo, HoldCause } from "./protocol.ts";
 import TargetPicker from "./TargetPicker.tsx";
@@ -17,6 +18,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   takenOver: "Session taken over",
   failed: "Cannot open the session",
   unavailable: "Display not available",
+  idle: "Not connected",
   stale: "Page out of date",
 };
 
@@ -131,6 +133,88 @@ function SessionCovers({
   );
 }
 
+// What stands over the page while there is no desktop to show: the connection's
+// lifecycle, a claim conflict, or the gap before the first frame.
+function StatusOverlay({
+  branding,
+  status,
+  connectError,
+  waiting,
+  tabDisplay,
+  onTakeOver,
+  onRetry,
+}: {
+  branding: string;
+  status: ConnectionStatus;
+  connectError: string | null;
+  tabDisplay: number | null;
+  // The session is up and its first frame has not come.
+  waiting: boolean;
+  onTakeOver: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="status-overlay">
+      <span className="status-brand">{branding}</span>
+      <span className={`status status-${status}`}>{STATUS_LABEL[status]}</span>
+      {/* Why the session is not up, when the reason is known. "Reconnecting…"
+          is true and unhelpful next to "the server answered 502", and the
+          picker is not on screen to carry it while the overlay is. */}
+      {connectError && <span className="status-hint">{connectError}</span>}
+      {waiting && (
+        <span className="status-hint">Waiting for the remote desktop…</span>
+      )}
+      {status === "busy" && (
+        <>
+          <span className="status-hint">
+            This desktop is open in another browser.
+          </span>
+          <button type="button" className="status-action" onClick={onTakeOver}>
+            Take over
+          </button>
+        </>
+      )}
+      {(status === "failed" || status === "unavailable") && (
+        <button type="button" className="status-action" onClick={onRetry}>
+          Retry
+        </button>
+      )}
+      {/* A display's tab asks before it takes the display: one tab shows it at a
+          time, and the one that connects is the one that has it. */}
+      {status === "idle" && (
+        <>
+          <span className="status-hint">
+            Display {tabDisplay} is shown in one tab at a time. Connect to show
+            it in this one.
+          </span>
+          <button type="button" className="status-action" onClick={onRetry}>
+            Connect
+          </button>
+        </>
+      )}
+      {status === "stale" && (
+        <button
+          type="button"
+          className="status-action"
+          onClick={() => location.reload()}
+        >
+          Reload
+        </button>
+      )}
+      {status === "takenOver" && (
+        <>
+          <span className="status-hint">
+            Another browser took over this session.
+          </span>
+          <button type="button" className="status-action" onClick={onTakeOver}>
+            Take it back
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function RemoteDesktop({
   branding,
   tabDisplay,
@@ -140,8 +224,9 @@ export default function RemoteDesktop({
   /** Deployment display name shown on the interstitials. */
   branding: string;
   /** The display this page shows in a tab of its own (`/display/N`), beside the
-   *  session another tab of this browser holds: its picture and input, and no
-   *  menu or picker. Null on the page that holds the session. */
+   *  session another tab of this browser holds: its picture and input, a menu
+   *  of its own for what is this tab's, and no picker. Null on the page that
+   *  holds the session. */
   tabDisplay: number | null;
   onLogout: () => void;
   onUnauthorized: () => void;
@@ -198,6 +283,7 @@ export default function RemoteDesktop({
     onLocalShortcut,
     takeOver,
     retry,
+    releaseTab,
     connect,
     switchTarget,
     selectDisplay,
@@ -279,56 +365,69 @@ export default function RemoteDesktop({
       </div>
 
       {/* The floating menu is desktop-only; its End session button returns to
-          the picker (see FloatingMenu.tsx), and Log out ends the login. */}
-      {mode === "desktop" && tabDisplay === null && (
-        <FloatingMenu
-          onLogout={onLogout}
-          onUnauthorized={onUnauthorized}
-          onSwitchTarget={switchTarget}
-          sendKeyCombo={sendKeyCombo}
-          onKeyboardInset={setBottomInset}
-          remoteClipboard={remoteClipboard}
-          onFetchClipboard={requestClipboard}
-          onSendClipboard={sendClipboard}
-          displays={displays}
-          activeDisplayId={activeDisplayId}
-          onSelectDisplay={selectDisplay}
-          size={size}
-          hostScale={hostScale}
-          connection={connection}
-          renderPlan={renderPlan}
-          oversize={oversize}
-          canAudio={canAudio}
-          audioEnabled={audioEnabled}
-          audioError={audioError}
-          audioStream={audioStream}
-          videoStream={videoStream}
-          onAudioChange={setAudio}
-          canCamera={canCamera}
-          cameraEnabled={cameraEnabled}
-          cameraError={cameraError}
-          cameraStreaming={cameraStreaming}
-          onCameraChange={setCamera}
-          canMic={canMic}
-          micEnabled={micEnabled}
-          micError={micError}
-          micStreaming={micStreaming}
-          onMicChange={setMic}
-          macKeyOverridesEnabled={macKeyOverridesEnabled}
-          macKeyOverridesActive={macKeyOverridesActive}
-          isMacHost={isMacHost}
-          remoteIsMac={remoteIsMac}
-          onMacKeyOverridesChange={setMacKeyOverridesEnabled}
-          touchOffered={touchOffered}
-          touchEnabled={touchEnabled}
-          touchActive={touchActive}
-          onTouchChange={setTouchEnabled}
-          onLocalShortcut={onLocalShortcut}
-          onFocusDesktop={focusDesktop}
-          onViewOnlyChange={setViewOnly}
-          desktopShown={!showStatus}
-        />
-      )}
+          the picker (see FloatingMenu.tsx), and Log out ends the login. A second
+          display's tab has a menu of its own instead, for this tab's full screen. */}
+      {mode === "desktop" &&
+        (tabDisplay !== null ? (
+          <DisplayMenu
+            display={tabDisplay}
+            connected={status === "connected"}
+            size={size}
+            isMacHost={isMacHost}
+            onLocalShortcut={onLocalShortcut}
+            onFocusDesktop={focusDesktop}
+            onViewOnlyChange={setViewOnly}
+            onDisconnect={releaseTab}
+          />
+        ) : (
+          <FloatingMenu
+            onLogout={onLogout}
+            onUnauthorized={onUnauthorized}
+            onSwitchTarget={switchTarget}
+            sendKeyCombo={sendKeyCombo}
+            onKeyboardInset={setBottomInset}
+            remoteClipboard={remoteClipboard}
+            onFetchClipboard={requestClipboard}
+            onSendClipboard={sendClipboard}
+            displays={displays}
+            activeDisplayId={activeDisplayId}
+            onSelectDisplay={selectDisplay}
+            size={size}
+            hostScale={hostScale}
+            connection={connection}
+            renderPlan={renderPlan}
+            oversize={oversize}
+            canAudio={canAudio}
+            audioEnabled={audioEnabled}
+            audioError={audioError}
+            audioStream={audioStream}
+            videoStream={videoStream}
+            onAudioChange={setAudio}
+            canCamera={canCamera}
+            cameraEnabled={cameraEnabled}
+            cameraError={cameraError}
+            cameraStreaming={cameraStreaming}
+            onCameraChange={setCamera}
+            canMic={canMic}
+            micEnabled={micEnabled}
+            micError={micError}
+            micStreaming={micStreaming}
+            onMicChange={setMic}
+            macKeyOverridesEnabled={macKeyOverridesEnabled}
+            macKeyOverridesActive={macKeyOverridesActive}
+            isMacHost={isMacHost}
+            remoteIsMac={remoteIsMac}
+            onMacKeyOverridesChange={setMacKeyOverridesEnabled}
+            touchOffered={touchOffered}
+            touchEnabled={touchEnabled}
+            touchActive={touchActive}
+            onTouchChange={setTouchEnabled}
+            onLocalShortcut={onLocalShortcut}
+            onFocusDesktop={focusDesktop}
+            onViewOnlyChange={setViewOnly}
+            desktopShown={!showStatus}
+          />
+        ))}
 
       {/* The post-login target picker: shown once the slot is held and no
           target is connected. */}
@@ -366,61 +465,15 @@ export default function RemoteDesktop({
       )}
 
       {showStatus && (
-        <div className="status-overlay">
-          <span className="status-brand">{branding}</span>
-          <span className={`status status-${status}`}>
-            {STATUS_LABEL[status]}
-          </span>
-          {/* Why the session is not up, when the reason is known. "Reconnecting…"
-              is true and unhelpful next to "the server answered 502", and the
-              picker is not on screen to carry it while the overlay is. */}
-          {connectError && <span className="status-hint">{connectError}</span>}
-          {status === "connected" && mode === "desktop" && !size && (
-            <span className="status-hint">Waiting for the remote desktop…</span>
-          )}
-          {status === "busy" && (
-            <>
-              <span className="status-hint">
-                This desktop is open in another browser.
-              </span>
-              <button
-                type="button"
-                className="status-action"
-                onClick={takeOver}
-              >
-                Take over
-              </button>
-            </>
-          )}
-          {(status === "failed" || status === "unavailable") && (
-            <button type="button" className="status-action" onClick={retry}>
-              Retry
-            </button>
-          )}
-          {status === "stale" && (
-            <button
-              type="button"
-              className="status-action"
-              onClick={() => location.reload()}
-            >
-              Reload
-            </button>
-          )}
-          {status === "takenOver" && (
-            <>
-              <span className="status-hint">
-                Another browser took over this session.
-              </span>
-              <button
-                type="button"
-                className="status-action"
-                onClick={takeOver}
-              >
-                Take it back
-              </button>
-            </>
-          )}
-        </div>
+        <StatusOverlay
+          branding={branding}
+          status={status}
+          connectError={connectError}
+          waiting={status === "connected"}
+          tabDisplay={tabDisplay}
+          onTakeOver={takeOver}
+          onRetry={retry}
+        />
       )}
     </div>
   );

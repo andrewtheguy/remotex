@@ -24,7 +24,7 @@ target below, has what RFB defines and nothing more, whatever server it reaches.
 It lists none of wlshare's extensions, so it never asks for a density and is
 never told one, and that holds when the server it reaches is wlshare itself. The
 engine reports `UNSCALED` (`src/vnc.rs`), the browser shows every pixel
-one-to-one, and the Help card reads `1728×883 at 1x` under a browser at 2x.
+one-to-one, and the Info card reads `1728×883 at 1x` under a browser at 2x.
 
 Every other kind of target has a wire that carries density, and remotex reads it
 from there:

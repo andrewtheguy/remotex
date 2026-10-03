@@ -1188,6 +1188,20 @@ impl SessionManager {
         }
     }
 
+    /// The tab showing a display in a tab of its own gave it up through socket
+    /// `id`: its socket goes as any does, and the display is the next tab's to
+    /// take, as when the engine stops listing it.
+    pub fn release_display(&self, id: u64) {
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.displays.get(&SECOND_DISPLAY).is_some_and(|slot| slot.id == id) {
+                info!("session: display {SECOND_DISPLAY}'s tab gave it up");
+                st.tab_token = None;
+            }
+        }
+        self.detach_display(id);
+    }
+
     /// Route input that arrived on display socket `id` to the current engine. The
     /// first display's goes as it is, as the session socket's does; another
     /// display's is wrapped in [`ClientMsg::OnDisplay`], since its positions are in
@@ -2977,6 +2991,17 @@ mod tests {
                 if matches!(&*input, ClientMsg::Key { code, pressed: false, .. } if code == "ControlLeft")
         ));
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, feed: None })));
+
+        // A tab that gives the display up frees it for another, where one whose
+        // socket only went keeps it.
+        assert!(matches!(mgr.attach_display("login", 2, None), Err(DisplayRefused::Taken(2))));
+        let fourth = mgr.attach_display("login", 2, Some(&fresh)).unwrap();
+        mgr.release_display(fourth.id);
+        let mut fifth = mgr.attach_display("login", 2, None).unwrap();
+        let AttachEvent::Msg(ServerMsg::DisplayToken { token: next }) = recv(&mut fifth.events).await else {
+            panic!("a new token for the tab that takes a display given up");
+        };
+        assert_ne!(next, fresh);
     }
 
     /// A page opens its two sockets together, so the picture an engine starts with

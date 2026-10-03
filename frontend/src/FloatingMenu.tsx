@@ -1,6 +1,5 @@
 import {
   type ReactNode,
-  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -14,11 +13,17 @@ import { ClipboardPanel } from "./ClipboardPanel.tsx";
 import DisplayPanel from "./DisplayPanel.tsx";
 import { desktopViewportSize, sizeWindowToDesktop } from "./desktopWindow.ts";
 import {
+  FloatingButton,
+  hideChromeShortcut,
+  useFloatingButton,
+} from "./floatingButton.tsx";
+import {
   fullscreenSupported,
   isFullscreen,
   onFullscreenChange,
   toggleFullscreen,
 } from "./fullscreen.ts";
+import { gatewayUrl } from "./gateway.ts";
 import { keyboardLockSupported } from "./keyboardLock.ts";
 import {
   type AudioRow,
@@ -49,26 +54,8 @@ import {
 // buttons open a panel instead of acting: Soft keyboard — which is where every
 // key, modifier and browser-swallowed combo now lives — Clipboard (see
 // ClipboardPanel), and Display, only for a remote
-// that offers more than one (see DisplayPanel).
-const FAB_SIZE = 40;
-const FAB_MARGIN = 12;
-// Pointer travel (px) before a press becomes a drag rather than a click.
-const DRAG_THRESHOLD = 6;
-const TOOLBAR_WIDTH = 240;
-const TOOLBAR_GAP = 10;
-const TOOLBAR_MIN_HEIGHT = 120;
-
-// The chrome shortcut, spelled the way the Help card and the button's tooltip show
-// it. One source for all three so the card, the tooltip and the handler cannot
-// drift — the handler matches exactly what this returns.
-//
-// The middle modifier is the host's: Command on a Mac, where Option is a
-// character-composing key and Ctrl+Alt chords are Windows vocabulary, and Alt
-// everywhere else. Whichever it is, the *other* one has to be absent, so all four
-// held — a Mac user's own Cmd+Ctrl+Alt+Shift+; hyper chord — stays theirs.
-function hideChromeShortcut(isMacHost: boolean): string {
-  return isMacHost ? "Ctrl + Cmd + Shift + ;" : "Ctrl + Alt + Shift + ;";
-}
+// that offers more than one (see DisplayPanel). The button and where the drawer
+// goes are floatingButton.tsx's, shared with a second display's tab.
 
 // The reference density both ends of this agree on: one CSS pixel per dot, and
 // also what RDP calls 100%. So a 2x screen is 192 dpi whichever end names it.
@@ -115,39 +102,6 @@ const GESTURE_HELP: readonly { gesture: string; action: string }[] = [
   { gesture: "Two-finger swipe", action: "Scroll" },
 ];
 
-interface Position {
-  x: number;
-  y: number;
-}
-
-interface DragState {
-  pointerId: number;
-  startX: number;
-  startY: number;
-  originX: number;
-  originY: number;
-  dragged: boolean;
-}
-
-// visualViewport tracks the *visible* area (mobile URL bar, on-screen keyboard,
-// pinch-zoom), with a window fallback for browsers that lack it.
-interface Viewport {
-  width: number;
-  height: number;
-  offsetX: number;
-  offsetY: number;
-}
-
-function readViewport(): Viewport {
-  const vp = window.visualViewport;
-  return {
-    width: vp ? vp.width : window.innerWidth,
-    height: vp ? vp.height : window.innerHeight,
-    offsetX: vp ? vp.offsetLeft : 0,
-    offsetY: vp ? vp.offsetTop : 0,
-  };
-}
-
 // Which docked panel is open, if any.
 //
 // One state rather than a boolean each: both dock to the bottom edge and report
@@ -156,8 +110,9 @@ function readViewport(): Viewport {
 // clear the other — and this makes it impossible to express.
 type Panel = "clipboard" | "keyboard" | "display";
 
-// Which face the one modal card shows, when it is up at all.
-type Modal = "info" | "throughput";
+// Which face the one modal card shows, when it is up at all: what this session
+// is, how to drive it, or what it has carried.
+type Modal = "info" | "help" | "throughput";
 
 /// The window kind, subscribed to rather than read once.
 ///
@@ -356,7 +311,7 @@ function useViewOnly(
 // rather than passing it through — the surface underneath hides the browser's own
 // cursor, and a menu is no place to be without one — and a click on it closes the
 // drawer and the clipboard panel, as one beside any menu does.
-function ViewOnlyCover({
+export function ViewOnlyCover({
   over,
   onDismiss,
 }: {
@@ -501,7 +456,7 @@ function DisplaySection({
 //
 // Offered wherever the browser grants it, touch clients included. A phone has no Super
 // key to win back, but full screen is still the larger desktop.
-function FullscreenSection({ onSettled }: { onSettled: () => void }) {
+export function FullscreenSection({ onSettled }: { onSettled: () => void }) {
   const fullscreen = useSyncExternalStore(
     onFullscreenChange,
     isFullscreen,
@@ -585,7 +540,13 @@ function WindowSection({
   );
 }
 
-// What the remote is drawing against what this browser is, at the top of the Help
+// A remote display's pixels and the density it draws them at, as the Info card says
+// it of the display on its page and a second display's menu says it of its own.
+export function remoteSizeLabel(size: RemoteSize): string {
+  return `${size.w}×${size.h} at ${densityLabel(size.scale * 100)} (${dpiLabel(size.scale * 100)})`;
+}
+
+// What the remote is drawing against what this browser is, at the top of the Info
 // card so the two can be read off one another.
 //
 // It exists because a density that did not take is otherwise invisible. Both
@@ -626,9 +587,7 @@ function ScreenHelp({
               desktop" state: a placeholder reading 0×0 would be a worse answer
               than saying so. */}
           <dd>
-            {size
-              ? `${size.w}×${size.h} at ${densityLabel(size.scale * 100)} (${dpiLabel(size.scale * 100)})`
-              : "Waiting for the remote desktop"}
+            {size ? remoteSizeLabel(size) : "Waiting for the remote desktop"}
           </dd>
         </div>
         <div className="help-item">
@@ -677,6 +636,60 @@ function ScreenHelp({
       </dl>
     </>
   );
+}
+
+// The displays of a session that shows one in a tab of its own, which is All
+// Displays on a target with two: the one on this page, and each other with the link
+// that opens it, the same one the Display picker has. It names them and nothing
+// more: what this page's is drawn at is the Remote desktop row above, and what
+// another's is drawn at is known to the tab showing it, whose menu says so. Absent on
+// every other session, where the Display picker is the whole of it.
+function DisplaysHelp({ shown }: { shown: DisplayInfo[] }) {
+  if (shown.length === 0) {
+    return null;
+  }
+  return (
+    <>
+      <h3>Displays</h3>
+      <dl className="help-list">
+        {shown.map((display) => (
+          <div key={display.id} className="help-item">
+            <dt>
+              {display.label}
+              {display.tab === null ? " (Current)" : ""}
+            </dt>
+            <dd>
+              {display.tab === null ? (
+                "On this page"
+              ) : (
+                <a
+                  className="dp-tab-link"
+                  href={gatewayUrl(`/display/${display.tab}`)}
+                  target="_blank"
+                  rel="noopener"
+                >
+                  Open in a new tab ↗
+                </a>
+              )}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </>
+  );
+}
+
+// The displays a session shows at once, one on this page and the rest in tabs of
+// their own: every display but the chosen entry, which is All Displays itself.
+// Empty on a session that shows one display, whatever the picker lists.
+function displaysShown(
+  displays: DisplayInfo[],
+  activeDisplayId: number | null,
+): DisplayInfo[] {
+  if (!displays.some((display) => display.tab !== null)) {
+    return [];
+  }
+  return displays.filter((display) => display.id !== activeDisplayId);
 }
 
 // The direct audio toggle is also the user gesture required to create a
@@ -1089,7 +1102,6 @@ export default function FloatingMenu({
   // reconnecting, an error, a claim conflict, or the gap before the first frame.
   desktopShown: boolean;
 }) {
-  const [open, setOpen] = useState(false);
   // The one modal card, and which face it shows: Info, or the "Throughput" view its
   // button switches it to.
   const [modal, setModal] = useState<Modal | null>(null);
@@ -1098,15 +1110,17 @@ export default function FloatingMenu({
   // stays closed for that moment so it never opens on stale text that visibly
   // rewrites itself a beat later.
   const [clipboardPending, setClipboardPending] = useState(false);
-  // null = not yet moved; resolvedPosition falls back to the lower-right corner.
-  const [position, setPosition] = useState<Position | null>(null);
-  const [dragging, setDragging] = useState(false);
-  const [viewport, setViewport] = useState<Viewport>(readViewport);
   // How much of the bottom edge a docked panel is covering. The canvas already
   // insets above it; the button and its drawer float over the same edge and
   // have to do the same, or the soft keyboard opens on top of the one control
   // that closes it again.
   const [dockedHeight, setDockedHeight] = useState(0);
+  const { open, setOpen, hidden, toolbarStyle, button } = useFloatingButton({
+    glyph: "☰",
+    dockedHeight,
+    isMacHost,
+    onLocalShortcut,
+  });
 
   // Kept here as well as passed on: one measurement, two readers.
   const onDockedHeight = useCallback(
@@ -1117,187 +1131,17 @@ export default function FloatingMenu({
     [onKeyboardInset],
   );
 
-  const dragStateRef = useRef<DragState | null>(null);
-  // A drag ends with a synthetic click on some platforms; swallow it so a drag
-  // never toggles the toolbar.
-  const suppressClickRef = useRef(false);
-
-  useEffect(() => {
-    const update = () => {
-      const next = readViewport();
-      setViewport((prev) =>
-        prev.width === next.width &&
-        prev.height === next.height &&
-        prev.offsetX === next.offsetX &&
-        prev.offsetY === next.offsetY
-          ? prev
-          : next,
-      );
-    };
-    window.addEventListener("resize", update);
-    const vp = window.visualViewport;
-    vp?.addEventListener("resize", update);
-    vp?.addEventListener("scroll", update);
-    return () => {
-      window.removeEventListener("resize", update);
-      vp?.removeEventListener("resize", update);
-      vp?.removeEventListener("scroll", update);
-    };
-  }, []);
-
-  // The lowest edge the floating chrome may reach. `visualViewport` already
-  // takes the browser's own on-screen keyboard off the bottom; a docked panel
-  // is drawn by this page, so nothing but this subtracts it.
-  const floor = viewport.offsetY + viewport.height - dockedHeight;
-
-  const clamp = useCallback(
-    (x: number, y: number): Position => {
-      const minX = viewport.offsetX + FAB_MARGIN;
-      const minY = viewport.offsetY + FAB_MARGIN;
-      const maxX =
-        viewport.offsetX +
-        Math.max(FAB_MARGIN, viewport.width - FAB_SIZE - FAB_MARGIN);
-      const maxY = Math.max(minY, floor - FAB_SIZE - FAB_MARGIN);
-      return {
-        x: Math.min(Math.max(x, minX), maxX),
-        y: Math.min(Math.max(y, minY), maxY),
-      };
-    },
-    [viewport, floor],
-  );
-
-  const defaultPosition = useCallback(
-    (): Position =>
-      clamp(
-        viewport.offsetX + viewport.width - FAB_SIZE - FAB_MARGIN,
-        floor - FAB_SIZE - FAB_MARGIN,
-      ),
-    [clamp, viewport, floor],
-  );
-
-  // Clamped on the way out rather than in place, so that what a drag stored
-  // survives a floor that only moved for a moment: a rotation, or a panel
-  // opening, bumps the button up while it lasts, and giving the room back puts
-  // it where its owner left it. Every reader — the drawer's anchor, a drag's
-  // origin — takes this and not the raw state, so nothing jumps.
-  const resolvedPosition = useMemo(
-    () => (position ? clamp(position.x, position.y) : defaultPosition()),
-    [position, clamp, defaultPosition],
-  );
-
   // The toolbar control that opened the modal, which takes focus back when it closes.
   const modalOpenerRef = useRef<HTMLElement | null>(null);
   const closeModal = useCallback(() => {
     setModal(null);
     modalOpenerRef.current?.focus();
   }, []);
-  const closeThroughput = useCallback(() => setModal("info"), []);
-
-  // Capture the non-persisted chrome shortcut before remote input forwarding.
-  const [hidden, setHidden] = useState(false);
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      // The host's own middle modifier and pointedly not the other one, which is
-      // what leaves the four-modifier hyper chord to its owner. See
-      // hideChromeShortcut.
-      const middle = isMacHost
-        ? e.metaKey && !e.altKey
-        : e.altKey && !e.metaKey;
-      if (e.code !== "Semicolon" || !e.ctrlKey || !e.shiftKey || !middle) {
-        return;
-      }
-      e.preventDefault();
-      e.stopPropagation();
-      // Command is held and the key it was held with has just been taken by this
-      // client, so the input path never saw the chord and would read Command's
-      // release as a bare tap — which is how the guest's Start menu opens. Hiding
-      // a button must not do that. See macKeys.ts.
-      if (isMacHost) {
-        onLocalShortcut();
-      }
-      setHidden((was) => !was);
-    };
-    window.addEventListener("keydown", onKeyDown, { capture: true });
-    return () =>
-      window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [isMacHost, onLocalShortcut]);
-
-  const onPointerDown = useCallback(
-    (e: ReactPointerEvent<HTMLButtonElement>) => {
-      if (
-        e.button !== 0 &&
-        e.pointerType !== "touch" &&
-        e.pointerType !== "pen"
-      ) {
-        return;
-      }
-      dragStateRef.current = {
-        pointerId: e.pointerId,
-        startX: e.clientX,
-        startY: e.clientY,
-        originX: resolvedPosition.x,
-        originY: resolvedPosition.y,
-        dragged: false,
-      };
-      e.currentTarget.setPointerCapture(e.pointerId);
-    },
-    [resolvedPosition],
+  const shown = useMemo(
+    () => displaysShown(displays, activeDisplayId),
+    [displays, activeDisplayId],
   );
-
-  const onPointerMove = useCallback(
-    (e: ReactPointerEvent<HTMLButtonElement>) => {
-      const drag = dragStateRef.current;
-      if (!drag || drag.pointerId !== e.pointerId) {
-        return;
-      }
-      const dx = e.clientX - drag.startX;
-      const dy = e.clientY - drag.startY;
-      if (!drag.dragged && Math.hypot(dx, dy) >= DRAG_THRESHOLD) {
-        drag.dragged = true;
-        setDragging(true);
-      }
-      if (!drag.dragged) {
-        return;
-      }
-      setPosition(clamp(drag.originX + dx, drag.originY + dy));
-      suppressClickRef.current = true;
-      e.preventDefault();
-    },
-    [clamp],
-  );
-
-  const endDrag = useCallback((pointerId: number) => {
-    const drag = dragStateRef.current;
-    if (!drag || drag.pointerId !== pointerId) {
-      return;
-    }
-    dragStateRef.current = null;
-    setDragging(false);
-    if (drag.dragged) {
-      // Touch may never fire the click that clears the guard; drop it on a
-      // timer so the next tap isn't swallowed.
-      setTimeout(() => {
-        suppressClickRef.current = false;
-      }, 400);
-    }
-  }, []);
-
-  const onPointerUp = useCallback(
-    (e: ReactPointerEvent<HTMLButtonElement>) => endDrag(e.pointerId),
-    [endDrag],
-  );
-  const onPointerCancel = useCallback(
-    (e: ReactPointerEvent<HTMLButtonElement>) => endDrag(e.pointerId),
-    [endDrag],
-  );
-
-  const onClick = useCallback(() => {
-    if (suppressClickRef.current) {
-      suppressClickRef.current = false;
-      return;
-    }
-    setOpen((prev) => !prev);
-  }, []);
+  const backToInfo = useCallback(() => setModal("info"), []);
 
   // A soft key is input, and the drawer standing over a view-only desktop says
   // input is not happening — so pressing one takes the drawer down with it rather
@@ -1309,7 +1153,7 @@ export default function FloatingMenu({
       setOpen(false);
       sendKeyCombo(codes);
     },
-    [sendKeyCombo],
+    [sendKeyCombo, setOpen],
   );
 
   // Open the on-screen keyboard and collapse the drawer so the panel has the
@@ -1317,7 +1161,7 @@ export default function FloatingMenu({
   const onSoftKeyboard = useCallback(() => {
     togglePanel("keyboard");
     setOpen(false);
-  }, [togglePanel]);
+  }, [togglePanel, setOpen]);
 
   // A button gesture in Chrome's app window requests the remote's point-size
   // viewport plus whatever frame Chrome and this OS currently put around it.
@@ -1329,7 +1173,7 @@ export default function FloatingMenu({
     }
     setOpen(false);
     sizeWindowToDesktop(size, size.scale);
-  }, [size]);
+  }, [size, setOpen]);
 
   // Entering the mode has to hand the keyboard over along with the screen. The button
   // just clicked otherwise keeps focus, and the remote's key listeners sit on the
@@ -1340,7 +1184,7 @@ export default function FloatingMenu({
   const onFullscreenSettled = useCallback(() => {
     onFocusDesktop();
     setOpen(false);
-  }, [onFocusDesktop]);
+  }, [onFocusDesktop, setOpen]);
 
   // Same deal for the clipboard panel, except it cannot open straight away: it
   // fetches first and waits for the answer, so it appears already showing what
@@ -1366,38 +1210,14 @@ export default function FloatingMenu({
         current === panelAtFetchStart ? "clipboard" : current,
       );
     });
-  }, [panel, clipboardPending, onFetchClipboard, closePanel, setPanel]);
-
-  // The drawer anchors to the FAB: right-aligned to it, placed below unless the
-  // FAB sits too low, in which case it flips above.
-  const toolbarStyle = useMemo(() => {
-    const minLeft = viewport.offsetX + FAB_MARGIN;
-    const maxLeft =
-      viewport.offsetX +
-      Math.max(FAB_MARGIN, viewport.width - TOOLBAR_WIDTH - FAB_MARGIN);
-    const desiredLeft = resolvedPosition.x + FAB_SIZE - TOOLBAR_WIDTH;
-    const left = Math.min(Math.max(desiredLeft, minLeft), maxLeft);
-
-    const topBelow = resolvedPosition.y + FAB_SIZE + TOOLBAR_GAP;
-    const topAbove = resolvedPosition.y - TOOLBAR_GAP;
-    const availableBelow = floor - topBelow - FAB_MARGIN;
-    const availableAbove = topAbove - viewport.offsetY - FAB_MARGIN;
-    const placeBelow =
-      availableBelow >= TOOLBAR_MIN_HEIGHT || availableBelow >= availableAbove;
-    const maxHeight = Math.max(
-      TOOLBAR_MIN_HEIGHT,
-      Math.floor(placeBelow ? availableBelow : availableAbove),
-    );
-
-    return placeBelow
-      ? { left: `${left}px`, top: `${topBelow}px`, maxHeight: `${maxHeight}px` }
-      : {
-          left: `${left}px`,
-          top: `${topAbove}px`,
-          transform: "translateY(-100%)",
-          maxHeight: `${maxHeight}px`,
-        };
-  }, [resolvedPosition, viewport, floor]);
+  }, [
+    panel,
+    clipboardPending,
+    onFetchClipboard,
+    closePanel,
+    setPanel,
+    setOpen,
+  ]);
 
   // The soft keyboard types on the desktop, so it goes when the desktop does,
   // and is not there again when the desktop comes back.
@@ -1413,7 +1233,7 @@ export default function FloatingMenu({
   const dismissCover = useCallback(() => {
     setOpen(false);
     setPanel((current) => (current === "clipboard" ? null : current));
-  }, [setPanel]);
+  }, [setPanel, setOpen]);
 
   return (
     <>
@@ -1423,28 +1243,7 @@ export default function FloatingMenu({
           that isn't there reads as a bug. Both keep their state while hidden, so
           the chord brings back exactly what was on screen. Docked panels are left
           alone because they carry their own Close. */}
-      {!hidden && (
-        <button
-          type="button"
-          className={`fab${open ? " fab-open" : ""}${dragging ? " fab-dragging" : ""}`}
-          style={{
-            left: `${resolvedPosition.x}px`,
-            top: `${resolvedPosition.y}px`,
-          }}
-          onClick={onClick}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerCancel}
-          aria-label={open ? "Close menu" : "Open menu"}
-          aria-expanded={open}
-          // The only place the chord is written down in the UI, and it has to be
-          // here: once the button is hidden there is nothing left to read it off.
-          title={`${hideChromeShortcut(isMacHost)} hides this button`}
-        >
-          {open ? "✕" : "☰"}
-        </button>
-      )}
+      {!hidden && <FloatingButton {...button} />}
 
       {open && !hidden && (
         <div className="toolbar" style={toolbarStyle}>
@@ -1526,7 +1325,7 @@ export default function FloatingMenu({
                 modalOpenerRef.current = e.currentTarget;
                 setModal("info");
               }}
-              title="This session's size, density, render dial and decoders, and the touch gestures"
+              title="This session's displays, density, render dial and decoders, with the shortcuts and gestures under Help"
             >
               Info
             </button>
@@ -1561,7 +1360,7 @@ export default function FloatingMenu({
 
       <ThroughputModal
         open={modal === "throughput"}
-        onBack={closeThroughput}
+        onBack={backToInfo}
         onDismiss={closeModal}
         onUnauthorized={onUnauthorized}
       />
@@ -1583,6 +1382,29 @@ export default function FloatingMenu({
             }}
             videoStream={videoStream}
           />
+          <DisplaysHelp shown={shown} />
+          <div className="help-actions">
+            <ThroughputButton onOpen={() => setModal("throughput")} />
+            <button
+              type="button"
+              className="toolbar-btn"
+              onClick={() => setModal("help")}
+            >
+              Help
+            </button>
+            <button type="button" className="toolbar-btn" onClick={closeModal}>
+              Close
+            </button>
+          </div>
+          <AppVersion className="app-version" />
+        </ModalOverlay>
+      )}
+
+      {/* The Info card switched to Help: how the session is driven, apart from
+          what it is. Back returns to Info, as from Throughput. */}
+      {modal === "help" && (
+        <ModalOverlay label="Help" className="help-card" onDismiss={closeModal}>
+          <h2>Help</h2>
           <h3>Shortcuts</h3>
           <dl className="help-list">
             <div className="help-item">
@@ -1615,12 +1437,13 @@ export default function FloatingMenu({
             ))}
           </dl>
           <div className="help-actions">
-            <ThroughputButton onOpen={() => setModal("throughput")} />
+            <button type="button" className="toolbar-btn" onClick={backToInfo}>
+              Back to info
+            </button>
             <button type="button" className="toolbar-btn" onClick={closeModal}>
               Close
             </button>
           </div>
-          <AppVersion className="app-version" />
         </ModalOverlay>
       )}
 

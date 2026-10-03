@@ -139,7 +139,7 @@ What is not done:
   decoded picture on the GPU, and reading it back only when a later command
   copies from it, is the step after that if a large one proves slow.
 
-### Two streams for Apple's All Displays
+### Two streams for Standard's All Displays
 
 Standard's All Displays over two screens is one framebuffer of both, which is
 often past the video ceiling at factor 1.0 (5376×2287 over a 2x screen beside a
@@ -152,6 +152,10 @@ paint window order two chains, and how each stream starts over are the work.
 
 Two screens is the limit, as it is today: All Displays over three or more is held
 with the notice whatever its size.
+
+High Performance is not part of this. Its All Displays is not one framebuffer:
+each of its virtual displays is a stream of its own already, the second shown in
+a browser tab ([two virtual displays](#two-virtual-displays-past-alpha)).
 
 ### Two virtual displays past alpha
 
@@ -167,10 +171,12 @@ What it lacks:
   cannot leave the tab that holds it, so the session needs a way of its own to
   send a window across. A Mac needs none: a window dragged halfway over the edge
   is moved to the second display.
-- **Finding the second display.** The main window should show both displays'
-  details, give a way to tell which display is which, and carry a link that
-  opens the second one, where today the link is only in the Display picker
-  under *All Displays*.
+- **Telling the displays apart.** The session page's Info names both displays
+  and links to the second, but nothing on the remote's screens says which
+  display is which.
+
+Fixing those does not take it out of alpha by itself. It also needs more testing
+than it has had, on both kinds of target, before it is offered as anything else.
 
 ## Under consideration
 
