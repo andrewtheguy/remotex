@@ -393,6 +393,10 @@ pub struct Offers {
     pub audio: bool,
     /// The stream this target can pass untouched, where it has one.
     pub passthrough: Option<Passthrough>,
+    /// Whether where the second virtual display sits is a choice
+    /// ([`Placement`]): on a target that asks for two of a host that is told
+    /// where each is.
+    pub placement: bool,
 }
 
 /// What whoever started a session chose under its target at the picker, carried by
@@ -419,12 +423,57 @@ pub struct Choices {
     /// Pass the target's [`Passthrough`].
     #[serde(default)]
     pub passthrough: bool,
+    /// Where the second virtual display sits.
+    #[serde(default)]
+    pub placement: Placement,
 }
 
 impl Choices {
     /// Whether the client's window drives the desktop's size.
     pub fn resize(self) -> bool {
         self.size == Sizing::Window
+    }
+}
+
+/// Where the second of two virtual displays sits against the first:
+/// [`Choices::placement`], on a target that offers it ([`Offers::placement`]).
+///
+/// An RDP host is told each monitor's position, in the connect-time monitor data
+/// and in every layout after, so it arranges the two as asked: a window dragged
+/// over that edge of the first display arrives on the second. Beside the first
+/// the two are top-aligned, and above or below it left-aligned. A High
+/// Performance Mac places its second display itself, on the right, and offers
+/// no choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Placement {
+    #[default]
+    Right,
+    Left,
+    Top,
+    Bottom,
+}
+
+impl Placement {
+    /// Where the second monitor's corner is against the first's, the first being
+    /// `first` in size and the second `second`: what a monitor's position is
+    /// stated relative to ([MS-RDPBCGR] 2.2.1.3.6.1, [MS-RDPEDISP] 2.2.2.2.1).
+    pub fn second_corner(self, first: (u32, u32), second: (u32, u32)) -> (i32, i32) {
+        let signed = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+        match self {
+            Self::Right => (signed(first.0), 0),
+            Self::Left => (-signed(second.0), 0),
+            Self::Top => (0, -signed(second.1)),
+            Self::Bottom => (0, signed(first.1)),
+        }
+    }
+
+    /// The desktop two monitors of these sizes make: their union.
+    pub fn union(self, first: (u32, u32), second: (u32, u32)) -> (u32, u32) {
+        match self {
+            Self::Right | Self::Left => (first.0.saturating_add(second.0), first.1.max(second.1)),
+            Self::Top | Self::Bottom => (first.0.max(second.0), first.1.saturating_add(second.1)),
+        }
     }
 }
 
@@ -974,24 +1023,29 @@ impl TargetConfig {
                 resize: self.egfx(),
                 audio: true,
                 passthrough: self.egfx().then_some(Passthrough::RdpGraphics),
+                placement: self.virtual_displays > 1,
             },
             // Read as any VNC server, which carries no sound, and whose answer
             // to a size is not known until it is dialled.
-            (Protocol::Vnc, None) => Offers { resize: false, audio: false, passthrough: None },
+            (Protocol::Vnc, None) => {
+                Offers { resize: false, audio: false, passthrough: None, placement: false }
+            }
             // Its VP9 is the subtype's picture and not a choice.
             (Protocol::Vnc, Some(Subtype::Wlshare)) => {
-                Offers { resize: true, audio: true, passthrough: None }
+                Offers { resize: true, audio: true, passthrough: None, placement: false }
             }
             // Standard mode shares the Mac's physical displays, whose resolution
             // this gateway does not change, and never touches its sound.
             (Protocol::Vnc, Some(Subtype::Ard)) => {
-                Offers { resize: self.virtual_display, audio: false, passthrough: None }
+                Offers { resize: self.virtual_display, audio: false, passthrough: None, placement: false }
             }
-            // The sound comes with the picture, so it is not a choice.
+            // The sound comes with the picture, so it is not a choice, and the
+            // Mac places a second virtual display itself.
             (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => Offers {
                 resize: true,
                 audio: false,
                 passthrough: Some(Passthrough::AppleMedia),
+                placement: false,
             },
         }
     }
@@ -1009,6 +1063,10 @@ impl TargetConfig {
             ),
             ("sound", choices.audio != Sound::Off && !offers.audio),
             ("a passthrough", choices.passthrough && offers.passthrough.is_none()),
+            (
+                "a place for the second display",
+                choices.placement != Placement::default() && !offers.placement,
+            ),
         ];
         match refused.into_iter().find(|(_, refused)| *refused) {
             Some((choice, _)) => Err(NotOffered { target: self.name.clone(), choice }),
@@ -3379,7 +3437,7 @@ mod tests {
         // Standard mode exposes physical displays, which this gateway never resizes,
         // and never touches the Mac's sound: the picker has nothing to offer there.
         let standard = &ard("username = \"andrew\"\npassword = \"h\"").unwrap().targets[0];
-        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: None });
+        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: None, placement: false });
 
         // And it is a VNC subtype only.
         let err = ConfigFile::parse(&format!(
@@ -3425,7 +3483,7 @@ mod tests {
         assert!(target.has_virtual_display());
         assert_eq!(
             target.offers(),
-            Offers { resize: true, audio: false, passthrough: None },
+            Offers { resize: true, audio: false, passthrough: None, placement: false },
             "a display to resize, and no sound on Standard's virtual display either"
         );
         assert!(!target.media_stream());
@@ -3628,6 +3686,11 @@ mod tests {
         assert_eq!(two.offers().passthrough, Some(Passthrough::RdpGraphics), "the passthrough shows one display of the span");
         assert!(two.offers().resize, "the window still drives each display's size");
         assert_eq!(two.accepts(Choices { passthrough: true, ..Choices::default() }), Ok(()));
+        // Where the second sits is chosen only where there is a second, on a host
+        // that is told where: the Mac places its own.
+        let below = Choices { placement: Placement::Bottom, ..Choices::default() };
+        assert_eq!(two.accepts(below), Ok(()));
+        assert_eq!(one.accepts(below).unwrap_err().choice, "a place for the second display");
 
         for bad in ["virtual_displays = 0", "virtual_displays = 3"] {
             let err = ConfigFile::parse(&rdp_toml(bad)).unwrap_err();
@@ -3649,6 +3712,7 @@ vnc_password = \"x\"")).unwrap_err();
         .targets
         .remove(0);
         assert_eq!(mac.virtual_displays, 2);
+        assert!(mac.accepts(below).is_err());
         assert_eq!(mac.offers().passthrough, Some(Passthrough::AppleMedia), "each display is a stream of its own");
         // One is every target's default and so is accepted anywhere.
         ConfigFile::parse(&vnc_toml("virtual_displays = 1
@@ -4057,7 +4121,7 @@ vnc_password = \"x\"")).unwrap();
         let win = rdp("");
         assert_eq!(
             win.offers(),
-            Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics) }
+            Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics), placement: false }
         );
         for chroma in [Chroma::Subsampled, Chroma::Full] {
             let composes = Decoders { chroma, apple_media: false, rdp_graphics: true, rdp_h264: false };
@@ -4087,7 +4151,7 @@ vnc_password = \"x\"")).unwrap();
         assert!(!win.render_plan(passed, decodes).rdp_h264, "nor a target without the key");
 
         let bitmap = rdp("egfx = false");
-        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: None });
+        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: None, placement: false });
         assert_eq!(
             bitmap.accepts(passed),
             Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })

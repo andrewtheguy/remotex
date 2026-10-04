@@ -295,6 +295,41 @@ export default function TargetPicker({
                         )}
                       </>
                     )}
+                    {/* Where the second of two virtual displays sits, on a
+                        target whose host is told. */}
+                    {options.placements && (
+                      <fieldset className="picker-choice">
+                        <legend>Second display</legend>
+                        <div className="picker-placements">
+                          {options.placements.map((placement) => (
+                            <label
+                              key={placement.value}
+                              className="picker-option"
+                            >
+                              <input
+                                type="radio"
+                                name={`picker-placement-${t.name}`}
+                                checked={
+                                  options.choices.placement === placement.value
+                                }
+                                disabled={pendingTarget !== null}
+                                onChange={() =>
+                                  setRemembered((was) =>
+                                    rememberChoice(
+                                      was,
+                                      t.name,
+                                      "placement",
+                                      placement.value,
+                                    ),
+                                  )
+                                }
+                              />
+                              <span>{placement.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                    )}
                     {/* Only what the target's type offers has a row; one that
                         cannot be had here is greyed and says why. */}
                     {options.rows.map((row) => (

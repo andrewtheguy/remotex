@@ -1,7 +1,7 @@
 // The second display's picture, in a session started with an RDP host's graphics
 // pipeline passed.
 //
-// The host draws its two virtual displays as one output, side by side, through one
+// The host draws its two virtual displays as one output, the second against the first, through one
 // pipeline whose state they share: the cache slots and the copies between surfaces
 // cross from one to the other, so the pipeline cannot be dealt out by display. The
 // page that holds the session composes the whole of it, once, and shows its own

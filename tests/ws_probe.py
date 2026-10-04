@@ -12,8 +12,8 @@ This is a manual probe for display selection and dynamic-resolution behavior. St
         --port 52675 --target sandbox2highperf --user admin --resize \
         --viewport 1366x768 --viewport 1920x1080
 
-``--resize``, ``--sound`` and ``--passthrough`` are what the picker's Start would
-carry: the session is started with each one named, and with none otherwise. Without
+``--resize``, ``--sound``, ``--passthrough`` and ``--placement`` are what the picker's
+Start would carry: the session is started with each one named, and with none otherwise. Without
 ``--resize`` the desktop is kept at the target's size: its configured one, or the
 default.
 
@@ -146,6 +146,13 @@ async def main() -> int:
         action="store_true",
         help="start the session with the target's own stream passed: the Mac's with "
         "--apple-media, an RDP host's graphics pipeline with --rdp-graphics",
+    )
+    parser.add_argument(
+        "--placement",
+        choices=("right", "left", "top", "bottom"),
+        default="right",
+        help="where the second virtual display sits against the first, on an rdp "
+        "target with virtual_displays = 2",
     )
     parser.add_argument(
         "--audio",
@@ -353,6 +360,7 @@ async def main() -> int:
         "size": "window" if args.resize else "target",
         "audio": args.sound,
         "passthrough": args.passthrough,
+        "placement": args.placement,
     }
     # A display socket carries no token: the login cookie is what lets it in.
     headers = {"Cookie": f"remotex_session={cookie}"}

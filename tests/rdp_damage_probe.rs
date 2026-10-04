@@ -74,6 +74,7 @@ fn connect() -> (Session, Receiver<Event>) {
         height: SIZE.1,
         scale_percent: 0,
         monitors: 1,
+        placement: remotex::config::Placement::Right,
         resize: offers.resize,
         egfx: target.egfx(),
         pass_graphics: false,

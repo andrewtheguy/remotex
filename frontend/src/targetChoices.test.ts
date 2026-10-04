@@ -41,6 +41,7 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     audio: false,
     passthrough: null,
     passthroughOnly: false,
+    placement: false,
     ...offers,
   };
 }
@@ -154,6 +155,7 @@ test("only what the target's type offers has a row", () => {
     size: "target",
     audio: "off",
     passthrough: false,
+    placement: "right",
   });
   assert.equal(standard.blocked, null);
 });
@@ -164,6 +166,7 @@ test("nothing is ticked until somebody ticks it", () => {
     size: "window",
     audio: "off",
     passthrough: false,
+    placement: "right",
   });
   assert.equal(options.sound, false);
   assert.ok(options.rows.every((row) => !row.checked && !row.disabled));
@@ -177,6 +180,7 @@ test("what was chosen last time is what Start sends", () => {
     size: "window",
     audio: "opus",
     passthrough: false,
+    placement: "right",
   });
   assert.equal(options.sound, true);
   assert.equal(options.soundRow?.checked, true);
@@ -200,6 +204,7 @@ test("what was chosen last time is what Start sends", () => {
     size: "target",
     audio: "off",
     passthrough: false,
+    placement: "right",
   });
   // Nor is something this page never wrote there.
   const stale = targetOptions(RDP, { audio: true as never }, ABLE);
@@ -304,4 +309,26 @@ test("unreadable storage remembers nothing and still returns the choice", () => 
   assert.deepEqual(rememberChoice({}, "win", "size", "window"), {
     win: { size: "window" },
   });
+});
+
+test("the second display's place is a choice where the target offers it", () => {
+  // Not offered, there is no row and it is where it has always been, whatever
+  // was remembered.
+  const one = targetOptions(RDP, { placement: "left" }, ABLE);
+  assert.equal(one.placements, null);
+  assert.equal(one.choices.placement, "right");
+  const two = { ...RDP, placement: true };
+  const fresh = targetOptions(two, undefined, ABLE);
+  assert.deepEqual(
+    fresh.placements?.map((option) => option.value),
+    ["right", "left", "top", "bottom"],
+  );
+  assert.equal(fresh.choices.placement, "right");
+  assert.equal(
+    targetOptions(two, { placement: "bottom" }, ABLE).choices.placement,
+    "bottom",
+  );
+  // Nor is something this page never wrote there.
+  const stale = targetOptions(two, { placement: "above" as never }, ABLE);
+  assert.equal(stale.choices.placement, "right");
 });

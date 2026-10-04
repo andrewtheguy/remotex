@@ -1093,7 +1093,7 @@ pub enum ServerMsg {
     /// host laid out one display.
     ///
     /// The page holding the session composes the whole span the host draws — one
-    /// surface a display, mapped side by side onto one output — and presents this
+    /// surface a display, each mapped to its place on one output — and presents this
     /// part of it. The second display's tab composes nothing: its picture is this
     /// part of the session page's, handed across the browser by that page, so a
     /// pipeline is composed once however many tabs show it (`displayRelay.ts`).
@@ -1624,7 +1624,8 @@ mod tests {
                 crate::config::Choices {
                     size: crate::config::Sizing::Window,
                     audio: crate::config::Sound::Off,
-                    passthrough: true
+                    passthrough: true,
+                    placement: crate::config::Placement::Right,
                 }
             ),
             other => panic!("unexpected: {other:?}"),

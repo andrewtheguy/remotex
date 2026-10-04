@@ -754,6 +754,9 @@ fn describe_offers(target: &TargetConfig) -> String {
     if let Some(passthrough) = offers.passthrough {
         choices.push(format!("{} passed through", passthrough.stream()));
     }
+    if offers.placement {
+        choices.push("where the second display sits".to_owned());
+    }
     if choices.is_empty() {
         "nothing to choose".to_owned()
     } else {

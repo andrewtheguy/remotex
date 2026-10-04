@@ -1489,7 +1489,7 @@ and `GET /api/targets` carries it:
   person has. An `rdp` target with `egfx = false` has no pipeline, so neither
   the window nor the pipeline's row; one with `virtual_displays = 2` has both,
   since the browser composes a passed pipeline whole and shows one display of
-  it. A `connect` that names a choice the target does
+  it, and it alone has the second display's row. A `connect` that names a choice the target does
   not offer is refused with an `error`, and the slot stays as it was.
 - **Offered but unavailable is greyed, with the reason.** A passthrough is
   greyed wherever the browser cannot take it: one that does not decode the Mac's
@@ -1502,6 +1502,13 @@ and `GET /api/targets` carries it:
   A `connect`
   that asks for a passthrough the browser said it cannot take is refused like an
   unoffered one.
+- **The second display is placed once.** `choices.placement` says `right`,
+  `left`, `top` or `bottom` (`Placement` in `src/config.rs`): where the second
+  of two virtual displays sits against the first, so the remote's arrangement
+  can match the client's own screens. Offered by an `rdp` target with
+  `virtual_displays = 2`, whose host is told each monitor's position; a High
+  Performance Mac places its own, on the right, and has no row. A `connect` that
+  names none has it on the right.
 - **Sound is off, Opus or lossless.** `choices.audio` says `off`, `opus` or
   `flac` (`Sound` in `src/config.rs`). On a target that offers it the picker
   shows a Sound tick, and under a ticked one the two formats side by side, Opus
@@ -2093,8 +2100,11 @@ every remote screen. On an `rdp` target left at one display it has nothing to
 enumerate, and a plain `vnc` target reads its server the same way, so neither
 sends the message and the picker stays hidden there. An `rdp` target with
 `virtual_displays = 2` (alpha) asks the host for two monitors of the session's
-size in a row, in the connect-time monitor data and in every monitor layout, and
-the host spans one framebuffer over both. The engine shows one column of it: it
+size, the second against the edge of the first chosen at the picker, in the
+connect-time monitor data and in every monitor layout, and the host spans one
+framebuffer over both. Where each monitor is in that framebuffer is read from
+the host's own graphics reset. The engine shows one monitor's part of it, a
+column: it
 announces the column's size as the desktop, cuts damage to it, offsets pointer
 positions into it, and lists the columns as `Display 1` and `Display 2`. A
 `selectDisplay` is answered in the gateway, out of the framebuffer it already
@@ -2275,8 +2285,9 @@ session started with resize, the default `egfx = true`, `camera = true`, or
 `microphone = true`; `cliprdr` always; and `rdpsnd` with `rdpdr`
 for a session started with sound.
 
-`virtual_displays = 2` (alpha) asks the host for two monitors in a row, each the
-session's size, in the connect-time monitor data and in every layout a resizing
+`virtual_displays = 2` (alpha) asks the host for two monitors, each the
+session's size and the second where the picker placed it, in the connect-time
+monitor data and in every layout a resizing
 session sends; the host spans one framebuffer over both and the engine shows one
 column of it, switched from the display picker without asking the host, or —
 on *All Displays* — the second column in a browser tab of its own

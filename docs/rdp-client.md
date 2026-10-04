@@ -358,18 +358,22 @@ client owns neither.
 ## Virtual displays (alpha)
 
 `Connect::monitors`, from the target's `virtual_displays`, asks the host for that
-many monitors of the session's size in a row, the primary at the left and each
-next one starting at the last one's right edge. It goes out twice. At connect, as
+many monitors of the session's size, the first the primary and the second against
+the edge of it that `Connect::placement` names, the session's choice at the
+picker: to its right or left, top-aligned, or above or below it, left-aligned.
+Positions are relative to the primary's corner, which is always (0, 0)
+([MS-RDPBCGR] 2.2.1.3.6.1, [MS-RDPEDISP] 2.2.2.2.1), so a monitor to its left or
+above it has negative ones. It goes out twice. At connect, as
 a `CS_MONITOR` block in the GCC conference ([MS-RDPBCGR] 2.2.1.3.6, `TS_UD_CS_MONITOR`)
 beside the three blocks every connection sends, with the core data's desktop set
-to the row's union; it is an extended block, so it is sent only to a server whose
+to the monitors' union; it is an extended block, so it is sent only to a server whose
 X.224 Connection Confirm carried `EXTENDED_CLIENT_DATA_SUPPORTED`, and a server
 without the flag is asked for one monitor and the one desktop it always gave. And
 in every monitor layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2), one
 `DISPLAYCONTROL_MONITOR_LAYOUT` per monitor, the first flagged primary, all at one
 scale factor and each at the size `Input::resize` names for it: the same for every
-monitor unless a display shown in a tab of its own follows that tab's window, top
-at 0 and each starting at the last one's right edge. The server's `MaxNumMonitors` and area ceiling arrive in
+monitor unless a display shown in a tab of its own follows that tab's window, the
+second placed against the first's edge as at connect. The server's `MaxNumMonitors` and area ceiling arrive in
 its capabilities as before, and every layout is held to both: no more monitors
 than the server lays out, and no more than fit its area together, since a layout
 past either is one a conforming server ignores in silence, so monitors are dropped

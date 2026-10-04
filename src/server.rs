@@ -683,6 +683,8 @@ struct TargetInfo {
     /// cannot take the picture cannot start the target.
     #[serde(rename = "passthroughOnly")]
     passthrough_only: bool,
+    /// Whether where the second virtual display sits is a choice.
+    placement: bool,
 }
 
 /// A desktop size in points, as the picker shows it before Start.
@@ -715,6 +717,7 @@ impl TargetInfo {
             audio: offers.audio,
             passthrough: offers.passthrough,
             passthrough_only: target.media_stream() && !apple_decoders,
+            placement: offers.placement,
         }
     }
 }
@@ -1453,7 +1456,8 @@ mod tests {
             target("mac", "protocol = \"vnc\"\nsubtype = \"ard\"", "192.0.2.10"),
             target("win", "protocol = \"rdp\"\nsize = \"1920x1080\"", "192.0.2.11"),
             target("fast", "protocol = \"vnc\"\nsubtype = \"ard-high-performance\"", "192.0.2.10"),
-        ) + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12");
+        ) + &target("two", "protocol = \"rdp\"\nvirtual_displays = 2", "192.0.2.11")
+            + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12");
         let targets = crate::config::ConfigFile::parse(&text).expect("the targets parse").targets;
         let entry = |name: &str, apple_decoders| {
             let target = targets.iter().find(|t| t.name == name).unwrap();
@@ -1464,21 +1468,23 @@ mod tests {
         // sizes, no sound, no stream.
         assert_eq!(
             entry("mac", true),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"passthrough":null,"passthroughOnly":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"passthrough":null,"passthroughOnly":false,"placement":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"passthrough":"rdp-graphics","passthroughOnly":false}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"passthrough":"rdp-graphics","passthroughOnly":false,"placement":false}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // stream is, and is the only way in on a host without its decoders.
         let fast = entry("fast", true);
-        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"passthrough":"apple-media","passthroughOnly":false}"#), "{fast}");
-        assert!(entry("fast", false).ends_with(r#""passthroughOnly":true}"#));
+        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"passthrough":"apple-media","passthroughOnly":false,"placement":false}"#), "{fast}");
+        assert!(entry("fast", false).ends_with(r#""passthroughOnly":true,"placement":false}"#));
         // Which says nothing about a target with no such stream.
-        assert!(entry("win", false).ends_with(r#""passthroughOnly":false}"#));
+        assert!(entry("win", false).ends_with(r#""passthroughOnly":false,"placement":false}"#));
+        // Where the second display sits is offered by a host asked for two.
+        assert!(entry("two", true).ends_with(r#""placement":true}"#));
         // wlshare's sound is offered, and a target with no sound to choose
         // offers none.
         assert!(entry("sway", true).contains(r#""audio":true,"#));

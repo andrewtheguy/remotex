@@ -1,5 +1,6 @@
 // What a session is started with: how the desktop is sized, whether the remote's
-// sound is taken and as what, and whether the target's own stream is passed. Chosen under the
+// sound is taken and as what, whether the target's own stream is passed, and where
+// a second virtual display sits. Chosen under the
 // target at the picker, before Start, and held for the life of the session —
 // `connect` carries them and the gateway keeps them beside the target
 // (src/config.rs, `Choices`).
@@ -19,6 +20,8 @@
 //   shown ticked.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
 //   or lossless: see `soundRow`.
+// - Where the second display sits is a choice on a target that asks its host for
+//   two and tells it where each is: see `PLACEMENTS`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 
@@ -56,6 +59,8 @@ export interface TargetInfo {
    * whose pipeline every gateway composes itself.
    */
   passthroughOnly: boolean;
+  /** Whether where the second virtual display sits is a choice. */
+  placement: boolean;
 }
 
 /** A desktop size in points. */
@@ -77,11 +82,18 @@ export type Sizing = "target" | "default" | "window";
  */
 export type Sound = "off" | "opus" | "flac";
 
+/**
+ * Where the second of two virtual displays sits against the first, as `connect`
+ * names it.
+ */
+export type Placement = "right" | "left" | "top" | "bottom";
+
 /** What `connect` carries. */
 export interface Choices {
   size: Sizing;
   audio: Sound;
   passthrough: boolean;
+  placement: Placement;
 }
 
 /** What this browser can do with a target. */
@@ -122,6 +134,12 @@ export interface SoundRow {
   formats: SoundFormat[];
 }
 
+/** One place the second display can sit. */
+export interface PlacementOption {
+  value: Placement;
+  label: string;
+}
+
 /** One option under an open target. */
 export interface OptionRow {
   key: "passthrough";
@@ -141,6 +159,11 @@ export interface TargetOptions {
   sizes: SizeOption[];
   /** The target's sound, as a choice: null where it offers none. */
   soundRow: SoundRow | null;
+  /**
+   * Where the second display can sit, on a target whose host is told: null
+   * where it is not a choice.
+   */
+  placements: PlacementOption[] | null;
   rows: OptionRow[];
   /** What Start sends. */
   choices: Choices;
@@ -323,6 +346,15 @@ function soundRow(
   };
 }
 
+// The second display against the first: the edge of the first a window dragged
+// over arrives on the second from. The right is where it has always been.
+const PLACEMENTS: PlacementOption[] = [
+  { value: "right", label: "Right" },
+  { value: "left", label: "Left" },
+  { value: "top", label: "Top" },
+  { value: "bottom", label: "Bottom" },
+];
+
 /**
  * The options under `target`, from what was `remembered` for it and what this
  * browser can do. A size the operator configured is the size until somebody
@@ -350,14 +382,19 @@ export function targetOptions(
     rows.push(passed.row);
     blocked = passed.blocked;
   }
+  const placements = target.placement ? PLACEMENTS : null;
   const choices: Choices = {
     size,
     audio: sound.audio,
     passthrough: rows.some((row) => row.checked),
+    placement:
+      placements?.find((option) => option.value === remembered?.placement)
+        ?.value ?? "right",
   };
   return {
     sizes,
     soundRow: sound.row,
+    placements,
     rows,
     choices,
     // High Performance's sound comes with its picture, so it has no row and is

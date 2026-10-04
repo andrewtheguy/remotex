@@ -11,6 +11,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;
 
+use crate::config::Placement;
 use super::connect::{self, Connected, Joined};
 use super::error::Error;
 use remotex_rdp_graphics::framebuffer::{Framebuffer, Rect, affordable, stage};
@@ -28,6 +29,7 @@ use super::proto::share::{self, Pdu};
 use super::microphone::{MicrophoneFeed, MicrophoneInput, MicrophoneQueue, MicrophoneSink};
 use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpeai, rdpecam, rdpsnd, tls};
 use super::proto::gfx as gfx_proto;
+pub use remotex_rdp_graphics::proto::gfx::Placed;
 
 // ------------------------------------------------------------------ configuration
 
@@ -43,13 +45,16 @@ pub struct Connect {
     /// [`Event::Resize`].
     pub width: u32,
     pub height: u32,
-    /// How many monitors of that size to ask for, in a row with the primary at the
-    /// left: in the connect-time monitor data, where the server reads it, and in
-    /// every layout [`Input::resize`] sends. One is the single desktop every server
-    /// opens; more is held to [`display::MAX_MONITORS`]. The desktop the server opens
-    /// is the row's union, and whether it laid out the row is read off that size
-    /// at connect and off each [`Event::Resize`] after.
+    /// How many monitors of that size to ask for, the first the primary: in the
+    /// connect-time monitor data, where the server reads it, and in every layout
+    /// [`Input::resize`] sends. One is the single desktop every server opens; more
+    /// is held to [`display::MAX_MONITORS`]. The desktop the server opens is their
+    /// union, and whether it laid them out is read off that size at connect and
+    /// off each [`Event::Resize`] after.
     pub monitors: u32,
+    /// Where the second monitor sits against the first, in that data and in every
+    /// layout.
+    pub placement: Placement,
     /// The desktop scale factor to open at, as a percentage — 100 for an ordinary
     /// desktop, 200 for a 2x one — sent in the core data so the server logs on at
     /// it. Unlike a later [`Input::resize`] it needs no Display Control. Zero, or
@@ -185,10 +190,10 @@ pub enum Event {
     /// to, and the framebuffer is blank until it does; a caller that cannot show a
     /// blank desktop should follow this with [`Input::refresh`].
     ///
-    /// `monitors` is the size of each monitor the server laid the desktop out over,
-    /// left to right, from the graphics reset that redefined it: the row
+    /// `monitors` is where each monitor the server laid the desktop out over is in
+    /// it, the primary first, from the graphics reset that redefined it: the ones
     /// [`Connect::monitors`] asked for, each of its own size, or the one desktop.
-    Resize { width: u32, height: u32, monitors: Vec<(u32, u32)> },
+    Resize { width: u32, height: u32, monitors: Vec<Placed> },
     /// The server offered Display Control, so [`Input::resize`] now has somewhere
     /// to go. Only ever sent on a session configured with [`Connect::resize`], and
     /// not at all by a server that does not implement MS-RDPEDISP.
@@ -720,6 +725,8 @@ struct Active<'a> {
 struct Dynamics {
     /// Whether Display Control is wanted at all — [`Connect::resize`].
     resize: bool,
+    /// Where every layout puts the second monitor — [`Connect::placement`].
+    placement: Placement,
     /// Whether the Graphics channel is wanted at all — [`Connect::egfx`].
     egfx: bool,
     /// Whether the host is told it may draw with H.264 — [`Connect::h264`], on a
@@ -916,6 +923,7 @@ impl<'a> Active<'a> {
             device_chunks: channel::Reassembly::new(),
             dynamics: Dynamics {
                 resize: config.resize && config.egfx,
+                placement: config.placement,
                 egfx: config.egfx,
                 h264: config.pass_graphics && config.h264,
                 audio: wants_audio,
@@ -1533,11 +1541,12 @@ impl<'a> Active<'a> {
     }
 
     /// The framebuffer has been resized and cleared; tell the caller.
-    async fn announce_desktop(&mut self, width: u32, height: u32, monitors: Vec<(u32, u32)>) {
+    async fn announce_desktop(&mut self, width: u32, height: u32, monitors: Vec<Placed>) {
         // Rectangles of the desktop that just went away name pixels that no longer
         // exist; the caller starts over from the resize anyway.
         self.damage.clear();
-        let monitors = if monitors.is_empty() { vec![(width, height)] } else { monitors };
+        let monitors =
+            if monitors.is_empty() { vec![Placed { x: 0, y: 0, w: width, h: height }] } else { monitors };
         self.send(Event::Resize { width, height, monitors }).await;
     }
 
@@ -1577,7 +1586,7 @@ impl<'a> Active<'a> {
         }
         let sizes = &sizes[..monitors];
         debug!("rdp: sending a monitor layout of {sizes:?} at {scale}%");
-        let layout = display::monitor_layout(sizes, scale);
+        let layout = display::monitor_layout(sizes, self.dynamics.placement, scale);
         self.write_channel(dynamic, &dvc::data(control, &layout)?).await
     }
 

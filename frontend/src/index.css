@@ -613,6 +613,14 @@ body {
   padding-left: 1.35rem;
 }
 
+/* Where the second display sits, its four edges of the first in one row. */
+.picker-placements {
+  display: grid;
+  grid-template-columns: repeat(4, auto);
+  justify-content: start;
+  gap: 0.9rem;
+}
+
 /* Offered by the target, and not to be had here: greyed, with its note saying
    why. */
 .picker-option-unavailable {
