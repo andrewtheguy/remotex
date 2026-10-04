@@ -2510,10 +2510,12 @@ export function useRemoteDesktop(
   }, []);
 
   // Best-effort clipboard push on focus, when reads are permitted. Oversized
-  // values are skipped locally; the explicit panel reports the limit.
+  // values are skipped locally; the explicit panel reports the limit. A display
+  // in a tab of its own pushes too, on its display socket: the browser lets only
+  // the focused page read the clipboard, and with two windows that is often the
+  // tab's.
   useEffect(() => {
-    // The clipboard is the session socket's; a display in a tab of its own has none.
-    if (mode !== "desktop" || tabDisplay !== null) {
+    if (mode !== "desktop") {
       return;
     }
     const pushBrowserClipboardOnFocus = () => {
@@ -2561,7 +2563,7 @@ export function useRemoteDesktop(
         pushBrowserClipboardOnFocus,
       );
     };
-  }, [mode, tabDisplay]);
+  }, [mode]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
