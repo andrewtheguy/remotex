@@ -16,19 +16,17 @@
 // - `tap`: the scrollable shortcut row, where a slide is the row scrolling. The
 //   key commits on lift if the finger stayed within the slop. A cancel inside the
 //   slop commits too: the browser cancels a touch the moment it claims a pan, and
-//   its own slop can trip before ours, which used to swallow the tap. A modifier
-//   on this row is a key like the Esc beside it: a tap sends it, alone.
+//   its own slop can trip before ours, which used to swallow the tap.
 //
-// The modifier keys of every other row never reach the wire on their own. A tap
+// The modifier keys never reach the wire on their own. A tap
 // arms a one-shot, which the next commit spends, a repeat tick included, and a
 // second tap disarms it. Under a resting finger a modifier chords the other
 // fingers' keys like a physical chord, and is off when the finger lifts. Every
 // such modifier is sent down ahead of the key in the order it was taken, and
 // released after it, through sendKeyCombo.
 //
-// The PC grid's Sticky key turns that off and on again: while it is off, a
-// modifier of any row is a key like the rest of its row, sent alone, and
-// nothing is armed or chorded.
+// The Sticky key turns that off and on again: while it is off, a modifier is a
+// key like the rest of its row, sent alone, and nothing is armed or chorded.
 import {
   type CellId,
   type Commit,
@@ -200,9 +198,9 @@ export function createPressEngine(
   };
 
   // The modifier a cell arms or chords with, or null when it is a key that is
-  // sent: not a modifier, one on the shortcut row, or any while nothing sticks.
+  // sent: not a modifier, or any while nothing sticks.
   const stickyCodeOf = (id: CellId | null): string | null =>
-    sticky && cellOf(id)?.commit !== "tap" ? modifierCodeOf(id) : null;
+    sticky ? modifierCodeOf(id) : null;
 
   // Commands are gathered per event; `active` and `modifiers` are emitted at the
   // end only if they changed, so the host never re-renders for nothing.

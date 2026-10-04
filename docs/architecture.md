@@ -2701,15 +2701,13 @@ and lets a slide scroll. A modifier tapped once wraps the next key and is spent,
 tapped again it is off, and under a resting finger it chords the other fingers'
 keys; nothing locks. Every such modifier goes down ahead of the key in the order
 it was taken and up after it, a repeat tick included, and never reaches the wire
-on its own. The ABC page's shortcut row leads with Shift, Ctrl, Alt and Super,
-drawn dashed, which are not that kind: each is a key of the row, so a tap that
-stayed put sends it alone, down then up — Super alone is the Start key — a
-slide scrolls the row and sends nothing, and it arms nothing. The Sym page's
-row is F1 to F12 alone. The PC grid has no such row, so its
-Sticky key, in the Caps Lock slot, switches its modifiers between the two: on,
-as it starts, they stick; off, each is sent alone and is drawn dashed like the
-row's. It is drawn as the switch it is, a green pill with a lamp lit while they
-stick, so it is not taken for a key that types. The key area
+on its own. The Sticky key switches that off and on: on, as it starts, the
+modifiers stick; off, each is a key like the rest of its row, so a tap sends it
+alone, down then up — Super alone is the Start key — and is drawn dashed. The
+PC grid has it in the Caps Lock slot; a phone has it ahead of the shortcut row
+on both pages, outside what scrolls, with the ABC page's chords or the Sym
+page's F1 to F12 behind it. It is drawn as the switch it is, a green pill with
+a lamp lit while they stick, so it is not taken for a key that types. The key area
 refuses every browser gesture (`touch-action: none`), so a cancelled touch means
 the system took the finger and commits nothing; the shortcut row alone allows
 the horizontal pan it scrolls by. A phone — a touch screen whose short side is a

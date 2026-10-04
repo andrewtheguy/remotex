@@ -1350,8 +1350,8 @@ body {
 }
 
 /* A bare modifier: sent alone on a tap, drawn open so it reads apart from one
-   that arms for the next key. The shortcut row's always are; the PC grid's are
-   while its Sticky key is off, and that key is drawn open with them. */
+   that arms for the next key. Every modifier is while the Sticky key is off,
+   and that key is drawn open with them. */
 .sk-bare .sk-cap {
   background: #1b2b47;
   border-style: dashed;
@@ -1404,9 +1404,10 @@ body {
   color: #fff;
 }
 
-/* The shortcut row: scrollable, with the close button fixed at its end. Its
-   keys commit on a tap where they are touched and let a slide scroll the row,
-   so `pan-x` is the one gesture the browser may take from them. */
+/* The shortcut row: scrollable, with the Sticky key fixed at its start and the
+   close button at its end. Its keys commit on a tap where they are touched and
+   the scrolling ones let a slide scroll the row, so `pan-x` is the one gesture
+   the browser may take from them. */
 .sk-shortcut {
   display: flex;
   align-items: stretch;
@@ -1437,6 +1438,14 @@ body {
 .sk-scroller .sk-cap {
   padding: 0 10px;
   font-size: 0.7rem;
+}
+
+.sk-shortcut > .sk-cell {
+  flex: 0 0 auto;
+}
+
+.sk-shortcut > .sk-cell .sk-cap {
+  padding: 0 10px;
 }
 
 .sk-shortcut .sk-close {

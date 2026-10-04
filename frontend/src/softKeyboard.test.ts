@@ -56,17 +56,12 @@ test("the phone pages have the same rows, so the keyboard keeps its height", () 
   }
 });
 
-test("the ABC shortcut row leads with a bare Shift, Ctrl, Alt and Super and has no Ctrl chord, and the Sym row is the F-keys alone", () => {
+test("the ABC shortcut row has no modifier and no Ctrl chord, and the Sym row is the F-keys", () => {
   const cells = PAGE_ABC.rows[0].cells;
-  assert.deepEqual(
-    cells
-      .slice(0, 4)
-      .map((cell) => (cell.def.type === "special" ? cell.def.code : "")),
-    ["ShiftLeft", "ControlLeft", "AltLeft", "MetaLeft"],
-  );
-  const sym = PAGE_SYM.rows[0].cells.map((cell) =>
-    cell.def.type === "special" ? cell.def.code : "",
-  );
+  assert.ok(cells.every((cell) => modifierOf(cell.def) === null));
+  const sym = PAGE_SYM.rows[0].cells
+    .slice(1)
+    .map((cell) => (cell.def.type === "special" ? cell.def.code : ""));
   assert.deepEqual(
     sym,
     Array.from({ length: 12 }, (_, i) => `F${i + 1}`),
@@ -113,7 +108,7 @@ test("the Sym/Nav page holds every right-hand modifier", () => {
   }
 });
 
-test("the strip has Esc between its modifiers and its arrows", () => {
+test("the strip has Esc beside Tab, then its modifiers and its arrows", () => {
   const strip = PAGE_ABC.rows.find((row) => row.kind === "strip");
   assert.ok(strip);
   assert.deepEqual(
@@ -122,10 +117,10 @@ test("the strip has Esc between its modifiers and its arrows", () => {
     ),
     [
       "Tab",
+      "Escape",
       "ControlLeft",
       "AltLeft",
       "MetaLeft",
-      "Escape",
       "ArrowLeft",
       "ArrowUp",
       "ArrowDown",
@@ -187,12 +182,16 @@ test("the PC grid puts each side's keys on its side, by code", () => {
   assert.equal(labelOf(shifts[0].def, false), labelOf(shifts[1].def, false));
 });
 
-test("the PC grid alone has the Sticky key, in the Caps Lock slot", () => {
+test("every page has one Sticky key: the PC grid's in the Caps Lock slot, a phone page's leading its shortcut row", () => {
   for (const page of PAGES.values()) {
     const ids = [...cellsOf(page).values()]
       .filter((cell) => cell.def.type === "sticky")
       .map((cell) => cell.id);
-    assert.deepEqual(ids, page.id === "pc" ? ["pc:3:0"] : [], page.id);
+    assert.deepEqual(
+      ids,
+      [page.id === "pc" ? "pc:3:0" : `${page.id}:0:0`],
+      page.id,
+    );
   }
 });
 

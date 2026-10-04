@@ -1,8 +1,8 @@
 // The soft keyboard, read off the session socket: that a key tapped on it is the
 // `key` frames the page sends, down then up; that a tapped modifier wraps the next
 // key and is spent, and a twice-tapped one is off again; that a phone gets the
-// docked keyboard, its strip, its shortcut row with its bare modifiers and its
-// Sym page, and that a shifted symbol there is Shift and the key.
+// docked keyboard, its strip, its shortcut row with the Sticky key on both pages
+// and its Sym page, and that a shifted symbol there is Shift and the key.
 //
 // Everything asserted is a system decision: the frames the page sent, parsed by
 // this file, and the accessible state of the keys. Nothing here is about repeat,
@@ -186,22 +186,27 @@ test.describe("the soft keyboard on a phone", () => {
       up("AltLeft"),
     ]);
 
-    // The shortcut row's modifiers are keys, not modifiers that arm: a tap on
-    // one is a bare press of it.
-    await key(page, "Super key").tap();
+    // With the row's Sticky key off, a tap on a modifier is a bare press of it.
+    const sticky = key(page, "Sticky modifiers");
+    await expect(sticky).toHaveAttribute("aria-pressed", "true");
+    await sticky.tap();
+    await expect(sticky).toHaveAttribute("aria-pressed", "false");
+    await key(page, "Super").tap();
     await expect.poll(() => keys.slice(10)).toEqual([
       down("MetaLeft"),
       up("MetaLeft"),
     ]);
-    await expect(key(page, "Super")).toHaveAttribute("aria-pressed", "false");
 
     // The Sym page: a shifted symbol is Shift and its key, and the strip stays.
     await key(page, "?123").tap();
     await expect(key(page, "ABC")).toBeVisible();
     await expect(key(page, "Left")).toBeVisible();
-    // This page's shortcut row is the F-keys alone, with no bare modifiers.
+    // This page's shortcut row is the F-keys, behind the same Sticky key, which
+    // is as it was left; on again, the modifiers stick.
     await expect(key(page, "F1")).toBeVisible();
-    await expect(key(page, "Alt key")).toHaveCount(0);
+    await expect(sticky).toHaveAttribute("aria-pressed", "false");
+    await sticky.tap();
+    await expect(sticky).toHaveAttribute("aria-pressed", "true");
     await key(page, "_").tap();
     await expect.poll(() => keys.slice(12)).toEqual([
       down("ShiftLeft"),
