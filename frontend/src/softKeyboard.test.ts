@@ -56,24 +56,21 @@ test("the phone pages have the same rows, so the keyboard keeps its height", () 
   }
 });
 
-test("each shortcut row leads with a bare Shift, Ctrl, Alt and Super, and ABC has no Ctrl chord", () => {
-  for (const page of PHONE_PAGES) {
-    const row = page.rows[0].cells;
-    assert.deepEqual(
-      row
-        .slice(0, 4)
-        .map((cell) => (cell.def.type === "special" ? cell.def.code : "")),
-      ["ShiftLeft", "ControlLeft", "AltLeft", "MetaLeft"],
-      page.id,
-    );
-  }
-  // The Sym row's F-keys sit beside them.
+test("the ABC shortcut row leads with a bare Shift, Ctrl, Alt and Super and has no Ctrl chord, and the Sym row is the F-keys alone", () => {
+  const cells = PAGE_ABC.rows[0].cells;
+  assert.deepEqual(
+    cells
+      .slice(0, 4)
+      .map((cell) => (cell.def.type === "special" ? cell.def.code : "")),
+    ["ShiftLeft", "ControlLeft", "AltLeft", "MetaLeft"],
+  );
   const sym = PAGE_SYM.rows[0].cells.map((cell) =>
     cell.def.type === "special" ? cell.def.code : "",
   );
-  assert.deepEqual(sym.slice(4, 6), ["F1", "F2"]);
-  assert.equal(sym.length, 16);
-  const cells = PAGE_ABC.rows[0].cells;
+  assert.deepEqual(
+    sym,
+    Array.from({ length: 12 }, (_, i) => `F${i + 1}`),
+  );
   // Ctrl and one key is the strip's Ctrl and that key; only a three-finger
   // chord earns a key of its own.
   for (const cell of cells) {

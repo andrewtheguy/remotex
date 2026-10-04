@@ -73,8 +73,8 @@ modifier wraps the next key and is spent, and a twice-tapped one is off again;
 that with the PC grid's Sticky key off a modifier is sent alone; and
 that a phone — a touch screen of a phone's size, which the test declares — gets the
 docked keyboard with its strip, its shortcut row, whose modifiers are a bare
-press of the key when tapped, and its Sym page, where a shifted symbol is Shift
-and its key. It asserts frames and accessible state, never repeat or how long a
+press of the key when tapped, and its Sym page, whose row is the F-keys alone
+and where a shifted symbol is Shift and its key. It asserts frames and accessible state, never repeat or how long a
 key is held, which is timing, or where a key is drawn.
 
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
