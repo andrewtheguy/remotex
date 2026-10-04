@@ -24,6 +24,7 @@ import { expect, type Page, test } from "@playwright/test";
 
 import {
   BASE_URL,
+  chooseDisplay,
   leaveSession,
   logInAndConnectTo,
   returnToPicker,
@@ -82,25 +83,6 @@ function watchDisplays(page: Page): Displays {
 
 const last = <T>(items: T[] | undefined): T | undefined =>
   items?.[items.length - 1];
-
-/// Choose `display` in the session page's Display picker, from the drawer's
-/// button for the display shown now, and leave the drawer and the picker closed
-/// whichever of them the choice left open.
-async function chooseDisplay(page: Page, shown: string, display: string) {
-  await page.getByRole("button", { name: "Open menu" }).click();
-  await page.getByRole("button", { name: shown, exact: true }).click();
-  // The picker's entries are pressed buttons, one pressed at a time; the one
-  // asked for is not it yet.
-  await page.getByRole("button", { name: display, pressed: false }).click();
-  const picker = page.getByRole("button", { name: "Close display picker" });
-  if (await picker.isVisible()) {
-    await picker.click();
-  }
-  const drawer = page.getByRole("button", { name: "Close menu" });
-  if (await drawer.isVisible()) {
-    await drawer.click();
-  }
-}
 
 test.describe("a target that passes its pipeline over two virtual displays", () => {
   test.skip(

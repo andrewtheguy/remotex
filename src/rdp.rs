@@ -711,6 +711,33 @@ impl View {
         (left, 0)
     }
 
+    /// The desktop the columns make: their row, side by side and top-aligned, which
+    /// is the union the host laid them out in.
+    fn desktop(self) -> (u16, u16) {
+        (0..self.columns).fold((0, 0), |(w, h), column| {
+            let (cw, ch) = self.column_size(column);
+            (w.saturating_add(cw), h.max(ch))
+        })
+    }
+
+    /// A pointer position made on `column`, in the desktop: offset to where the
+    /// column starts, and held inside the desktop, which is what RDP's mouse event
+    /// addresses (MS-RDPBCGR 2.2.8.1.2.2.3, `xPos`: "relative to the top-left
+    /// corner of the server's desktop"). The page holds a position to the display
+    /// it was made on except towards the display shown beside it, which a drag
+    /// held past the edge crosses to (`frontend/src/remotePoint.ts`), so a
+    /// position past that edge lands on the other column, and one past the
+    /// desktop's own edge at it.
+    fn desktop_point(self, column: u16, x: i32, y: i32) -> (u16, u16) {
+        let (left, top) = self.column_origin(column);
+        let (w, h) = self.desktop();
+        let last = |v: u16| i32::from(v.saturating_sub(1));
+        (
+            clamp_u16(x.saturating_add(i32::from(left)).clamp(0, last(w))),
+            clamp_u16(y.saturating_add(i32::from(top)).clamp(0, last(h))),
+        )
+    }
+
     /// The column shown in tab `display`, while *All Displays* is chosen: every
     /// column but the first, numbered from one as the display sockets number them.
     fn tab_column(self, display: u32) -> Option<u16> {
@@ -1728,7 +1755,7 @@ async fn active_loop(
                             *made,
                             ClientMsg::Key { pressed: false, .. } | ClientMsg::MouseButton { pressed: false, .. }
                         ) {
-                            for event in translate_input(*made, &mut last_pos, &mut wheel, view.origin()) {
+                            for event in translate_input(*made, &mut last_pos, &mut wheel, view, view.active) {
                                 event.apply(input);
                             }
                         }
@@ -1754,8 +1781,7 @@ async fn active_loop(
                         }
                         continue;
                     }
-                    let origin = view.column_origin(shown.column());
-                    for event in translate_input(*made, &mut last_pos, &mut wheel, origin) {
+                    for event in translate_input(*made, &mut last_pos, &mut wheel, view, shown.column()) {
                         event.apply(input);
                     }
                     continue;
@@ -1849,7 +1875,7 @@ async fn active_loop(
                     }).await?;
                     continue;
                 }
-                for event in translate_input(msg, &mut last_pos, &mut wheel, view.origin()) {
+                for event in translate_input(msg, &mut last_pos, &mut wheel, view, view.active) {
                     event.apply(input);
                 }
                 continue;
@@ -2206,21 +2232,19 @@ impl WheelRotation {
 
 /// Translate one browser input message into what to do to the remote.
 ///
-/// `origin` is where the display the browser is looking at starts in the
-/// framebuffer: a position arrives in that display's pixels and goes to the host
-/// in the desktop's, and `last_pos` is kept in the desktop's.
+/// A position arrives in the pixels of `column`, the display the browser made it
+/// on, and goes to the host in the desktop's, held inside it
+/// ([`View::desktop_point`]); `last_pos` is kept in the desktop's.
 fn translate_input(
     input: ClientMsg,
     last_pos: &mut (u16, u16),
     wheel: &mut WheelRotation,
-    origin: (u16, u16),
+    view: View,
+    column: u16,
 ) -> Vec<RemoteInput> {
     match input {
         ClientMsg::MouseMove { x, y } => {
-            let (x, y) = (
-                clamp_u16(x.saturating_add(i32::from(origin.0))),
-                clamp_u16(y.saturating_add(i32::from(origin.1))),
-            );
+            let (x, y) = view.desktop_point(column, x, y);
             *last_pos = (x, y);
             vec![RemoteInput::Move { x, y }]
         }
@@ -2745,12 +2769,15 @@ mod tests {
     /// width in.
     #[test]
     fn a_position_on_the_second_display_is_offset_by_the_first() {
+        let per = Layout { w: 1280, h: 800, density: Density::One, second: None };
+        let two = View::opened(2, per, (2560, 800));
         let mut last_pos = (0, 0);
         let events = translate_input(
             ClientMsg::MouseMove { x: 10, y: 20 },
             &mut last_pos,
             &mut WheelRotation::default(),
-            (1280, 0),
+            two,
+            1,
         );
         assert_eq!(events, vec![RemoteInput::Move { x: 1290, y: 20 }]);
         assert_eq!(last_pos, (1290, 20), "the position kept is the desktop's");
@@ -2759,9 +2786,46 @@ mod tests {
             ClientMsg::MouseButton { button: MouseButton::Left, pressed: true, clicks: 1 },
             &mut last_pos,
             &mut WheelRotation::default(),
-            (1280, 0),
+            two,
+            1,
         );
         assert_eq!(events, vec![RemoteInput::Button { button: RdpButton::Left, down: true, x: 1290, y: 20 }]);
+    }
+
+    /// A position past the edge between two displays, which the page lets through
+    /// for a drag held across it, lands on the other display; one past the
+    /// desktop's own edge is held at it, so the host is never addressed outside
+    /// the desktop, nor is the button that follows.
+    #[test]
+    fn a_position_past_a_display_is_held_inside_the_desktop() {
+        let per = Layout { w: 1280, h: 800, density: Density::One, second: None };
+        let two = View::opened(2, per, (2560, 800));
+        assert_eq!(two.desktop(), (2560, 800));
+        assert_eq!(two.desktop_point(0, 1300, 20), (1300, 20), "onto the second");
+        assert_eq!(two.desktop_point(1, -100, 20), (1180, 20), "onto the first");
+        assert_eq!(two.desktop_point(0, 5000, 2000), (2559, 799));
+        assert_eq!(two.desktop_point(1, -5000, -5), (0, 0));
+        let mut last_pos = (0, 0);
+        let events = translate_input(
+            ClientMsg::MouseMove { x: 5000, y: 20 },
+            &mut last_pos,
+            &mut WheelRotation::default(),
+            two,
+            1,
+        );
+        assert_eq!(events, vec![RemoteInput::Move { x: 2559, y: 20 }]);
+        let events = translate_input(
+            ClientMsg::MouseButton { button: MouseButton::Left, pressed: true, clicks: 1 },
+            &mut last_pos,
+            &mut WheelRotation::default(),
+            two,
+            1,
+        );
+        assert_eq!(events, vec![RemoteInput::Button { button: RdpButton::Left, down: true, x: 2559, y: 20 }]);
+        // A row of two sizes is as tall as its taller column.
+        let row = two.laid_out(&[(1280, 800), (1024, 1000)], (2304, 1000));
+        assert_eq!(row.desktop(), (2304, 1000));
+        assert_eq!(row.desktop_point(0, 2400, 999), (2303, 999));
     }
 
     /// In a passed session the browser composes the span and is told which column
@@ -2899,12 +2963,14 @@ mod tests {
         assert_eq!(last, (100, 200));
     }
 
+    /// Held at the desktop's edge, not the wire's: the host is addressed inside
+    /// the desktop it laid out.
     #[test]
     fn negative_and_huge_coords_are_clamped() {
         let mut last = (0, 0);
         let events = translate(ClientMsg::MouseMove { x: -5, y: 70000 }, &mut last);
-        assert_eq!(events, vec![RemoteInput::Move { x: 0, y: u16::MAX }]);
-        assert_eq!(last, (0, u16::MAX));
+        assert_eq!(events, vec![RemoteInput::Move { x: 0, y: 799 }]);
+        assert_eq!(last, (0, 799));
     }
 
     /// No touch channel, so a contact is nothing — and, not being the pointer,
@@ -2963,13 +3029,18 @@ mod tests {
         }
     }
 
+    /// One display, the whole desktop.
+    fn one() -> View {
+        View::opened(1, Layout { w: 1280, h: 800, density: Density::One, second: None }, (1280, 800))
+    }
+
     /// Input that carries no scroll, translated with a wheel that has none pending.
     fn translate(input: ClientMsg, last_pos: &mut (u16, u16)) -> Vec<RemoteInput> {
-        translate_input(input, last_pos, &mut WheelRotation::default(), (0, 0))
+        translate_input(input, last_pos, &mut WheelRotation::default(), one(), 0)
     }
 
     fn scroll(wheel: &mut WheelRotation, dx: f32, dy: f32, unit: WheelUnit) -> Vec<RemoteInput> {
-        translate_input(ClientMsg::Wheel { dx, dy, unit }, &mut (1, 2), wheel, (0, 0))
+        translate_input(ClientMsg::Wheel { dx, dy, unit }, &mut (1, 2), wheel, one(), 0)
     }
 
     fn vertical(delta: i16) -> RemoteInput {

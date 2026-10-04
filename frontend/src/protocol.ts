@@ -166,8 +166,9 @@ export interface DisplayInfo {
   virtual: boolean;
   // Where this display is shown in a browser tab of its own, beside the one on
   // the canvas: the number its page (`/display/N`) and its display socket name
-  // it by. Null for a display the picker switches the canvas to. Only an RDP
-  // target's All Displays sets it (alpha).
+  // it by. Null for a display the picker switches the canvas to. Set by *All
+  // Displays* on an RDP target or a High Performance Mac with two virtual
+  // displays (alpha), for the second of them.
   tab: number | null;
 }
 
