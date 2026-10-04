@@ -34,7 +34,7 @@ const CELLS: LayoutCell[] = [
     { type: "combo", label: "Alt+Tab", codes: ["AltLeft", "Tab"] },
     "tap",
   ),
-  cell("super", { type: "special", label: "Super", code: "MetaLeft" }, "tap"),
+  cell("stickyRow", { type: "sticky", label: "Sticky" }, "tap"),
   cell(
     "under",
     { type: "printable", label: "_", code: "Minus", shifted: true },
@@ -362,38 +362,18 @@ test("a shortcut-row key that scrolled commits nothing, whoever ended it", () =>
   assert.deepEqual(f.sent, []);
 });
 
-test("a shortcut-row modifier is sent alone on a tap, like any key, and arms nothing", () => {
+test("the shortcut row's Sticky key switches on a tap that stayed put", () => {
   const f = new Fingers();
-  f.down("super");
-  assert.deepEqual(f.sent, []);
-  assert.deepEqual(f.modifiers(), []);
-  f.up("super", 50);
-  assert.deepEqual(f.sent, [["MetaLeft"]]);
-  assert.deepEqual(f.modifiers(), []);
-  f.tap("esc", 100);
-  assert.deepEqual(f.sent.at(-1), ["Escape"]);
-  f.tap("a", 200);
-  assert.deepEqual(f.sent.at(-1), ["KeyA"]);
-});
+  const switches = () => f.log.filter((c) => c.kind === "sticky");
+  f.down("stickyRow", 0);
+  f.moveTo(xOf("stickyRow") + 20, 20, 20);
+  f.upAt(xOf("stickyRow") + 20, 20, 40);
+  assert.deepEqual(switches(), []);
 
-test("a shortcut-row modifier that scrolled sends nothing, whoever ended it", () => {
-  const f = new Fingers();
-  f.down("super", 0);
-  f.moveTo(xOf("super") + 20, 20, 20);
-  f.upAt(xOf("super") + 20, 20, 40);
-
-  f.down("super", 100);
-  f.moveTo(xOf("super") + 20, 20, 120);
-  f.cancel(1, 140);
-  assert.deepEqual(f.sent, []);
-  assert.deepEqual(f.modifiers(), []);
-});
-
-test("a shortcut-row modifier is wrapped by an armed one and spends it", () => {
-  const f = new Fingers();
-  f.tap("ctrl", 0);
-  f.tap("super", 100);
-  assert.deepEqual(f.sent, [["ControlLeft", "MetaLeft"]]);
+  f.tap("stickyRow", 100);
+  assert.deepEqual(switches(), [{ kind: "sticky", on: false }]);
+  f.tap("ctrl", 200);
+  assert.deepEqual(f.sent, [["ControlLeft"]]);
   assert.deepEqual(f.modifiers(), []);
 });
 

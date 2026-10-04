@@ -100,7 +100,8 @@ function toRect(r: DOMRect): Rect {
 }
 
 // Measure every key of the area into a hit tester. The shortcut row is left
-// out: its keys commit on tap where they are touched and scroll under a slide,
+// out: its keys commit on tap where they are touched, and the scrolling ones
+// scroll under a slide,
 // so a slide never resolves into it, and the area's bounds start below it.
 function measure(area: HTMLElement): HitTester {
   const rows: GeometryRow[] = [];
@@ -408,19 +409,16 @@ const SPOKEN_NAMES: ReadonlyMap<string, string> = new Map([
   ["MetaLeft", "Super"],
 ]);
 
-// A modifier that is a key sent alone: the shortcut row's always, and every
-// one while the Sticky key is off.
+// A modifier that is a key sent alone: every one while the Sticky key is off.
 function isBareModifier(cell: LayoutCell, sticky: boolean): boolean {
-  return (cell.commit === "tap" || !sticky) && modifierOf(cell.def) !== null;
+  return !sticky && modifierOf(cell.def) !== null;
 }
 
-// The accessible name. The shortcut row's modifier is named apart from the
-// strip's key of the same code, which arms rather than sends.
+// The accessible name.
 function nameOf(cell: LayoutCell): string {
   const { def } = cell;
   if (def.type === "special") {
-    const name = SPOKEN_NAMES.get(def.code) ?? def.label;
-    return cell.commit === "tap" && modifierOf(def) ? `${name} key` : name;
+    return SPOKEN_NAMES.get(def.code) ?? def.label;
   }
   if (def.type === "sticky") {
     return "Sticky modifiers";
@@ -697,18 +695,28 @@ export function SoftKeyboardPanel({
       <div className="sk-area" ref={areaRef}>
         {shortcutRows.map((row) => (
           <div key={row.kind} className="sk-shortcut" data-row="shortcut">
-            <div className="sk-scroller">
-              {row.cells.map((cell) => (
-                <Cell
-                  key={cell.id}
-                  cell={cell}
-                  shift={shift}
-                  active={active.has(cell.id)}
-                  modifier={modifierStateOf(cell, held, sticky)}
-                  sticky={sticky}
-                />
-              ))}
-            </div>
+            {/* The Sticky key stays put ahead of the keys that scroll. */}
+            {[true, false].map((fixed) => {
+              const group = row.cells
+                .filter((cell) => (cell.def.type === "sticky") === fixed)
+                .map((cell) => (
+                  <Cell
+                    key={cell.id}
+                    cell={cell}
+                    shift={shift}
+                    active={active.has(cell.id)}
+                    modifier={modifierStateOf(cell, held, sticky)}
+                    sticky={sticky}
+                  />
+                ));
+              return fixed ? (
+                group
+              ) : (
+                <div key="scroller" className="sk-scroller">
+                  {group}
+                </div>
+              );
+            })}
             {unseen.length > 0 && (
               <div className="sk-badges">
                 {unseen.map(([code, state]) => (

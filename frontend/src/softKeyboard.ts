@@ -45,8 +45,9 @@ export interface PageSoftKey {
   page: PageId;
 }
 
-// Switches the PC grid's modifiers between sticking and being sent alone on a
-// tap, as the shortcut row's are on a phone. Sits in the Caps Lock slot.
+// Switches the modifiers between sticking and being sent alone on a tap. Sits
+// in the PC grid's Caps Lock slot, and fixed ahead of the shortcut row on both
+// phone pages.
 export interface StickySoftKey {
   type: "sticky";
   label: string;
@@ -204,6 +205,10 @@ function pg(label: string, page: PageId, units = 1): Key {
   return { def: { type: "page", label, page }, units };
 }
 
+function sticky(units = 1): Key {
+  return { def: { type: "sticky", label: "Sticky" }, units };
+}
+
 function gap(units: number): Key {
   return { def: { type: "spacer" }, units };
 }
@@ -238,39 +243,31 @@ function page(
 
 // ── Shortcut rows (scrollable, phone pages) ──
 
-// The bare modifiers lead the ABC page's shortcut row. Each is a key and not a
-// modifier that arms: a tap sends it alone, down then up — Super alone is the
-// Start key. The modifiers that stick are the solid ones below.
-// Super as the phone pages draw it: a symbol, one unit wide, where the word would
-// take the room the strip gives Esc.
-const SUPER_GLYPH = "❖";
-
-const BARE_MODIFIERS: Key[] = [
-  s("Shift", "ShiftLeft"),
-  s("Ctrl", "ControlLeft"),
-  s("Alt", "AltLeft"),
-  s(SUPER_GLYPH, "MetaLeft"),
-];
-
-// The chords that follow the modifiers are the ones a browser swallows or a
-// phone cannot otherwise reach; Ctrl+C and its kin are the strip's Ctrl and a
-// letter.
+// The Sticky key leads both rows, and the panel keeps it out of the scroll so
+// it is on screen on either page. With it off, a tap on a modifier sends that
+// key alone, down then up — Super alone is the Start key.
+//
+// The chords are the ones a browser swallows or a phone cannot otherwise
+// reach; Ctrl+C and its kin are the strip's Ctrl and a letter.
 const SHORTCUTS_ABC: Key[] = [
-  ...BARE_MODIFIERS,
+  sticky(),
   c("Alt+Tab", ["AltLeft", "Tab"]),
   c("Alt+F4", ["AltLeft", "F4"]),
   c("C+A+Del", ["ControlLeft", "AltLeft", "Delete"]),
 ];
 
-// The Sym page's row is F1 to F12 alone.
-const SHORTCUTS_FN: Key[] = Array.from({ length: 12 }, (_, i) =>
-  s(`F${i + 1}`, `F${i + 1}`),
-);
+// The Sym page's row is F1 to F12.
+const SHORTCUTS_FN: Key[] = [
+  sticky(),
+  ...Array.from({ length: 12 }, (_, i) => s(`F${i + 1}`, `F${i + 1}`)),
+];
 
 // ── The strip: modifiers, Esc and arrows, on every phone page ──
 
-// Super is its symbol, as on the shortcut row, and the modifiers kept narrow,
-// which is the room Esc takes between them and the arrows.
+// Super is a symbol, one unit wide, and the modifiers kept narrow, which is the
+// room Esc takes between them and the arrows.
+const SUPER_GLYPH = "❖";
+
 const STRIP: Key[] = [
   s("Tab", "Tab", 1.5),
   s("Ctrl", "ControlLeft", 1.1),
@@ -408,7 +405,7 @@ const PC_QWERTY_ROW: Key[] = [
 ];
 
 const PC_HOME_ROW: Key[] = [
-  { def: { type: "sticky", label: "Sticky" }, units: 2.1 },
+  sticky(2.1),
   ...letters("asdfghjkl"),
   p(";", "Semicolon", ":"),
   p("'", "Quote", '"'),
