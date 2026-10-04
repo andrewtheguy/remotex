@@ -241,11 +241,15 @@ function page(
 // The bare modifiers lead the ABC page's shortcut row. Each is a key and not a
 // modifier that arms: a tap sends it alone, down then up — Super alone is the
 // Start key. The modifiers that stick are the solid ones below.
+// Super as the phone pages draw it: a symbol, one unit wide, where the word would
+// take the room the strip gives Esc.
+const SUPER_GLYPH = "❖";
+
 const BARE_MODIFIERS: Key[] = [
   s("Shift", "ShiftLeft"),
   s("Ctrl", "ControlLeft"),
   s("Alt", "AltLeft"),
-  s("Supr", "MetaLeft"),
+  s(SUPER_GLYPH, "MetaLeft"),
 ];
 
 // The chords that follow the modifiers are the ones a browser swallows or a
@@ -265,14 +269,14 @@ const SHORTCUTS_FN: Key[] = Array.from({ length: 12 }, (_, i) =>
 
 // ── The strip: modifiers, Esc and arrows, on every phone page ──
 
-// Super is spelled short, as on the shortcut row, and the modifiers kept narrow,
+// Super is its symbol, as on the shortcut row, and the modifiers kept narrow,
 // which is the room Esc takes between them and the arrows.
 const STRIP: Key[] = [
   s("Tab", "Tab", 1.5),
-  s("Ctrl", "ControlLeft", 1.2),
+  s("Ctrl", "ControlLeft", 1.1),
   s("Alt", "AltLeft", 1.1),
-  s("Supr", "MetaLeft", 1.2),
-  s("Esc", "Escape"),
+  s(SUPER_GLYPH, "MetaLeft"),
+  s("Esc", "Escape", 1.3),
   s("←", "ArrowLeft"),
   s("↑", "ArrowUp"),
   s("↓", "ArrowDown"),
