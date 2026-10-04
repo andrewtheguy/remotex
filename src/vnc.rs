@@ -3962,6 +3962,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
 
             (leg, picture) = next_picture(&mut apple) => {
                 let _switch = shared.switch.lock().await;
+                // The Mac's leg, as the session's display it carries.
+                let leg = media.as_ref().map_or(leg, |media| media.lock().unwrap().leg_of(leg));
                 match picture {
                     FromStream::Picture(picture) => {
                         if let Some(media) = media {
@@ -6234,6 +6236,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             // Either display's change answers a request, which names both.
             let changed = resized || (!d.virtuals.is_empty() && d.virtuals != virtuals);
             d.virtuals.clone_from(&virtuals);
+            // The Mac's video legs follow its arrangement: the display that
+            // starts the framebuffer first.
+            if let (Some(media), [first, second]) = (&shared.media, virtuals.as_slice()) {
+                media.lock().unwrap().arrange(second.origin < first.origin);
+            }
             d.hp.layout(changed, tokio::time::Instant::now());
             d.laid_out = true;
             // A new display stopped the media stream, whoever asked for it: the

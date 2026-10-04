@@ -1507,7 +1507,9 @@ and `GET /api/targets` carries it:
   of two virtual displays sits against the first, so the remote's arrangement
   can match the client's own screens. Offered by an `rdp` target with
   `virtual_displays = 2`, whose host is told each monitor's position; a High
-  Performance Mac places its own, on the right, and has no row. A `connect` that
+  Performance Mac places its own, on the right, and has no row: it is moved on
+  the Mac, in its Displays settings, and the session follows the layout the Mac
+  then reports. A `connect` that
   names none has it on the right.
 - **Sound is off, Opus or lossless.** `choices.audio` says `off`, `opus` or
   `flac` (`Sound` in `src/config.rs`). On a target that offers it the picker
@@ -2181,8 +2183,13 @@ but the keyframe a display coming into view starts at; the canvas stays behind
 its resize notice until that picture, as it does across any display change. The
 framebuffer the Mac spans over both displays is only the space its rectangles,
 stepped over, and pointer positions are addressed in: a position made on the
-second display is offset by where the layout places it, and held inside the span
-(`DesktopState::hp_span_point`). On a session that follows
+second display is offset by where the layout places it, and held on a display
+(`DesktopState::hp_span_point`). Where that is is the Mac's to say: the second
+display is created to the right of the first and can be arranged anywhere
+against it in the Mac's Displays settings, and each layout places both in the
+framebuffer as they then sit. The legs follow the same arrangement, the display
+that starts the framebuffer on the first, so the engine reads which display a
+leg carries off the layout too (`MediaStream::arrange`). On a session that follows
 the window the tab's window sizes the second display through the same
 configuration, which always names both. The sound is the session's, on the first
 tab. See [Two virtual displays](apple-vnc-889.md#two-virtual-displays).

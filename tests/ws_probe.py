@@ -192,6 +192,13 @@ async def main() -> int:
         help="after display 2's first resize, report its tab's window as this size, "
         "which a session started with --resize lays the second monitor out at",
     )
+    parser.add_argument(
+        "--tab-viewport-delay",
+        type=float,
+        default=0.0,
+        help="seconds to wait before --tab-viewport goes out, so it changes a "
+        "second display whose stream is already flowing",
+    )
     parser.add_argument("--mouse", type=coordinates, default=None)
     parser.add_argument(
         "--display",
@@ -617,11 +624,16 @@ async def main() -> int:
                             )
                             if args.tab_viewport is not None and not tab_viewport_sent:
                                 tab_viewport_sent = True
-                                w, h = args.tab_viewport
-                                print(f"  [2] -> viewport {w}x{h}")
-                                await origin.send(
-                                    json.dumps({"type": "viewport", "w": w, "h": h})
-                                )
+
+                                async def size_tab(tab=origin) -> None:
+                                    await asyncio.sleep(args.tab_viewport_delay)
+                                    w, h = args.tab_viewport
+                                    print(f"  [2] -> viewport {w}x{h}")
+                                    await tab.send(
+                                        json.dumps({"type": "viewport", "w": w, "h": h})
+                                    )
+
+                                move_tasks.append(asyncio.create_task(size_tab()))
                             if args.tab_mouse is not None and not tab_mouse_sent:
                                 tab_mouse_sent = True
                                 move_tasks.append(

@@ -165,9 +165,11 @@ What it lacks:
 
 - **Where a Mac's second display sits.** An `rdp` target's is chosen at the
   picker, right, left, top or bottom, so the remote's arrangement can match where
-  the client's own second display is. A High Performance Mac's is always to the
-  right of the first: the Mac places it, and nothing in the display
-  configuration it is sent is known to say where.
+  the client's own second display is. A High Performance Mac creates its to the
+  right of the first, and nothing in the display configuration it is sent is
+  known to say where. It can be moved by hand, in the Mac's Displays settings,
+  and the session follows ([Macs](guide.md#macs-vnc-with-an-apple-subtype)), but
+  that is not a choice at the picker and the Mac does not always keep it.
 - **Telling the displays apart.** The session page's Info names both displays
   and links to the second, but nothing on the remote's screens says which
   display is which.

@@ -181,7 +181,13 @@ connection with the same error as wrong credentials. See
   HEVC and AAC-ELD over SRTP:
   - **Alpha:** `virtual_displays = 2` asks the Mac for two virtual displays,
     Apple's viewer's "2 Virtual Displays", the second to the right of the first:
-    the Mac places it, so the picker offers no other side.
+    the Mac places it, so the picker offers no other side. To have it on another
+    side, arrange the displays on the Mac while the session is open, in System
+    Settings → Displays → Arrange: drag the second display to the left of the
+    first, above it or below it. The session follows — each tab keeps its own
+    display and the pointer crosses the edge they now share — and the Mac may
+    keep the arrangement for the next session; when it has not, it is on the
+    right again.
     The Display picker switches between them, and its *All Displays* keeps the
     first here and opens the second at `/display/2` in a new tab of the same
     browser, as on an RDP target; on a session that follows the window that
