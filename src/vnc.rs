@@ -6231,6 +6231,12 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     };
     let resized = apply_resize(desktop, shadow, size, scale, sink).await?;
     if virtual_display {
+        // Which leg carries which display changes under a canvas changing
+        // display, which reads and sets who is shown each: one at a time.
+        let switch = match (&shared.media, virtuals.len()) {
+            (Some(_), 2) => Some(shared.switch.lock().await),
+            _ => None,
+        };
         let (cover, changed) = {
             let mut d = desktop.lock().unwrap();
             // Either display's change answers a request, which names both.
@@ -6256,6 +6262,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             };
             (cover, changed)
         };
+        drop(switch);
         hp_wake.notify_one();
         if cover {
             sink.msg(ServerMsg::Resizing { active: true }).await?;
