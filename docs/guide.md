@@ -243,6 +243,13 @@ sound, and with `camera = true` or `microphone = true` the browser's camera and
 microphone as PipeWire devices on the desktop. Without the subtype the same
 server is read as any VNC server is.
 
+- **Alpha:** a desktop with exactly two outputs, monitors or headless ones, is
+  listed with *All Displays*: the first stays here and the second opens at
+  `/display/2` in a new tab of the same browser, with its own pointer and
+  keyboard, as on an `rdp` target with two virtual displays. No key asks for it;
+  the outputs are the compositor's, and `virtual_displays` is not a key of this
+  target. It needs wlshare 0.0.54 or later.
+
 The example uses the account wlshare runs as, checked through PAM over
 RSA-AES. If wlshare instead has a `password_file`, set that server password as
 `vnc_password` and omit `username` and `password`.
