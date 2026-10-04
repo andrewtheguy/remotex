@@ -744,6 +744,7 @@ impl View {
     }
 
     /// The desktop the columns make: the union the host laid them out in.
+    #[cfg(test)]
     fn desktop(self) -> (u16, u16) {
         (0..self.columns).fold((0, 0), |(w, h), column| {
             let (cw, ch) = self.column_size(column);
@@ -753,21 +754,24 @@ impl View {
     }
 
     /// A pointer position made on `column`, in the desktop: offset to where the
-    /// column starts, and held inside the desktop, which is what RDP's mouse event
+    /// column starts, and held on a column, which is what RDP's mouse event
     /// addresses (MS-RDPBCGR 2.2.8.1.2.2.3, `xPos`: "relative to the top-left
     /// corner of the server's desktop"). The page holds a position to the display
     /// it was made on unless another is shown in a tab of its own, which a drag
     /// held past the edge between them crosses to (`frontend/src/remotePoint.ts`),
-    /// so a position past that edge lands on the other column, and one past the
-    /// desktop's own edge at it.
+    /// so a position past that edge lands on the other column, and one that lies
+    /// on neither at the nearest edge of the nearest ([`engine::hold_on_display`]).
     fn desktop_point(self, column: u16, x: i32, y: i32) -> (u16, u16) {
         let (left, top) = self.column_origin(column);
-        let (w, h) = self.desktop();
-        let last = |v: u16| i32::from(v.saturating_sub(1));
-        (
-            clamp_u16(x.saturating_add(i32::from(left)).clamp(0, last(w))),
-            clamp_u16(y.saturating_add(i32::from(top)).clamp(0, last(h))),
-        )
+        let point = (x.saturating_add(i32::from(left)), y.saturating_add(i32::from(top)));
+        let mut columns = [engine::DisplayRect { x: 0, y: 0, w: 0, h: 0 }; COLUMNS];
+        let shown = usize::from(self.columns).min(COLUMNS);
+        for (index, rect) in columns.iter_mut().enumerate().take(shown) {
+            let ((x, y), (w, h)) = (self.origins[index], self.sizes[index]);
+            *rect = engine::DisplayRect { x: i32::from(x), y: i32::from(y), w: i32::from(w), h: i32::from(h) };
+        }
+        let (x, y) = engine::hold_on_display(point, &columns[..shown], usize::from(column));
+        (clamp_u16(x), clamp_u16(y))
     }
 
     /// The column shown in tab `display`, while *All Displays* is chosen: every
@@ -2872,6 +2876,9 @@ mod tests {
         let row = two.laid_out(&row(&[(1280, 800), (1024, 1000)]), (2304, 1000));
         assert_eq!(row.desktop(), (2304, 1000));
         assert_eq!(row.desktop_point(0, 2400, 999), (2303, 999));
+        // Below the shorter column is inside the desktop and on neither: held on
+        // the column it was made on.
+        assert_eq!(row.desktop_point(0, 640, 950), (640, 799));
     }
 
     /// In a passed session the browser composes the span and is told which column

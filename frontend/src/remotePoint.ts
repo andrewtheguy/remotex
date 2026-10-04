@@ -9,8 +9,9 @@
 // onto the next screen, so a position past the display's edge is where the
 // pointer is on the display beyond it, and the gateway places it there: its
 // engine knows which edge the other display is against, offsets the position
-// into the remote's arrangement and holds it inside, so one past any other edge
-// is held there instead of here. A window dragged over the edge between two
+// into the remote's arrangement and holds it on a display, so one past any other
+// edge, or beyond a neighbour shorter or narrower than this display, is held
+// there instead of here. A window dragged over the edge between two
 // full-screen windows, one display each, arrives on the other display; the
 // pointer itself is sent by whichever window it is over, so it needs nothing of
 // this.

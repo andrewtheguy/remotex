@@ -232,11 +232,75 @@ pub fn clamp_u16(v: i32) -> u16 {
     v.clamp(0, i32::from(u16::MAX)) as u16
 }
 
+/// One display of a remote's arrangement, in the space its pointer positions are
+/// addressed in: where it starts, and its size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// `point`, made on display `from` of `displays` and already offset into their
+/// arrangement, held on a display: as it is where it lies on one, and otherwise
+/// at the nearest point of the nearest, `from` where two are as near.
+///
+/// The union of displays of different sizes is not its bounding rectangle, so a
+/// position held only inside that rectangle can lie on no display: below the
+/// shorter of two side by side, or beside the narrower of two stacked. The page
+/// lets a held drag's positions through past any edge while another display is
+/// shown beside it (`frontend/src/remotePoint.ts`), so which of them are on a
+/// display is decided here.
+pub fn hold_on_display(point: (i32, i32), displays: &[DisplayRect], from: usize) -> (i32, i32) {
+    let held = |display: &DisplayRect| {
+        let last = |start: i32, length: i32| start.saturating_add(length.max(1) - 1);
+        (
+            point.0.clamp(display.x, last(display.x, display.w)),
+            point.1.clamp(display.y, last(display.y, display.h)),
+        )
+    };
+    let away = |at: (i32, i32)| {
+        let (dx, dy) = (i64::from(at.0) - i64::from(point.0), i64::from(at.1) - i64::from(point.1));
+        dx * dx + dy * dy
+    };
+    displays
+        .iter()
+        .enumerate()
+        .map(|(index, display)| (held(display), index != from))
+        .min_by_key(|&(at, other)| (away(at), other))
+        .map_or(point, |(at, _)| at)
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+
+    /// A position past the edge between two displays lands on the other, and one
+    /// that would lie on neither is held on the nearest.
+    #[test]
+    fn a_position_is_held_on_a_display_and_not_only_inside_their_bounding_rectangle() {
+        let beside = [DisplayRect { x: 0, y: 0, w: 1600, h: 900 }, DisplayRect { x: 1600, y: 0, w: 1024, h: 1200 }];
+        assert_eq!(hold_on_display((800, 450), &beside, 0), (800, 450));
+        assert_eq!(hold_on_display((1700, 1100), &beside, 0), (1700, 1100), "onto the second");
+        // Below the first, which is shorter than the second: on neither.
+        assert_eq!(hold_on_display((800, 1100), &beside, 0), (800, 899));
+        assert_eq!(hold_on_display((1500, 1100), &beside, 1), (1600, 1100), "nearer the second");
+        // Past the arrangement's own edge, at it.
+        assert_eq!(hold_on_display((9000, -5), &beside, 0), (2623, 0));
+        assert_eq!(hold_on_display((-5, -5), &beside, 1), (0, 0));
+        // Stacked, the second narrower: beside it is on neither.
+        let stacked = [DisplayRect { x: 0, y: 700, w: 1600, h: 900 }, DisplayRect { x: 0, y: 0, w: 1024, h: 700 }];
+        assert_eq!(hold_on_display((1300, 650), &stacked, 0), (1300, 700));
+        assert_eq!(hold_on_display((1300, 300), &stacked, 1), (1023, 300));
+        // As near to both: the one it was made on.
+        let equal = [DisplayRect { x: 0, y: 0, w: 100, h: 100 }, DisplayRect { x: 201, y: 0, w: 100, h: 100 }];
+        assert_eq!(hold_on_display((150, 50), &equal, 0), (99, 50));
+        assert_eq!(hold_on_display((150, 50), &equal, 1), (201, 50));
+        assert_eq!(hold_on_display((7, 7), &[], 0), (7, 7));
+    }
 
     /// A sink and the channel behind it. `VideoSink` forwards through a task of its
     /// own, so a test reads the channel only after [`VideoSink::flush`].
