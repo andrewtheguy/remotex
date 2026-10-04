@@ -362,7 +362,7 @@ test("a shortcut-row key that scrolled commits nothing, whoever ended it", () =>
   assert.deepEqual(f.sent, []);
 });
 
-test("a shortcut-row modifier is sent alone on a tap, like the Esc beside it, and arms nothing", () => {
+test("a shortcut-row modifier is sent alone on a tap, like any key, and arms nothing", () => {
   const f = new Fingers();
   f.down("super");
   assert.deepEqual(f.sent, []);

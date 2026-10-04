@@ -238,14 +238,14 @@ function page(
 
 // ── Shortcut rows (scrollable, phone pages) ──
 
-// The bare modifiers lead the ABC page's shortcut row. Each is a key like the
-// Esc beside it: a tap sends it alone, down then up — Super alone is the Start
-// key — and it arms nothing. The modifiers that stick are the solid ones below.
+// The bare modifiers lead the ABC page's shortcut row. Each is a key and not a
+// modifier that arms: a tap sends it alone, down then up — Super alone is the
+// Start key. The modifiers that stick are the solid ones below.
 const BARE_MODIFIERS: Key[] = [
   s("Shift", "ShiftLeft"),
   s("Ctrl", "ControlLeft"),
   s("Alt", "AltLeft"),
-  s("Super", "MetaLeft"),
+  s("Supr", "MetaLeft"),
 ];
 
 // The chords that follow the modifiers are the ones a browser swallows or a
@@ -253,7 +253,6 @@ const BARE_MODIFIERS: Key[] = [
 // letter.
 const SHORTCUTS_ABC: Key[] = [
   ...BARE_MODIFIERS,
-  s("Esc", "Escape"),
   c("Alt+Tab", ["AltLeft", "Tab"]),
   c("Alt+F4", ["AltLeft", "F4"]),
   c("C+A+Del", ["ControlLeft", "AltLeft", "Delete"]),
@@ -264,13 +263,16 @@ const SHORTCUTS_FN: Key[] = Array.from({ length: 12 }, (_, i) =>
   s(`F${i + 1}`, `F${i + 1}`),
 );
 
-// ── The strip: modifiers and arrows, on every phone page ──
+// ── The strip: modifiers, Esc and arrows, on every phone page ──
 
+// Super is spelled short, as on the shortcut row, and the modifiers kept narrow,
+// which is the room Esc takes between them and the arrows.
 const STRIP: Key[] = [
   s("Tab", "Tab", 1.5),
-  s("Ctrl", "ControlLeft", 1.5),
-  s("Alt", "AltLeft", 1.5),
-  s("Super", "MetaLeft", 1.5),
+  s("Ctrl", "ControlLeft", 1.2),
+  s("Alt", "AltLeft", 1.1),
+  s("Supr", "MetaLeft", 1.2),
+  s("Esc", "Escape"),
   s("←", "ArrowLeft"),
   s("↑", "ArrowUp"),
   s("↓", "ArrowDown"),
