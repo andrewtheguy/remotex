@@ -134,7 +134,9 @@ What the gateway does:
   not on. It is a session of its own into that socket: wlshare's VP9 passed, with
   a walk of the tab's own link, the cursor, the size and the density. On a
   session that follows the window the tab's window sizes a headless second
-  output at the browser's density; a monitor keeps its mode.
+  output at the density of the screen that window is on, which the tab states
+  on its display socket as the session's page does on its own; a monitor keeps
+  its mode.
 - **It lists nothing of the session's.** No output list, no clipboard, no sound,
   camera or microphone: those are the first connection's.
 - **Choosing one output ends it** before wlshare is asked for that output, and

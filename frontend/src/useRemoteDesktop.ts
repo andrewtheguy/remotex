@@ -1251,7 +1251,11 @@ export function useRemoteDesktop(
       // menu shows this number, and a density this screen has that the remote
       // does not is exactly what someone reading it is trying to see.
       setHostScale(msg.scale);
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // A tab of its own states its screen on its display's socket, the one
+      // socket it has: a display that is a connection of its own takes its
+      // density from the window it is shown in.
+      const socket = tabDisplay === null ? ws : displayWs;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
         return;
       }
       const key = `${msg.w}x${msg.h}@${msg.scale}`;
@@ -1398,6 +1402,8 @@ export function useRemoteDesktop(
       }
       setStatus("connected");
       setMode("desktop");
+      lastHostDisplay = null;
+      sendHostDisplay();
       lastTabViewport = null;
       sendTabViewport();
     };

@@ -1533,8 +1533,8 @@ async fn display(
                     room.notify_one();
                 }
                 // What is made over a display — the pointer, the keys, touches —
-                // its repaint, and the window it is shown in. What concerns the
-                // session goes on its socket.
+                // its repaint, the window it is shown in and the screen that
+                // window is on. What concerns the session goes on its socket.
                 Ok(
                     input @ (ClientMsg::MouseMove { .. }
                     | ClientMsg::MouseButton { .. }
@@ -1542,7 +1542,8 @@ async fn display(
                     | ClientMsg::Key { .. }
                     | ClientMsg::Touch { .. }
                     | ClientMsg::Refresh
-                    | ClientMsg::Viewport { .. }),
+                    | ClientMsg::Viewport { .. }
+                    | ClientMsg::HostDisplay(_)),
                 ) => sessions.forward_display_input(id, input),
                 // The one session message a display socket carries: the browser
                 // hands its clipboard over to the tab that has focus, and a tab of
