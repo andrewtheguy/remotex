@@ -66,6 +66,7 @@ import {
 } from "./protocol.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { decodesRdpH264 } from "./rdpH264.ts";
+import { type Beside, remotePoint } from "./remotePoint.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
 import type { Choices } from "./targetChoices.ts";
 import {
@@ -652,6 +653,12 @@ export function useRemoteDesktop(
   // leaves the panel agreeing with what is on screen.
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
   const [activeDisplayId, setActiveDisplayId] = useState<number | null>(null);
+  // The display shown beside this page's, in a tab of its own, by the side it
+  // sits on (remotePoint.ts): a page showing the second display in a tab has
+  // the first on its left for as long as it is shown at all, and the session's
+  // page has the second on its right while the remote lists it for a tab. A ref
+  // because the pointer handlers read it at pointer rate.
+  const besideRef = useRef<Beside>(tabDisplay === null ? null : "left");
   // Whether the remote reported itself as a Mac, which is the only thing that
   // decides whether a local Command chord stays Command or becomes remote
   // Control. Reset to false on every disconnect (see the "picker" case), because
@@ -1760,6 +1767,11 @@ export function useRemoteDesktop(
     const handleDisplays = (msg: Extract<ControlMsg, { type: "displays" }>) => {
       setDisplays(msg.displays);
       setActiveDisplayId(msg.active);
+      if (tabDisplay === null) {
+        besideRef.current = msg.displays.some((d) => d.tab !== null)
+          ? "right"
+          : null;
+      }
       const switched = sharedDisplay !== null && sharedDisplay !== msg.active;
       sharedDisplay = msg.active;
       if (switched) {
@@ -1890,6 +1902,9 @@ export function useRemoteDesktop(
       setRemoteResizing(false);
       setDisplays([]);
       setActiveDisplayId(null);
+      if (tabDisplay === null) {
+        besideRef.current = null;
+      }
       sharedDisplay = null;
       setRemoteClipboard(null);
       lastFromRemoteRef.current = null;
@@ -2603,23 +2618,16 @@ export function useRemoteDesktop(
     // released on the next event that reports it up (see heldModifiers.ts).
     const heldModifiers = new HeldModifiers();
 
-    // Client point to remote pixels. Map through the canvas rect (not the
-    // overlay): it reflects the displayed framebuffer under the current touch
-    // zoom/pan, and on desktop it coincides with the overlay anyway.
-    const toRemotePoint = (clientX: number, clientY: number) => {
-      const rect = pointerRectCache.read(canvasRef.current ?? el);
-      const remote = sizeRef.current;
-      const scaleX = remote && rect.width > 0 ? remote.w / rect.width : 1;
-      const scaleY = remote && rect.height > 0 ? remote.h / rect.height : 1;
-      let x = Math.round((clientX - rect.left) * scaleX);
-      let y = Math.round((clientY - rect.top) * scaleY);
-      // Clamp to the framebuffer bounds so a drag past the edge stays in range.
-      if (remote) {
-        x = Math.min(Math.max(x, 0), remote.w - 1);
-        y = Math.min(Math.max(y, 0), remote.h - 1);
-      }
-      return { x, y };
-    };
+    // Client point to remote pixels, through the canvas rect and clamped to the
+    // framebuffer save towards a display shown beside this one (remotePoint.ts).
+    const toRemotePoint = (clientX: number, clientY: number) =>
+      remotePoint(
+        clientX,
+        clientY,
+        pointerRectCache.read(canvasRef.current ?? el),
+        sizeRef.current,
+        besideRef.current,
+      );
 
     // Touchscreen mode: fingers go to the remote as contacts and the guest
     // reads the gestures, so the trackpad layer below is not attached. The

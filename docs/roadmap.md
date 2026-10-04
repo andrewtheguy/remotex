@@ -166,11 +166,6 @@ What it lacks:
 - **Where the second display sits.** It is always to the right of the first. The
   plan is four fixed choices, above, left, right or below, so the remote's
   arrangement can match where the client's own second display is.
-- **Moving a window to the other display on Windows.** A window dragged to the
-  edge of the display in one tab does not arrive on the other, since the pointer
-  cannot leave the tab that holds it, so the session needs a way of its own to
-  send a window across. A Mac needs none: a window dragged halfway over the edge
-  is moved to the second display.
 - **Telling the displays apart.** The session page's Info names both displays
   and links to the second, but nothing on the remote's screens says which
   display is which.

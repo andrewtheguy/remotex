@@ -118,7 +118,9 @@ touch.
   them; the gateway encodes only the one shown. Its *All Displays* keeps the
   first display here and links to the second, which opens at `/display/2` in a
   new tab of the same browser: just that display, with its own pointer and
-  keyboard. While *All Displays* is chosen the menu's **Info** names both
+  keyboard. With each tab full screen on a display of its own, a window dragged
+  over the edge between them arrives on the other display, as the pointer does.
+  While *All Displays* is chosen the menu's **Info** names both
   displays and carries the same link. The page asks before it shows the display: **Connect** takes
   the display for that tab. On a session that follows the window, that tab's
   window sizes display 2. It needs the login of the browser holding the session
@@ -181,7 +183,8 @@ connection with the same error as wrong credentials. See
     browser, as on an RDP target; on a session that follows the window that
     tab's window sizes the second display. The Mac sends a stream for each
     display, the second to UDP port 5902, and the gateway decodes or passes
-    only the displays shown. As on RDP, the second display's tab is not
+    only the displays shown. As on RDP, a window dragged over the edge between
+    the two tabs arrives on the other display, and the second display's tab is not
     recommended on a client with one physical display, and not supported on a
     phone or tablet.
   - The Mac sends to the gateway's UDP ports 5900 and 5901, and 5902 for a

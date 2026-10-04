@@ -2116,7 +2116,14 @@ socket in only while the engine's last list names the tab, and hands the engine 
 feed for it (`ClientMsg::DisplayShown`): a sink, an encoder and a shadow of its
 own over the second column, the same pointer shape, and a repaint when it
 attaches or asks. Its input arrives wrapped as `ClientMsg::OnDisplay` and is
-offset into its column. On a session that follows the window the tab's window is
+offset into its column. A pointer position is held to the display it was made
+on, except towards the display shown beside it: a browser keeps delivering a held
+drag's positions to the page it began on, past that page's window and onto the
+next screen, so the page lets a position past that edge through as it is
+(`frontend/src/remotePoint.ts`), and the engine offsets it onto the other display
+as it offsets any position. A window dragged over the edge between two
+full-screen windows, one display each, arrives on the other display; the pointer
+itself is sent by whichever page it is over. On a session that follows the window the tab's window is
 the second monitor's size: its viewport, sent on its own socket, makes the next
 layout a row of two sizes, top-aligned, and the second keeps that size for as long
 as *All Displays* is chosen — a tab reloading does not reset it — and is the
@@ -2162,7 +2169,8 @@ but the keyframe a display coming into view starts at; the canvas stays behind
 its resize notice until that picture, as it does across any display change. The
 framebuffer the Mac spans over both displays is only the space its rectangles,
 stepped over, and pointer positions are addressed in: a position made on the
-second display is offset by where the layout places it. On a session that follows
+second display is offset by where the layout places it, and held inside the span
+(`DesktopState::hp_span_point`). On a session that follows
 the window the tab's window sizes the second display through the same
 configuration, which always names both. The sound is the session's, on the first
 tab. See [Two virtual displays](apple-vnc-889.md#two-virtual-displays).

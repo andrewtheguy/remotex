@@ -1139,6 +1139,25 @@ impl DesktopState {
         self.virtuals.get(leg).map_or((0, 0), |display| display.origin)
     }
 
+    /// A pointer position made on display `leg`, in the framebuffer the Mac
+    /// spans over its virtual displays: offset to where that display starts,
+    /// and, where there are two, held inside the span. The page holds a
+    /// position to the display it was made on except towards the display shown
+    /// beside it, which a drag held past the edge crosses to
+    /// (`frontend/src/remotePoint.ts`), so a position past that edge lands on
+    /// the other display, and one past the span's own edge at it.
+    fn hp_span_point(&self, leg: usize, x: i32, y: i32) -> (i32, i32) {
+        let (left, top) = self.hp_origin(leg);
+        let (x, y) = (x.saturating_add(left), y.saturating_add(top));
+        match self.span {
+            Some((w, h)) => {
+                let last = |v: u16| i32::from(v.saturating_sub(1));
+                (x.clamp(0, last(w)), y.clamp(0, last(h)))
+            }
+            None => (x, y),
+        }
+    }
+
     /// The `SetDisplayConfiguration` for a High Performance resize that is due,
     /// taken by the read loop at an update boundary — see [`HpResize`]. `None`
     /// when nothing is due, or when what is due is the desktop already showing.
@@ -2981,15 +3000,16 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 // the framebuffer the position was taken on is still the one
                 // the layout names — see [`DisplayState::apple_pointer`] — and
                 // then to where the display it was made on starts in the
-                // framebuffer a Mac spans over two virtual displays.
+                // framebuffer a Mac spans over two virtual displays, held
+                // inside it ([`DesktopState::hp_span_point`]).
                 let input = match input {
                     ClientMsg::MouseMove { x, y } => {
                         let (x, y) = display.lock().unwrap().apple_pointer(x, y);
-                        let (left, top) = {
+                        let (x, y) = {
                             let d = desktop.lock().unwrap();
-                            d.hp_origin(on_leg.unwrap_or(d.view.active))
+                            d.hp_span_point(on_leg.unwrap_or(d.view.active), x, y)
                         };
-                        ClientMsg::MouseMove { x: x + left, y: y + top }
+                        ClientMsg::MouseMove { x, y }
                     }
                     other => other,
                 };
@@ -12166,6 +12186,12 @@ mod tests {
             assert_eq!(d.span, Some((2880, 1000)), "which the Mac's rectangles are addressed in");
             assert_eq!(d.hp_sizes(), [(1600, 1000), (1280, 800)], "a video leg each");
             assert_eq!((d.hp_origin(0), d.hp_origin(1)), ((0, 0), (1600, 0)));
+            // A position past the edge between them lands on the other display,
+            // and one past the span's own edge at it.
+            assert_eq!(d.hp_span_point(0, 1700, 200), (1700, 200));
+            assert_eq!(d.hp_span_point(1, -100, 200), (1500, 200));
+            assert_eq!(d.hp_span_point(1, 5000, 2000), (2879, 999));
+            assert_eq!(d.hp_span_point(0, -5, -5), (0, 0));
         }
         sink.flush().await;
         assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 1600, h: 1000, .. })));
