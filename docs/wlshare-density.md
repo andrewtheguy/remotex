@@ -69,10 +69,14 @@ framebuffer's size in pixels and a scale. What the gateway makes of them:
   that carries the new framebuffer.
 - **`ClientDensity`** is sent once the first `OutputScale` has arrived, whenever
   the client's screen changes density (`hostDisplay`), and on a switch of shared
-  output — only in a session started with resize, because the answer changes the
-  output. It carries the density the browser would like the desktop rendered at,
+  output — in a session started with resize, and in any session of a pinch-zoom
+  client (`HostDisplay::fit`: a phone or tablet, which fits the desktop to its
+  width on a 2x or 3x screen). A pointer client's session at a kept size declares
+  nothing and keeps the output's own scale. It carries the density the browser
+  would like the desktop rendered at,
   quantized to 1x or 2x like every other engine's request
-  ([`protocol::render_density`]), *and* the window in pixels at that density,
+  ([`protocol::render_density`]), *and* the size in pixels at that density — the
+  window, or the points the session keeps —
   every time, so a density change is one output configuration. A resize at an
   unchanged density is still `SetDesktopSize`.
 - **Every declaration is answered** with an `OutputScale`, after the change or at

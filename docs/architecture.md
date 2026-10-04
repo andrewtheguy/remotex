@@ -2036,6 +2036,9 @@ A `HostDisplay::fit` client gets that on RDP too: it fits the desktop to its
 width, usually on a phone's or tablet's 2x or 3x screen, so an RDP session at a
 kept size states the client's density at connect, as a High Performance Mac opens
 at it. Without resize there is no Display Control channel to restate it later.
+A `wlshare` session at a kept size declares such a client's density too, with
+the kept size in pixels at it, and declares it again if the screen's density
+changes.
 
 What is engine-specific is the mechanism:
 
@@ -2079,7 +2082,7 @@ browser that reattaches mid-resize is told again. No other engine sends
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
 and its density. Mid-session only the density is acted on, and only in a
-session started with resize: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
+session started with resize, or a `wlshare` one of a pinch-zoom client: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
 screen `connect` names), a High Performance virtual
 display re-renders the same points at it, and a `wlshare` target declares it to
 the server over wlshare's density extension, which sets its output's scale; the
