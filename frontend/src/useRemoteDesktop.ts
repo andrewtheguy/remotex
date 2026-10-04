@@ -2727,7 +2727,16 @@ export function useRemoteDesktop(
       }
     };
 
+    // On the window, for a held drag: a browser hit-tests every mousemove — a
+    // mouse gets no implicit capture, as a touch does — so a drag that leaves
+    // the overlay, over the toolbar or past the window onto the next screen, is
+    // delivered to whatever is under it, and only the window sees them all. A
+    // move with nothing held is the overlay's own: a hover elsewhere on the page
+    // is not the remote's.
     const onMouseMove = (e: MouseEvent) => {
+      if (pressedButtons.size === 0 && !el.contains(e.target as Node | null)) {
+        return;
+      }
       releaseLiftedButtons(e);
       releaseLapsedPointer(e);
       moveTo(e);
@@ -2885,7 +2894,7 @@ export function useRemoteDesktop(
     releaseKeysRef.current = releaseKeys;
     localShortcutRef.current = () => macKeys.noteCommandUsedLocally();
 
-    el.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mousemove", onMouseMove);
     el.addEventListener("mousedown", onMouseDown);
     window.addEventListener("mouseup", onMouseUp);
     window.addEventListener("scroll", invalidatePointerRect, {
@@ -2923,7 +2932,7 @@ export function useRemoteDesktop(
       passthrough?.detach();
       releaseKeysRef.current = null;
       localShortcutRef.current = null;
-      el.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mousemove", onMouseMove);
       el.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("mouseup", onMouseUp);
       window.removeEventListener("scroll", invalidatePointerRect, {

@@ -369,3 +369,26 @@ export async function leaveSession(page: Page): Promise<void> {
     await returnToPicker(page);
   }
 }
+
+// Choose `display` in the session page's Display picker, from the drawer's button
+// for the display shown now, and leave the drawer and the picker closed whichever
+// of them the choice left open.
+export async function chooseDisplay(
+  page: Page,
+  shown: string,
+  display: string,
+): Promise<void> {
+  await page.getByRole("button", { name: "Open menu" }).click();
+  await page.getByRole("button", { name: shown, exact: true }).click();
+  // The picker's entries are pressed buttons, one pressed at a time; the one
+  // asked for is not it yet.
+  await page.getByRole("button", { name: display, pressed: false }).click();
+  const picker = page.getByRole("button", { name: "Close display picker" });
+  if (await picker.isVisible()) {
+    await picker.click();
+  }
+  const drawer = page.getByRole("button", { name: "Close menu" });
+  if (await drawer.isVisible()) {
+    await drawer.click();
+  }
+}
