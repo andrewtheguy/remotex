@@ -199,6 +199,11 @@ const FENCE_HOLD_LIMIT: Duration = Duration::from_millis(500);
 /// `OutputList` and the client's `SelectOutput`. Outside every registered RFB
 /// message type.
 const MSG_WLSHARE_OUTPUTS: u8 = 0xE1;
+/// The ClientInit byte with which a connection asks wlshare to show it another
+/// output beside the one the session's connection is on, which stays: what the
+/// second display's tab is fed from on *All Displays*. wlshare takes the desktop
+/// for every other value.
+const CLIENT_INIT_WLSHARE_BESIDE: u8 = 0xB5;
 /// A fence the server wants echoed. Nothing else in the flags word obliges a
 /// client, and the two it may keep are [`FENCE_BLOCK_BEFORE`] and
 /// [`FENCE_BLOCK_AFTER`].
@@ -1444,6 +1449,14 @@ struct DisplayState {
     /// them, before the view marks one for a tab: what [`Self::hp_list`] builds
     /// the list from at a layout and at every choice. Empty on a session with one.
     hp_infos: Vec<DisplayInfo>,
+    /// wlshare's outputs as its last `OutputList` named them, and the one this
+    /// connection shares: what [`Self::wlshare_list`] builds the list from.
+    wlshare_outputs: Vec<DisplayInfo>,
+    wlshare_shared: u32,
+    /// *All Displays* was chosen on a wlshare target: its first output on the
+    /// canvas and its second in a tab of its own. The gateway's choice, in force
+    /// once wlshare says the connection is on the first.
+    wlshare_all: bool,
 }
 
 impl DisplayState {
@@ -1465,6 +1478,43 @@ impl DisplayState {
             active: self.active,
             displays: self.displays.clone(),
         })
+    }
+
+    /// List wlshare's outputs, from its last `OutputList` and the choice made
+    /// here. A desk with exactly two ends with *All Displays*, as a High
+    /// Performance session's list does: each output is a connection of its own
+    /// to wlshare, so the first stays on the canvas and the second is shown in a
+    /// tab, fed by a second connection ([`Beside`]). More than two have no such
+    /// entry, there being one tab. Whether the list or the checkmark changed.
+    fn wlshare_list(&mut self) -> bool {
+        let two = self.wlshare_outputs.len() == 2;
+        self.wlshare_all &= two;
+        let all = self.wlshare_all && self.wlshare_shared == self.wlshare_outputs[0].id;
+        let mut displays = self.wlshare_outputs.clone();
+        if two {
+            if all {
+                displays[1].tab = Some(BESIDE_DISPLAY);
+            }
+            displays.push(DisplayInfo {
+                id: Self::COMBINED,
+                label: "All Displays".into(),
+                detail: "One browser tab each".into(),
+                main: false,
+                virtual_display: false,
+                tab: None,
+            });
+        }
+        let active = if all { Self::COMBINED } else { self.wlshare_shared };
+        let changed = self.displays != displays || self.active != active;
+        self.displays = displays;
+        self.active = active;
+        self.listed = true;
+        changed
+    }
+
+    /// Whether a wlshare target's second output is shown in a tab of its own.
+    fn wlshare_tab(&self) -> bool {
+        self.displays.iter().any(|display| display.tab == Some(BESIDE_DISPLAY))
     }
 
     /// List a High Performance session's two virtual displays as `view` shows
@@ -1630,6 +1680,59 @@ struct TabFeed {
 /// input loop hears it come and go, and the read loop sends it pictures. Never
 /// held across an await; its sink and shadow are cloned out.
 type SharedTab = Arc<std::sync::Mutex<Option<TabFeed>>>;
+
+/// The number of a wlshare target's second output on its socket.
+const BESIDE_DISPLAY: u32 = 2;
+
+/// A wlshare target's second output, shown in a browser tab of its own while
+/// *All Displays* is chosen: a second connection to wlshare, which shows it the
+/// output the session's connection is not on ([`CLIENT_INIT_WLSHARE_BESIDE`]),
+/// run as a session of its own into the display socket the session handed over.
+/// Everything a display has is then that connection's: its size and density,
+/// its pointer, its VP9 stream and the walk of its own link. The sound, the
+/// clipboard, the camera and the microphone are the session's, on the first.
+///
+/// Dropping it closes its input, which ends that session as the session layer
+/// ends any.
+struct Beside {
+    display: u32,
+    input: mpsc::UnboundedSender<ClientMsg>,
+}
+
+/// What a wlshare session starts a [`Beside`] connection with: what it was
+/// started with itself.
+#[derive(Clone)]
+struct BesidePlan {
+    config: TargetConfig,
+    choices: Choices,
+    display: Option<HostDisplay>,
+}
+
+impl BesidePlan {
+    /// Connect to wlshare again for its second output, into `feed`.
+    fn start(&self, display: u32, feed: crate::session::DisplayFeed, plan: RenderPlan) -> Beside {
+        let (input, input_rx) = mpsc::unbounded_channel();
+        let BesidePlan { config, choices, display: screen } = self.clone();
+        let oversize = if choices.resize() { Oversize::Refuse } else { Oversize::Hold };
+        // On a thread and a runtime of its own, as the session's engine is on
+        // its: a session's future is not one a runtime may move between threads.
+        let spawned = std::thread::Builder::new().name("vnc-display".into()).spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(e) => return warn!("vnc: no runtime for display {display}'s connection: {e}"),
+            };
+            runtime.block_on(async {
+                let sink = VideoSink::new("vnc", feed.frames, plan, feed.feedback, oversize);
+                session(config, choices, screen, plan, input_rx, None, None, None, true, &sink).await;
+                sink.finish().await;
+            });
+        });
+        if let Err(e) = spawned {
+            warn!("vnc: no thread for display {display}'s connection: {e}");
+        }
+        Beside { display, input }
+    }
+}
 
 /// The tab's sink and shadow, while there is one.
 fn tab_parts(tab: &SharedTab) -> Option<(VideoSink, SharedShadow)> {
@@ -1822,7 +1925,7 @@ pub async fn run(
     // asked for at the plan's chroma, dial and walk; any other server is encoded here
     // from ZRLE. A session started with the Mac's stream passed is sent its HEVC.
     let sink = VideoSink::new("vnc", frame_tx, plan, feedback, oversize);
-    session(config, choices, display, plan, input_rx, audio, camera, microphone, &sink).await;
+    session(config, choices, display, plan, input_rx, audio, camera, microphone, false, &sink).await;
     sink.finish().await;
 }
 
@@ -1845,6 +1948,8 @@ async fn session(
     audio: Option<Arc<crate::audio::AudioBridge>>,
     camera: Option<Arc<crate::camera::CameraBridge>>,
     microphone: Option<Arc<crate::mic::MicBridge>>,
+    // Whether this is a wlshare target's second connection ([`Beside`]).
+    beside: bool,
     sink: &VideoSink,
 ) {
     // A gateway whose host lacks the decoder's library can only pass the Mac's
@@ -1876,7 +1981,7 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        |stream| connect(&config, choices, display, plan, stream),
+        |stream| connect(&config, choices, display, plan, beside, stream),
     )
     .await
     else {
@@ -1927,6 +2032,8 @@ async fn session(
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
             hp_displays: if virtual_display { usize::from(config.virtual_displays) } else { 1 },
+            beside: (config.wlshare() && !beside)
+                .then(|| BesidePlan { config: config.clone(), choices, display }),
             plan,
             media,
             passthrough,
@@ -1999,6 +2106,10 @@ struct Flags {
     /// How many virtual displays a High Performance session asked the Mac for:
     /// the target's `virtual_displays`, one on every other session.
     hp_displays: usize,
+    /// What a `wlshare` target's second output is connected to with, when it is
+    /// shown in a tab of its own. `None` on every other target, and on that
+    /// connection itself.
+    beside: Option<BesidePlan>,
     /// What a display shown in a tab of its own is encoded by: the session's plan.
     plan: RenderPlan,
     /// High Performance's media stream — see [`Connected::media`].
@@ -2069,6 +2180,7 @@ async fn connect(
     choices: Choices,
     display: Option<HostDisplay>,
     plan: RenderPlan,
+    beside: bool,
     stream: tokio::net::TcpStream,
 ) -> anyhow::Result<Connected> {
     let dialect = Dialect::of(config.subtype);
@@ -2113,9 +2225,14 @@ async fn connect(
                 }
             };
             read_security_result(&mut downlink).await?;
-            uplink.send(&[dialect.client_init()]).await?;
-            let server = read_server_init(&mut downlink).await?;
-            rfb38_preface(downlink, uplink, server, macos, config, choices, plan).await
+            let init = if beside { CLIENT_INIT_WLSHARE_BESIDE } else { dialect.client_init() };
+            uplink.send(&[init]).await?;
+            // wlshare closes a connection it has no other output to show.
+            let server = match read_server_init(&mut downlink).await {
+                Err(e) if beside => return Err(e.context("the server has no second display to show")),
+                server => server?,
+            };
+            rfb38_preface(downlink, uplink, server, macos, config, choices, plan, beside).await
         }
         Dialect::Apple889 => {
             let Secured::Apple(wrap_key) = secured else {
@@ -2306,6 +2423,7 @@ fn encoding_label(encoding: i32) -> String {
 /// for at their head for a desktop within the ceiling. A plain target's has none
 /// of them, so a wlshare server reached as one serves it as it serves any VNC
 /// client: ZRLE, encoded here.
+#[allow(clippy::too_many_arguments)]
 async fn rfb38_preface(
     downlink: Downlink,
     mut uplink: Uplink,
@@ -2314,11 +2432,16 @@ async fn rfb38_preface(
     config: &TargetConfig,
     choices: Choices,
     plan: RenderPlan,
+    beside: bool,
 ) -> anyhow::Result<Connected> {
     uplink.send(&set_pixel_format()).await?;
     let passthrough = if config.wlshare() {
-        let audio = config.sound(choices).then(|| config.lossless(choices));
-        let encodings = wlshare_encoding_list(audio, config.camera, config.microphone);
+        let encodings = if beside {
+            wlshare_beside_encoding_list()
+        } else {
+            let audio = config.sound(choices).then(|| config.lossless(choices));
+            wlshare_encoding_list(audio, config.camera, config.microphone)
+        };
         let lists = Listing::new(encodings, plan);
         let listed = if lists_wlshare_vp9((server.width, server.height)) { &lists.vp9 } else { &lists.plain };
         uplink.send(&set_encodings(listed)).await?;
@@ -2477,6 +2600,19 @@ fn wlshare_encoding_list(audio: Option<bool>, camera: bool, microphone: bool) ->
     // than one output to offer, and why a switch to a differently sized one
     // needs the size pseudo-encodings above.
     encodings.push(ENCODING_WLSHARE_OUTPUTS);
+    encodings
+}
+
+/// What a `wlshare` target's second connection lists ([`Beside`]): a display and
+/// nothing else. The generic list less the clipboard, which is the session's on
+/// its first connection as the sound, the camera and the microphone are, and the
+/// density request, since the output it is shown has a scale of its own. Not
+/// the output list: which output it shows is wlshare's to say, the one the
+/// first connection is not on.
+fn wlshare_beside_encoding_list() -> Vec<i32> {
+    let mut encodings = rfb38_encoding_list();
+    encodings.retain(|encoding| *encoding != vnc_clipboard::ENCODING);
+    encodings.push(ENCODING_WLSHARE_DENSITY);
     encodings
 }
 
@@ -2726,10 +2862,13 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         host_density,
         poll,
         hp_displays,
+        beside: beside_plan,
         plan,
         media,
         passthrough,
     } = flags;
+    // A wlshare target's second output, while a tab shows it.
+    let mut beside: Option<Beside> = None;
     // Only a `wlshare` target has a listing, and it is the one sent a scroll as
     // a distance.
     let mut wheel = if passthrough.is_some() { Wheel::wlshare() } else { Wheel::new(apple) };
@@ -2947,6 +3086,38 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 };
                 // A display socket for the second virtual display came or went.
                 let input = match input {
+                    // On a wlshare target the display is a connection of its own.
+                    ClientMsg::DisplayShown { display: shown, feed } if beside_plan.is_some() => {
+                        // The one before it goes first: wlshare shows the output
+                        // to one connection.
+                        beside = None;
+                        let listed = display.lock().unwrap().wlshare_tab();
+                        if let (Some(feed), Some(start), true) = (feed, &beside_plan, listed && shown == BESIDE_DISPLAY) {
+                            info!("vnc: showing display {shown} in a tab of its own, on a connection of its own");
+                            beside = Some(start.start(shown, feed, plan));
+                        }
+                        continue;
+                    }
+                    // What its tab sends is that connection's input, as it came:
+                    // its positions are in its own output's pixels, its window
+                    // sizes that output, and its repaint is its own. The picker's
+                    // choice and the clipboard are the session's.
+                    ClientMsg::OnDisplay { display: on, input: made } if beside_plan.is_some() => {
+                        if let Some(beside) = beside.as_ref().filter(|beside| beside.display == on)
+                            && !matches!(
+                                *made,
+                                ClientMsg::SelectDisplay { .. }
+                                    | ClientMsg::DisplayShown { .. }
+                                    | ClientMsg::OnDisplay { .. }
+                                    | ClientMsg::Clipboard { .. }
+                                    | ClientMsg::ClipboardRequest
+                            )
+                        {
+                            // A connection that has ended takes nothing.
+                            let _ = beside.input.send(*made);
+                        }
+                        continue;
+                    }
                     ClientMsg::DisplayShown { display, feed } => {
                         hp_tab_shown(&shared_here, display, feed, plan, macos).await;
                         continue;
@@ -3332,13 +3503,45 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         // the same reason as above — a switch to a same-sized
                         // output carries no resize rectangle to redraw through,
                         // and the old screen's pixels are not this one's.
-                        debug!("vnc: asking the server for output {id}");
-                        let size = desktop.lock().unwrap().size;
-                        send_all(
-                            &uplink,
-                            &[select_output(id).to_vec(), update_request(false, size).to_vec()],
-                        )
-                        .await
+                        //
+                        // *All Displays* is this gateway's entry: the first
+                        // output here and the second in a tab of its own, on a
+                        // connection of its own. So wlshare is asked only for
+                        // the first, and not even that when the canvas is on it
+                        // already, where the list is answered from here. Any
+                        // other choice ends the second connection before the
+                        // output it shows is asked for.
+                        let (ask, answer) = {
+                            let mut state = display.lock().unwrap();
+                            state.wlshare_all = id == DisplayState::COMBINED;
+                            let ask = if state.wlshare_all {
+                                state.wlshare_outputs.first().map(|first| first.id).filter(|first| *first != state.wlshare_shared)
+                            } else {
+                                Some(id)
+                            };
+                            let answer = if ask.is_none() && state.wlshare_list() { state.displays_msg() } else { None };
+                            (ask, answer)
+                        };
+                        if id != DisplayState::COMBINED {
+                            beside = None;
+                        }
+                        if let Some(msg) = answer
+                            && let Err(e) = sink.msg(msg).await
+                        {
+                            break Err(e);
+                        }
+                        match ask {
+                            Some(id) => {
+                                debug!("vnc: asking the server for output {id}");
+                                let size = desktop.lock().unwrap().size;
+                                send_all(
+                                    &uplink,
+                                    &[select_output(id).to_vec(), update_request(false, size).to_vec()],
+                                )
+                                .await
+                            }
+                            None => Ok(()),
+                        }
                     }
                 } else {
                     let msgs = translate_input(
@@ -5806,13 +6009,12 @@ async fn read_output_list<R: AsyncRead + Unpin>(
     );
     let (msg, switched) = {
         let mut state = display.lock().unwrap();
-        let changed = state.displays != displays || state.active != active;
         // The shared output moved to another: not the session's first list, and
         // not to nothing at all.
-        let switched = state.listed && state.active != active && active != 0;
-        state.displays = displays;
-        state.active = active;
-        state.listed = true;
+        let switched = state.listed && state.wlshare_shared != active && active != 0;
+        state.wlshare_outputs = displays;
+        state.wlshare_shared = active;
+        let changed = state.wlshare_list();
         // Sent only on a change, as the Apple path sends its own: every
         // `SetEncodings` is answered with a list, and a reconnecting browser is
         // told the current one by the reattach path.
@@ -8154,7 +8356,9 @@ mod tests {
             panic!("the list was not forwarded");
         };
         assert_eq!(active, 7);
-        assert_eq!(displays.len(), 2);
+        // The two outputs, and the entry that shows both.
+        assert_eq!(displays.len(), 3);
+        assert_eq!(displays[2].id, DisplayState::COMBINED);
         assert_eq!(displays[0].label, "DP-2");
         assert_eq!(displays[0].detail, "1920×1080", "1x states no density");
         assert!(!displays[0].virtual_display);
@@ -8179,6 +8383,72 @@ mod tests {
         ));
     }
 
+    /// A desk of two outputs is listed with *All Displays*, which is this
+    /// gateway's choice and in force once wlshare says the canvas is on the first:
+    /// the second is then marked for a tab of its own. Any other number of
+    /// outputs has no such entry, and a list that stops being two drops the
+    /// choice with the tab.
+    #[tokio::test]
+    async fn two_outputs_are_listed_with_all_displays_and_the_second_in_a_tab() {
+        let (uplink, _wire) = test_uplink();
+        let desktop = shared_desktop((1920, 1080), None, None);
+        let (sink, mut rx) = test_sink();
+        let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
+        let listed = |id, name| Listed { id, name, size: (1280, 800), scale: 1.0, headless: true };
+        let two = [listed(3, "HEADLESS-1"), listed(7, "HEADLESS-2")];
+        let mut list = async |active: u32, outputs: &[Listed]| {
+            read_output_list(&mut output_list_body(active, outputs).as_slice(), &uplink, &desktop, &display, &sink)
+                .await
+                .unwrap();
+            forwarded(&sink, &mut rx).await
+        };
+
+        // Chosen while the canvas is on the second: nothing shows in a tab until
+        // wlshare has moved the canvas to the first.
+        list(7, &two).await.expect("the list");
+        display.lock().unwrap().wlshare_all = true;
+        assert!(!display.lock().unwrap().wlshare_list(), "the canvas is still on the second output");
+        assert!(!display.lock().unwrap().wlshare_tab());
+        let Some(ServerMsg::Displays { active, displays }) = list(3, &two).await else {
+            panic!("the switch was not forwarded");
+        };
+        assert_eq!(active, DisplayState::COMBINED);
+        assert_eq!(displays.iter().map(|d| d.tab).collect::<Vec<_>>(), [None, Some(BESIDE_DISPLAY), None]);
+        assert!(display.lock().unwrap().wlshare_tab());
+
+        // A third output: one tab cannot show two more, so the entry goes, and
+        // the choice with it.
+        let three = [listed(3, "HEADLESS-1"), listed(7, "HEADLESS-2"), listed(9, "HEADLESS-3")];
+        let Some(ServerMsg::Displays { active, displays }) = list(3, &three).await else {
+            panic!("the longer list was not forwarded");
+        };
+        assert_eq!(active, 3);
+        assert_eq!(displays.len(), 3);
+        assert!(displays.iter().all(|d| d.tab.is_none() && d.id != DisplayState::COMBINED));
+        // Two again does not bring the choice back.
+        let Some(ServerMsg::Displays { active: 3, displays }) = list(3, &two).await else {
+            panic!("the shorter list was not forwarded");
+        };
+        assert!(displays.iter().all(|d| d.tab.is_none()));
+    }
+
+    /// The second connection lists a display and nothing of the session's.
+    #[test]
+    fn the_second_connection_lists_no_clipboard_outputs_or_media() {
+        let listed = wlshare_beside_encoding_list();
+        assert!(listed.contains(&ENCODING_WLSHARE_DENSITY));
+        assert!(listed.contains(&ENCODING_CURSOR_WITH_ALPHA));
+        for absent in [
+            vnc_clipboard::ENCODING,
+            ENCODING_WLSHARE_OUTPUTS,
+            vnc_audio::ENCODING,
+            vnc_camera::ENCODING,
+            vnc_mic::ENCODING,
+        ] {
+            assert!(!listed.contains(&absent), "{}", encoding_label(absent));
+        }
+    }
+
     /// A list that empties is forwarded empty, which is what hides the picker: a
     /// browser left holding the last non-empty list would keep offering outputs
     /// the compositor no longer has. An empty list that says nothing new is not
@@ -8198,7 +8468,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             forwarded(&sink, &mut rx).await,
-            Some(ServerMsg::Displays { active: 3, ref displays }) if displays.len() == 2
+            Some(ServerMsg::Displays { active: 3, ref displays }) if displays.len() == 3
         ));
 
         // Every output went away: nothing listed, nothing shared.

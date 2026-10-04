@@ -74,7 +74,7 @@ and optimization prioritize them.
 
 | Tier | Server | Target | Displays | Sound | Camera and microphone | Picture |
 |---|---|---|---|---|---|---|
-| 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker; a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
+| 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
 | 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | VP9 from the gateway, or the graphics pipeline passed through (beta) |
 | 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | VP9 from the gateway, or the Mac's HEVC passed through |
 | 3 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
@@ -208,9 +208,9 @@ passed.
 - A session's displays may be shown in more than one tab of the browser that
   holds it, and in no other browser: each display rides a display socket of its
   own, let in by the login cookie the session was claimed under and never by a
-  token. Only *All Displays* over two virtual displays does this, on an RDP target
-  or a High Performance Mac, for the second display at
-  `/display/2` (alpha). That is one session shown twice, not a shared one; do not
+  token. Only *All Displays* does this, over two virtual displays on an RDP target
+  or a High Performance Mac and over a `wlshare` target's two outputs, for the
+  second display at `/display/2` (alpha). That is one session shown twice, not a shared one; do not
   let a display socket in for any other login, or hand a tab the claim's token.
   In a session started with an RDP host's pipeline passed, the second display's
   socket carries no picture: the tab is painted from the picture the session's
@@ -2197,9 +2197,29 @@ tab. See [Two virtual displays](apple-vnc-889.md#two-virtual-displays).
 Where the list is sent, the checkmark moves only when the remote comes back naming
 the screen it is now sending — never on the click. On a Mac the engine prepends an
 *All Displays* entry of its own so a client that picks a screen can get back; see
-[`apple-vnc-889.md`](apple-vnc-889.md). wlshare captures one output at a time and
-has no combined view to offer, so its list is the compositor's outputs and nothing
-else; see [Switching outputs over VNC with wlshare](wlshare-outputs.md).
+[`apple-vnc-889.md`](apple-vnc-889.md). wlshare captures one output for a
+connection and has no combined view to offer, so its list is the compositor's
+outputs; see [Switching outputs over VNC with wlshare](wlshare-outputs.md).
+
+A `wlshare` target whose compositor has exactly two outputs is listed with *All
+Displays* (alpha) too, and shown the same way from a third source: a second
+connection. No key asks for it, since the outputs are the compositor's and the
+gateway creates none — `virtual_displays` is refused on the target. wlshare
+shows a connection one output, so the engine keeps the session's connection on
+the first output the list names, asking wlshare for it if the canvas was on the
+other, and when the tab's socket arrives connects to wlshare again, with the
+same login, as a display beside the first (`Beside` in `src/vnc.rs`). wlshare
+gives that connection the other output without taking the desktop from the
+first. It runs as a session of its own into the tab's socket: its own
+framebuffer and wlshare's VP9 passed with a walk of its own link, its own
+pointer shape, and its own size and density, so on a session that follows the
+window the tab's window sizes the second output where it is headless, and a
+monitor keeps its mode. The tab's input goes to that connection as it came,
+its positions already in its output's pixels, so nothing is offset here. It lists none of the session's extensions: the
+sound, the clipboard, the camera and the microphone stay on the first
+connection. Choosing one output, a list that is no longer two, or the tab
+closing ends the second connection. More than two outputs are switched between
+and have no *All Displays*, there being one tab.
 
 `refresh` re-announces the desktop size and requests a full repaint. The session
 layer injects it after attaching to an existing engine.

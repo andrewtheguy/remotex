@@ -82,7 +82,8 @@ macOS are the common use case, so testing and optimization prioritize them.
   server is ours, what RFB lacks is added to it: it switches outputs, follows
   the window at its density, carries Opus or FLAC sound and the browser's camera
   and microphone, and codes its own VP9 for the gateway to pass through,
-  adapting to the browser's link.
+  adapting to the browser's link. Two outputs can be shown at once, the second
+  in a browser tab of its own (alpha).
 - **Tier 2: Windows 10 and 11's Remote Desktop** (`rdp`) **and a Mac's High
   Performance Screen Sharing** (`vnc`, `subtype = "ard-high-performance"`).
   Both follow the window at its density and carry sound: Windows as Opus or
