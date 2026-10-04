@@ -1693,8 +1693,10 @@ const BESIDE_DISPLAY: u32 = 2;
 /// clipboard, the camera and the microphone are the session's, on the first.
 ///
 /// Dropping it closes its input, which ends that session as the session layer
-/// ends any.
+/// ends any. One that ends by itself, refused or closed by wlshare, says so
+/// with its `id`, and the tab's socket is let go for the next one to open.
 struct Beside {
+    id: u64,
     display: u32,
     input: mpsc::UnboundedSender<ClientMsg>,
 }
@@ -1709,28 +1711,38 @@ struct BesidePlan {
 }
 
 impl BesidePlan {
-    /// Connect to wlshare again for its second output, into `feed`.
-    fn start(&self, display: u32, feed: crate::session::DisplayFeed, plan: RenderPlan) -> Beside {
+    /// Connect to wlshare again for its second output, into `feed`. `id` goes
+    /// to `ended` when the connection is over, however it ended.
+    fn start(
+        &self,
+        id: u64,
+        display: u32,
+        feed: crate::session::DisplayFeed,
+        plan: RenderPlan,
+        ended: mpsc::UnboundedSender<u64>,
+    ) -> Beside {
         let (input, input_rx) = mpsc::unbounded_channel();
         let BesidePlan { config, choices, display: screen } = self.clone();
         let oversize = if choices.resize() { Oversize::Refuse } else { Oversize::Hold };
         // On a thread and a runtime of its own, as the session's engine is on
         // its: a session's future is not one a runtime may move between threads.
+        let over = ended.clone();
         let spawned = std::thread::Builder::new().name("vnc-display".into()).spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(runtime) => runtime,
-                Err(e) => return warn!("vnc: no runtime for display {display}'s connection: {e}"),
-            };
-            runtime.block_on(async {
-                let sink = VideoSink::new("vnc", feed.frames, plan, feed.feedback, oversize);
-                session(config, choices, screen, plan, input_rx, None, None, None, true, &sink).await;
-                sink.finish().await;
-            });
+            match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime.block_on(async {
+                    let sink = VideoSink::new("vnc", feed.frames, plan, feed.feedback, oversize);
+                    session(config, choices, screen, plan, input_rx, None, None, None, true, &sink).await;
+                    sink.finish().await;
+                }),
+                Err(e) => warn!("vnc: no runtime for display {display}'s connection: {e}"),
+            }
+            let _ = over.send(id);
         });
         if let Err(e) = spawned {
             warn!("vnc: no thread for display {display}'s connection: {e}");
+            let _ = ended.send(id);
         }
-        Beside { display, input }
+        Beside { id, display, input }
     }
 }
 
@@ -2869,6 +2881,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     } = flags;
     // A wlshare target's second output, while a tab shows it.
     let mut beside: Option<Beside> = None;
+    let mut besides = 0u64;
+    let (beside_ended, mut beside_over) = mpsc::unbounded_channel::<u64>();
     // Only a `wlshare` target has a listing, and it is the one sent a scroll as
     // a distance.
     let mut wheel = if passthrough.is_some() { Wheel::wlshare() } else { Wheel::new(apple) };
@@ -3056,6 +3070,26 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     break Err(e);
                 }
             }
+            // The second connection to wlshare ended by itself: refused, closed
+            // by wlshare, or failed. Its tab's socket would stay open on a
+            // picture that no longer moves, so the display is unlisted, which
+            // lets the socket go, and listed again for the tab to open anew.
+            Some(over) = beside_over.recv() => {
+                if beside.as_ref().is_some_and(|beside| beside.id == over) {
+                    beside = None;
+                    let listed = display.lock().unwrap().displays_msg();
+                    if let Some(ServerMsg::Displays { active, displays }) = listed {
+                        info!("vnc: display {BESIDE_DISPLAY}'s connection ended; letting its tab go");
+                        let unlisted = displays.iter().cloned().map(|d| DisplayInfo { tab: None, ..d }).collect();
+                        if let Err(e) = sink.msg(ServerMsg::Displays { active, displays: unlisted }).await {
+                            break Err(e);
+                        }
+                        if let Err(e) = sink.msg(ServerMsg::Displays { active, displays }).await {
+                            break Err(e);
+                        }
+                    }
+                }
+            }
             // The writer has caught up: what was held goes out, as it now stands.
             () = backlog.room(Backlog::MOTION_LIMIT), if !held.is_empty() => {
                 let msgs = held_messages(
@@ -3094,7 +3128,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let listed = display.lock().unwrap().wlshare_tab();
                         if let (Some(feed), Some(start), true) = (feed, &beside_plan, listed && shown == BESIDE_DISPLAY) {
                             info!("vnc: showing display {shown} in a tab of its own, on a connection of its own");
-                            beside = Some(start.start(shown, feed, plan));
+                            besides += 1;
+                            beside = Some(start.start(besides, shown, feed, plan, beside_ended.clone()));
                         }
                         continue;
                     }
