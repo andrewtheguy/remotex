@@ -398,11 +398,14 @@ function useSoftKeyEngine(
 
 // ── Cells ──
 
-const ARROW_NAMES: ReadonlyMap<string, string> = new Map([
+// The keys named by something other than what is drawn on them: an arrow is a
+// glyph, and the phone pages spell Super short.
+const SPOKEN_NAMES: ReadonlyMap<string, string> = new Map([
   ["ArrowLeft", "Left"],
   ["ArrowUp", "Up"],
   ["ArrowDown", "Down"],
   ["ArrowRight", "Right"],
+  ["MetaLeft", "Super"],
 ]);
 
 // A modifier that is a key sent alone: the shortcut row's always, and every
@@ -416,7 +419,7 @@ function isBareModifier(cell: LayoutCell, sticky: boolean): boolean {
 function nameOf(cell: LayoutCell): string {
   const { def } = cell;
   if (def.type === "special") {
-    const name = ARROW_NAMES.get(def.code) ?? def.label;
+    const name = SPOKEN_NAMES.get(def.code) ?? def.label;
     return cell.commit === "tap" && modifierOf(def) ? `${name} key` : name;
   }
   if (def.type === "sticky") {

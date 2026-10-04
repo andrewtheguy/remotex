@@ -2699,7 +2699,7 @@ tapped again it is off, and under a resting finger it chords the other fingers'
 keys; nothing locks. Every such modifier goes down ahead of the key in the order
 it was taken and up after it, a repeat tick included, and never reaches the wire
 on its own. The ABC page's shortcut row leads with Shift, Ctrl, Alt and Super,
-drawn dashed, which are not that kind: each is a key of the row like the Esc beside it, so a tap that
+drawn dashed, which are not that kind: each is a key of the row, so a tap that
 stayed put sends it alone, down then up — Super alone is the Start key — a
 slide scrolls the row and sends nothing, and it arms nothing. The Sym page's
 row is F1 to F12 alone. The PC grid has no such row, so its

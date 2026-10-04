@@ -113,6 +113,33 @@ test("the Sym/Nav page holds every right-hand modifier", () => {
   }
 });
 
+test("the strip has Esc between its modifiers and its arrows", () => {
+  const strip = PAGE_ABC.rows.find((row) => row.kind === "strip");
+  assert.ok(strip);
+  assert.deepEqual(
+    strip.cells.map((cell) =>
+      cell.def.type === "special" ? cell.def.code : "",
+    ),
+    [
+      "Tab",
+      "ControlLeft",
+      "AltLeft",
+      "MetaLeft",
+      "Escape",
+      "ArrowLeft",
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowRight",
+    ],
+  );
+  // The shortcut row above no longer carries it.
+  assert.ok(
+    PAGE_ABC.rows[0].cells.every(
+      (cell) => cell.def.type !== "special" || cell.def.code !== "Escape",
+    ),
+  );
+});
+
 test("the strip is the same on every phone page", () => {
   const strip = (page: LayoutPage) =>
     page.rows

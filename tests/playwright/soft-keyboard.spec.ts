@@ -186,8 +186,8 @@ test.describe("the soft keyboard on a phone", () => {
       up("AltLeft"),
     ]);
 
-    // The shortcut row's modifiers are keys like its Esc: a tap on one is a
-    // bare press of it, and it arms nothing.
+    // The shortcut row's modifiers are keys, not modifiers that arm: a tap on
+    // one is a bare press of it.
     await key(page, "Super key").tap();
     await expect.poll(() => keys.slice(10)).toEqual([
       down("MetaLeft"),
