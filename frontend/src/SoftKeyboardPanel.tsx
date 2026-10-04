@@ -399,7 +399,7 @@ function useSoftKeyEngine(
 // ── Cells ──
 
 // The keys named by something other than what is drawn on them: an arrow is a
-// glyph, and the phone pages spell Super short.
+// glyph, and so is the phone pages' Super.
 const SPOKEN_NAMES: ReadonlyMap<string, string> = new Map([
   ["ArrowLeft", "Left"],
   ["ArrowUp", "Up"],
