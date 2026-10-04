@@ -367,11 +367,13 @@ const NAV: Key[] = [
 // The right-hand modifiers live here and nowhere else on a phone: the ABC
 // page's Shift, Ctrl, Alt and Super are the left keys, so this is the only way
 // a phone reaches AltGr on a Windows or Linux host, or a Mac's right Option.
+// Backspace ends the row, where the ABC page has it, as wide as each of them.
 const RIGHT_MODIFIERS: Key[] = [
-  s("RShift", "ShiftRight", 2.5),
-  s("RCtrl", "ControlRight", 2.5),
-  s("RAlt", "AltRight", 2.5),
-  s("RSuper", "MetaRight", 2.5),
+  s("RShift", "ShiftRight", 2),
+  s("RCtrl", "ControlRight", 2),
+  s("RAlt", "AltRight", 2),
+  s("RSuper", "MetaRight", 2),
+  s("Bksp", "Backspace", 2),
 ];
 
 const BOTTOM_SYM: Key[] = [

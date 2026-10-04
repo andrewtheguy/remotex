@@ -140,6 +140,18 @@ test("the strip has Esc between its modifiers and its arrows", () => {
   );
 });
 
+test("Backspace ends the same row on both phone pages", () => {
+  for (const page of PHONE_PAGES) {
+    const last = page.rows[5].cells.at(-1);
+    assert.ok(last, page.id);
+    assert.equal(
+      last.def.type === "special" ? last.def.code : "",
+      "Backspace",
+      page.id,
+    );
+  }
+});
+
 test("the strip is the same on every phone page", () => {
   const strip = (page: LayoutPage) =>
     page.rows
