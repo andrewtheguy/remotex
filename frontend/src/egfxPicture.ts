@@ -11,7 +11,7 @@
 // everything else presenting it.
 //
 // The picture is the whole output the host draws, which over two virtual displays
-// is both of them side by side; the canvas shows the part of it the gateway named
+// is both of them as the host placed them; the canvas shows the part of it the gateway named
 // (`graphicsView`), one display's column. A tab showing the second display holds a
 // picture of its own, patched from the session page's rather than composed
 // (displayRelay.ts), and shows it whole.

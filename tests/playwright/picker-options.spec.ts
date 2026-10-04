@@ -111,7 +111,7 @@ test.describe("the picker's options", () => {
     await logInAndConnectTo(page, PICKER_TARGET ?? "", "", { resize: true });
 
     expect(seen.connects).toEqual([
-      { size: "window", audio: "off", passthrough: false },
+      { size: "window", audio: "off", passthrough: false, placement: "right" },
     ]);
     const connected = seen.statuses.at(-1);
     expect(connected).toMatchObject({

@@ -66,7 +66,7 @@ import {
 } from "./protocol.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { decodesRdpH264 } from "./rdpH264.ts";
-import { type Beside, remotePoint } from "./remotePoint.ts";
+import { remotePoint } from "./remotePoint.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
 import type { Choices } from "./targetChoices.ts";
 import {
@@ -653,12 +653,12 @@ export function useRemoteDesktop(
   // leaves the panel agreeing with what is on screen.
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
   const [activeDisplayId, setActiveDisplayId] = useState<number | null>(null);
-  // The display shown beside this page's, in a tab of its own, by the side it
-  // sits on (remotePoint.ts): a page showing the second display in a tab has
-  // the first on its left for as long as it is shown at all, and the session's
-  // page has the second on its right while the remote lists it for a tab. A ref
-  // because the pointer handlers read it at pointer rate.
-  const besideRef = useRef<Beside>(tabDisplay === null ? null : "left");
+  // Whether another display is shown beside this page's, in a tab of its own
+  // (remotePoint.ts): a page showing the second display in a tab has the first
+  // beside it for as long as it is shown at all, and the session's page has the
+  // second while the remote lists it for a tab. A ref because the pointer
+  // handlers read it at pointer rate.
+  const besideRef = useRef(tabDisplay !== null);
   // Whether the remote reported itself as a Mac, which is the only thing that
   // decides whether a local Command chord stays Command or becomes remote
   // Control. Reset to false on every disconnect (see the "picker" case), because
@@ -1768,9 +1768,7 @@ export function useRemoteDesktop(
       setDisplays(msg.displays);
       setActiveDisplayId(msg.active);
       if (tabDisplay === null) {
-        besideRef.current = msg.displays.some((d) => d.tab !== null)
-          ? "right"
-          : null;
+        besideRef.current = msg.displays.some((d) => d.tab !== null);
       }
       const switched = sharedDisplay !== null && sharedDisplay !== msg.active;
       sharedDisplay = msg.active;
@@ -1903,7 +1901,7 @@ export function useRemoteDesktop(
       setDisplays([]);
       setActiveDisplayId(null);
       if (tabDisplay === null) {
-        besideRef.current = null;
+        besideRef.current = false;
       }
       sharedDisplay = null;
       setRemoteClipboard(null);
@@ -2628,7 +2626,7 @@ export function useRemoteDesktop(
     const heldModifiers = new HeldModifiers();
 
     // Client point to remote pixels, through the canvas rect and clamped to the
-    // framebuffer save towards a display shown beside this one (remotePoint.ts).
+    // framebuffer unless a display is shown beside this one (remotePoint.ts).
     const toRemotePoint = (clientX: number, clientY: number) =>
       remotePoint(
         clientX,

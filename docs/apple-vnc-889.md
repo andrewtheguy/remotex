@@ -561,9 +561,17 @@ changes, as read from Apple's viewer and daemon and as macOS 26 answered:
   display, in the opening configuration and in every resize. The Mac creates the
   second display to the right of the first, top-aligned: 1440×900 beside
   1440×900 put it at 1440 points across, and 1366×768 beside 1024×700 at 1366.
+  Nothing known in the descriptor says where; the arrangement is changed on the
+  Mac, in System Settings → Displays → Arrange, or by any program in its desktop
+  session through `CGConfigureDisplayOrigin`. A later configuration keeps an
+  arrangement made that way, and a new session sometimes opened with it and
+  sometimes with the second display on the right again.
 - **The layout lists both under the combined sentinel,** the first display
   first, and its framebuffer is the span of the two: 2880×900 over two 1440×900
-  displays. Each record's backing rectangle is where that display sits in the
+  displays. The records stay in that order however the displays are arranged,
+  and their corners are the framebuffer's, never negative: with the second
+  display dragged above a 1440×900 first, the first's record was at 0,900 and
+  the second's at 0,0. Each record's backing rectangle is where that display sits in the
   span, and pointer positions are addressed in the span too. A position of
   100,200 on the second of those displays, sent as 1540,200, put the Mac's
   pointer at 1540,200; over two 1280×800 displays at 2x, 2660,200 put it at
@@ -572,9 +580,15 @@ changes, as read from Apple's viewer and daemon and as macOS 26 answered:
 - **The media stream has a video leg per display.** Message 1 enables video 2,
   on the port after video 1's; the offer carries the second display's keys and
   offer behind the first's; the answer has a blob for each
-  ([Negotiation](#negotiation)). Video 1 is the first display and video 2 the
-  second: asked for 1366×768 beside 1024×700, each leg's pictures were its own
-  display's size. Each leg has its own keys, SSRC, reports, rate feedback and
+  ([Negotiation](#negotiation)). The legs follow the Mac's arrangement, not the
+  order the displays were asked for in: video 1 is the display that starts the
+  spanned framebuffer. With the second display where the Mac creates it, to the
+  right, that is the first: asked for 1366×768 beside 1024×700, each leg's
+  pictures were its own display's size. With the second dragged to the left of
+  the first or above it, in the Mac's Displays settings, video 1 carried the
+  second display's pictures, and remotex reads each leg as the display the
+  layout places there (`MediaStream::arrange`). A diagonal arrangement has not
+  been tried. Each leg has its own keys, SSRC, reports, rate feedback and
   keyframe requests, and the offers carry the session's one call id, as Apple's
   viewer's do. The legs are offered, answered, stopped by a display change and
   offered again together, in one message each time, so the rule of one offer at

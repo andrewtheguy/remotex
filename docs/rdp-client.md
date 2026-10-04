@@ -358,18 +358,22 @@ client owns neither.
 ## Virtual displays (alpha)
 
 `Connect::monitors`, from the target's `virtual_displays`, asks the host for that
-many monitors of the session's size in a row, the primary at the left and each
-next one starting at the last one's right edge. It goes out twice. At connect, as
+many monitors of the session's size, the first the primary and the second against
+the edge of it that `Connect::placement` names, the session's choice at the
+picker: to its right or left, top-aligned, or above or below it, left-aligned.
+Positions are relative to the primary's corner, which is always (0, 0)
+([MS-RDPBCGR] 2.2.1.3.6.1, [MS-RDPEDISP] 2.2.2.2.1), so a monitor to its left or
+above it has negative ones. It goes out twice. At connect, as
 a `CS_MONITOR` block in the GCC conference ([MS-RDPBCGR] 2.2.1.3.6, `TS_UD_CS_MONITOR`)
 beside the three blocks every connection sends, with the core data's desktop set
-to the row's union; it is an extended block, so it is sent only to a server whose
+to the monitors' union; it is an extended block, so it is sent only to a server whose
 X.224 Connection Confirm carried `EXTENDED_CLIENT_DATA_SUPPORTED`, and a server
 without the flag is asked for one monitor and the one desktop it always gave. And
 in every monitor layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2), one
 `DISPLAYCONTROL_MONITOR_LAYOUT` per monitor, the first flagged primary, all at one
 scale factor and each at the size `Input::resize` names for it: the same for every
-monitor unless a display shown in a tab of its own follows that tab's window, top
-at 0 and each starting at the last one's right edge. The server's `MaxNumMonitors` and area ceiling arrive in
+monitor unless a display shown in a tab of its own follows that tab's window, the
+second placed against the first's edge as at connect. The server's `MaxNumMonitors` and area ceiling arrive in
 its capabilities as before, and every layout is held to both: no more monitors
 than the server lays out, and no more than fit its area together, since a layout
 past either is one a conforming server ignores in silence, so monitors are dropped
@@ -377,17 +381,19 @@ from the right until the rest fit. A first monitor that does not fit alone is no
 sent. `Event::ResizeReady` carries the area over every
 monitor together.
 
-The host answers with one desktop spanning the row: a Demand Active naming the
-union at connect, and a `ResetGraphics` naming it, with its monitor definitions,
-after each layout. The framebuffer is that span, and the host maps one surface
-onto the output per monitor. The definitions are read against the row asked for
-(`row` in the graphics crate's `proto/gfx.rs`): `Event::Resize` carries each
-monitor's size when they are a row like the one asked for — top-aligned, each
-starting where the last ended, the row as wide as the output and as tall as its
-tallest — and the output's one size when the host laid the session out any other
-way, stacked, offset or out of order, so a caller that shows one column never
-cuts a layout it does not know the shape of. At connect the caller reads the
-equal row off the size. The client composes and reports the span as
+The host answers with one desktop spanning the monitors: a Demand Active naming
+the union at connect, and a `ResetGraphics` naming it, with its monitor
+definitions, after each layout. The framebuffer is that span, and the host maps
+one surface onto the output per monitor. The definitions say where each monitor
+is (`arrangement` in the graphics crate's `proto/gfx.rs`): their edges are
+relative to the primary's corner, and the output starts at the leftmost and
+topmost of them, so `Event::Resize` carries each monitor's place in the output
+and its size, the primary first, wherever the host put them — beside one
+another or stacked, in whatever order it lists them. It carries the output as
+one monitor when the definitions do not make it up: none or one, an empty one,
+two that overlap, or a union that is not the output's size. At connect, where
+there are no definitions, the caller reads the equal monitors and the placement
+it asked for off the union's size. The client composes and reports the span as
 it does any desktop. Which part of it a browser sees, and the pointer offset
 into it, is the engine's (`View` in `src/rdp.rs`), and so is *All Displays*, which
 shows the second column on a socket of its own (`Tab`): nothing of it reaches
@@ -402,7 +408,10 @@ kept-size session asked for two 1440×900 monitors opened a 2880×900 desktop,
 `CreateSurface 2, MapSurfaceToOutput 2`; a resizing session opened at two
 1280×800 and a 1366×768 layout came back as one `ResetGraphics` of 2732×768 over
 two monitors; and asked for 1280×800 beside 1024×700, it answered a 2304×800
-`ResetGraphics` defining those two monitors, top-aligned. Alpha: one host, and
+`ResetGraphics` defining those two monitors, top-aligned. On 2026-10-03 the
+second monitor placed left of, above and below the first came back the same way,
+at connect and after a layout, and a position sent in the span's coordinates
+landed on the monitor it was made on. Alpha: one host, and
 nothing of the second display has been held
 against Microsoft's own client.
 

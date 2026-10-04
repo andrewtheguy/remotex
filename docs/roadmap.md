@@ -163,9 +163,6 @@ a browser tab ([two virtual displays](#two-virtual-displays-past-alpha)).
 ([Windows](guide.md#windows-rdp), [Macs](guide.md#macs-vnc-with-an-apple-subtype)).
 What it lacks:
 
-- **Where the second display sits.** It is always to the right of the first. The
-  plan is four fixed choices, above, left, right or below, so the remote's
-  arrangement can match where the client's own second display is.
 - **Telling the displays apart.** The session page's Info names both displays
   and links to the second, but nothing on the remote's screens says which
   display is which.

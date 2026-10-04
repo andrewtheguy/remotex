@@ -82,10 +82,10 @@
 //!   interceptor cannot replay the credentials; it is **not** defensible under
 //!   plain TLS security, where the credentials go to whoever answered.
 //! - **No Kerberos.** CredSSP runs NTLM with the target's user name and password.
-//! - **Monitors in a row, or one.** [`Connect::monitors`] asks for a row of
-//!   same-sized monitors at connect, and each layout after names each monitor's own
-//!   size; the framebuffer spans the row, top-aligned, and the caller shows what it
-//!   will of it. Nothing here lays monitors out any other way.
+//! - **One monitor, or a second against it.** [`Connect::monitors`] asks for
+//!   same-sized monitors at connect, the second against the edge of the first that
+//!   [`Connect::placement`] names, and each layout after names each monitor's own
+//!   size; the framebuffer spans them, and the caller shows what it will of it.
 
 mod camera;
 mod connect;
@@ -102,4 +102,4 @@ pub use error::Error;
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};
 pub use pointer::{Cursor, CursorImage};
 pub use remotex_rdp_graphics::{Composed, Compositor, Frame, Framebuffer, Rect};
-pub use session::{AudioSink, Connect, Event, Session};
+pub use session::{AudioSink, Connect, Event, Placed, Session};

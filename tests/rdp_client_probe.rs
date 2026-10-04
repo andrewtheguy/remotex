@@ -346,6 +346,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         height: OPENING.1,
         scale_percent: 0,
         monitors: 1,
+        placement: remotex::config::Placement::Right,
         // A resize is the pipeline's graphics reset; the bitmap path has none.
         resize: egfx(),
         egfx: egfx(),
@@ -1021,6 +1022,7 @@ async fn pass_the_pipeline() {
         height: OPENING.1,
         scale_percent: 0,
         monitors: 1,
+        placement: remotex::config::Placement::Right,
         resize: true,
         egfx: true,
         pass_graphics: true,
@@ -1217,6 +1219,7 @@ async fn pass_h264() {
         height: OPENING.1,
         scale_percent: 0,
         monitors: 1,
+        placement: remotex::config::Placement::Right,
         resize: false,
         egfx: true,
         pass_graphics: true,

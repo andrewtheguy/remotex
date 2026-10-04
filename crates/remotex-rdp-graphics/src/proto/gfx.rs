@@ -124,35 +124,64 @@ pub struct MonitorDef {
     pub flags: u32,
 }
 
-/// The size of each monitor of `monitors` when they make up the output as a row:
-/// the layout this client asks for, monitor `i` starting at the right edge of the
-/// one before it, the first at the left edge, every one at the top, the row as
-/// wide as the output and as tall as its tallest. Monitors in a row may differ in
-/// size — a display shown in a browser tab follows that tab's window. One size,
-/// the output's, when the host laid the session out any other way — stacked,
-/// offset, out of order, or with no definitions at all — since a caller that shows
-/// one column of the output can only cut it along a row it knows the shape of. A
-/// session laid out otherwise is shown whole, as one display.
-pub fn row(width: u32, height: u32, monitors: &[MonitorDef]) -> Vec<(u32, u32)> {
-    let whole = vec![(width, height)];
+/// `TS_MONITOR_PRIMARY`: the monitor every other one's edges are relative to.
+const MONITOR_PRIMARY: u32 = 0x0000_0001;
+
+/// One monitor of the output: where it starts in it, and its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placed {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Placed {
+    fn overlaps(self, other: Self) -> bool {
+        self.x < other.x + other.w && other.x < self.x + self.w && self.y < other.y + other.h && other.y < self.y + self.h
+    }
+}
+
+/// Where each monitor of `monitors` is in the output they make up, the primary
+/// first and the rest in the host's order. The definitions' edges are relative to
+/// the primary's corner, so one to its left or above it is negative; the output
+/// starts at the leftmost and topmost edge of them all. Monitors may differ in
+/// size — a display shown in a browser tab follows that tab's window. One
+/// monitor, the whole output, when the definitions are not an arrangement a
+/// caller can cut the output along: none or one, an empty one, two that overlap,
+/// or a union that is not the output.
+pub fn arrangement(width: u32, height: u32, monitors: &[MonitorDef]) -> Vec<Placed> {
+    let whole = vec![Placed { x: 0, y: 0, w: width, h: height }];
     if monitors.len() <= 1 || width == 0 || height == 0 {
         return whole;
     }
-    let mut sizes = Vec::with_capacity(monitors.len());
-    let mut left = 0_i64;
-    for def in monitors {
-        let (w, h) = (i64::from(def.right) - i64::from(def.left) + 1, i64::from(def.bottom) - i64::from(def.top) + 1);
-        if i64::from(def.left) != left || def.top != 0 || w <= 0 || h <= 0 {
-            return whole;
-        }
-        left += w;
-        sizes.push((w as u32, h as u32));
-    }
-    let tallest = sizes.iter().map(|(_, h)| *h).max().unwrap_or(0);
-    if left != i64::from(width) || tallest != height {
+    let edges = |pick: fn(&MonitorDef) -> i32| monitors.iter().map(move |def| i64::from(pick(def)));
+    let (left, top) = (edges(|def| def.left).min().unwrap_or(0), edges(|def| def.top).min().unwrap_or(0));
+    let (right, bottom) = (edges(|def| def.right).max().unwrap_or(0), edges(|def| def.bottom).max().unwrap_or(0));
+    if right - left + 1 != i64::from(width) || bottom - top + 1 != i64::from(height) {
         return whole;
     }
-    sizes
+    let mut placed = Vec::with_capacity(monitors.len());
+    let primary = monitors.iter().filter(|def| def.flags & MONITOR_PRIMARY != 0);
+    let rest = monitors.iter().filter(|def| def.flags & MONITOR_PRIMARY == 0);
+    for def in primary.chain(rest) {
+        let (w, h) = (i64::from(def.right) - i64::from(def.left) + 1, i64::from(def.bottom) - i64::from(def.top) + 1);
+        if w <= 0 || h <= 0 {
+            return whole;
+        }
+        // Inside the output, so each fits the field.
+        let monitor = Placed {
+            x: (i64::from(def.left) - left) as u32,
+            y: (i64::from(def.top) - top) as u32,
+            w: w as u32,
+            h: h as u32,
+        };
+        if placed.iter().any(|other: &Placed| other.overlaps(monitor)) {
+            return whole;
+        }
+        placed.push(monitor);
+    }
+    placed
 }
 
 /// `RECTANGLE_16`, with exclusive right and bottom edges.
@@ -673,27 +702,37 @@ mod tests {
         );
     }
 
-    /// Only a row like the one this client asks for is cut into columns, of
-    /// whatever widths and heights its monitors have; anything else the host lays
-    /// out is one display shown whole.
+    /// The output is cut along its monitors wherever the host put them, the
+    /// primary first; definitions that do not make up the output are one display
+    /// shown whole.
     #[test]
-    fn a_row_is_cut_into_its_monitors_and_any_other_layout_is_one_display() {
+    fn an_output_is_cut_along_its_monitors_and_anything_else_is_one_display() {
+        let at = |x, y, w, h| Placed { x, y, w, h };
         let two = [monitor(0, 0, 1279, 799), monitor(1280, 0, 2559, 799)];
-        assert_eq!(row(2560, 800, &two), vec![(1280, 800), (1280, 800)]);
-        assert_eq!(row(2560, 800, &two[..1]), vec![(2560, 800)], "one definition is one display");
-        assert_eq!(row(2560, 800, &[]), vec![(2560, 800)], "no definitions is one display");
-        // Unequal, top-aligned, the row as tall as its tallest.
+        assert_eq!(arrangement(2560, 800, &two), vec![at(0, 0, 1280, 800), at(1280, 0, 1280, 800)]);
+        assert_eq!(arrangement(2560, 800, &two[..1]), vec![at(0, 0, 2560, 800)], "one definition is one display");
+        assert_eq!(arrangement(2560, 800, &[]), vec![at(0, 0, 2560, 800)], "no definitions is one display");
+        // Unequal, top-aligned, the output as tall as its tallest.
         let unequal = [monitor(0, 0, 1599, 899), monitor(1600, 0, 2879, 767)];
-        assert_eq!(row(2880, 900, &unequal), vec![(1600, 900), (1280, 768)]);
-        // The same two the other way round are not in their places.
-        assert_eq!(row(2560, 800, &[two[1], two[0]]), vec![(2560, 800)]);
-        // Stacked, offset, or not filling the output.
-        assert_eq!(row(1280, 1600, &[monitor(0, 0, 1279, 799), monitor(0, 800, 1279, 1599)]), vec![(1280, 1600)]);
-        assert_eq!(row(2560, 900, &[monitor(0, 0, 1279, 799), monitor(1280, 100, 2559, 899)]), vec![(2560, 900)]);
-        assert_eq!(row(2561, 800, &two), vec![(2561, 800)], "a row narrower than the output");
-        assert_eq!(row(2560, 800, &[monitor(0, 0, 1279, 767), monitor(1280, 0, 2559, 767)]), vec![(2560, 800)]);
+        assert_eq!(arrangement(2880, 900, &unequal), vec![at(0, 0, 1600, 900), at(1600, 0, 1280, 768)]);
+        // The second to the left of the primary, or above it: negative edges, and
+        // the output starts at the second.
+        let primary = MonitorDef { flags: MONITOR_PRIMARY, ..monitor(0, 0, 1599, 899) };
+        let left = [primary, monitor(-1280, 0, -1, 767)];
+        assert_eq!(arrangement(2880, 900, &left), vec![at(1280, 0, 1600, 900), at(0, 0, 1280, 768)]);
+        let above = [primary, monitor(0, -768, 1279, -1)];
+        assert_eq!(arrangement(1600, 1668, &above), vec![at(0, 768, 1600, 900), at(0, 0, 1280, 768)]);
+        let below = [primary, monitor(0, 900, 1279, 1667)];
+        assert_eq!(arrangement(1600, 1668, &below), vec![at(0, 0, 1600, 900), at(0, 900, 1280, 768)]);
+        // The primary leads whatever order the host lists them in.
+        assert_eq!(arrangement(2880, 900, &[left[1], left[0]]), arrangement(2880, 900, &left));
+        // Not filling the output, overlapping, or empty.
+        assert_eq!(arrangement(2561, 800, &two), vec![at(0, 0, 2561, 800)], "narrower than the output");
+        assert_eq!(arrangement(2560, 800, &[monitor(0, 0, 1279, 767), monitor(1280, 0, 2559, 767)]), vec![at(0, 0, 2560, 800)]);
+        assert_eq!(arrangement(2560, 800, &[monitor(0, 0, 2559, 799), monitor(1280, 0, 2559, 799)]), vec![at(0, 0, 2560, 800)]);
+        assert_eq!(arrangement(2560, 800, &[monitor(0, 0, 2559, 799), monitor(100, 0, 99, 799)]), vec![at(0, 0, 2560, 800)]);
         let three = [monitor(0, 0, 999, 599), monitor(1000, 0, 1999, 599), monitor(2000, 0, 2999, 599)];
-        assert_eq!(row(3000, 600, &three).len(), 3);
+        assert_eq!(arrangement(3000, 600, &three).len(), 3);
     }
 
     #[test]

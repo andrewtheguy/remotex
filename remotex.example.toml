@@ -325,8 +325,9 @@ password = "change-me"
 # `egfx = false`.
 #egfx_h264 = true
 
-# ALPHA. Ask the host for this many virtual displays side by side, each the
-# session's size. The floating menu's Display picker switches between them, and
+# ALPHA. Ask the host for this many virtual displays, each the session's size.
+# Where the second sits against the first is chosen at the picker, on an rdp
+# target: right, left, top or bottom. The floating menu's Display picker switches between them, and
 # the gateway encodes only the one shown; the host renders the other for the
 # windows left on it. 1 is the one desktop every target opens; at most 2. RDP
 # and `subtype = "ard-high-performance"` — the key is shared by the target types

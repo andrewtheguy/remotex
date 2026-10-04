@@ -1141,21 +1141,29 @@ impl DesktopState {
 
     /// A pointer position made on display `leg`, in the framebuffer the Mac
     /// spans over its virtual displays: offset to where that display starts,
-    /// and, where there are two, held inside the span. The page holds a
-    /// position to the display it was made on except towards the display shown
-    /// beside it, which a drag held past the edge crosses to
+    /// and, where there are two, held on one of them. The page holds a
+    /// position to the display it was made on unless another is shown in a tab
+    /// of its own, which a drag held past the edge between them crosses to
     /// (`frontend/src/remotePoint.ts`), so a position past that edge lands on
-    /// the other display, and one past the span's own edge at it.
+    /// the other display, and one that lies on neither at the nearest edge of
+    /// the nearest ([`engine::hold_on_display`]).
     fn hp_span_point(&self, leg: usize, x: i32, y: i32) -> (i32, i32) {
         let (left, top) = self.hp_origin(leg);
-        let (x, y) = (x.saturating_add(left), y.saturating_add(top));
-        match self.span {
-            Some((w, h)) => {
-                let last = |v: u16| i32::from(v.saturating_sub(1));
-                (x.clamp(0, last(w)), y.clamp(0, last(h)))
-            }
-            None => (x, y),
+        let point = (x.saturating_add(left), y.saturating_add(top));
+        if self.span.is_none() {
+            return point;
         }
+        let displays: Vec<engine::DisplayRect> = self
+            .virtuals
+            .iter()
+            .map(|display| engine::DisplayRect {
+                x: display.origin.0,
+                y: display.origin.1,
+                w: i32::from(display.size.0),
+                h: i32::from(display.size.1),
+            })
+            .collect();
+        engine::hold_on_display(point, &displays, leg)
     }
 
     /// The `SetDisplayConfiguration` for a High Performance resize that is due,
@@ -3954,6 +3962,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
 
             (leg, picture) = next_picture(&mut apple) => {
                 let _switch = shared.switch.lock().await;
+                // The Mac's leg, as the session's display it carries.
+                let leg = media.as_ref().map_or(leg, |media| media.lock().unwrap().leg_of(leg));
                 match picture {
                     FromStream::Picture(picture) => {
                         if let Some(media) = media {
@@ -6221,11 +6231,22 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     };
     let resized = apply_resize(desktop, shadow, size, scale, sink).await?;
     if virtual_display {
+        // Which leg carries which display changes under a canvas changing
+        // display, which reads and sets who is shown each: one at a time.
+        let switch = match (&shared.media, virtuals.len()) {
+            (Some(_), 2) => Some(shared.switch.lock().await),
+            _ => None,
+        };
         let (cover, changed) = {
             let mut d = desktop.lock().unwrap();
             // Either display's change answers a request, which names both.
             let changed = resized || (!d.virtuals.is_empty() && d.virtuals != virtuals);
             d.virtuals.clone_from(&virtuals);
+            // The Mac's video legs follow its arrangement: the display that
+            // starts the framebuffer first.
+            if let (Some(media), [first, second]) = (&shared.media, virtuals.as_slice()) {
+                media.lock().unwrap().arrange(second.origin < first.origin);
+            }
             d.hp.layout(changed, tokio::time::Instant::now());
             d.laid_out = true;
             // A new display stopped the media stream, whoever asked for it: the
@@ -6241,6 +6262,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             };
             (cover, changed)
         };
+        drop(switch);
         hp_wake.notify_one();
         if cover {
             sink.msg(ServerMsg::Resizing { active: true }).await?;
@@ -12187,10 +12209,12 @@ mod tests {
             assert_eq!(d.hp_sizes(), [(1600, 1000), (1280, 800)], "a video leg each");
             assert_eq!((d.hp_origin(0), d.hp_origin(1)), ((0, 0), (1600, 0)));
             // A position past the edge between them lands on the other display,
-            // and one past the span's own edge at it.
+            // one past the span's own edge at it, and one below the shorter
+            // display, inside the span and on neither, on that display.
             assert_eq!(d.hp_span_point(0, 1700, 200), (1700, 200));
             assert_eq!(d.hp_span_point(1, -100, 200), (1500, 200));
-            assert_eq!(d.hp_span_point(1, 5000, 2000), (2879, 999));
+            assert_eq!(d.hp_span_point(1, 5000, 2000), (2879, 799));
+            assert_eq!(d.hp_span_point(1, 100, 900), (1700, 799));
             assert_eq!(d.hp_span_point(0, -5, -5), (0, 0));
         }
         sink.flush().await;

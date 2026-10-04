@@ -1698,8 +1698,11 @@ pub struct MediaStream {
     offer_made: std::sync::Arc<tokio::sync::Notify>,
     /// The ports the receiver is bound to, and the receiver.
     receiver: Option<(Ports, tokio::task::JoinHandle<()>)>,
-    /// Each display's video leg, as the receiver shares it.
+    /// Each video leg, as the receiver shares it, in the Mac's order.
     legs: Vec<Leg>,
+    /// Whether the Mac's legs carry the session's two displays the other way
+    /// round — see [`MediaStream::arrange`].
+    swapped: bool,
     /// Why the receiver stopped, which it leaves here before the `None` that says
     /// so — see [`MediaStream::failure`].
     failed: Failure,
@@ -1823,6 +1826,7 @@ impl MediaStream {
             offer_made: std::sync::Arc::default(),
             receiver: None,
             legs,
+            swapped: false,
             failed: Failure::default(),
             sound_heard: Heard::default(),
             sounded: Heard::default(),
@@ -1840,6 +1844,32 @@ impl MediaStream {
     /// How many displays the stream carries, a video leg each.
     pub fn displays(&self) -> usize {
         self.legs.len()
+    }
+
+    /// Say which display each leg carries. The Mac sends its displays in the
+    /// order they sit in the framebuffer it spans over them, not the order the
+    /// session asked for them in: with the second display arranged to the left
+    /// of the first or above it, on the Mac, the first leg carries the second.
+    /// `swapped` is whether that is so, as the layout places them. Every display
+    /// this stream is asked about or hands a picture of is the session's.
+    ///
+    /// Seen with the second display to the left, the right and above; one placed
+    /// diagonally has not been.
+    pub fn arrange(&mut self, swapped: bool) {
+        let swapped = swapped && self.legs.len() == 2;
+        if std::mem::replace(&mut self.swapped, swapped) != swapped {
+            // Who is shown a display goes with the display.
+            let relaxed = std::sync::atomic::Ordering::Relaxed;
+            let first = self.legs[0].shown.load(relaxed);
+            let second = self.legs[1].shown.swap(first, relaxed);
+            self.legs[0].shown.store(second, relaxed);
+        }
+    }
+
+    /// The leg that carries `display`, and the display leg `display` carries:
+    /// with two the one is the other's inverse.
+    pub fn leg_of(&self, display: usize) -> usize {
+        if self.swapped && display < 2 { 1 - display } else { display }
     }
 
     /// What to send toward a stream for displays of `sizes` backing pixels, which
@@ -1867,7 +1897,8 @@ impl MediaStream {
         self.pending = true;
         self.offered = Some(sizes.to_vec());
         self.owe(Owed::Stream { offered: now, pictured: [None; MAX_DISPLAYS] });
-        Some(Offer::Configuration(self.offers.configuration(sizes)))
+        let by_leg: Vec<(u16, u16)> = (0..sizes.len()).map(|leg| sizes[self.leg_of(leg)]).collect();
+        Some(Offer::Configuration(self.offers.configuration(&by_leg)))
     }
 
     /// Owe `owed` from here, which sets a new deadline.
@@ -1880,7 +1911,7 @@ impl MediaStream {
     /// whole desktop again. A passed stream has none: [`Self::want_keyframe`] is
     /// its repaint.
     pub fn latest(&self, leg: usize) -> Option<std::sync::Arc<Picture>> {
-        match &self.legs.get(leg)?.pictures {
+        match &self.legs.get(self.leg_of(leg))?.pictures {
             Outlet::Decoded(pictures) => pictures.borrow().clone(),
             Outlet::Passed(_) => None,
         }
@@ -1891,7 +1922,7 @@ impl MediaStream {
     /// decoder's failure. The Mac answers within tens of milliseconds. A decoded
     /// stream asks nothing: its repaint is [`Self::latest`].
     pub fn want_keyframe(&self, leg: usize) {
-        if let Some(leg) = self.legs.get(leg)
+        if let Some(leg) = self.legs.get(self.leg_of(leg))
             && matches!(leg.pictures, Outlet::Passed(_))
         {
             leg.keyframe_wanted.notify_one();
@@ -1909,6 +1940,7 @@ impl MediaStream {
     /// `true` when the display came into view with this call, and so has no
     /// picture to show until that IDR.
     pub fn show(&mut self, leg: usize, shown: bool) -> bool {
+        let leg = self.leg_of(leg);
         let Some(shared) = self.legs.get(leg) else {
             return false;
         };
@@ -1947,9 +1979,10 @@ impl MediaStream {
     /// the display the stream was offered for puts the picture's deadline off; one
     /// of another display, the old one's last, does not.
     pub fn pictured(&mut self, leg: usize, size: (u16, u16)) {
+        let carried = self.leg_of(leg);
         if let Owed::Stream { pictured, .. } = &mut self.owed
             && self.offered.as_ref().and_then(|sizes| sizes.get(leg)) == Some(&size)
-            && let Some(pictured) = pictured.get_mut(leg)
+            && let Some(pictured) = pictured.get_mut(carried)
         {
             *pictured = Some(std::time::Instant::now());
         }
@@ -3607,6 +3640,44 @@ mod tests {
         both[25] = 1;
         let extra = media().on_reply(&both).unwrap_err();
         assert!(format!("{extra:#}").contains("enabled 2 video leg(s) for the 1"), "{extra:#}");
+    }
+
+    /// With the second display arranged ahead of the first on the Mac, the legs
+    /// carry them the other way round: a display is asked about, shown and
+    /// credited on the leg that carries it.
+    #[test]
+    fn the_legs_follow_the_macs_arrangement() {
+        let peer = "[fd00::2]:5900".parse().unwrap();
+        let local = "[fd00::1]:50000".parse().unwrap();
+        let relaxed = std::sync::atomic::Ordering::Relaxed;
+        let (mut m, _pictures) = MediaStream::new(peer, local, false, 2);
+        m.asked = true;
+        m.invited = true;
+        assert_eq!((m.leg_of(0), m.leg_of(1)), (0, 1));
+        m.show(0, true);
+        m.arrange(true);
+        assert_eq!((m.leg_of(0), m.leg_of(1)), (1, 0));
+        assert!(m.legs[1].shown.load(relaxed) && !m.legs[0].shown.load(relaxed), "shown goes with the display");
+        m.show(1, true);
+        assert!(m.legs[0].shown.load(relaxed));
+
+        // The first display's picture comes on the second leg, and is what that
+        // leg owed.
+        let sizes = [(1920, 911), (1915, 910)];
+        assert!(m.offer(&sizes).is_some());
+        m.pictured(0, (1920, 911));
+        let Owed::Stream { pictured, .. } = m.owed else { panic!("an offer owes its stream") };
+        assert!(pictured[1].is_some() && pictured[0].is_none());
+        m.pictured(1, (1920, 911));
+        let Owed::Stream { pictured, .. } = m.owed else { panic!("an offer owes its stream") };
+        assert!(pictured[0].is_none(), "the second display is the other size");
+
+        m.arrange(false);
+        assert_eq!((m.leg_of(0), m.leg_of(1)), (0, 1));
+        // One display has nothing to swap.
+        let mut one = media();
+        one.arrange(true);
+        assert_eq!(one.leg_of(0), 0);
     }
 
     /// Each display owes its first picture. One nobody is shown hands none on, and

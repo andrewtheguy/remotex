@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::{AudioBridge, PcmFormat};
-use crate::config::{Choices, RenderPlan, Sizing, TargetConfig};
+use crate::config::{Choices, Placement, RenderPlan, Sizing, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
@@ -44,7 +44,7 @@ use crate::session::Uplinks;
 use crate::rdp_client::proto::rdpsnd;
 use crate::rdp_client::{
     self as client, AudioSink, Connect, Event, Frame, Framebuffer, Input, MouseButton as RdpButton,
-    Session,
+    Placed, Session,
 };
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
 use crate::shadow::{self, Rect, Shadow};
@@ -167,7 +167,7 @@ pub async fn run(
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
-    session(config, choices.size, plan, display, input_rx, audio, uplinks, &sink).await;
+    session(config, choices, plan, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
 
@@ -198,7 +198,7 @@ impl AudioSink for Sound {
 #[allow(clippy::too_many_arguments)]
 async fn session(
     config: TargetConfig,
-    sizing: Sizing,
+    choices: Choices,
     plan: RenderPlan,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
@@ -206,11 +206,12 @@ async fn session(
     uplinks: Uplinks,
     sink: &VideoSink,
 ) {
-    let resize = sizing == Sizing::Window;
+    let sizing = choices.size;
+    let resize = choices.resize();
     let opening = opening_layout(&config, sizing, display);
     let (session, mut events) = Session::start(connect_config(
         &config,
-        resize,
+        choices,
         states_density(sizing, display),
         opening,
         plan,
@@ -231,14 +232,16 @@ async fn session(
         return;
     };
     // Which of the displays asked for the host laid out, read off the desktop it
-    // opened: the row's union, or one. The opening density counts as applied only
+    // opened: their union, or one. The opening density counts as applied only
     // when the desktop came back at the size that asked for it — the same proof a
     // mid-session layout needs (see `confirms`). A server that opened something
     // else is taken to be at 1x, and the attachment's `HostDisplay` asks again
     // through Display Control.
     let asked = u32::from(config.virtual_displays);
-    let mut view = View::opened(asked, opening.adjusted(), (width, height));
-    let applied = if (u32::from(width), u32::from(height)) == span(opening.adjusted(), view.columns) {
+    let mut view = View::opened(asked, opening.adjusted(), (width, height), choices.placement);
+    let applied = if (u32::from(width), u32::from(height))
+        == span(opening.adjusted(), view.columns, choices.placement)
+    {
         opening.density
     } else {
         Density::One
@@ -396,7 +399,7 @@ fn states_density(sizing: Sizing, display: Option<HostDisplay>) -> bool {
 /// Everything the RDP client needs to open this target's session.
 fn connect_config(
     config: &TargetConfig,
-    resize: bool,
+    choices: Choices,
     stated_density: bool,
     opening: Layout,
     plan: RenderPlan,
@@ -412,11 +415,12 @@ fn connect_config(
         width: opening.w,
         height: opening.h,
         monitors: u32::from(config.virtual_displays),
+        placement: choices.placement,
         // Stated only in a session whose density is this end's to set, where 1x is
         // a statement too: a session left at 2x reconnects at 100%. Otherwise the
         // host keeps whatever scaling it was configured with.
         scale_percent: if stated_density { opening.density.percent() } else { 0 },
-        resize,
+        resize: choices.resize(),
         egfx: config.egfx(),
         pass_graphics: plan.rdp_graphics,
         h264: plan.rdp_h264,
@@ -506,10 +510,12 @@ impl Density {
 /// shrinks everything drawn in them. MS-RDPEDISP puts both on one PDU, and
 /// [`Input::resize`] takes both for the same reason.
 ///
-/// `w` and `h` are the first monitor's, and every monitor of a row is that size
-/// unless `second` says otherwise: the second monitor's size, where a display shown
+/// `w` and `h` are the first monitor's, and every monitor is that size unless
+/// `second` says otherwise: the second monitor's size, where a display shown
 /// in a browser tab of its own follows that tab's window rather than the first's.
-/// `None` whenever it would be the same size, so a row is spelt one way.
+/// `None` whenever it would be the same size, so a layout is spelt one way. Where
+/// the second sits is not part of it: that is the session's, chosen once
+/// ([`Placement`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Layout {
     w: u32,
@@ -524,7 +530,7 @@ impl Layout {
         Self { second: self.second.filter(|second| *second != (self.w, self.h)), ..self }
     }
 
-    /// Each monitor's size, left to right, for a row of `monitors`.
+    /// Each monitor's size, the first first, for a layout of `monitors`.
     fn row(self, monitors: u16) -> Vec<(u32, u32)> {
         let second = self.second.unwrap_or((self.w, self.h));
         (0..monitors.max(1)).map(|index| if index == 0 { (self.w, self.h) } else { second }).collect()
@@ -600,18 +606,24 @@ impl std::fmt::Display for Layout {
     }
 }
 
-/// The desktop a layout makes when the host lays it out over `columns` monitors in
-/// a row: the union the host names in a Demand Active or a graphics reset.
-fn span(layout: Layout, columns: u16) -> (u32, u32) {
-    (layout.w * u32::from(columns.max(1)), layout.h)
+/// The desktop a layout makes when the host lays it out over `columns` monitors,
+/// the second where `placement` puts it: the union the host names in a Demand
+/// Active or a graphics reset.
+fn span(layout: Layout, columns: u16, placement: Placement) -> (u32, u32) {
+    if columns <= 1 {
+        return layout.size();
+    }
+    placement.union(layout.size(), layout.second.unwrap_or(layout.size()))
 }
 
 /// The virtual displays the host laid out, and the one the browser is looking at.
 ///
 /// RDP delivers one framebuffer spanning every monitor of the session, and this
-/// engine shows one monitor of it: `columns` equal columns side by side, which is
-/// how every layout it asks for is built (`display::monitor_layout` in the RDP
-/// client), and `active` the column on the canvas. The picker's list is this and
+/// engine shows one monitor of it: `columns` of them, the second against whichever
+/// edge of the first the session chose ([`Placement`]), which is how every layout
+/// it asks for is built (`display::monitor_layout` in the RDP client), and
+/// `active` the one on the canvas. A column here is one monitor's part of the
+/// framebuffer, wherever it sits. The picker's list is this and
 /// its checkmark is `active`, both sent from here: a switch is answered out of the
 /// framebuffer the gateway already holds, and the host is asked for nothing. The
 /// browser keeps no display state of its own, so the list goes out again whenever
@@ -627,9 +639,11 @@ fn span(layout: Layout, columns: u16) -> (u32, u32) {
 struct View {
     /// How many monitors the host laid the desktop out over. Never zero.
     columns: u16,
-    /// Each column's size, left to right, from the layout the host stated: the
-    /// first `columns` of these. Columns sit side by side, top-aligned.
+    /// Each column's size, the primary first, from the layout the host stated: the
+    /// first `columns` of these.
     sizes: [(u16, u16); COLUMNS],
+    /// Where each column starts, in the framebuffer.
+    origins: [(u16, u16); COLUMNS],
     /// The column on the canvas, below `columns`.
     active: u16,
     /// Whether *All Displays* is chosen: `active` is then the first column, and
@@ -651,26 +665,44 @@ impl View {
     /// `asked` monitors when the desktop is their union, else one. A Demand Active
     /// names no monitor count, and a server without the extended client data was
     /// asked for one monitor anyway.
-    fn opened(asked: u32, per_monitor: Layout, desktop: (u16, u16)) -> Self {
+    fn opened(asked: u32, per_monitor: Layout, desktop: (u16, u16), placement: Placement) -> Self {
         let asked = narrow(asked.max(1));
-        let row = usize::from(asked) <= COLUMNS
-            && (u32::from(desktop.0), u32::from(desktop.1)) == span(per_monitor, asked);
-        let mut view = Self { columns: 1, sizes: [desktop; COLUMNS], active: 0, all: false, listed: false };
-        if asked > 1 && row {
+        let union = usize::from(asked) <= COLUMNS
+            && (u32::from(desktop.0), u32::from(desktop.1)) == span(per_monitor, asked, placement);
+        let mut view = Self {
+            columns: 1,
+            sizes: [desktop; COLUMNS],
+            origins: [(0, 0); COLUMNS],
+            active: 0,
+            all: false,
+            listed: false,
+        };
+        if asked > 1 && union {
+            // Every monitor the connect asks for is the one size.
+            let (w, h) = (narrow(per_monitor.w), narrow(per_monitor.h));
             view.columns = asked;
-            view.sizes = [(desktop.0 / asked, desktop.1); COLUMNS];
+            view.sizes = [(w, h); COLUMNS];
+            view.origins = match placement {
+                Placement::Right => [(0, 0), (w, 0)],
+                Placement::Left => [(w, 0), (0, 0)],
+                Placement::Top => [(0, h), (0, 0)],
+                Placement::Bottom => [(0, 0), (0, h)],
+            };
         }
         view
     }
 
-    /// The host laid the desktop out again, over `monitors`, each of its own size —
-    /// its answer to a layout, or its own change. A row of more than this view
-    /// holds is shown whole, as one. The selection is kept where it still exists.
-    fn laid_out(self, monitors: &[(u32, u32)], desktop: (u16, u16)) -> Self {
+    /// The host laid the desktop out again, over `monitors`, each of its own size
+    /// and where the host put it — its answer to a layout, or its own change. More
+    /// monitors than this view holds are shown whole, as one. The selection is kept
+    /// where it still exists.
+    fn laid_out(self, monitors: &[Placed], desktop: (u16, u16)) -> Self {
         let mut sizes = [desktop; COLUMNS];
+        let mut origins = [(0, 0); COLUMNS];
         let columns = if (2..=COLUMNS).contains(&monitors.len()) {
-            for (size, &(w, h)) in sizes.iter_mut().zip(monitors) {
-                *size = (narrow(w), narrow(h));
+            for (column, monitor) in monitors.iter().enumerate() {
+                sizes[column] = (narrow(monitor.w), narrow(monitor.h));
+                origins[column] = (narrow(monitor.x), narrow(monitor.y));
             }
             narrow(monitors.len() as u32)
         } else {
@@ -679,6 +711,7 @@ impl View {
         Self {
             columns,
             sizes,
+            origins,
             active: if self.active < columns { self.active } else { 0 },
             all: self.all && columns > 1,
             ..self
@@ -705,37 +738,40 @@ impl View {
         self.sizes[usize::from(column).min(COLUMNS - 1)]
     }
 
-    /// Where `column` starts, in the framebuffer: past every column before it.
+    /// Where `column` starts, in the framebuffer.
     fn column_origin(self, column: u16) -> (u16, u16) {
-        let left = (0..column).fold(0_u16, |left, before| left.saturating_add(self.column_size(before).0));
-        (left, 0)
+        self.origins[usize::from(column).min(COLUMNS - 1)]
     }
 
-    /// The desktop the columns make: their row, side by side and top-aligned, which
-    /// is the union the host laid them out in.
+    /// The desktop the columns make: the union the host laid them out in.
+    #[cfg(test)]
     fn desktop(self) -> (u16, u16) {
         (0..self.columns).fold((0, 0), |(w, h), column| {
             let (cw, ch) = self.column_size(column);
-            (w.saturating_add(cw), h.max(ch))
+            let (left, top) = self.column_origin(column);
+            (w.max(left.saturating_add(cw)), h.max(top.saturating_add(ch)))
         })
     }
 
     /// A pointer position made on `column`, in the desktop: offset to where the
-    /// column starts, and held inside the desktop, which is what RDP's mouse event
+    /// column starts, and held on a column, which is what RDP's mouse event
     /// addresses (MS-RDPBCGR 2.2.8.1.2.2.3, `xPos`: "relative to the top-left
     /// corner of the server's desktop"). The page holds a position to the display
-    /// it was made on except towards the display shown beside it, which a drag
-    /// held past the edge crosses to (`frontend/src/remotePoint.ts`), so a
-    /// position past that edge lands on the other column, and one past the
-    /// desktop's own edge at it.
+    /// it was made on unless another is shown in a tab of its own, which a drag
+    /// held past the edge between them crosses to (`frontend/src/remotePoint.ts`),
+    /// so a position past that edge lands on the other column, and one that lies
+    /// on neither at the nearest edge of the nearest ([`engine::hold_on_display`]).
     fn desktop_point(self, column: u16, x: i32, y: i32) -> (u16, u16) {
         let (left, top) = self.column_origin(column);
-        let (w, h) = self.desktop();
-        let last = |v: u16| i32::from(v.saturating_sub(1));
-        (
-            clamp_u16(x.saturating_add(i32::from(left)).clamp(0, last(w))),
-            clamp_u16(y.saturating_add(i32::from(top)).clamp(0, last(h))),
-        )
+        let point = (x.saturating_add(i32::from(left)), y.saturating_add(i32::from(top)));
+        let mut columns = [engine::DisplayRect { x: 0, y: 0, w: 0, h: 0 }; COLUMNS];
+        let shown = usize::from(self.columns).min(COLUMNS);
+        for (index, rect) in columns.iter_mut().enumerate().take(shown) {
+            let ((x, y), (w, h)) = (self.origins[index], self.sizes[index]);
+            *rect = engine::DisplayRect { x: i32::from(x), y: i32::from(y), w: i32::from(w), h: i32::from(h) };
+        }
+        let (x, y) = engine::hold_on_display(point, &columns[..shown], usize::from(column));
+        (clamp_u16(x), clamp_u16(y))
     }
 
     /// The column shown in tab `display`, while *All Displays* is chosen: every
@@ -763,7 +799,7 @@ impl View {
         }
     }
 
-    /// The row as it stands, at `density`: what a layout is compared against.
+    /// The layout as it stands, at `density`: what one asked for is compared against.
     fn current(self, density: Density) -> Layout {
         let size = |column: u16| {
             let (w, h) = self.column_size(column);
@@ -1499,7 +1535,7 @@ async fn active_loop(
                     // pending layout rather than assuming there was one.
                     Event::Resize { width, height, monitors } => {
                         // The framebuffer the host paints: every display it laid
-                        // out, side by side. What the browser sees is `view`'s
+                        // out, as it placed them. What the browser sees is `view`'s
                         // column of it.
                         let desktop = (narrow(width), narrow(height));
                         view = view.laid_out(&monitors, desktop);
@@ -2068,11 +2104,12 @@ fn install_layout(
 /// PDU reports the scale a server settled on. The size is the only evidence there
 /// is, which is why it has to be the evidence used.
 ///
-/// `monitors` is the size of each monitor the host laid the desktop out over, from
-/// the reset that reported it: the answer to a layout is its row, as many of its
-/// monitors as the host laid out.
-fn confirms(pending: &PendingLayout, monitors: &[(u32, u32)]) -> bool {
-    pending.layout.adjusted().row(narrow(monitors.len() as u32)) == monitors
+/// `monitors` is each monitor the host laid the desktop out over, from the reset
+/// that reported it: the answer to a layout is its sizes, as many of its monitors
+/// as the host laid out.
+fn confirms(pending: &PendingLayout, monitors: &[Placed]) -> bool {
+    let sizes: Vec<(u32, u32)> = monitors.iter().map(|monitor| (monitor.w, monitor.h)).collect();
+    pending.layout.adjusted().row(narrow(monitors.len() as u32)) == sizes
 }
 
 fn request_layout(input: &Input, ready: bool, current: Layout, wanted: Layout, monitors: u16) -> Asked {
@@ -2507,6 +2544,19 @@ fn pack_rgb(frame: &Frame, rect: Rect, buf: &mut Vec<u8>) {
 mod tests {
     use super::*;
 
+    /// Monitors of these sizes as a host places them left to right, top-aligned.
+    fn row(sizes: &[(u32, u32)]) -> Vec<Placed> {
+        let mut x = 0;
+        sizes
+            .iter()
+            .map(|&(w, h)| {
+                let placed = Placed { x, y: 0, w, h };
+                x += w;
+                placed
+            })
+            .collect()
+    }
+
     fn rect(left: u16, top: u16, right: u16, bottom: u16) -> Rect {
         Rect { left, top, right, bottom }
     }
@@ -2770,7 +2820,7 @@ mod tests {
     #[test]
     fn a_position_on_the_second_display_is_offset_by_the_first() {
         let per = Layout { w: 1280, h: 800, density: Density::One, second: None };
-        let two = View::opened(2, per, (2560, 800));
+        let two = View::opened(2, per, (2560, 800), Placement::Right);
         let mut last_pos = (0, 0);
         let events = translate_input(
             ClientMsg::MouseMove { x: 10, y: 20 },
@@ -2799,7 +2849,7 @@ mod tests {
     #[test]
     fn a_position_past_a_display_is_held_inside_the_desktop() {
         let per = Layout { w: 1280, h: 800, density: Density::One, second: None };
-        let two = View::opened(2, per, (2560, 800));
+        let two = View::opened(2, per, (2560, 800), Placement::Right);
         assert_eq!(two.desktop(), (2560, 800));
         assert_eq!(two.desktop_point(0, 1300, 20), (1300, 20), "onto the second");
         assert_eq!(two.desktop_point(1, -100, 20), (1180, 20), "onto the first");
@@ -2823,9 +2873,12 @@ mod tests {
         );
         assert_eq!(events, vec![RemoteInput::Button { button: RdpButton::Left, down: true, x: 2559, y: 20 }]);
         // A row of two sizes is as tall as its taller column.
-        let row = two.laid_out(&[(1280, 800), (1024, 1000)], (2304, 1000));
+        let row = two.laid_out(&row(&[(1280, 800), (1024, 1000)]), (2304, 1000));
         assert_eq!(row.desktop(), (2304, 1000));
         assert_eq!(row.desktop_point(0, 2400, 999), (2303, 999));
+        // Below the shorter column is inside the desktop and on neither: held on
+        // the column it was made on.
+        assert_eq!(row.desktop_point(0, 640, 950), (640, 799));
     }
 
     /// In a passed session the browser composes the span and is told which column
@@ -2837,7 +2890,7 @@ mod tests {
             other => panic!("not a view: {other:?}"),
         };
         let per = Layout { w: 1280, h: 800, density: Density::One, second: None };
-        let mut view = View::opened(2, per, (2560, 800));
+        let mut view = View::opened(2, per, (2560, 800), Placement::Right);
         assert_eq!(part(view.graphics_view()), (0, 0, 1280, 800));
         assert_eq!(view.select(1), Some(true));
         assert_eq!(part(view.graphics_view()), (1280, 0, 1280, 800));
@@ -2845,8 +2898,63 @@ mod tests {
         assert_eq!(part(view.graphics_view()), (0, 0, 1280, 800));
         assert_eq!(part(graphics_view(view.column_rect(1))), (1280, 0, 1280, 800));
         // One display is the whole picture.
-        let one = View::opened(1, per, (1280, 800));
+        let one = View::opened(1, per, (1280, 800), Placement::Right);
         assert_eq!(part(one.graphics_view()), (0, 0, 1280, 800));
+    }
+
+    /// The second display sits against the edge of the first that was chosen: the
+    /// view opens on the desktop that makes, each display where it is in the
+    /// framebuffer, and follows wherever the host says it put them after.
+    #[test]
+    fn the_second_display_is_where_it_was_placed() {
+        let per = Layout { w: 1280, h: 800, density: Density::One, second: None };
+        let opened = |placement, desktop| {
+            let view = View::opened(2, per, desktop, placement);
+            (view.columns, view.column_rect(0), view.column_rect(1), view.desktop())
+        };
+        let rect = |left, top, right, bottom| Rect { left, top, right, bottom };
+        assert_eq!(
+            opened(Placement::Left, (2560, 800)),
+            (2, rect(1280, 0, 2559, 799), rect(0, 0, 1279, 799), (2560, 800))
+        );
+        assert_eq!(
+            opened(Placement::Top, (1280, 1600)),
+            (2, rect(0, 800, 1279, 1599), rect(0, 0, 1279, 799), (1280, 1600))
+        );
+        assert_eq!(
+            opened(Placement::Bottom, (1280, 1600)),
+            (2, rect(0, 0, 1279, 799), rect(0, 800, 1279, 1599), (1280, 1600))
+        );
+        // A desktop that is not the union asked for is one display.
+        assert_eq!(opened(Placement::Bottom, (2560, 800)).0, 1);
+        assert_eq!(span(per, 2, Placement::Top), (1280, 1600));
+        assert_eq!(span(Layout { second: Some((1024, 700)), ..per }, 2, Placement::Left), (2304, 800));
+
+        // A position made on a display is offset to where that display starts, and
+        // one past the edge between them lands on the other.
+        let above = View::opened(2, per, (1280, 1600), Placement::Top);
+        assert_eq!(above.desktop_point(0, 10, 20), (10, 820));
+        assert_eq!(above.desktop_point(1, 10, 20), (10, 20));
+        assert_eq!(above.desktop_point(0, 10, -30), (10, 770), "up onto the second");
+        assert_eq!(above.desktop_point(1, 10, 830), (10, 830), "down onto the first");
+        assert_eq!(above.desktop_point(0, -5, 5000), (0, 1599));
+        let left = View::opened(2, per, (2560, 800), Placement::Left);
+        assert_eq!(left.desktop_point(0, -100, 20), (1180, 20), "onto the second");
+        assert_eq!(left.desktop_point(1, 1300, 20), (1300, 20), "onto the first");
+
+        // The host's own word for where each monitor is replaces the opening guess:
+        // the second, its tab's size, to the left of the first.
+        let moved = left.laid_out(
+            &[Placed { x: 1024, y: 0, w: 1600, h: 900 }, Placed { x: 0, y: 0, w: 1024, h: 700 }],
+            (2624, 900),
+        );
+        assert_eq!(moved.column_rect(0), rect(1024, 0, 2623, 899));
+        assert_eq!(moved.column_rect(1), rect(0, 0, 1023, 699));
+        assert_eq!(moved.desktop(), (2624, 900));
+        assert_eq!(
+            moved.current(Density::One),
+            Layout { w: 1600, h: 900, density: Density::One, second: Some((1024, 700)) }
+        );
     }
 
     /// The view is read off what the host opened: two displays when the desktop is
@@ -2854,15 +2962,15 @@ mod tests {
     #[test]
     fn the_view_is_what_the_host_laid_out() {
         let per = Layout { w: 1280, h: 800, density: Density::One, second: None };
-        let two = View::opened(2, per, (2560, 800));
+        let two = View::opened(2, per, (2560, 800), Placement::Right);
         assert_eq!((two.columns, two.active), (2, 0));
         assert_eq!(two.size(), (1280, 800));
         assert_eq!(two.rect(), rect(0, 0, 1279, 799));
         // A host that opened one desktop, or something else entirely, is one display.
-        assert_eq!(View::opened(2, per, (1280, 800)).columns, 1);
-        assert_eq!(View::opened(2, per, (1024, 768)).columns, 1);
-        assert_eq!(View::opened(1, per, (1280, 800)).columns, 1);
-        assert_eq!(View::opened(1, per, (1280, 800)).size(), (1280, 800));
+        assert_eq!(View::opened(2, per, (1280, 800), Placement::Right).columns, 1);
+        assert_eq!(View::opened(2, per, (1024, 768), Placement::Right).columns, 1);
+        assert_eq!(View::opened(1, per, (1280, 800), Placement::Right).columns, 1);
+        assert_eq!(View::opened(1, per, (1280, 800), Placement::Right).size(), (1280, 800));
 
         let mut view = two;
         let msg = view.displays(Density::One).expect("two displays are a list");
@@ -2878,7 +2986,7 @@ mod tests {
         );
         assert!(displays.iter().all(|d| d.tab.is_none()), "no tab until All Displays is chosen");
         // At 2x the detail is in points.
-        let mut dense = view.laid_out(&[(2560, 1600), (2560, 1600)], (5120, 1600));
+        let mut dense = view.laid_out(&row(&[(2560, 1600), (2560, 1600)]), (5120, 1600));
         let ServerMsg::Displays { displays, .. } = dense.displays(Density::Two).unwrap() else {
             panic!("not a list")
         };
@@ -2914,7 +3022,7 @@ mod tests {
 
         // A row whose monitors differ, the second following its tab's window:
         // each column is its own size, side by side and top-aligned.
-        let unequal = view.laid_out(&[(1600, 900), (1024, 700)], (2624, 900));
+        let unequal = view.laid_out(&row(&[(1600, 900), (1024, 700)]), (2624, 900));
         assert!(unequal.all, "the tab outlives its column changing size");
         assert_eq!(unequal.size(), (1600, 900));
         assert_eq!(unequal.column_size(1), (1024, 700));
@@ -2925,33 +3033,33 @@ mod tests {
         );
         assert_eq!(two.current(Density::One), per, "an even row has no second size");
 
-        assert!(!view.laid_out(&[(1280, 800)], (1280, 800)).all, "one monitor has nothing to show beside it");
+        assert!(!view.laid_out(&row(&[(1280, 800)]), (1280, 800)).all, "one monitor has nothing to show beside it");
         assert_eq!(view.select(1), Some(true));
         assert_eq!(view.tab_column(2), None);
 
         // A host that lays the desktop out over one monitor again shrinks the view
         // to it, the selection with it — and a browser that was sent a list is sent
         // the shorter one, so it stops offering the display that went away.
-        let one = view.laid_out(&[(1280, 800)], (1280, 800));
+        let one = view.laid_out(&row(&[(1280, 800)]), (1280, 800));
         assert_eq!((one.columns, one.active), (1, 0));
         let mut one = one;
         let ServerMsg::Displays { displays, .. } = one.displays(Density::One).unwrap() else {
             panic!("a list once sent is sent again")
         };
         assert_eq!(displays.len(), 1, "and one display offers no All Displays");
-        let mut one_view = View::opened(1, per, (1280, 800));
+        let mut one_view = View::opened(1, per, (1280, 800), Placement::Right);
         assert_eq!(one_view.select(ALL_DISPLAYS), None);
         // One that never had a list has none to send.
-        assert!(View::opened(1, per, (1280, 800)).displays(Density::One).is_none());
+        assert!(View::opened(1, per, (1280, 800), Placement::Right).displays(Density::One).is_none());
         // A reset over two monitors confirms a layout against its row.
         let pending = PendingLayout::new(per);
-        assert!(confirms(&pending, &[(1280, 800), (1280, 800)]));
-        assert!(!confirms(&pending, &[(640, 800), (640, 800)]));
-        assert!(confirms(&pending, &[(1280, 800)]), "a host that laid out one of them");
-        let row = PendingLayout::new(Layout { second: Some((1024, 700)), ..per });
-        assert!(confirms(&row, &[(1280, 800), (1024, 700)]));
-        assert!(!confirms(&row, &[(1280, 800), (1280, 800)]), "the second's own size is what was asked");
-        assert_eq!(row.layout.row(2), vec![(1280, 800), (1024, 700)]);
+        assert!(confirms(&pending, &row(&[(1280, 800), (1280, 800)])));
+        assert!(!confirms(&pending, &row(&[(640, 800), (640, 800)])));
+        assert!(confirms(&pending, &row(&[(1280, 800)])), "a host that laid out one of them");
+        let unequal = PendingLayout::new(Layout { second: Some((1024, 700)), ..per });
+        assert!(confirms(&unequal, &row(&[(1280, 800), (1024, 700)])));
+        assert!(!confirms(&unequal, &row(&[(1280, 800), (1280, 800)])), "the second's own size is what was asked");
+        assert_eq!(unequal.layout.row(2), vec![(1280, 800), (1024, 700)]);
         assert_eq!(per.row(2), vec![(1280, 800), (1280, 800)]);
     }
 
@@ -3031,7 +3139,7 @@ mod tests {
 
     /// One display, the whole desktop.
     fn one() -> View {
-        View::opened(1, Layout { w: 1280, h: 800, density: Density::One, second: None }, (1280, 800))
+        View::opened(1, Layout { w: 1280, h: 800, density: Density::One, second: None }, (1280, 800), Placement::Right)
     }
 
     /// Input that carries no scroll, translated with a wheel that has none pending.
@@ -3305,8 +3413,8 @@ mod tests {
         // And the held layout is what the server's answer is checked against, so the
         // retry ladder recognises the desktop it asked for.
         let pending = PendingLayout::new(retina.held());
-        assert!(confirms(&pending, &[(3840, 2400)]));
-        assert!(!confirms(&pending, &[(5120, 2880)]));
+        assert!(confirms(&pending, &row(&[(3840, 2400)])));
+        assert!(!confirms(&pending, &row(&[(5120, 2880)])));
     }
 
     #[test]
@@ -3389,16 +3497,16 @@ mod tests {
     #[test]
     fn only_the_size_that_was_asked_for_confirms_a_layout() {
         let pending = PendingLayout::new(Layout { w: 1600, h: 900, density: Density::Two, second: None });
-        assert!(confirms(&pending, &[(1600, 900)]), "the size that went out came back");
-        assert!(!confirms(&pending, &[(1280, 800)]), "a desktop the server chose for itself");
-        assert!(!confirms(&pending, &[(1600, 1000)]), "one axis is not enough");
+        assert!(confirms(&pending, &row(&[(1600, 900)])), "the size that went out came back");
+        assert!(!confirms(&pending, &row(&[(1280, 800)])), "a desktop the server chose for itself");
+        assert!(!confirms(&pending, &row(&[(1600, 1000)])), "one axis is not enough");
 
         // Through the adjustment, because an odd width is not what was sent: a
         // server answering 1600 has answered the request, and a comparison
         // against the 1601 asked for would retry until the ladder ran out.
         let odd = PendingLayout::new(Layout { w: 1601, h: 900, density: Density::One, second: None });
-        assert!(confirms(&odd, &[(1600, 900)]));
-        assert!(!confirms(&odd, &[(1601, 900)]), "1601 is not a size this can be sent as");
+        assert!(confirms(&odd, &row(&[(1600, 900)])));
+        assert!(!confirms(&odd, &row(&[(1601, 900)])), "1601 is not a size this can be sent as");
     }
 
     /// The pack drops the fourth byte and keeps the order. Its own test because

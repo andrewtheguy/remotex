@@ -113,8 +113,11 @@ touch.
 - **Experimental:** `egfx_h264 = true` lets the host draw video with H.264 on a
   passed pipeline, which the browser decodes. Without it a passed pipeline is
   lossless.
-- **Alpha:** `virtual_displays = 2` asks the host for two displays side by side,
-  each the session's size. The floating menu's Display picker switches between
+- **Alpha:** `virtual_displays = 2` asks the host for two displays, each the
+  session's size. Where the second sits against the first is chosen under the
+  target at the picker, **Second display**: right, left, top or bottom, to match
+  where the client's own second display is. The floating menu's Display picker
+  switches between
   them; the gateway encodes only the one shown. Its *All Displays* keeps the
   first display here and links to the second, which opens at `/display/2` in a
   new tab of the same browser: just that display, with its own pointer and
@@ -177,7 +180,14 @@ connection with the same error as wrong credentials. See
   3840×2160 backing pixels. Picture and sound come over the Mac's media stream,
   HEVC and AAC-ELD over SRTP:
   - **Alpha:** `virtual_displays = 2` asks the Mac for two virtual displays,
-    Apple's viewer's "2 Virtual Displays", the second to the right of the first.
+    Apple's viewer's "2 Virtual Displays", the second to the right of the first:
+    the Mac places it, so the picker offers no other side. To have it on another
+    side, arrange the displays on the Mac while the session is open, in System
+    Settings → Displays → Arrange: drag the second display to the left of the
+    first, above it or below it. The session follows — each tab keeps its own
+    display and the pointer crosses the edge they now share — and the Mac may
+    keep the arrangement for the next session; when it has not, it is on the
+    right again.
     The Display picker switches between them, and its *All Displays* keeps the
     first here and opens the second at `/display/2` in a new tab of the same
     browser, as on an RDP target; on a session that follows the window that
