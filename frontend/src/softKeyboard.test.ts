@@ -108,7 +108,7 @@ test("the Sym/Nav page holds every right-hand modifier", () => {
   }
 });
 
-test("the strip has Esc between its modifiers and its arrows", () => {
+test("the strip has Esc beside Tab, then its modifiers and its arrows", () => {
   const strip = PAGE_ABC.rows.find((row) => row.kind === "strip");
   assert.ok(strip);
   assert.deepEqual(
@@ -117,10 +117,10 @@ test("the strip has Esc between its modifiers and its arrows", () => {
     ),
     [
       "Tab",
+      "Escape",
       "ControlLeft",
       "AltLeft",
       "MetaLeft",
-      "Escape",
       "ArrowLeft",
       "ArrowUp",
       "ArrowDown",

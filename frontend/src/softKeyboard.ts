@@ -264,16 +264,16 @@ const SHORTCUTS_FN: Key[] = [
 
 // ── The strip: modifiers, Esc and arrows, on every phone page ──
 
-// Super is a symbol, one unit wide, and the modifiers kept narrow, which is the
-// room Esc takes between them and the arrows.
+// Esc sits beside Tab, ahead of the modifiers. Super is a symbol where the word
+// would not fit, and all of them are kept narrow so the arrows keep a unit each.
 const SUPER_GLYPH = "❖";
 
 const STRIP: Key[] = [
   s("Tab", "Tab", 1.5),
+  s("Esc", "Escape", 1.1),
   s("Ctrl", "ControlLeft", 1.1),
   s("Alt", "AltLeft", 1.1),
-  s(SUPER_GLYPH, "MetaLeft"),
-  s("Esc", "Escape", 1.3),
+  s(SUPER_GLYPH, "MetaLeft", 1.2),
   s("←", "ArrowLeft"),
   s("↑", "ArrowUp"),
   s("↓", "ArrowDown"),
