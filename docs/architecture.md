@@ -2137,7 +2137,9 @@ drawer (`floatingButton.tsx`) with the display's number on the button where the
 session's shows ☰. It holds what is the tab's alone: immersive full screen, which
 is a window's and which the session page's button reaches only for its own
 window, and Disconnect. What the session has one of — sound, clipboard, the display picker, End
-session — stays in the menu on the session's page.
+session — stays in the menu on the session's page. The clipboard's automatic sync
+is the exception, kept in both tabs because only the focused one can reach the
+browser's clipboard ([Clipboard](#clipboard)).
 
 The display is one tab's. The first socket for it after the engine lists its tab is
 given a token, sent first on it as `displayToken`; the tab keeps it in its
@@ -2219,6 +2221,14 @@ clipboard is negotiated and never reports it.
 Transfers are capped at 512 KiB and refused rather than truncated. Browser
 clipboard integration is best effort because Safari's permission rules, and an
 unfocused tab, may prevent automatic access.
+
+A browser reads and writes its clipboard only for the page that has focus, and
+on *All Displays* that is as often the second display's tab as the session's
+page. So the tab syncs it too, over its display socket, the one thing that socket
+carries that is the session's rather than its display's: the browser's clipboard
+goes out on it when the tab gains focus, as it does from the session's page,
+and every remote copy goes to the tab as well as to the page, and whichever has
+focus writes it. A fetch's answer is the Clipboard panel's, and goes to the page alone.
 
 ### Liveness
 

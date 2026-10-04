@@ -1544,6 +1544,10 @@ async fn display(
                     | ClientMsg::Refresh
                     | ClientMsg::Viewport { .. }),
                 ) => sessions.forward_display_input(id, input),
+                // The one session message a display socket carries: the browser
+                // hands its clipboard over to the tab that has focus, and a tab of
+                // its own has no session socket to send it on.
+                Ok(clipboard @ ClientMsg::Clipboard { .. }) => sessions.forward_display_clipboard(id, clipboard),
                 Ok(other) => warn!("ws: a display socket sent a session message: {other:?}"),
                 Err(e) => warn!("ws: bad client message: {e} (raw: {text})"),
             },

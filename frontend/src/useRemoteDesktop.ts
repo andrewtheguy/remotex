@@ -2510,12 +2510,18 @@ export function useRemoteDesktop(
   }, []);
 
   // Best-effort clipboard push on focus, when reads are permitted. Oversized
-  // values are skipped locally; the explicit panel reports the limit.
+  // values are skipped locally; the explicit panel reports the limit. A display
+  // in a tab of its own pushes too, on its display socket: the browser lets only
+  // the focused page read the clipboard, and with two windows that is often the
+  // tab's. Only while connected: a desktop stays up through a reconnect, and a
+  // value sent then would be dropped yet still stamp `lastToRemoteRef`, which
+  // keeps it from going out once the socket is back.
   useEffect(() => {
-    // The clipboard is the session socket's; a display in a tab of its own has none.
-    if (mode !== "desktop" || tabDisplay !== null) {
+    if (mode !== "desktop" || status !== "connected") {
       return;
     }
+    // Cleared when the connection changes, which a read can outlast.
+    let live = true;
     const pushBrowserClipboardOnFocus = () => {
       // The menu check is the ref rather than the dependency it looks like: a
       // re-run calls this once itself, so gating the effect would push the
@@ -2536,7 +2542,9 @@ export function useRemoteDesktop(
           // have opened: the read sits on a permission prompt for as long as the
           // user takes to answer it, and what it then resolves with may be what was
           // copied off a panel. Sending it would also stamp `lastToRemoteRef` with
-          // it, which is the mirror's echo guard.
+          // it, which is the mirror's echo guard. The connection is asked again
+          // for the same reason.
+          !live ||
           viewOnlyRef.current ||
           text === "" ||
           overClipboardLimit(text) ||
@@ -2555,13 +2563,14 @@ export function useRemoteDesktop(
     // Also once now: the tab may already be focused when the session starts.
     pushBrowserClipboardOnFocus();
     return () => {
+      live = false;
       window.removeEventListener("focus", pushBrowserClipboardOnFocus);
       document.removeEventListener(
         "visibilitychange",
         pushBrowserClipboardOnFocus,
       );
     };
-  }, [mode, tabDisplay]);
+  }, [mode, status]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is

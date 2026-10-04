@@ -188,7 +188,8 @@ pub struct Attachment {
 /// [`SessionManager::attach_display`].
 ///
 /// A display socket carries one display's picture and everything that goes with it
-/// ([`ServerMsg::is_display`]); the session socket carries the rest. The page holding
+/// ([`ServerMsg::is_display`]); the session socket carries the rest, but for a tab's
+/// clipboard ([`SessionManager::forward_display_clipboard`]). The page holding
 /// the session opens the first display's beside its session socket, and the RDP
 /// engine's *All displays* lets the same browser open another display's in a tab of
 /// its own (`/display/N`), whose input arrives on it.
@@ -504,6 +505,11 @@ struct DisplaySlot {
     /// The first display's messages arrive here from the pump; another display's
     /// from the engine's [`DisplayFeed`], through a forwarder.
     event_tx: mpsc::Sender<AttachEvent>,
+    /// A tab's latest remote copy, which a forwarder hands to `event_tx`; `None`
+    /// for the first display, whose page has the copy on its session socket. One
+    /// slot that keeps the newest, so the pump never waits on the tab's paint and
+    /// copies in quick succession leave the tab holding the last.
+    clipboard: Option<tokio::sync::watch::Sender<Option<ServerMsg>>>,
     /// Held, never sent on — dropping the slot resolves the socket's receiver, as
     /// for [`AudioSlot`].
     _close: oneshot::Sender<()>,
@@ -1159,7 +1165,23 @@ impl SessionManager {
             }
             feedback
         };
-        st.displays.insert(display, DisplaySlot { id, event_tx, _close: close_tx });
+        let clipboard = (display != FIRST_DISPLAY).then(|| {
+            let (clipboard, mut latest) = tokio::sync::watch::channel(None::<ServerMsg>);
+            let forward = event_tx.clone();
+            // Ends with the slot, which drops the sender, or with the socket.
+            tokio::spawn(async move {
+                while latest.changed().await.is_ok() {
+                    let Some(msg) = latest.borrow_and_update().clone() else {
+                        continue;
+                    };
+                    if forward.send(AttachEvent::Msg(msg)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            clipboard
+        });
+        st.displays.insert(display, DisplaySlot { id, event_tx, clipboard, _close: close_tx });
         info!("session: display {display}'s socket attached");
         Ok(DisplayAttachment { id, display, events, evicted, feedback })
     }
@@ -1220,6 +1242,21 @@ impl SessionManager {
                 engine.tab_held.entry(display).or_default().note(&msg);
                 ClientMsg::OnDisplay { display, input: Box::new(msg) }
             };
+            let _ = engine.input_tx.send(msg);
+        }
+    }
+
+    /// Put on the remote's clipboard what arrived on display socket `id`. The
+    /// clipboard is the session's rather than a display's, so it goes to the engine
+    /// bare, as the session socket's does: the browser lets a page read its
+    /// clipboard only while that page has focus, which a tab of its own takes from
+    /// the session's page.
+    pub fn forward_display_clipboard(&self, id: u64, msg: ClientMsg) {
+        let st = self.state.lock().unwrap();
+        if !st.displays.values().any(|slot| slot.id == id) {
+            return;
+        }
+        if let Some(engine) = &st.engine {
             let _ = engine.input_tx.send(msg);
         }
     }
@@ -1961,6 +1998,18 @@ impl SessionManager {
                     } else {
                         if let ServerMsg::Displays { displays, .. } = &msg {
                             st.show_tabs(displays.iter().filter_map(|display| display.tab).collect());
+                        }
+                        // A remote copy goes to each tab of its own as well, since
+                        // whichever page has focus is the one the browser lets write
+                        // its clipboard. A fetch's answer is the panel's, and the
+                        // panel is on the session's page. Left in the tab's slot
+                        // rather than awaited here: a tab's queue waits on that tab's
+                        // paint, and the first display's picture must not wait
+                        // behind it.
+                        if matches!(msg, ServerMsg::Clipboard { requested: false, .. }) {
+                            for clipboard in st.displays.values().filter_map(|slot| slot.clipboard.as_ref()) {
+                                clipboard.send_replace(Some(msg.clone()));
+                            }
                         }
                         // Detached: dropped, the engine owns the framebuffer.
                         st.client.as_ref().map_or(Route::Drop, |c| Route::Send(c.event_tx.clone()))
@@ -3002,6 +3051,94 @@ mod tests {
             panic!("a new token for the tab that takes a display given up");
         };
         assert_ne!(next, fresh);
+    }
+
+    /// The clipboard crosses a tab's display socket both ways: what the tab sends
+    /// reaches the engine bare, and a remote copy reaches the tab as well as the
+    /// session's page, where a fetch's answer reaches the page alone.
+    #[tokio::test]
+    async fn a_tab_of_its_own_carries_the_clipboard_both_ways() {
+        let (mgr, hooks) = manager_with_fake_engine();
+        let token = mgr.claim(false, None, "login").unwrap();
+        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        expect_picker(&mut att.events).await;
+        let mut first = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
+        expect_connected(&mut att.events, "fake").await;
+        let (mut input_rx, frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+        frame_tx
+            .send(ServerMsg::Displays {
+                active: 0,
+                displays: vec![crate::protocol::DisplayInfo {
+                    id: 1,
+                    label: "Display 2".into(),
+                    detail: String::new(),
+                    main: false,
+                    virtual_display: true,
+                    tab: Some(2),
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(recv(&mut att.events).await, AttachEvent::Msg(ServerMsg::Displays { .. })));
+        let mut second = mgr.attach_display("login", 2, None).unwrap();
+        assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, .. })));
+        assert!(matches!(recv(&mut second.events).await, AttachEvent::Msg(ServerMsg::DisplayToken { .. })));
+
+        mgr.forward_display_clipboard(second.id, ClientMsg::Clipboard { text: "from the tab".into() });
+        assert!(matches!(
+            input_rx.recv().await,
+            Some(ClientMsg::Clipboard { text }) if text == "from the tab"
+        ));
+
+        let copy = |text: &str, requested: bool| ServerMsg::Clipboard {
+            text: text.into(),
+            changed_at_ms: None,
+            requested,
+            oversized_bytes: None,
+            unconfirmed: false,
+        };
+        frame_tx.send(copy("answered", true)).await.unwrap();
+        frame_tx.send(copy("copied", false)).await.unwrap();
+        assert!(matches!(
+            recv(&mut att.events).await,
+            AttachEvent::Msg(ServerMsg::Clipboard { text, requested: true, .. }) if text == "answered"
+        ));
+        assert!(matches!(
+            recv(&mut att.events).await,
+            AttachEvent::Msg(ServerMsg::Clipboard { text, requested: false, .. }) if text == "copied"
+        ));
+        assert!(matches!(
+            recv(&mut second.events).await,
+            AttachEvent::Msg(ServerMsg::Clipboard { text, requested: false, .. }) if text == "copied"
+        ));
+        assert!(second.events.try_recv().is_err(), "the fetch's answer is the session page's alone");
+
+        // Copies in quick succession may coalesce for a tab, but never reorder: the
+        // last it is given is the last made.
+        frame_tx.send(copy("earlier", false)).await.unwrap();
+        frame_tx.send(copy("later", false)).await.unwrap();
+        for text in ["earlier", "later"] {
+            assert!(matches!(
+                recv(&mut att.events).await,
+                AttachEvent::Msg(ServerMsg::Clipboard { text: got, .. }) if got == text
+            ));
+        }
+        let AttachEvent::Msg(ServerMsg::Clipboard { text, .. }) = recv(&mut second.events).await else {
+            panic!("a copy reaches the tab");
+        };
+        if text == "earlier" {
+            assert!(matches!(
+                recv(&mut second.events).await,
+                AttachEvent::Msg(ServerMsg::Clipboard { text, .. }) if text == "later"
+            ));
+        } else {
+            assert_eq!(text, "later");
+        }
+        assert!(second.events.try_recv().is_err());
+        // The first display's socket is the session page's, which has the copy on
+        // its session socket already.
+        assert!(first.events.try_recv().is_err());
     }
 
     /// A page opens its two sockets together, so the picture an engine starts with

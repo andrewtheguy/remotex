@@ -169,6 +169,14 @@ What it lacks:
 - **Telling the displays apart.** The session page's Info names both displays
   and links to the second, but nothing on the remote's screens says which
   display is which.
+- **A tab left behind.** When the session's page goes — closed, reloading, or
+  its socket dropped — the tab showing the second display carries on with no
+  word of it: its input still reaches the remote through the reattach grace, and
+  only the engine ending takes the display away. The tab's display socket already
+  carries one thing that is the session's rather than the display's, the
+  clipboard ([Clipboard](architecture.md#clipboard)). The plan is for it to carry
+  whether the session's page is attached too, and for the tab to say so over its
+  desktop until the page is back.
 
 Fixing those does not take it out of alpha by itself. It also needs more testing
 than it has had, on both kinds of target, before it is offered as anything else.
