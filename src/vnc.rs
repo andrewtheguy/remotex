@@ -1489,7 +1489,7 @@ impl DisplayState {
     fn wlshare_list(&mut self) -> bool {
         let two = self.wlshare_outputs.len() == 2;
         self.wlshare_all &= two;
-        let all = self.wlshare_all && self.wlshare_shared == self.wlshare_outputs[0].id;
+        let all = self.wlshare_all && self.wlshare_outputs.first().is_some_and(|first| first.id == self.wlshare_shared);
         let mut displays = self.wlshare_outputs.clone();
         if two {
             if all {
