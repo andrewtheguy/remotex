@@ -91,9 +91,9 @@ jobs:
           # both the tarballs and the container images (packaging/Dockerfile runs
           # them on debian:trixie-slim, glibc 2.41), so the builder must not drift
           # under us into something newer than what can run them.
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             target-note: linux-x86_64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             target-note: linux-arm64
           - runner: macos-latest
             target-note: macos-arm64
@@ -223,7 +223,7 @@ jobs:
           - runner: ubuntu-latest
             arch: amd64
             target-note: linux-x86_64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             arch: arm64
             target-note: linux-arm64
     runs-on: ${{ matrix.runner }}

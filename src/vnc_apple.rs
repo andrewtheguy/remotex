@@ -454,14 +454,15 @@ pub fn set_display_configuration(modes: &[VirtualMode]) -> Vec<u8> {
     ); // display_count
     body.extend_from_slice(&0u32.to_be_bytes()); // flags
 
-    for VirtualMode { pixels, scaled } in modes.iter().copied() {
+    for (index, VirtualMode { pixels, scaled }) in modes.iter().copied().enumerate() {
         let mut display = Vec::with_capacity(descriptor);
         display.extend_from_slice(
             &u16::try_from(descriptor)
                 .expect("descriptor within u16")
                 .to_be_bytes(),
         );
-        display.resize(0x7a, 0); // opaque 120-byte region
+        display.extend_from_slice(display_name(index).as_bytes());
+        display.resize(0x7a, 0); // the name's 120 bytes, zero-filled
         display.extend_from_slice(&1u32.to_be_bytes()); // display_flags: dynamic resolution
         display.extend_from_slice(&4u32.to_be_bytes()); // display_type: virtual
         let mm = |px: u16| (f32::from(px) / NOMINAL_DPI * 25.4).to_be_bytes();
@@ -487,6 +488,16 @@ pub fn set_display_configuration(modes: &[VirtualMode]) -> Vec<u8> {
         body.extend_from_slice(&display);
     }
     message(SET_DISPLAY_CONFIGURATION, &body)
+}
+
+/// What the Mac calls virtual display `index`, in its Displays settings and
+/// wherever a display is named: Apple's viewer's own names. A descriptor without
+/// one makes a display with no name, which the Mac lists as " (1)" and " (2)".
+fn display_name(index: usize) -> String {
+    match index {
+        0 => "Screen Sharing Virtual Display".to_owned(),
+        _ => format!("Screen Sharing Virtual Display #{}", index + 1),
+    }
 }
 
 /// [`set_display_configuration`]'s message type.
@@ -1225,12 +1236,17 @@ mod tests {
         assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
         assert_eq!(msg.len(), CONFIG_HEAD + 2 * descriptor);
         assert_eq!(be16(&msg, 6), 2, "display_count");
-        // Each is the descriptor a one-display message carries for the same mode.
+        // Each is the descriptor a one-display message carries for the same mode,
+        // under its own name: zero-terminated in the 120 bytes after the length.
+        let names = ["Screen Sharing Virtual Display", "Screen Sharing Virtual Display #2"];
         for (index, mode) in [first, second].into_iter().enumerate() {
             let at = CONFIG_HEAD + index * descriptor;
             let alone = set_display_configuration(&[mode]);
-            assert_eq!(msg[at..at + descriptor], alone[CONFIG_HEAD..]);
+            assert_eq!(msg[at + 0x7a..at + descriptor], alone[CONFIG_HEAD + 0x7a..]);
             assert_eq!(usize::from(be16(&msg, at)), descriptor);
+            let name = &msg[at + 2..at + 0x7a];
+            assert_eq!(&name[..names[index].len()], names[index].as_bytes());
+            assert!(name[names[index].len()..].iter().all(|byte| *byte == 0));
         }
         assert_eq!(be32(&msg[CONFIG_HEAD + descriptor..], 0x9c), 2560, "the second's render width");
     }
