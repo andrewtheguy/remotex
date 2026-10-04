@@ -238,9 +238,9 @@ function page(
 
 // ── Shortcut rows (scrollable, phone pages) ──
 
-// The bare modifiers lead both shortcut rows. Each is a key like the Esc beside
-// it: a tap sends it alone, down then up — Super alone is the Start key — and
-// it arms nothing. The modifiers that stick are the solid ones below.
+// The bare modifiers lead the ABC page's shortcut row. Each is a key like the
+// Esc beside it: a tap sends it alone, down then up — Super alone is the Start
+// key — and it arms nothing. The modifiers that stick are the solid ones below.
 const BARE_MODIFIERS: Key[] = [
   s("Shift", "ShiftLeft"),
   s("Ctrl", "ControlLeft"),
@@ -259,10 +259,10 @@ const SHORTCUTS_ABC: Key[] = [
   c("C+A+Del", ["ControlLeft", "AltLeft", "Delete"]),
 ];
 
-const SHORTCUTS_FN: Key[] = [
-  ...BARE_MODIFIERS,
-  ...Array.from({ length: 12 }, (_, i) => s(`F${i + 1}`, `F${i + 1}`)),
-];
+// The Sym page's row is F1 to F12 alone.
+const SHORTCUTS_FN: Key[] = Array.from({ length: 12 }, (_, i) =>
+  s(`F${i + 1}`, `F${i + 1}`),
+);
 
 // ── The strip: modifiers and arrows, on every phone page ──
 

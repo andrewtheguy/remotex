@@ -2698,11 +2698,11 @@ and lets a slide scroll. A modifier tapped once wraps the next key and is spent,
 tapped again it is off, and under a resting finger it chords the other fingers'
 keys; nothing locks. Every such modifier goes down ahead of the key in the order
 it was taken and up after it, a repeat tick included, and never reaches the wire
-on its own. The shortcut rows' Shift, Ctrl, Alt and Super, drawn dashed, are
-not that kind: each is a key of the row like the Esc beside it, so a tap that
+on its own. The ABC page's shortcut row leads with Shift, Ctrl, Alt and Super,
+drawn dashed, which are not that kind: each is a key of the row like the Esc beside it, so a tap that
 stayed put sends it alone, down then up — Super alone is the Start key — a
 slide scrolls the row and sends nothing, and it arms nothing. The Sym page's
-row has the same four ahead of F1 to F12. The PC grid has no such row, so its
+row is F1 to F12 alone. The PC grid has no such row, so its
 Sticky key, in the Caps Lock slot, switches its modifiers between the two: on,
 as it starts, they stick; off, each is sent alone and is drawn dashed like the
 row's. It is drawn as the switch it is, a green pill with a lamp lit while they
