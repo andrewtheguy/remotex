@@ -101,8 +101,8 @@ function toRect(r: DOMRect): Rect {
 
 // Measure every key of the area into a hit tester. The shortcut row is left
 // out: its keys commit on tap where they are touched, and the scrolling ones
-// scroll under a slide,
-// so a slide never resolves into it, and the area's bounds start below it.
+// scroll under a slide, so a slide never resolves into it, and the area's
+// bounds start below it.
 function measure(area: HTMLElement): HitTester {
   const rows: GeometryRow[] = [];
   let top = area.getBoundingClientRect().top;
@@ -533,6 +533,10 @@ function Rows({ rows, shift, active, held, sticky }: RowsProps) {
   ));
 }
 
+function isStickyKey(cell: LayoutCell): boolean {
+  return cell.def.type === "sticky";
+}
+
 // ── The panel ──
 
 export function SoftKeyboardPanel({
@@ -658,6 +662,16 @@ export function SoftKeyboardPanel({
     : undefined;
 
   const shortcutRows = page.rows.filter((row) => row.kind === "shortcut");
+  const shortcutCell = (cell: LayoutCell) => (
+    <Cell
+      key={cell.id}
+      cell={cell}
+      shift={shift}
+      active={active.has(cell.id)}
+      modifier={modifierStateOf(cell, held, sticky)}
+      sticky={sticky}
+    />
+  );
   const keyRows = page.rows.filter((row) => row.kind !== "shortcut");
 
   return (
@@ -696,27 +710,10 @@ export function SoftKeyboardPanel({
         {shortcutRows.map((row) => (
           <div key={row.kind} className="sk-shortcut" data-row="shortcut">
             {/* The Sticky key stays put ahead of the keys that scroll. */}
-            {[true, false].map((fixed) => {
-              const group = row.cells
-                .filter((cell) => (cell.def.type === "sticky") === fixed)
-                .map((cell) => (
-                  <Cell
-                    key={cell.id}
-                    cell={cell}
-                    shift={shift}
-                    active={active.has(cell.id)}
-                    modifier={modifierStateOf(cell, held, sticky)}
-                    sticky={sticky}
-                  />
-                ));
-              return fixed ? (
-                group
-              ) : (
-                <div key="scroller" className="sk-scroller">
-                  {group}
-                </div>
-              );
-            })}
+            {row.cells.filter(isStickyKey).map(shortcutCell)}
+            <div className="sk-scroller">
+              {row.cells.filter((cell) => !isStickyKey(cell)).map(shortcutCell)}
+            </div>
             {unseen.length > 0 && (
               <div className="sk-badges">
                 {unseen.map(([code, state]) => (
