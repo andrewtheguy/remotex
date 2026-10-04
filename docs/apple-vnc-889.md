@@ -515,7 +515,7 @@ one descriptor with one mode:
 
 | Descriptor field | Value remotex sends |
 |---|---|
-| name | 120 bytes |
+| name | 120 bytes, UTF-8 and zero-filled: `Screen Sharing Virtual Display`, and `Screen Sharing Virtual Display #2` for the second, which are the names Apple's viewer's displays have. It is what the Mac calls the display, in its Displays settings and to its applications; left empty, the displays have no name and the Mac lists them as ` (1)` and ` (2)`. |
 | display flags | 1: dynamic resolution. Bit 1, never sent, tells the Mac to leave the refresh rate alone and ignore the mode's. |
 | display type | 4, virtual |
 | physical size | millimetres, as big-endian `f32` |
