@@ -1903,6 +1903,17 @@ impl MediaStream {
         Some(Offer::Configuration(self.offers.configuration(&by_leg)))
     }
 
+    /// Whether [`Self::offer`] would hand back the `0x1c` offer for `sizes`: the
+    /// Mac has named its ports for one, none is out, and the stream does not
+    /// already run at those sizes.
+    pub fn offer_ready(&self, sizes: &[(u16, u16)]) -> bool {
+        !self.pending
+            && sizes.len() == self.legs.len()
+            && self.offered.as_deref() != Some(sizes)
+            && self.asked
+            && self.invited
+    }
+
     /// Owe `owed` from here, which sets a new deadline.
     fn owe(&mut self, owed: Owed) {
         self.owed = owed;

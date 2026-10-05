@@ -431,6 +431,8 @@ enum MacRequest {
     Display(u32),
     AutoPasteboard(bool),
     AutoFramebuffer((u16, u16)),
+    /// A media-stream offer.
+    Offer,
     IncrementalFramebuffer,
     /// An incremental request for the single pixel at the origin: polling held
     /// while a display change is out.
@@ -705,14 +707,10 @@ fn fake_mac_read_clipboard(header: &[u8; 15], compressed: &[u8]) -> (u32, String
 /// never mistaken for one repeat. Capped to a corner of the desktop: a dirty rect
 /// need not cover it, and the raw pixels of the 3840×2160 opening display a
 /// resizable session now asks for would not fit one record.
-///
-/// With `answer`, a second rect answers the media-stream offer the gateway made
-/// ([`fake_mac_answer`]). It rides an update the fake sends anyway, so the answer
-/// adds no update, and no poll, to the order the tests assert.
-fn fake_mac_update(shade: u8, (w, h): (u16, u16), answer: Option<MacStream>) -> Vec<u8> {
+fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
     let (w, h) = (w.min(MAC_DESKTOP), h.min(MAC_DESKTOP));
     let mut update = vec![0u8, 0];
-    update.extend_from_slice(&(1 + u16::from(answer.is_some())).to_be_bytes());
+    update.extend_from_slice(&1u16.to_be_bytes());
     update.extend_from_slice(&0u16.to_be_bytes()); // x
     update.extend_from_slice(&0u16.to_be_bytes()); // y
     update.extend_from_slice(&w.to_be_bytes());
@@ -722,9 +720,6 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16), answer: Option<MacStream>) -> 
         shade;
         usize::from(w) * usize::from(h) * 4
     ]);
-    if let Some(answer) = answer {
-        update.extend_from_slice(&fake_mac_answer(answer));
-    }
     update
 }
 
@@ -939,7 +934,6 @@ async fn serve_fake_mac_records(
     let mut sent_layout = false;
     let mut sent_clipboard_status = false;
     let mut clipboard_fetch_pending = false;
-    let mut offer_pending = false;
     // Whether the encodings listed the media stream, after which every display
     // change names its ports again.
     let mut media_listed = false;
@@ -989,15 +983,16 @@ async fn serve_fake_mac_records(
                     write_half.write_all(writer.frame(&update).unwrap()).await?;
                 }
             }
-            // FramebufferUpdateRequest. A non-incremental one is answered; the
-            // first is answered with the display layout first, which is the
-            // metadata burst a real Mac opens with.
+            // FramebufferUpdateRequest. A non-incremental one is answered, with
+            // no more than the region it asks for; the first is answered with
+            // the display layout first, which is the metadata burst a real Mac
+            // opens with.
             3 => {
                 let mut req = [0u8; 9];
                 records.read_exact(&mut req).await?;
+                let rect = [&req[1..3], &req[3..5], &req[5..7], &req[7..9]]
+                    .map(|field| u16::from_be_bytes([field[0], field[1]]));
                 if req[0] != 0 {
-                    let rect = [&req[1..3], &req[3..5], &req[5..7], &req[7..9]]
-                        .map(|field| u16::from_be_bytes([field[0], field[1]]));
                     let _ = requests.send(if rect == [0, 0, 1, 1] {
                         MacRequest::HeldFramebuffer
                     } else {
@@ -1021,10 +1016,9 @@ async fn serve_fake_mac_records(
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
                 shade = shade.wrapping_add(0x10);
-                let pixels = (points.0 * density, points.1 * density);
-                let answered = std::mem::take(&mut offer_pending).then_some(answer);
+                let pixels = ((points.0 * density).min(rect[2]), (points.1 * density).min(rect[3]));
                 write_half
-                    .write_all(writer.frame(&fake_mac_update(shade, pixels, answered)).unwrap())
+                    .write_all(writer.frame(&fake_mac_update(shade, pixels)).unwrap())
                     .await?;
             }
             // KeyEvent
@@ -1130,9 +1124,8 @@ async fn serve_fake_mac_records(
                     write_half.write_all(writer.frame(&rect).unwrap()).await?;
                 }
             }
-            // RFBMediaStreamServerConfiguration: the media-stream offer, accepted in
-            // the next update, or refused at once in an update of its own. One offer
-            // at a time, as the Mac requires.
+            // RFBMediaStreamServerConfiguration: the media-stream offer, accepted or
+            // refused at once in an update of its own.
             0x1c => {
                 let mut head = [0u8; 3];
                 records.read_exact(&mut head).await?;
@@ -1140,16 +1133,11 @@ async fn serve_fake_mac_records(
                 let mut body = vec![0u8; size];
                 records.read_exact(&mut body).await?;
                 assert_eq!(&body[..2], &3u16.to_be_bytes(), "media-stream configuration version");
-                assert!(!offer_pending, "a second media-stream offer while one was out");
-                match answer {
-                    MacStream::Accept => offer_pending = true,
-                    MacStream::Refuse => {
-                        let mut update = vec![0u8, 0];
-                        update.extend_from_slice(&1u16.to_be_bytes());
-                        update.extend_from_slice(&fake_mac_answer(answer));
-                        write_half.write_all(writer.frame(&update).unwrap()).await?;
-                    }
-                }
+                let _ = requests.send(MacRequest::Offer);
+                let mut update = vec![0u8, 0];
+                update.extend_from_slice(&1u16.to_be_bytes());
+                update.extend_from_slice(&fake_mac_answer(answer));
+                write_half.write_all(writer.frame(&update).unwrap()).await?;
             }
             // ClipboardSend: independently inflate and parse what the browser put
             // on the fake Mac's pasteboard.
@@ -2053,10 +2041,12 @@ async fn high_performance_refuses_a_mac_without_a_virtual_display() {
 }
 
 /// A Mac that refuses the media stream ends the session, as it ends Apple's
-/// viewer's: High Performance does not go on over ZRLE alone.
+/// viewer's: High Performance does not go on over ZRLE alone. The offer it
+/// refuses went out with the region armed at one pixel, so the Mac's updates do
+/// not meet its answer.
 #[tokio::test]
 async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
-    let (mac_port, _requests, _actions, fake_mac) =
+    let (mac_port, mut requests, _actions, fake_mac) =
         spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
     let addr = spawn_app(mac_target(mac_port)).await;
     let cookie = common::login(addr).await;
@@ -2073,6 +2063,15 @@ async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
         error.contains("the Mac refused the media stream (error type 2, sub-code 0)"),
         "{error}"
     );
+    let mut armed = None;
+    loop {
+        match next_mac_request(&mut requests).await {
+            MacRequest::AutoFramebuffer(region) => armed = Some(region),
+            MacRequest::Offer => break,
+            _ => {}
+        }
+    }
+    assert_eq!(armed, Some((1, 1)), "the region armed when the offer went out");
     // The gateway hung up on the fake, which reads that as the end of its session.
     fake_mac
         .await
@@ -2081,8 +2080,7 @@ async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
 }
 
 /// An offer that brings no picture ends the session once the first one is overdue:
-/// the fake accepts offers only in an update it would send anyway, and on a still
-/// session nothing asks for one, so this offer goes unanswered.
+/// the fake accepts the offer and sends nothing to the ports it named.
 #[tokio::test]
 #[ignore = "slow: waits out the 10 s stream start"]
 async fn high_performance_ends_when_the_offer_brings_no_picture() {
@@ -2099,7 +2097,7 @@ async fn high_performance_ends_when_the_offer_brings_no_picture() {
 
     let started = std::time::Instant::now();
     let error = expect_error(&mut ws).await;
-    assert!(error.contains("did not answer the media-stream offer within 10s"), "{error}");
+    assert!(error.contains("no picture came over the Mac's media stream within 10s of its offer"), "{error}");
     assert!(started.elapsed() >= Duration::from_secs(9), "ended early: {:?}", started.elapsed());
     fake_mac
         .await

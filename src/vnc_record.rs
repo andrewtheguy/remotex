@@ -296,6 +296,7 @@ impl<R> RecordReader<R> {
     fn accept(&mut self, len: usize) -> io::Result<std::ops::Range<usize>> {
         self.cbc.decrypt(&mut self.staging[..len]);
         let covered = len - TRAILER;
+        let seq = self.cbc.seq;
         let expected = self.cbc.trailer(&self.staging[..covered]);
         // Constant-time is not the concern — an attacker who can replay records
         // learns nothing from timing a hash comparison here — but *closing* is:
@@ -303,7 +304,10 @@ impl<R> RecordReader<R> {
         if self.staging[covered..len] != expected {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "a record failed its integrity check",
+                format!(
+                    "a record failed its integrity check: record {seq}, of {len} bytes{}",
+                    miscounted(seq, &self.staging[..covered], &self.staging[covered..len])
+                ),
             ));
         }
         let body_len = usize::from(u16::from_be_bytes([self.staging[0], self.staging[1]]));
@@ -314,6 +318,32 @@ impl<R> RecordReader<R> {
             ));
         }
         Ok(BODY_LEN..BODY_LEN + body_len)
+    }
+}
+
+/// What a failed record's trailer says of the sender's count, for the error that
+/// names it: whether it is the trailer of the record before or after `seq`.
+///
+/// A trailer that fits a neighbouring number is a record that decrypted whole and
+/// was only counted wrongly, which is what two of the sender's threads framing at
+/// once and drawing one number leaves. One that fits neither says nothing: the
+/// same collision can break the cipher chain instead, and so can a damaged stream.
+/// Nothing is accepted on the strength of it.
+fn miscounted(seq: u32, covered: &[u8], trailer: &[u8]) -> String {
+    let fits = |seq: u32| {
+        let mut hash = Sha1::new();
+        hash.update(seq.to_be_bytes());
+        hash.update(covered);
+        hash.finalize().as_slice() == trailer
+    };
+    let before = seq.wrapping_sub(1);
+    let after = seq.wrapping_add(1);
+    if fits(before) {
+        format!("; its trailer is record {before}'s, a number the sender drew twice")
+    } else if fits(after) {
+        format!("; its trailer is record {after}'s, a number the sender skipped")
+    } else {
+        "; its trailer fits neither neighbouring record".to_owned()
     }
 }
 
@@ -610,6 +640,25 @@ mod tests {
         let err = reader.read_u8().await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(format!("{err}").contains("already failed"), "{err}");
+    }
+
+    /// A sender that framed two records under one number: the second decrypts
+    /// whole, fails, and the error says whose trailer it carries.
+    #[tokio::test]
+    async fn a_record_counted_twice_is_refused_and_named() {
+        let mut writer = RecordWriter::new(keys());
+        let mut wire = writer.frame(b"first").unwrap().to_vec();
+        writer.cbc.seq = 0;
+        let second = writer.frame(b"second").unwrap().to_vec();
+        wire.extend_from_slice(&second);
+
+        let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
+        let mut got = [0u8; 11];
+        let err = reader.read_exact(&mut got).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let said = format!("{err}");
+        assert!(said.contains("record 1, of 32 bytes"), "{said}");
+        assert!(said.contains("its trailer is record 0's"), "{said}");
     }
 
     #[tokio::test]

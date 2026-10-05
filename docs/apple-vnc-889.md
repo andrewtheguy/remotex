@@ -1358,6 +1358,16 @@ moving over a TextEdit window, with 123 bytes of zlib. A login once pushed a who
 screen unasked, which is decoded to keep the deflate stream in step and not
 shown.
 
+An offer goes out with one pixel armed too. The Mac frames the answer on the
+thread that reads the viewer's messages, without the lock its update sender
+frames under, and a record from each at once fails the record layer's integrity
+check and ends the session. So remotex narrows the region when an offer is due,
+asks for that pixel, sends the offer at the end of the update that answers, and
+arms the display again at the Mac's answer, asking for it whole. The Mac's
+rectangles stand still for that long. A cursor change can still meet the answer.
+A record that fails is reported with its number, its size, and whether its
+trailer is a neighbouring record's, which is what a number drawn twice leaves.
+
 This also ends the input freeze behind a playing video. With the gateway capped at
 15% of a core, the Mac's receive queue of our input was empty in 64 of 68
 one-second samples and never above 3.5 KB. Over zlib under the same cap, input
