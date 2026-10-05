@@ -50,7 +50,7 @@ official modes alone.
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
-| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Until the stream is up and across display changes its ZRLE rectangles stand in for the picture, a second apart, encoded as VP9 at the encoder's fastest speed. |
+| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Until the stream is up and across display changes its ZRLE rectangles stand in for the picture, a second apart, encoded as VP9 at the encoder's fastest speed and at a lower quality than the session's. |
 | Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
@@ -1023,7 +1023,7 @@ AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with 
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
 (`src/vnc_apple_media.rs`). ZRLE stands in until the stream delivers, at connect
 and across display changes: the Mac's rectangles, pushed a second apart, encoded
-here as VP9 at the encoder's fastest speed, as `ard` with `virtual_display = true`
+here as VP9 at the encoder's fastest speed and at quality 50 at most, as `ard` with `virtual_display = true`
 shows them at its own pace. While the stream flows they are decoded, which keeps
 ZRLE's deflate stream in step, and dropped. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
