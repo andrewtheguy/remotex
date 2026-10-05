@@ -1532,9 +1532,11 @@ and `GET /api/targets` carries it:
   extension, so the host keeps playing where it did. The session's audio button
   opens and closes the browser's subscription and nothing else, which is why it
   reads Mute and Unmute. Start's click is the gesture a browser needs for an
-  audio context, so a session started with sound comes up playing; in Safari and
-  on iOS a reload has no gesture, and comes back muted. A mute is the tab's, for
-  its session, and survives a reload.
+  audio context, so a session started with sound comes up playing. It comes up
+  muted, with Unmute as its click, on a touch client and in Safari, whose audio
+  context starts only inside a gesture and so comes back muted from every reload
+  as well. A mute or an unmute is the tab's, for its session, and survives a
+  reload wherever the browser can play without a click.
 - **The browser remembers.** What was chosen under a target is kept in the
   browser's local storage per target, and is how the target opens next time.
   Until then a configured size is the size and no remote's sound plays. A greyed
@@ -1668,8 +1670,10 @@ a `wlshare` target as Opus or lossless — and always on for `ard-high-performan
 with its picture; `ard` and a plain `vnc` target carry none. It has a socket of
 its own. **Opening `/ws/audio?session=<token>` is the subscription** — there is no
 message that turns sound on, and closing the socket is the only way to stop. The
-page opens it when a session that carries sound starts, and its Mute and Unmute
-close and open it.
+page opens it when a session that carries sound starts unmuted. A touch client
+and Safari start muted and open it at Unmute
+([What a session is started with](#what-a-session-is-started-with)). From then
+on Mute and Unmute close and open it.
 
 The separation is the point. The display socket's bounded queue is four frames
 deep; an audio pump waiting behind a video backlog on it would stop draining the

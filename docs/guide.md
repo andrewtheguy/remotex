@@ -71,7 +71,8 @@ config key.
   scaled on the client. A phone is offered the kept sizes only.
 - **Sound.** Opus, or FLAC, which is lossless. A session started without
   sound asks the remote for none, so the host keeps playing where it did. In the
-  session, Mute and Unmute change only whether this browser listens.
+  session, Mute and Unmute change only whether this browser listens. A phone,
+  a tablet and Safari start muted.
 - **Passthrough.** Sends the remote's own stream to the browser as it came, for
   a LAN, instead of VP9 encoded by the gateway. It is greyed where the browser
   cannot take the stream. A passed stream does not follow the browser's link:
