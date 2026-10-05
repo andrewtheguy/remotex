@@ -431,8 +431,9 @@ enum MacRequest {
     Display(u32),
     AutoPasteboard(bool),
     AutoFramebuffer((u16, u16)),
-    /// A media-stream offer.
-    Offer,
+    /// A media-stream offer, and whether the encodings last listed had the media
+    /// stream first, which is what stops a Mac's pixels.
+    Offer { media_first: bool },
     IncrementalFramebuffer,
     /// An incremental request for the single pixel at the origin: polling held
     /// while a display change is out.
@@ -937,6 +938,7 @@ async fn serve_fake_mac_records(
     // Whether the encodings listed the media stream, after which every display
     // change names its ports again.
     let mut media_listed = false;
+    let mut media_first = false;
 
     loop {
         let mut kind = [0u8; 1];
@@ -976,6 +978,7 @@ async fn serve_fake_mac_records(
                 let mut encodings = vec![0u8; usize::from(count) * 4];
                 records.read_exact(&mut encodings).await?;
                 let lists_media = encodings.as_chunks::<4>().0.iter().any(|&e| i32::from_be_bytes(e) == 1010);
+                media_first = encodings.as_chunks::<4>().0.first().is_some_and(|&e| i32::from_be_bytes(e) == 1010);
                 if lists_media && !std::mem::replace(&mut media_listed, true) {
                     let mut update = vec![0u8, 0];
                     update.extend_from_slice(&1u16.to_be_bytes());
@@ -1133,7 +1136,7 @@ async fn serve_fake_mac_records(
                 let mut body = vec![0u8; size];
                 records.read_exact(&mut body).await?;
                 assert_eq!(&body[..2], &3u16.to_be_bytes(), "media-stream configuration version");
-                let _ = requests.send(MacRequest::Offer);
+                let _ = requests.send(MacRequest::Offer { media_first });
                 let mut update = vec![0u8, 0];
                 update.extend_from_slice(&1u16.to_be_bytes());
                 update.extend_from_slice(&fake_mac_answer(answer));
@@ -2042,8 +2045,8 @@ async fn high_performance_refuses_a_mac_without_a_virtual_display() {
 
 /// A Mac that refuses the media stream ends the session, as it ends Apple's
 /// viewer's: High Performance does not go on over ZRLE alone. The offer it
-/// refuses went out with the region armed at one pixel, so the Mac's updates do
-/// not meet its answer.
+/// refuses went out behind encodings that list the media stream first, so the
+/// Mac's updates do not meet its answer.
 #[tokio::test]
 async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
     let (mac_port, mut requests, _actions, fake_mac) =
@@ -2063,15 +2066,12 @@ async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
         error.contains("the Mac refused the media stream (error type 2, sub-code 0)"),
         "{error}"
     );
-    let mut armed = None;
-    loop {
-        match next_mac_request(&mut requests).await {
-            MacRequest::AutoFramebuffer(region) => armed = Some(region),
-            MacRequest::Offer => break,
-            _ => {}
+    let media_first = loop {
+        if let MacRequest::Offer { media_first } = next_mac_request(&mut requests).await {
+            break media_first;
         }
-    }
-    assert_eq!(armed, Some((1, 1)), "the region armed when the offer went out");
+    };
+    assert!(media_first, "the offer went out behind encodings listing the stream first");
     // The gateway hung up on the fake, which reads that as the end of its session.
     fake_mac
         .await

@@ -2519,7 +2519,7 @@ decoder runs four slice threads because one is too slow for 60 pictures a second
 on one core of an i5-8500T a 1600×1000 picture took 14–23 ms, on four 7–14 ms.
 ZRLE rectangles carry the picture only until the stream delivers, at connect and
 across every display change, a second apart and encoded at the encoder's fastest
-speed, and hold still from an offer to its answer
+speed, and stop at an offer, which lists the media stream first
 ([RFB while the stream runs](apple-vnc-889.md#rfb-while-the-stream-runs)). A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings

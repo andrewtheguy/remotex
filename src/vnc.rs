@@ -721,51 +721,11 @@ struct DesktopState {
     /// ([`vnc_apple::PUSH_INTERVAL_MEDIA_US`]). While [`Self::media_live`] they are
     /// decoded, which keeps ZRLE's one deflate stream whole, and dropped.
     media_stream: bool,
-    /// Where a media-stream offer is in the quiet it goes out in.
-    offer_quiet: OfferQuiet,
-}
-
-/// The quiet a High Performance media-stream offer goes out in.
-///
-/// The Mac's daemon frames its records from two threads. The one that sends its
-/// updates does so under a lock; the one that reads this side's messages sends
-/// the answer to an offer without it, and a record framed by each at once fails
-/// its integrity check here and ends the session. So the offer waits until the
-/// update thread has nothing left to send: the pixel region narrows to
-/// [`HP_HOLD_REQUEST`], that pixel is asked for until an update brings it and
-/// nothing wider, the offer goes out, and the region opens again at the answer.
-/// A repaint asked for just before is what the wait outlasts: an offer sent
-/// 35 ms behind one met it. A cursor change in the meantime can still collide.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum OfferQuiet {
-    /// No offer is being prepared or out.
-    #[default]
-    Open,
-    /// The region has been narrowed, and this many updates since have brought
-    /// something other than the pixel asked for.
-    Quieting(u8),
-    /// The offer is out and its answer has not come.
-    Held,
-}
-
-/// How many updates a media-stream offer waits through for one that brings only
-/// the pixel asked for, before it goes out regardless: what is left to drain when
-/// it is due is the repaint a layout earned and a push or two.
-const OFFER_QUIET_ROUNDS: u8 = 4;
-
-/// How long the read loop waits on a silent Mac before asking for the pixel
-/// again, while an offer waits. A request that arrives while the Mac is writing
-/// an update is not always answered on its own.
-const OFFER_QUIET_NUDGE: Duration = Duration::from_millis(500);
-
-/// Where [`offer_media`] is called from.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OfferAt {
-    /// The input loop, when a resize settles.
-    Settled,
-    /// The read loop, at the end of an update: whether it brought pixels, none of
-    /// them past [`HP_HOLD_REQUEST`].
-    Update { narrow: bool },
+    /// The list the Mac holds names the media stream first, so it sends this
+    /// session no pixels ([`vnc_apple_media::encodings_preferring_media_stream`]):
+    /// from an offer until a layout that changes the display, whose ZRLE
+    /// rectangles stand in for the stream again.
+    media_preferred: bool,
 }
 
 /// How long a High Performance viewport has to hold still before the Mac is
@@ -1244,17 +1204,11 @@ impl DesktopState {
         self.span.unwrap_or(self.size)
     }
 
-    /// Whether the pixel region is held to [`HP_HOLD_REQUEST`]: while a High
-    /// Performance display change is out, around a media-stream offer
-    /// ([`OfferQuiet`]), and while the stream carries the picture.
-    fn holds_region(&self) -> bool {
-        self.hp.holds_pixels() || self.media_live || self.offer_quiet != OfferQuiet::Open
-    }
-
-    /// The region a pixel request asks for: the framebuffer, or
-    /// [`HP_HOLD_REQUEST`] while [`Self::holds_region`].
+    /// The region a pixel request asks for: the framebuffer, or while a High
+    /// Performance display change is out or the media stream carries the
+    /// picture, [`HP_HOLD_REQUEST`].
     fn poll_size(&self) -> (u16, u16) {
-        if self.holds_region() { HP_HOLD_REQUEST } else { self.framebuffer() }
+        if self.hp.holds_pixels() || self.media_live { HP_HOLD_REQUEST } else { self.framebuffer() }
     }
 
     /// Whether the media stream may be offered for the current display: one
@@ -2967,7 +2921,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         laid_out: false,
         canvas_live: false,
         media_live: false,
-        offer_quiet: OfferQuiet::Open,
+        media_preferred: false,
         media_stream,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
@@ -3740,7 +3694,7 @@ async fn hp_resize_step(
                 // The Mac's rectangles are the picture until the stream delivers.
                 sink.msg(ServerMsg::Resizing { active: false }).await?;
                 tab_send(tab, media, vec![ServerMsg::Resizing { active: false }]).await;
-                offer_media(uplink, desktop, media, OfferAt::Settled).await?;
+                offer_media(uplink, desktop, media).await?;
             }
             // A full request answers at once even on a still desktop, so the
             // boundary the read loop waits for comes now rather than at the next
@@ -3766,103 +3720,43 @@ async fn hp_resize_step(
     }
 }
 
-/// What [`offer_media`] has to send.
-enum OfferStep {
-    /// The `SetEncodings` that names the stream.
-    Encodings,
-    /// Narrow the region ahead of an offer and ask for the pixel left.
-    Quiet(u32),
-    /// Ask for the pixel again: the update that came was not it.
-    Ask,
-    /// The offer, for displays of these sizes.
-    Offer(Vec<u8>, Vec<(u16, u16)>),
-    /// An offer that was being prepared is no longer due: arm this region again.
-    Rearm(u32, (u16, u16)),
-}
-
-/// Move High Performance's media stream toward an offer for the current display,
-/// when there is one to offer it for and nothing is about to change it — see
+/// Offer High Performance's media stream for the current display, when there is
+/// one to offer it for and nothing is about to change it — see
 /// [`DesktopState::media_offerable`] and [`MediaStream::offer`]. The session's
-/// first call sends the `SetEncodings` that names the stream, and an offer waits
-/// for the ports the Mac names for it or for a display change.
-///
-/// The offer itself goes out in a quiet ([`OfferQuiet`]): the call that finds
-/// one due narrows the region and asks for the pixel left, and the read loop's
-/// call at the end of the update that brings it sends the offer.
+/// first call sends the `SetEncodings` that names the stream instead, and an offer
+/// waits for the ports the Mac names for it or for a display change.
 async fn offer_media(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
     media: Option<&SharedMedia>,
-    at: OfferAt,
 ) -> anyhow::Result<()> {
     let Some(media) = media else {
         return Ok(());
     };
-    let step = {
+    let (sizes, offer) = {
         let mut d = desktop.lock().unwrap();
-        let mut media = media.lock().unwrap();
-        let offerable = d.media_offerable();
-        let sizes = d.hp_sizes();
-        let ready = offerable && media.offer_ready(&sizes);
-        match (d.offer_quiet, at) {
-            (OfferQuiet::Open, _) if ready => {
-                d.offer_quiet = OfferQuiet::Quieting(0);
-                // The read loop may be waiting behind a still screen.
-                media.offered().notify_one();
-                Some(OfferStep::Quiet(d.push_interval_us))
-            }
-            (OfferQuiet::Open, _) if offerable => match media.offer(&sizes) {
-                Some(vnc_apple_media::Offer::Encodings) => Some(OfferStep::Encodings),
-                Some(vnc_apple_media::Offer::Configuration(_)) | None => None,
-            },
-            // The display moved on while the region was narrowing.
-            (OfferQuiet::Quieting(_), OfferAt::Update { .. }) if !ready => {
-                d.offer_quiet = OfferQuiet::Open;
-                Some(OfferStep::Rearm(d.push_interval_us, d.poll_size()))
-            }
-            (OfferQuiet::Quieting(rounds), OfferAt::Update { narrow })
-                if narrow || rounds >= OFFER_QUIET_ROUNDS =>
-            {
-                match media.offer(&sizes) {
-                    Some(vnc_apple_media::Offer::Configuration(configuration)) => {
-                        d.offer_quiet = OfferQuiet::Held;
-                        Some(OfferStep::Offer(configuration, sizes))
-                    }
-                    Some(vnc_apple_media::Offer::Encodings) | None => None,
-                }
-            }
-            (OfferQuiet::Quieting(rounds), OfferAt::Update { .. }) => {
-                d.offer_quiet = OfferQuiet::Quieting(rounds + 1);
-                Some(OfferStep::Ask)
-            }
-            (OfferQuiet::Open | OfferQuiet::Quieting(_) | OfferQuiet::Held, _) => None,
+        if !d.media_offerable() {
+            return Ok(());
         }
+        let sizes = d.hp_sizes();
+        let offer = media.lock().unwrap().offer(&sizes);
+        if matches!(offer, Some(vnc_apple_media::Offer::Configuration(_))) {
+            d.media_preferred = true;
+        }
+        (sizes, offer)
     };
-    match step {
+    match offer {
         None => Ok(()),
-        Some(OfferStep::Encodings) => {
+        Some(vnc_apple_media::Offer::Encodings) => {
             debug!("vnc: asking the Mac to name its media-stream ports");
             send(uplink, &set_encodings(&vnc_apple_media::encodings_with_media_stream())).await
         }
-        Some(OfferStep::Quiet(interval)) => {
-            debug!("vnc: a media-stream offer is due; holding the Mac's updates for it");
-            send_all(
-                uplink,
-                &[
-                    vnc_apple::auto_framebuffer_update(interval, HP_HOLD_REQUEST),
-                    update_request(false, HP_HOLD_REQUEST).to_vec(),
-                ],
-            )
-            .await
-        }
-        Some(OfferStep::Ask) => send(uplink, &update_request(false, HP_HOLD_REQUEST)).await,
-        Some(OfferStep::Offer(configuration, sizes)) => {
+        Some(vnc_apple_media::Offer::Configuration(configuration)) => {
             let sizes: Vec<String> = sizes.iter().map(|(w, h)| format!("{w}x{h}")).collect();
             info!("vnc: offering the Mac's media stream for its {} display", sizes.join(" and "));
-            send(uplink, &configuration).await
-        }
-        Some(OfferStep::Rearm(interval, armed)) => {
-            send(uplink, &vnc_apple::auto_framebuffer_update(interval, armed)).await
+            // The Mac's pixels stop for the offer: its answer must not meet one.
+            let preferring = set_encodings(&vnc_apple_media::encodings_preferring_media_stream());
+            send_all(uplink, &[preferring, configuration]).await
         }
     }
 }
@@ -3918,11 +3812,6 @@ async fn stream_carries(shared: &Shared) -> anyhow::Result<()> {
 fn stream_stopped(d: &mut DesktopState, tab: &SharedTab) {
     d.canvas_live = false;
     d.media_live = false;
-    // An offer still being prepared was for the display that went; one already
-    // out keeps the region held until the Mac answers it.
-    if matches!(d.offer_quiet, OfferQuiet::Quieting(_)) {
-        d.offer_quiet = OfferQuiet::Open;
-    }
     if let Some(tab) = tab.lock().unwrap().as_mut() {
         tab.live = false;
     }
@@ -4291,17 +4180,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 None => std::future::pending().await,
             }
         };
-        // A media-stream offer waiting on a Mac that has gone silent — see
-        // [`OFFER_QUIET_NUDGE`].
-        let offer_waits = media.is_some()
-            && matches!(desktop.lock().unwrap().offer_quiet, OfferQuiet::Quieting(_));
-        let offer_nudge = async {
-            if offer_waits {
-                tokio::time::sleep(OFFER_QUIET_NUDGE).await;
-            } else {
-                std::future::pending().await
-            }
-        };
         let fence_due_at = held_fences.front().map(|(due, ..)| *due);
         // Only the last fence held can be BlockAfter: nothing is read behind one.
         let blocked = held_fences.back().is_some_and(|(_, block_after, _)| *block_after);
@@ -4373,10 +4251,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 continue;
             }
             () = media_offered => continue,
-            () = offer_nudge => {
-                send(uplink, &update_request(false, HP_HOLD_REQUEST)).await?;
-                continue;
-            }
 
             () = video_flush => {
                 sink.frame().await?;
@@ -4454,10 +4328,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let mut full_repaint_owed = false;
                 let mut audio_announced = false;
                 let mut painted = false;
-                // Whether a rectangle reached past [`HP_HOLD_REQUEST`]: an update
-                // that painted and has none is the pixel a media-stream offer
-                // waits for.
-                let mut wide = false;
                 for _ in 0..rects {
                     let effect = read_rect(
                         &mut reader,
@@ -4471,9 +4341,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     full_repaint_owed |= effect.full_repaint_owed;
                     audio_announced |= effect.audio_announced;
                     painted |= effect.pixels.is_some();
-                    wide |= effect.pixels.is_some_and(|rect| {
-                        rect.right >= HP_HOLD_REQUEST.0 || rect.bottom >= HP_HOLD_REQUEST.1
-                    });
                     cycle.rect(effect.pixels);
                     if let (Some(repaint), Some(rect)) = (&mut full_repaint, effect.pixels) {
                         repaint.accept(rect);
@@ -4590,7 +4457,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // of the display the change would replace. The answer ends an update
                 // too, and the change goes out at that one.
                 let hp_holding = if apple.as_ref().is_some_and(|a| a.virtual_display) {
-                    let (request, drained, interval) = {
+                    let (request, drained, holding, interval) = {
                         let mut d = desktop.lock().unwrap();
                         let draining = matches!(d.hp.phase, HpPhase::Draining(_));
                         let offer_out = media.as_ref().is_some_and(|m| m.lock().unwrap().pending());
@@ -4603,7 +4470,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             }
                         }
                         let drained = draining && !matches!(d.hp.phase, HpPhase::Draining(_));
-                        (request, drained, d.push_interval_us)
+                        (request, drained, d.hp.holds_pixels() || d.media_live, d.push_interval_us)
                     };
                     if let Some(msg) = request {
                         send_all(uplink, &[vnc_apple::auto_framebuffer_update(interval, HP_HOLD_REQUEST), msg])
@@ -4612,9 +4479,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     if drained {
                         hp_wake.notify_one();
                     }
-                    offer_media(uplink, desktop, media.as_ref(), OfferAt::Update { narrow: painted && !wide })
-                        .await?;
-                    desktop.lock().unwrap().holds_region()
+                    offer_media(uplink, desktop, media.as_ref()).await?;
+                    holding
                 } else {
                     false
                 };
@@ -5714,27 +5580,17 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // its rectangles are the picture until the next offer delivers, so the
         // region is armed in full again and the display asked for whole, since the
         // change behind it may keep the size and bring no layout that does both.
-        // The answer to an offer does the same, for the region its offer held
-        // ([`OfferQuiet`]) and what changed on screen behind it.
         vnc_apple_media::ENCODING_MEDIA_STREAM if shared.media.is_some() => {
             let len = reader.read_u16().await?;
             let mut body = vec![0u8; usize::from(len)];
             reader.read_exact(&mut body).await?;
             let media = shared.media.as_ref().expect("guarded");
-            let (down, pending) = {
-                let mut media = media.lock().unwrap();
-                (media.on_reply(&body)?, media.pending())
-            };
+            if !media.lock().unwrap().on_reply(&body)? {
+                return Ok(RectEffect::NOTHING);
+            }
             let (armed, interval) = {
                 let mut d = desktop.lock().unwrap();
-                if down {
-                    stream_stopped(&mut d, &shared.tab);
-                } else if d.offer_quiet == OfferQuiet::Held && !pending {
-                    // The answer: the quiet its offer went out in is over.
-                    d.offer_quiet = OfferQuiet::Open;
-                } else {
-                    return Ok(RectEffect::NOTHING);
-                }
+                stream_stopped(&mut d, &shared.tab);
                 (d.poll_size(), d.push_interval_us)
             };
             send(uplink, &vnc_apple::auto_framebuffer_update(interval, armed)).await?;
@@ -6663,6 +6519,9 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         }
     };
     let resized = apply_resize(desktop, shadow, size, scale, sink).await?;
+    // The Mac was told to send no pixels and the display has changed: its
+    // rectangles are wanted again, until the stream is offered for the new one.
+    let mut zrle_again = false;
     if virtual_display {
         // Which leg carries which display changes under a canvas changing
         // display, which reads and sets who is shown each: one at a time.
@@ -6690,6 +6549,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
                 if let Some(media) = &shared.media {
                     media.lock().unwrap().stopped();
                 }
+                zrle_again = std::mem::take(&mut d.media_preferred);
             }
             changed
         };
@@ -6788,6 +6648,9 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         (d.poll_size(), d.push_interval_us)
     };
     let mut uplink = uplink.lock().await;
+    if zrle_again {
+        uplink.send(&set_encodings(&vnc_apple_media::encodings_with_media_stream())).await?;
+    }
     if virtual_display {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
@@ -9686,7 +9549,7 @@ mod tests {
             laid_out: false,
             canvas_live: false,
             media_live: false,
-            offer_quiet: OfferQuiet::Open,
+            media_preferred: false,
             media_stream: false,
         }))
     }

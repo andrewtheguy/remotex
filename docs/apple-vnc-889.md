@@ -1358,20 +1358,24 @@ moving over a TextEdit window, with 123 bytes of zlib. A login once pushed a who
 screen unasked, which is decoded to keep the deflate stream in step and not
 shown.
 
-An offer goes out with one pixel armed too. The Mac frames the answer on the
-thread that reads the viewer's messages, without the lock its update sender
-frames under, and a record from each at once fails the record layer's integrity
-check and ends the session. So remotex narrows the region when an offer is due
-and asks for that pixel until an update brings it and nothing wider, sends the
-offer at the end of that update, and arms the display again at the Mac's answer,
-asking for it whole. The Mac's rectangles stand still for that long. Narrowing
-alone is not enough: an offer sent 35 ms behind a request for the whole display
-met its repaint. A request that arrives while the Mac writes an update is not
-always answered on its own, so the pixel is asked for again after each update
-that was not it and after half a second of silence. A cursor change can still
-meet the answer.
-A record that fails is reported with its number, its size, and whether its
-trailer is a neighbouring record's, which is what a number drawn twice leaves.
+An offer goes out behind a `SetEncodings` that lists the media stream first, as
+Apple's viewer lists it for the whole of a High Performance session. The Mac's
+preferred codec is the first it knows in the list, and its framebuffer sender
+sends no pixels to a viewer whose preferred codec is the media stream: cursor
+shapes, layouts and message 1 still come. That keeps the Mac's two framing
+threads apart. Its sender frames updates under a lock, and the thread that reads
+the viewer's messages frames the answer to an offer without it; a record from
+each at once fails the record layer's integrity check and ends the session, the
+answer carrying the trailer of the record before it. `SetEncodings` is acted on
+under that lock, so an update being written is out before the offer is read, and
+none follows. A layout that changes the display is answered with the list that
+has ZRLE first again, so the Mac's rectangles stand in until the next offer.
+A cursor change can still meet the answer, as it can for Apple's viewer.
+
+The Mac counts the media stream as a codec only in its Apple silicon build: the
+Intel slice of the same daemon never prefers it. A record that fails its check
+is reported with its number, its size, and whether its trailer is a neighbouring
+record's, which is what a number drawn twice leaves.
 
 This also ends the input freeze behind a playing video. With the gateway capped at
 15% of a core, the Mac's receive queue of our input was empty in 64 of 68
