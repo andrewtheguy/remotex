@@ -121,8 +121,11 @@ touch.
   them; the gateway encodes only the one shown. Its *All Displays* keeps the
   first display here and links to the second, which opens at `/display/2` in a
   new tab of the same browser: just that display, with its own pointer and
-  keyboard. With each tab full screen on a display of its own, a window dragged
-  over the edge between them arrives on the other display, as the pointer does.
+  keyboard. A window dragged over the edge between the two tabs arrives on the
+  other display, as the pointer does, however their windows are arranged. With
+  each tab full screen on a display of its own the edges meet, so it arrives
+  where it was dragged to; with anything between the two pictures it arrives
+  short by that much.
   While *All Displays* is chosen the menu's **Info** names both
   displays and carries the same link. The page asks before it shows the display: **Connect** takes
   the display for that tab. On a session that follows the window, that tab's
