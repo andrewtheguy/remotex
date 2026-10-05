@@ -1107,6 +1107,17 @@ The video offer names two codecs by their RTP payload numbers, 123 for H.264
 and 100 for HEVC, each with its own feature string. Offered both, the Mac sends
 HEVC.
 
+Offered 123 alone, the Mac sends H.264 instead, as RTP payload type 123 on the
+same leg and under the same keys, with the sound unchanged. On macOS 26.6 at
+1600×1000 with one tile it was High profile, level 4.0, 8-bit 4:2:0, declaring 5
+reference frames and a 13-bit picture order count, and tagged with the HEVC
+stream's colours: Display P3 primaries, sRGB transfer, BT.709 matrix. Its
+parameter sets do not come as NAL units of their own. A keyframe's first packet
+is an MP4 `avc1` sample description holding them, and the IDR follows as FU-A
+fragments. Remotex does not ask for it. Seen in one short run on the virtual Mac
+only: no browser was given it, and a display change, a keyframe request and
+more than one tile were not tried.
+
 The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
 sets its bits and then byte-swaps the word before sending it. A published
 description has the word in host order, which would move every bit to another
