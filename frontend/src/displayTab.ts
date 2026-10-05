@@ -9,7 +9,8 @@
 // Finding a tab by name means opening it without `noopener`, and a tab opened so
 // starts with a copy of this page's `sessionStorage`, the session token included,
 // and a reference to this page. The display's page drops both as it loads
-// (`standAlone`): it claims nothing and is let in by the login cookie alone.
+// (`standAlone`): it claims nothing and is let in by the login cookie alone. The
+// reference is made again each time the tab is found, and dropped here then.
 import { GATEWAY_ORIGIN, gatewayUrl } from "./gateway.ts";
 
 /** The page of the display shown in tab `tab`. */
@@ -25,6 +26,7 @@ export function displayTabName(tab: number): string {
 /** As much of a window as finding a display's tab takes. */
 export interface TabWindow {
   location: { origin: string; pathname: string; replace(url: string): void };
+  opener: unknown;
   focus(): void;
 }
 
@@ -52,7 +54,11 @@ export function showDisplayTab(
   } catch {
     // The tab was since taken to another site, whose address is not ours to read.
   }
-  if (!there) {
+  if (there) {
+    // Finding the tab made this page its opener again, which its page let go of
+    // as it loaded and does not load again to let go of now.
+    shown.opener = null;
+  } else {
     shown.location.replace(displayTabUrl(tab));
   }
   shown.focus();

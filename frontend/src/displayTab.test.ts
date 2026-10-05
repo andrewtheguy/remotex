@@ -15,6 +15,7 @@ function tabAt(origin: string, pathname: string) {
       pathname,
       replace: (url) => calls.push(`replace ${url}`),
     },
+    opener: "session page",
     focus: () => calls.push("focus"),
   };
   return { tab, calls };
@@ -30,6 +31,8 @@ test("a new tab is opened by name, loaded and focused", () => {
   assert.equal(shown, true);
   assert.deepEqual(opened, [["", displayTabName(2)]]);
   assert.deepEqual(calls, [`replace ${GATEWAY_ORIGIN}/display/2`, "focus"]);
+  // Its page lets go of the opener as it loads.
+  assert.equal(tab.opener, "session page");
 });
 
 test("a tab already showing the display is focused and not loaded again", () => {
@@ -40,6 +43,7 @@ test("a tab already showing the display is focused and not loaded again", () => 
       true,
     );
     assert.deepEqual(calls, ["focus"]);
+    assert.equal(tab.opener, null);
   }
 });
 
@@ -53,6 +57,7 @@ test("a tab taken to another site is brought back", () => {
       pathname: "",
       replace: (url) => calls.push(`replace ${url}`),
     },
+    opener: "session page",
     focus: () => calls.push("focus"),
   };
   assert.equal(
