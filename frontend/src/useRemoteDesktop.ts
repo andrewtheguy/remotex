@@ -148,8 +148,10 @@ const TAB_LOCK_WAIT_MS = 500;
 // Whether `id` is this page's alone: a duplicated tab starts with a copy of the
 // storage it was made from, the name included, and the page it was copied from
 // still holds the name's lock. Held for the page's life, so a reload, whose last
-// document lets go of it, gets it again. True where there are no locks to ask,
-// or asking fails: the name is then used as it is.
+// document lets go of it, gets it again. True only once the lock is this page's:
+// where there are no locks to ask (a page not served securely has none), or
+// asking fails, a name found in storage is not known to be this tab's, and the
+// page takes a new one.
 function tabIdIsFree(id: string): Promise<boolean> {
   return new Promise((resolve) => {
     try {
@@ -163,14 +165,10 @@ function tabIdIsFree(id: string): Promise<boolean> {
             return new Promise<void>(() => {});
           },
         )
-        .catch((cause: unknown) =>
-          // Still held when the wait ran out: another page's.
-          resolve(
-            !(cause instanceof DOMException && cause.name === "TimeoutError"),
-          ),
-        );
+        // Still held when the wait ran out, so another page's, or not answered.
+        .catch(() => resolve(false));
     } catch {
-      resolve(true);
+      resolve(false);
     }
   });
 }
