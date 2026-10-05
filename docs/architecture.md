@@ -1670,8 +1670,10 @@ a `wlshare` target as Opus or lossless — and always on for `ard-high-performan
 with its picture; `ard` and a plain `vnc` target carry none. It has a socket of
 its own. **Opening `/ws/audio?session=<token>` is the subscription** — there is no
 message that turns sound on, and closing the socket is the only way to stop. The
-page opens it when a session that carries sound starts, where the session comes
-up playing, and its Mute and Unmute close and open it.
+page opens it when a session that carries sound starts unmuted. A touch client
+and Safari start muted and open it at Unmute
+([What a session is started with](#what-a-session-is-started-with)). From then
+on Mute and Unmute close and open it.
 
 The separation is the point. The display socket's bounded queue is four frames
 deep; an audio pump waiting behind a video backlog on it would stop draining the
