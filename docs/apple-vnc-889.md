@@ -50,7 +50,7 @@ official modes alone.
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
-| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Until the stream is up and across display changes its ZRLE rectangles stand in for the picture, a second apart, encoded as VP9 at the encoder's fastest speed. |
+| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Until the stream is up and across display changes its ZRLE rectangles stand in for the picture, a second apart, encoded as VP9 at the encoder's fastest speed and at a lower quality than the session's. |
 | Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
@@ -1023,7 +1023,7 @@ AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with 
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
 (`src/vnc_apple_media.rs`). ZRLE stands in until the stream delivers, at connect
 and across display changes: the Mac's rectangles, pushed a second apart, encoded
-here as VP9 at the encoder's fastest speed, as `ard` with `virtual_display = true`
+here as VP9 at the encoder's fastest speed and at quality 50 at most, as `ard` with `virtual_display = true`
 shows them at its own pace. While the stream flows they are decoded, which keeps
 ZRLE's deflate stream in step, and dropped. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
@@ -1357,6 +1357,29 @@ That still brings every cursor shape and layout: 11 cursor shapes in 20 s of
 moving over a TextEdit window, with 123 bytes of zlib. A login once pushed a whole
 screen unasked, which is decoded to keep the deflate stream in step and not
 shown.
+
+An offer goes out behind a `SetEncodings` that lists the media stream first, as
+Apple's viewer lists it for the whole of a High Performance session. The Mac's
+preferred codec is the first it knows in the list, and its framebuffer sender
+sends no pixels to a viewer whose preferred codec is the media stream: cursor
+shapes, layouts and message 1 still come. That keeps the Mac's two framing
+threads apart. Its sender frames updates under a lock, and the thread that reads
+the viewer's messages frames the answer to an offer without it; a record from
+each at once fails the record layer's integrity check and ends the session, the
+answer carrying the trailer of the record before it. `SetEncodings` is acted on
+under that lock, so an update being written is out before the offer is read, and
+none follows. A layout that changes the display is answered with the list that
+has ZRLE first again, so the Mac's rectangles stand in until the next offer.
+From the offer until then remotex asks for and arms one pixel, so the Mac is left
+holding no request for a display that may have shrunk by the time it serves one,
+and a resize goes out as it falls due: the update a resize otherwise waits for
+never comes from a Mac that sends no pixels.
+A cursor change can still meet the answer, as it can for Apple's viewer.
+
+The Mac counts the media stream as a codec only in its Apple silicon build: the
+Intel slice of the same daemon never prefers it. A record that fails its check
+is reported with its number, its size, and whether its trailer is a neighbouring
+record's, which is what a number drawn twice leaves.
 
 This also ends the input freeze behind a playing video. With the gateway capped at
 15% of a core, the Mac's receive queue of our input was empty in 64 of 68

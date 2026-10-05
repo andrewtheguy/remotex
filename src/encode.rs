@@ -81,6 +81,11 @@ const QUEUE_BUDGET: u32 = 512 * 1024;
 /// while the eye is still on it.
 const SETTLE_IDLE: Duration = Duration::from_millis(500);
 
+/// The most quality a round that stands in for another stream is encoded at
+/// ([`VideoSink::stand_in`]): legible, and a fraction of the bits and the encoder's
+/// time the dial would spend on a picture shown for a second.
+const STAND_IN_QUALITY: u8 = 50;
+
 /// How often the order task wakes to look for a quiet stream to settle. It has to
 /// be its own timer rather than something the next frame does, because a screen
 /// that stops changing produces no next frame — which is exactly the case a settle
@@ -437,7 +442,8 @@ impl VideoSink {
         let Some(mut round) = video.stream.take_round()? else {
             return Ok(());
         };
-        let speed = if self.shared.stand_in.load(Ordering::Relaxed) { Speed::Fastest } else { Speed::Usual };
+        let standing_in = self.shared.stand_in.load(Ordering::Relaxed);
+        let speed = if standing_in { Speed::Fastest } else { Speed::Usual };
         if let Err(e) = round.set_speed(speed) {
             // The stream is as good as it was at the speed it kept.
             warn!("{}: could not move the video encoder to {speed:?}: {e:#}", self.engine);
@@ -460,6 +466,14 @@ impl VideoSink {
         let keyframe = round.keyframe();
         if keyframe {
             video.congestion.keyframe(now.into_std());
+        }
+        // A stand-in's own quality, taken after the walk has read the round: it is
+        // no verdict on the link and owes no settle, since the stream it stands in
+        // for replaces the picture.
+        if standing_in
+            && let Err(e) = round.set_quality(quality.min(STAND_IN_QUALITY))
+        {
+            warn!("{}: could not lower the video quality for a stand-in: {e:#}", self.engine);
         }
         // Dropped before the spawn and the push: the whole point is that `damage`
         // gets the lock back while the worker encodes.
@@ -675,8 +689,9 @@ impl VideoSink {
     /// Say whether the rectangles damaged from here on stand in for a stream that
     /// is not flowing: a High Performance Mac's own pixels, before its media stream
     /// delivers and across a display change. Their rounds are encoded at
-    /// [`Speed::Fastest`], since the picture is replaced as soon as the stream is
-    /// back; every other round is at [`Speed::Usual`].
+    /// [`Speed::Fastest`] and at no more than [`STAND_IN_QUALITY`], since the picture
+    /// is replaced as soon as the stream is back; every other round is at
+    /// [`Speed::Usual`] and the quality the walk holds.
     pub fn stand_in(&self, standing_in: bool) {
         self.shared.stand_in.store(standing_in, Ordering::Relaxed);
     }
@@ -1288,8 +1303,9 @@ mod tests {
         assert!(frame_rx.try_recv().is_err());
     }
 
-    /// Standing in moves the encoder's speed and nothing else: the rounds either
-    /// side of it are one chain, with no keyframe and no second announcement.
+    /// Standing in moves the encoder's speed and quality and nothing else: the
+    /// rounds either side of it are one chain, with no keyframe and no second
+    /// announcement.
     #[tokio::test(start_paused = true)]
     async fn standing_in_costs_the_stream_no_keyframe() {
         let (sink, mut frame_rx) = video_sink(64, 48).await;

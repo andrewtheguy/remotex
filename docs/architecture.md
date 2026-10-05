@@ -433,7 +433,8 @@ that selects the stream. See
   stream is the picture once it flows. Until its first picture, at connect and
   across every display change, the Mac's ZRLE rectangles stand in for it: left
   at the one push a second a High Performance session arms, and encoded as VP9
-  at the encoder's fastest speed (`VideoSink::stand_in`), since the stream
+  at the encoder's fastest speed and at quality 50 at most
+  (`VideoSink::stand_in`), since the stream
   replaces them. A PLI is a passed stream's
   repaint. The page answers for the
   sound by decoding one of the Mac's units in each form `isConfigSupported`
@@ -898,7 +899,8 @@ Three controls with similar names therefore remain separate:
   encoded here as VP9, which `VideoSink::damage` starts at a keyframe behind its
   own `VideoFormat`. Two things differ from that mode. The Mac is left pushing
   once a second, the interval a High Performance session arms, and the rounds
-  are encoded at `Speed::Fastest` (`VideoSink::stand_in`): the picture is
+  are encoded at `Speed::Fastest` and at quality 50 at most
+  (`VideoSink::stand_in`): the picture is
   replaced as soon as the stream delivers, so neither the Mac's reading of input
   nor the gateway's cores are spent on it. While the stream flows the rectangles
   are still decoded, since ZRLE's deflate stream cannot be inflated across a
@@ -2519,7 +2521,8 @@ decoder runs four slice threads because one is too slow for 60 pictures a second
 on one core of an i5-8500T a 1600×1000 picture took 14–23 ms, on four 7–14 ms.
 ZRLE rectangles carry the picture only until the stream delivers, at connect and
 across every display change, a second apart and encoded at the encoder's fastest
-speed. A stream the
+speed, and stop at an offer, which lists the media stream first
+([RFB while the stream runs](apple-vnc-889.md#rfb-while-the-stream-runs)). A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings
 cursor shapes and layouts. Apple's resolution-preset control remains
