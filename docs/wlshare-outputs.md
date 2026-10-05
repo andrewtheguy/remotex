@@ -89,8 +89,9 @@ before the wire.
   the canvas rather than with what was clicked.
 - **Density follows the switch.** The browser's density was declared to the
   output left behind, so the gateway declares it again when a list says the
-  shared output moved — in a session started with resize, the only kind that
-  declares one at all — and wlshare answers with an `OutputScale` as it always does:
+  shared output moved — in a session started with resize, or for a pinch-zoom
+  phone or tablet at a kept size; a pointer client at a kept size declares none
+  — and wlshare answers with an `OutputScale` as it always does:
   applying it on a headless output, and reporting the output as it is on a
   monitor whose mode belongs to the person in front of it. The declaration
   carries the window in pixels, even when the scale is the one already

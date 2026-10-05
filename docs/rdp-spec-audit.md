@@ -9,6 +9,14 @@ the spec text — MS-RDPBCGR of 2026-03-09, MS-RDPEGFX of 2026-05-11, and the
 MS-RDPEA, MS-RDPNSC, MS-RDPRFX and MS-RDPEGDI — with FreeRDP's `libfreerdp` as the
 cross-check for what a real host does.
 
+The verdict and field-by-field coverage apply only to the paths described
+below; they are not a standing audit of features added later. They do not cover
+H.264 on a passed graphics pipeline, added on 2026-10-02, or the
+multi-display `CS_MONITOR` and Display Control layouts added on 2026-10-03. The
+latter change also began enforcing the server's monitor-count and aggregate-area
+limits, resolving the Display Control leniency found by this audit. Current
+behavior is described in [The RDP client](rdp-client.md).
+
 The target is a current Windows host and only that, as
 [The RDP client](rdp-client.md) says, so every point is rated by its effect on
 such a host. Points that matter only to legacy or non-Windows servers are notes.
@@ -39,8 +47,8 @@ the instrument; it was not run for this audit because it takes over the remote
 clipboard.
 
 - **The ClearCodec sequence counter across a graphics reset.** The graphics crate's
-  `proto/clear.rs:196` requires each rectangle to carry the number after the last,
-  mod 256, and its `gfx.rs:411` leaves the counter alone on ResetGraphics. The
+  `proto/clear.rs` requires each rectangle to carry the number after the last,
+  mod 256, and `gfx.rs` leaves the counter alone on ResetGraphics. The
   spec is silent about the reset. FreeRDP's `clear_context_reset`, called from `gdi_ResetGraphics`, sets
   its counter to zero and then accepts whatever first number arrives — which
   suggests a Windows host restarts the sequence after a resize. If it does, this
@@ -54,13 +62,13 @@ clipboard.
   ```
 
 - **Whether auto-detect PDUs arrive at all.** The client requests no MCS message
-  channel (`proto/gcc.rs:20`) and does not set
+  channel (`proto/gcc.rs`) and does not set
   `RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT`, and MS-RDPBCGR 2.2.14.3 says those PDUs
   "MUST only be sent over the MCS message channel", so a conforming host has
   nowhere to send them. One arriving on the I/O channel would be parsed by
   `share::decode` as a share control header and end the session on "its version".
   The doc's claim should be re-measured or reworded.
-- **1-bpp pointer mask row order.** `proto/pointer.rs:257` reads a monochrome
+- **1-bpp pointer mask row order.** `proto/pointer.rs` reads a monochrome
   pointer's masks top-down, matching FreeRDP's `vFlip = (xorBpp == 1) ? FALSE :
   TRUE`. MS-RDPBCGR 2.2.9.1.1.4.4 calls both masks bottom-up with no exception for
   1 bpp. A monochrome cursor from a Windows host would decide it.
@@ -121,8 +129,6 @@ named refusal. Listed so nobody rediscovers them.
 - Clipboard: a malformed Format List ends the session where MS-RDPECLIP 3.1.5.2.2
   wants a failing Format List Response; a long-name list whose length happens to be
   a multiple of 36 would parse as short names.
-- Display Control: the monitor area cap is computed at `proto/display.rs:92` and
-  never compared, unreachable under the 8192 clamp.
 - Share layer: the T.128 `0x8000` flow marker is read as a length; a Server
   Redirection PDU is refused as "its type 0xa" rather than named; `dwStateTransition`
   in the License Error PDU is not checked; Client Info strings are capped at 64 KiB

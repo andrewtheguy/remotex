@@ -56,6 +56,11 @@ painted on from the session page's picture all the same, and that the picker
 moving the session's page to the other display moves the view without starting
 the pipeline over.
 
+`display-drag.spec.ts` reads the input each display socket sends while a held
+drag crosses the edge between two virtual displays. It checks that the edge
+towards the display beside it is open and every outer edge still clamps the
+pointer, without judging whether a remote window visibly followed the drag.
+
 `software-hevc.spec.ts` is the BETA software HEVC decoder, in a High
 Performance session started with the Mac's stream passed and the page loaded with
 `?hevc_decoder=software`. Against a gateway that has the decoder's archive it
@@ -189,12 +194,28 @@ REMOTEX_PLAYWRIGHT_EGFX_TARGET='win' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
+Its H.264 case needs a target with `egfx_h264 = true`, named by
+`REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET`, while the host is playing a video:
+
+```sh
+REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET='win-h264' \
+bunx playwright test '/egfx-passthrough\.spec\.ts$'
+```
+
 The two-display spec needs the same kind of host, in a target with
 `virtual_displays = 2`, named by `REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET`:
 
 ```sh
 REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET='win2' \
 bunx playwright test '/egfx-two-displays\.spec\.ts$'
+```
+
+The cross-display drag spec accepts either an RDP or High Performance target
+with two virtual displays. Name it with `REMOTEX_PLAYWRIGHT_DRAG_TARGET`:
+
+```sh
+REMOTEX_PLAYWRIGHT_DRAG_TARGET='win2' \
+bunx playwright test '/display-drag\.spec\.ts$'
 ```
 
 The software HEVC spec needs a gateway whose config has an
@@ -259,7 +280,7 @@ bun run typecheck
 The defaults are `http://127.0.0.1:52380/`, the gateway's built-in port, and
 target `mac`. Override the URL with `REMOTEX_PLAYWRIGHT_BASE_URL` when the
 gateway's config names another port.
-Each test is skipped with a list of missing variables when its live-Mac
-configuration is absent. They always run headless with one worker, and share the
-single session slot, which is why they are sequential by configuration rather
-than by luck.
+Live-target groups are skipped with a message naming their missing opt-in when
+their configuration is absent. The specs always run headless with one worker,
+and share the single session slot, which is why they are sequential by
+configuration rather than by luck.
