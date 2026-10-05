@@ -1923,7 +1923,7 @@ pub async fn run(
 ) {
     // A desktop past the video ceiling holds the session open without a picture,
     // on a session the window does not size: only the remote can bring it back
-    // within, as a Mac on All Displays does when one display is chosen. Following
+    // within, as a Mac on Combined Display does when one display is chosen. Following
     // the window, the gateway asks for every size and holds each under the
     // ceiling, and a remote that answers past it is refused. So is High
     // Performance's, whose virtual display is held under the ceiling too.
@@ -6549,7 +6549,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     if let Some(msg) = mosaic_msg {
         sink.msg(msg).await?;
     }
-    // All Displays over too many screens has no picture, whatever its size, and the
+    // Combined Display over too many screens has no picture, whatever its size, and the
     // resize below is where the sink reads it.
     sink.hold_screens(!virtual_display && layout.too_many_screens());
     // A session that asked for two virtual displays is sent a framebuffer spanning
@@ -6645,7 +6645,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
                 0,
                 DisplayInfo {
                     id: DisplayState::COMBINED,
-                    label: "All Displays".into(),
+                    label: "Combined Display".into(),
                     detail,
                     main: false,
                     virtual_display: false,
@@ -12595,7 +12595,7 @@ mod tests {
             [(1, (1280, 800), (1280, 800), 0x01), (7, (1440, 900), (2880, 1800), 0x00)];
         let mut state = DisplayState::default();
 
-        // A 1x browser on All Displays over mixed densities: composed from the
+        // A 1x browser on Combined Display over mixed densities: composed from the
         // native pixels, so nothing to ask.
         let native = parse_layout(&test_layout(None, &SCREENS)).unwrap();
         assert_eq!(state.accept_apple_layout(&native, 1.0), None);
@@ -12615,7 +12615,7 @@ mod tests {
         assert_eq!(state.accept_apple_layout(&halved, 1.0), None);
         assert!(state.apple_scale_pending.is_none());
 
-        // Back to All Displays before the Mac answers a pick of the 1x screen:
+        // Back to Combined Display before the Mac answers a pick of the 1x screen:
         // both want 1, which is already on its way.
         assert_eq!(state.request_apple_scale(Some(1), 1.0), Some(1.0));
         assert_eq!(state.request_apple_scale(None, 1.0), None);
@@ -12859,7 +12859,7 @@ mod tests {
                 assert_eq!(active, 11);
                 assert_eq!(displays.len(), 3);
                 assert_eq!(displays[0].id, DisplayState::COMBINED);
-                assert_eq!(displays[0].label, "All Displays");
+                assert_eq!(displays[0].label, "Combined Display");
                 assert_eq!(displays[1].detail, "1920×1080 at 2x");
                 assert_eq!(displays[2].label, "Display 2");
             }
@@ -12875,7 +12875,7 @@ mod tests {
         assert_eq!(written(&sent), expected);
     }
 
-    /// All Displays over three screens is held however small it is, and choosing
+    /// Combined Display over three screens is held however small it is, and choosing
     /// one of them brings video back: the browser is told why at each resize.
     #[tokio::test]
     async fn all_displays_over_three_screens_is_held() {

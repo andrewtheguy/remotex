@@ -900,7 +900,7 @@ pub struct DisplayInfo {
     /// Opaque to every client — whatever the engine wants back in
     /// [`ClientMsg::SelectDisplay`]. On the Apple dialect it is a
     /// `CGDirectDisplayID`, except for `0xffffffff`, which the engine uses for its
-    /// own "All Displays" entry (and which is Apple's own sentinel for that);
+    /// own entry for every display at once (and which is Apple's own sentinel for that);
     /// against wlshare it is the output's `wl_output` global; on RDP it is the
     /// display's place in the row the host laid out, from zero.
     pub id: u32,
@@ -930,7 +930,7 @@ pub struct DisplayInfo {
 pub enum HoldCause {
     /// Past what a video stream encodes ([`crate::video::within_ceiling`]).
     Size,
-    /// A Mac's All Displays over more than
+    /// A Mac's Combined Display over more than
     /// [`crate::vnc_apple::MAX_COMBINED_SCREENS`] screens, whatever its size.
     Screens,
 }
@@ -1115,13 +1115,13 @@ pub enum ServerMsg {
     /// while a resize is in progress.
     Resizing { active: bool },
     /// Why the desktop the `Resize` before this describes has no picture, or `None`
-    /// when it has one: past what a video stream encodes, or a Mac's All Displays
+    /// when it has one: past what a video stream encodes, or a Mac's Combined Display
     /// over more screens than one view shows. No picture follows until a `Resize`
     /// without a cause. Sent after every `Resize` of a source that holds the
     /// session open for that — see [`crate::encode::Oversize`] — and never by one
     /// that refuses it. The browser says so over the desktop, and offers the
     /// remote's displays where it lists them, since choosing one is how a Mac on
-    /// All Displays gets back.
+    /// Combined Display gets back.
     Oversize { cause: Option<HoldCause> },
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].

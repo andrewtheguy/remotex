@@ -633,7 +633,7 @@ export function useRemoteDesktop(
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
   // Why the desktop has no picture, from `oversize`: past what a video stream
-  // encodes, or All Displays over too many screens. Null in the picker and at
+  // encodes, or Combined Display over too many screens. Null in the picker and at
   // every `connected`, until the gateway says otherwise.
   const [oversize, setOversize] = useState<HoldCause | null>(null);
   // Whether it is held, which is what input and focus follow.

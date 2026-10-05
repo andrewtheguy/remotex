@@ -49,7 +49,7 @@ official modes alone.
 | Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for, or two. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
-| Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
+| Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density Combined Display view is composed in the browser, as Apple's viewer does. |
 | Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Until the stream is up and across display changes its ZRLE rectangles stand in for the picture, a second apart, encoded as VP9 at the encoder's fastest speed and at a lower quality than the session's. |
 | Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
@@ -455,10 +455,10 @@ factor. Only an answering layout confirms it, and a request left unanswered for
 ten seconds is given up. The Mac handles the request at once, but its answer can
 take seconds to arrive behind a display switch.
 
-### All Displays over mixed densities
+### Combined Display over mixed densities
 
 No single factor renders a 1x screen beside a 2x one. Apple's viewer does not try.
-In All Displays over mixed densities it never sends `SetServerScaling`; it takes
+In Combined Display over mixed densities it never sends `SetServerScaling`; it takes
 the native combined framebuffer and draws each screen's region at that screen's
 size in points:
 - at medium interpolation;
@@ -492,7 +492,7 @@ measured 5376×2287. Standard never resizes, so the gateway
 cannot ask for less. Such a view has no picture: the session stays up, and the
 page offers the Mac's screens instead, since one screen is a smaller desktop.
 Choosing one within the ceiling returns the session to video at the next layout.
-All Displays over more than two screens is held the same way whatever its size or
+Combined Display over more than two screens is held the same way whatever its size or
 densities, since composing them is too much for a browser to draw. See
 [past the ceiling](architecture.md#past-the-ceiling).
 

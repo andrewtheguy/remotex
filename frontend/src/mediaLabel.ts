@@ -122,7 +122,7 @@ export function videoLabel(
     return "Not in use: the desktop is past what video carries";
   }
   if (held === "screens") {
-    return "Not in use: All Displays spans more than two screens";
+    return "Not in use: Combined Display spans more than two screens";
   }
   if (!stream) {
     return "Waiting for the video format";

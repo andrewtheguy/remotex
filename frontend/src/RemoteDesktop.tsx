@@ -23,7 +23,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 };
 
 // The notice over a desktop with no picture, offering every display but the one
-// being sent, which is the one held: past what video carries, or All Displays over
+// being sent, which is the one held: past what video carries, or Combined Display over
 // more than two screens. A click sends a `selectDisplay` and nothing else: the
 // notice comes down when the gateway says the desktop has a picture again.
 function OversizeNotice({
@@ -46,7 +46,7 @@ function OversizeNotice({
         <>
           <span className="status">Too many screens to show</span>
           <span className="status-hint">
-            All Displays spans more than two screens, which is more than one
+            Combined Display spans more than two screens, which is more than one
             view shows.
           </span>
         </>
@@ -117,7 +117,7 @@ function SessionCovers({
 
       {/* A desktop past what video carries: no picture comes, and the session stays
           up for the one way out, a smaller desktop from the remote. Choosing one of
-          its displays is that way for a Mac on All Displays, so they are offered
+          its displays is that way for a Mac on Combined Display, so they are offered
           here and not only in the menu. It takes the pointer, since the remote
           under it is not on screen. */}
       {oversize && size && (

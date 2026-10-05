@@ -139,9 +139,9 @@ What is not done:
   decoded picture on the GPU, and reading it back only when a later command
   copies from it, is the step after that if a large one proves slow.
 
-### Two streams for Standard's All Displays
+### Two streams for Standard's Combined Display
 
-Standard's All Displays over two screens is one framebuffer of both, which is
+Standard's Combined Display over two screens is one framebuffer of both, which is
 often past the video ceiling at factor 1.0 (5376×2287 over a 2x screen beside a
 1x one), and then has no picture: the page offers one screen instead
 ([past the ceiling](architecture.md#past-the-ceiling)). The plan is to carry that
