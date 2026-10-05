@@ -1107,7 +1107,7 @@ impl Depacketizer {
         }
         self.next_sequence = Some(header.sequence.wrapping_add(1));
         let mut out = Depacketized::Pending;
-        if self.timestamp.is_some_and(|ts| ts != header.timestamp) && !self.unit.is_empty() {
+        if self.timestamp.is_some_and(|ts| ts != header.timestamp) && (self.damaged || !self.unit.is_empty()) {
             // The previous picture's last packet (the marked one) never came.
             self.damaged = true;
             self.finish();
@@ -1188,11 +1188,25 @@ impl Depacketizer {
         !self.synced && self.resumable
     }
 
-    /// Start over on a stream whose packets were not pushed for a while: the
-    /// sequence number expected is long gone, and the picture in flight is
-    /// missing its start.
-    pub fn rejoin(&mut self) {
-        *self = Self { ssrc: self.ssrc, damaged: true, ..Self::default() };
+    /// Pass over a packet nobody is shown, keeping in step with the stream: the
+    /// sequence number and the picture in flight are known when its packets are
+    /// wanted again, so the first one pushed is neither read as a duplicate nor
+    /// taken for the start of a picture it is the middle of. Its pictures are
+    /// given up, as by [`Self::resync`].
+    pub fn skip(&mut self, header: &RtpHeader) {
+        if self.ssrc != Some(header.ssrc) {
+            *self = Self { ssrc: Some(header.ssrc), ..Self::default() };
+        }
+        if self.next_sequence.is_some_and(|expected| header.sequence.wrapping_sub(expected) >= 0x8000) {
+            return;
+        }
+        *self = Self {
+            ssrc: self.ssrc,
+            next_sequence: Some(header.sequence.wrapping_add(1)),
+            timestamp: Some(header.timestamp),
+            damaged: !header.marker,
+            ..Self::default()
+        };
     }
 
     /// Close the current picture: it, if it is whole and decodable.
@@ -2458,14 +2472,12 @@ struct VideoLeg {
     size: Option<(u16, u16)>,
     /// The RTP timestamp of a picture handed on and not yet acknowledged.
     unacknowledged: Option<u32>,
-    /// Whether the last packet was handed on, for the start over a display coming
-    /// back into view needs.
-    was_shown: bool,
     packets: u64,
     forged: u64,
     behind: u64,
     pictures: u64,
-    plis: u64,
+    /// Refreshes and keyframes asked of the Mac.
+    asks: u64,
 }
 
 /// The picture a leg's stream needs before it can go on.
@@ -2570,13 +2582,10 @@ impl VideoLeg {
         }
         self.media_ssrc = header.ssrc;
         // A display nobody is shown costs its packets' authentication and nothing
-        // more, and starts over at an IDR when it comes back into view.
-        let shown = self.shared.shown.load(std::sync::atomic::Ordering::Relaxed);
-        if !std::mem::replace(&mut self.was_shown, shown) && shown {
-            self.depacketizer.rejoin();
-            return Ok(Took::Wants(Ask::Keyframe));
-        }
-        if !shown {
+        // more. It starts over at the IDR [`MediaStream::show`] has asked for by
+        // the time it is back in view, whose first packet may be the next one.
+        if !self.shared.shown.load(std::sync::atomic::Ordering::Relaxed) {
+            self.depacketizer.skip(&header);
             self.keyframe_request.settle();
             return Ok(Took::Nothing);
         }
@@ -2640,7 +2649,7 @@ impl VideoLeg {
         let Some(ask) = self.keyframe_request.due(tokio::time::Instant::now()) else {
             return;
         };
-        self.plis += 1;
+        self.asks += 1;
         let request = match (ask, self.size) {
             (Ask::Refresh, Some(size)) => self.rtcp.protect(&rtcp_refresh(self.ssrc, self.media_ssrc, size)),
             _ => self.rtcp.protect(&rtcp_pli(self.ssrc, self.media_ssrc)),
@@ -2761,12 +2770,11 @@ impl Receiver {
                     keyframe_request: KeyframeRequest::default(),
                     size: None,
                     unacknowledged: None,
-                    was_shown: true,
                     packets: 0,
                     forged: 0,
                     behind: 0,
                     pictures: 0,
-                    plis: 0,
+                    asks: 0,
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -2810,13 +2818,13 @@ impl Receiver {
                         if ticks.is_multiple_of(RATE_REPORT) && leg.pictures > 0 {
                             log::debug!(
                                 "vnc: {:.1} pictures a second of the Mac's {} over the last {RATE_REPORT}s, \
-                                 {} dropped behind {} so far, {} keyframes asked for, \
+                                 {} dropped behind {} so far, {} refreshes or keyframes asked for, \
                                  {:.1} ms of one-way delay reported",
                                 leg.pictures as f64 / f64::from(RATE_REPORT),
                                 leg.name(alone),
                                 leg.behind,
                                 leg.onward.name(),
-                                leg.plis,
+                                leg.asks,
                                 leg.feedback.delay() * 1000.0
                             );
                             leg.pictures = 0;
@@ -3541,24 +3549,41 @@ mod tests {
             .collect()
     }
 
-    /// A display out of view has its packets dropped unread, for as long as it
-    /// is: the sequence number has moved on by any amount when it comes back.
+    /// A display out of view has its packets passed over, for as long as it is,
+    /// and is asked for an IDR as it comes back: on a still screen the next
+    /// packet is that IDR's first, and the whole of it has to be taken.
     #[test]
-    fn a_stream_rejoined_starts_at_the_next_whole_random_access_picture() {
+    fn a_stream_passed_over_takes_the_idr_that_starts_at_the_next_packet() {
         let mut d = Depacketizer::default();
         assert_eq!(d.push(&header(10, 0, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
         assert!(matches!(d.push(&header(11, 0, true), IDR), Depacketized::Unit(_)));
-        // 40,000 packets on, which a sequence number reads as behind.
-        d.rejoin();
+        // 40,000 packets out of view, which a sequence number left where it was
+        // would read as behind.
         let on = 11u16.wrapping_add(40_000);
-        // The tail of an IDR whose parameter sets went unread is not a start.
-        assert_eq!(d.push(&header(on, 800, true), IDR), Depacketized::Lost);
-        assert_eq!(d.push(&header(on + 1, 1200, true), TRAIL), Depacketized::Lost);
-        assert_eq!(d.push(&header(on + 2, 1600, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        for passed in 1..=40_000u16 {
+            d.skip(&header(11u16.wrapping_add(passed), 400, passed == 40_000));
+        }
+        assert_eq!(d.push(&header(on + 1, 800, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
         assert_eq!(
-            d.push(&header(on + 3, 1600, true), IDR),
+            d.push(&header(on + 2, 800, true), IDR),
             Depacketized::Unit(vec![VPS.to_vec(), SPS.to_vec(), IDR.to_vec()])
         );
+    }
+
+    /// Back in view in the middle of a picture: its tail is no start, though an
+    /// IDR's tail holds slices a decoder could be handed.
+    #[test]
+    fn a_stream_passed_over_mid_picture_starts_at_the_next_whole_one() {
+        let mut d = Depacketizer::default();
+        d.skip(&header(10, 0, false));
+        assert_eq!(d.push(&header(11, 0, true), IDR), Depacketized::Lost);
+        assert_eq!(d.push(&header(12, 400, true), TRAIL), Depacketized::Lost);
+        assert!(!d.resumes_at_refresh(), "its pictures were given up");
+        // The picture passed over never ended with a marked packet: the next
+        // timestamp is a new picture all the same.
+        d.skip(&header(13, 800, false));
+        assert_eq!(d.push(&header(14, 1200, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert!(matches!(d.push(&header(15, 1200, true), IDR), Depacketized::Unit(_)));
     }
 
     /// Apple's first picture: the parameter sets aggregated, the IDR fragmented;
