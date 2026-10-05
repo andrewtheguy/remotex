@@ -726,6 +726,11 @@ struct DesktopState {
     /// from an offer until a layout that changes the display, whose ZRLE
     /// rectangles stand in for the stream again.
     media_preferred: bool,
+    /// The read loop is inside a `FramebufferUpdate`. A layout it has read may
+    /// not have reached [`HpResize::layout`] yet, and a High Performance resize
+    /// sent from elsewhere meanwhile would be taken as answered by it: one that
+    /// falls due now goes out at the update's end — see [`hp_send_due`].
+    in_update: bool,
 }
 
 /// How long a High Performance viewport has to hold still before the Mac is
@@ -2930,6 +2935,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         canvas_live: false,
         media_live: false,
         media_preferred: false,
+        in_update: false,
         media_stream,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
@@ -3708,8 +3714,9 @@ async fn hp_resize_step(
             // boundary the read loop waits for comes now rather than at the next
             // change on screen; the one pixel it asks for is in every mode.
             // Not from a Mac whose preferred codec is the media stream: it sends
-            // no pixels, so no update comes to wait for and none is in flight,
-            // and the size goes out from here.
+            // no pixels, so no update comes to wait for, and the size goes out
+            // from here unless the read loop is inside an update, whose end
+            // sends it.
             Some(HpStep::Drain) => {
                 if desktop.lock().unwrap().media_preferred {
                     hp_send_due(uplink, desktop, media, tab).await?;
@@ -3719,11 +3726,13 @@ async fn hp_resize_step(
                 }
             }
             // Polling holds to one pixel only while a request is out, but the
-            // armed region stays narrowed until a layout re-arms it.
+            // armed region stays narrowed until a layout re-arms it. Still one
+            // pixel under a media stream: a full request the Mac is left holding
+            // is served after the next display change, at this size.
             Some(HpStep::GiveUp) => {
                 let (size, interval) = {
                     let d = desktop.lock().unwrap();
-                    (d.framebuffer(), d.push_interval_us)
+                    (d.poll_size(), d.push_interval_us)
                 };
                 send_all(
                     uplink,
@@ -3738,8 +3747,11 @@ async fn hp_resize_step(
 /// Send the High Performance resize that is due, with the pixel region narrowed
 /// ahead of it — see [`HP_HOLD_REQUEST`]. Not while a media-stream offer is out:
 /// the Mac is starting a capture of the display the change would replace, and the
-/// answer ends an update, at which the read loop sends it. `true` when a size
-/// that was due no longer is: sent, or the desktop already showing.
+/// answer ends an update, at which the read loop sends it. Nor from outside the
+/// read loop while it is inside an update, which may hold a layout not yet
+/// counted: the request would be taken as answered by it, and the next one
+/// would overlap this one on the Mac. That update's end sends it. `true` when a
+/// size that was due no longer is: sent, or the desktop already showing.
 async fn hp_send_due(
     uplink: &SharedUplink,
     desktop: &SharedDesktop,
@@ -3750,7 +3762,8 @@ async fn hp_send_due(
         let mut d = desktop.lock().unwrap();
         let draining = matches!(d.hp.phase, HpPhase::Draining(_));
         let offer_out = media.is_some_and(|m| m.lock().unwrap().pending());
-        let request = if offer_out { None } else { d.hp_take_request(tokio::time::Instant::now()) };
+        let held = offer_out || d.in_update;
+        let request = if held { None } else { d.hp_take_request(tokio::time::Instant::now()) };
         if request.is_some() {
             stream_stopped(&mut d, tab);
             if let Some(media) = media {
@@ -3779,6 +3792,10 @@ async fn offer_media(
     let Some(media) = media else {
         return Ok(());
     };
+    // The uplink first, then the decision, as [`send_decided`] does: the list the
+    // Mac holds is the one [`DesktopState::media_preferred`] says it holds, whatever
+    // a layout read meanwhile sends.
+    let mut uplink = uplink.lock().await;
     let (sizes, offer) = {
         let mut d = desktop.lock().unwrap();
         if !d.media_offerable() {
@@ -3795,14 +3812,14 @@ async fn offer_media(
         None => Ok(()),
         Some(vnc_apple_media::Offer::Encodings) => {
             debug!("vnc: asking the Mac to name its media-stream ports");
-            send(uplink, &set_encodings(&vnc_apple_media::encodings_with_media_stream())).await
+            uplink.send(&set_encodings(&vnc_apple_media::encodings_with_media_stream())).await
         }
         Some(vnc_apple_media::Offer::Configuration(configuration)) => {
             let sizes: Vec<String> = sizes.iter().map(|(w, h)| format!("{w}x{h}")).collect();
             info!("vnc: offering the Mac's media stream for its {} display", sizes.join(" and "));
             // The Mac's pixels stop for the offer: its answer must not meet one.
-            let preferring = set_encodings(&vnc_apple_media::encodings_preferring_media_stream());
-            send_all(uplink, &[preferring, configuration]).await
+            uplink.send(&set_encodings(&vnc_apple_media::encodings_preferring_media_stream())).await?;
+            uplink.send(&configuration).await
         }
     }
 }
@@ -4362,7 +4379,11 @@ async fn read_loop<R: AsyncRead + Unpin>(
             0 => {
                 cycle.arrived();
                 reader.read_u8().await?; // padding
-                desktop.lock().unwrap().first_update();
+                {
+                    let mut d = desktop.lock().unwrap();
+                    d.first_update();
+                    d.in_update = true;
+                }
                 // `0xffff` here means "as many as it takes, ended by a LastRect" —
                 // an update a server starts sending before it knows how long it
                 // will be. macOS uses it for the metadata burst, so on the Apple
@@ -4481,6 +4502,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 }
                 let size = {
                     let mut d = desktop.lock().unwrap();
+                    d.in_update = false;
                     if resized {
                         // The full update a resize earns below repaints whatever a
                         // scale report cleared — see [`read_output_scale`].
@@ -6546,9 +6568,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         }
     };
     let resized = apply_resize(desktop, shadow, size, scale, sink).await?;
-    // The Mac was told to send no pixels and the display has changed: its
-    // rectangles are wanted again, until the stream is offered for the new one.
-    let mut zrle_again = false;
+    let mut display_changed = false;
     if virtual_display {
         // Which leg carries which display changes under a canvas changing
         // display, which reads and sets who is shown each: one at a time.
@@ -6576,12 +6596,12 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
                 if let Some(media) = &shared.media {
                     media.lock().unwrap().stopped();
                 }
-                zrle_again = std::mem::take(&mut d.media_preferred);
             }
             changed
         };
         drop(switch);
         hp_wake.notify_one();
+        display_changed = changed;
         if changed {
             tab_laid_out(shared, &virtuals).await;
         }
@@ -6670,11 +6690,16 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // A layout that answered nothing leaves a High Performance change out, and
     // the region stays narrowed until the one that answers it — see
     // [`HP_HOLD_REQUEST`].
-    let (armed, interval) = {
-        let d = desktop.lock().unwrap();
-        (d.poll_size(), d.push_interval_us)
-    };
+    //
+    // The Mac was told to send no pixels and the display has changed: its
+    // rectangles are wanted again, until the stream is offered for the new one.
+    // Decided with the uplink held, as [`offer_media`] decides the other list.
     let mut uplink = uplink.lock().await;
+    let (zrle_again, armed, interval) = {
+        let mut d = desktop.lock().unwrap();
+        let zrle_again = display_changed && std::mem::take(&mut d.media_preferred);
+        (zrle_again, d.poll_size(), d.push_interval_us)
+    };
     if zrle_again {
         uplink.send(&set_encodings(&vnc_apple_media::encodings_with_media_stream())).await?;
     }
@@ -9577,6 +9602,7 @@ mod tests {
             canvas_live: false,
             media_live: false,
             media_preferred: false,
+            in_update: false,
             media_stream: false,
         }))
     }
@@ -10023,6 +10049,43 @@ mod tests {
         sent.extend_from_slice(&hp_config((800, 600), 1.0));
         assert_eq!(written(&wire), sent);
         assert!(matches!(desktop.lock().unwrap().hp.phase, HpPhase::InFlight((800, 600))));
+
+        // Unanswered and given up on, the region re-armed is still the one
+        // pixel: the Mac would hold a full request until the display changed.
+        wire.0.lock().unwrap().clear();
+        tokio::time::advance(HP_RESIZE_STUCK).await;
+        hp_resize_step(&uplink, &desktop, None, &SharedTab::default(), &sink).await.unwrap();
+        let mut rearmed = vnc_apple::auto_framebuffer_update(interval, HP_HOLD_REQUEST);
+        rearmed.extend_from_slice(&update_request(false, HP_HOLD_REQUEST));
+        assert_eq!(written(&wire), rearmed);
+    }
+
+    /// Inside an update the read loop may hold a layout it has not counted, which
+    /// would answer a size sent now: the size waits for the update's end.
+    #[tokio::test(start_paused = true)]
+    async fn high_performance_resize_waits_for_the_end_of_an_update() {
+        let (uplink, wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let desktop = shared_desktop((1024, 768), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_preferred = true;
+            d.in_update = true;
+        }
+
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), true).await.unwrap();
+        hp_resize_step(&uplink, &desktop, None, &SharedTab::default(), &sink).await.unwrap();
+        tokio::time::advance(HP_RESIZE_SETTLE).await;
+        hp_resize_step(&uplink, &desktop, None, &SharedTab::default(), &sink).await.unwrap();
+        assert!(written(&wire).is_empty(), "nothing goes out inside an update");
+        assert!(matches!(desktop.lock().unwrap().hp.phase, HpPhase::Draining((800, 600))));
+
+        desktop.lock().unwrap().in_update = false;
+        assert!(hp_send_due(&uplink, &desktop, None, &SharedTab::default()).await.unwrap());
+        let interval = desktop.lock().unwrap().push_interval_us;
+        let mut sent = vnc_apple::auto_framebuffer_update(interval, HP_HOLD_REQUEST);
+        sent.extend_from_slice(&hp_config((800, 600), 1.0));
+        assert_eq!(written(&wire), sent);
     }
 
     #[test]
