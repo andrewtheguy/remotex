@@ -192,7 +192,7 @@ site_passwd = ""
 # per target for the next time. Which a target shows is its type's to say:
 #
 #   target                           window   sound            passthrough
-#   rdp                              yes      shown            shown (beta)
+#   rdp                              yes      shown            shown
 #   vnc                              —        —                —
 #   vnc, wlshare                     yes      shown            —
 #   vnc, ard                         —        —                —
@@ -307,10 +307,11 @@ password = "change-me"
 # session again rather than resumed, since the host draws against what its client
 # already holds. The page needs WebGL 2 and to be cross-origin isolated, which
 # every gateway makes it and a proxy that drops the two headers undoes.
-# BETA. The compositor is the gateway's own and is tested as it is there,
+# The compositor is the gateway's own and is tested as it is there,
 # and what is passed is checked against a real host, in a headless browser and by
-# hand. That is one Windows 11 host, with sound and the clipboard beside it;
-# `camera` and `microphone` beside it have not been tried.
+# hand. That is a physical Windows 11 computer, from a desktop browser and from a
+# mobile browser on iOS, with sound and the clipboard beside it; `camera` and `microphone`
+# beside it have not been tried.
 #egfx = true
 
 # EXPERIMENTAL. Let the host draw with H.264 on a pipeline that is passed to the

@@ -89,7 +89,7 @@ macOS are the common use case, so testing and optimization prioritize them.
   Both follow the window at its density and carry sound: Windows as Opus or
   FLAC, with the camera and microphone beside it; the Mac always as AAC-ELD, on
   one virtual display or two. Their picture is VP9 from the gateway or, for a LAN,
-  their own stream passed through, the host's graphics pipeline (beta) or the
+  their own stream passed through, the host's graphics pipeline or the
   Mac's HEVC, which does not adapt to the browser's link.
 - **Tier 3: a Mac's Standard Screen Sharing** (`vnc`, `subtype = "ard"`). The
   Mac's physical displays, one or all, at their own size and density, as VP9

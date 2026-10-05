@@ -58,7 +58,7 @@ config key.
 
 | Target | Window drives the size | Sound | Passthrough |
 |---|---|---|---|
-| `rdp` | yes | off, Opus or FLAC | the graphics pipeline (beta) |
+| `rdp` | yes | off, Opus or FLAC | the graphics pipeline |
 | `vnc` | no | none | — |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) |
 | `vnc`, `ard` | no | none | — |
@@ -106,7 +106,7 @@ touch.
 - `egfx = false` makes the host draw with bitmap updates instead of the graphics
   pipeline (MS-RDPEGFX). The desktop then keeps its size, since an RDP resize is
   the pipeline's graphics reset.
-- **Beta:** the passthrough sends the pipeline to the browser, which
+- The passthrough sends the pipeline to the browser, which
   composes it. That takes nearly all of the picture's work off the gateway. It
   needs WebGL 2 and a cross-origin isolated page, which a proxy that drops the
   gateway's two isolation headers undoes.

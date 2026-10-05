@@ -37,7 +37,7 @@ whose AAC-ELD sound every session passes to the browser, and whose HEVC a sessio
 started with the passthrough passes too rather than re-encoding it — see
 [Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
 session started with its passthrough is not decoded here either: the host's
-graphics pipeline is passed on for the browser to compose, which is in beta — see
+graphics pipeline is passed on for the browser to compose — see
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 How a session's desktop is sized, whether it takes the remote's sound and whether
 it passes the remote's stream are chosen at the picker before it starts — see
@@ -116,16 +116,17 @@ The host's own stream, passed through to the browser for a LAN:
 - **Modern Windows' own Remote Desktop server**, in a session started with the
   passthrough: the host's graphics pipeline (MS-RDPEGFX), composed in the browser
   by the gateway's own compositor built to WebAssembly, which takes nearly all of
-  the picture's work off the gateway. It is in **beta**: run against one
-  Windows 11 host, with sound and the clipboard beside it, and not yet with the
-  camera or the microphone. A target with `egfx_h264 = true`, more experimental
-  still, lets the host draw video with H.264 on that pipeline, which the browser
-  decodes; without the key what is passed is lossless. See
+  the picture's work off the gateway. It is tested against a
+  physical Windows 11 computer, from a desktop browser and from a mobile browser on iOS, with
+  sound and the clipboard beside it, and not yet with the camera or the
+  microphone. A target with the experimental `egfx_h264 = true` lets the host
+  draw video with H.264 on that pipeline, which the browser decodes; without the key what is passed is lossless. See
   [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 - **macOS Screen Sharing's High Performance mode** (`ard-high-performance`), in a
   session started with the passthrough: the Mac's HEVC picture, to a browser
   that decodes it (Chrome and Safari; not Firefox). Its AAC-ELD sound is passed
-  in every session. See
+  in every session. It is tested against a physical Mac, from a desktop browser
+  and from a mobile browser on iOS. See
   [Apple's media stream, passed through](#apples-media-stream-passed-through).
 
 The passthrough is a choice made at the picker, greyed for a browser that cannot
@@ -465,7 +466,7 @@ names, and on *All Displays* the second display's tab is painted that column of
 the same picture, handed across the browser (`frontend/src/displayRelay.ts`).
 Do not compose a pipeline in two tabs, and do not deal its commands out by
 display. A host that draws with bitmap updates is encoded here
-as VP9. Call it beta wherever it is named to an operator.
+as VP9.
 
 H.264 stays refused in the capability advertise of every pipeline the gateway
 composes: a host would hand the parts of the desktop that move like video to a
@@ -951,15 +952,15 @@ costs is the browser's work, and the quality walk: what the host draws with is
 sent as it is, so `video_quality`, `render_chroma` and `render_adaptive` reach
 nothing of it.
 
-**Beta.** The compositor the page runs is the gateway's own, unit tested
+The compositor the page runs is the gateway's own, unit tested
 as it is there, and the module built from it is tested as the page loads it.
 What is passed is checked against a real host: `tests/rdp_client_probe.rs`
 composes a passed pipeline beside the session that passed it,
 `tests/playwright/egfx-passthrough.spec.ts` reads the display socket of a
 headless browser composing one, and `tests/playwright/egfx-two-displays.spec.ts`
 reads both displays' sockets of a browser showing a passed span in two tabs.
-That host is one Windows 11 machine, used with
-sound and the clipboard beside it; the camera and the microphone beside it
+By hand it is used against a physical Windows 11 computer, from a desktop
+browser and from a mobile browser on iOS, with sound and the clipboard beside it; the camera and the microphone beside it
 have not been tried, and no container stands in for a host that draws through
 the pipeline.
 
@@ -1457,7 +1458,7 @@ and `GET /api/targets` carries it:
 
 | Target | Window drives the size | Sound | Passthrough |
 |---|---|---|---|
-| `rdp` | yes | shown | shown: the graphics pipeline, beta |
+| `rdp` | yes | shown | shown: the graphics pipeline |
 | `vnc` | no | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture |
 | `vnc`, `ard` | no | hidden | hidden |

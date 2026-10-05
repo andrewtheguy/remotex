@@ -350,10 +350,11 @@ pub enum Passthrough {
     /// nothing a running session can be resumed onto: a reattach reconnects the
     /// host instead.
     ///
-    /// **Beta.** The compositor the page runs is the gateway's own and is
+    /// The compositor the page runs is the gateway's own and is
     /// unit tested as it is there, and what is passed is checked against a real
-    /// host, by the probe and by a headless browser. That is one Windows 11 host,
-    /// with sound and the clipboard beside it;
+    /// host, by the probe, by a headless browser and by hand. That is a physical
+    /// Windows 11 computer, from a desktop browser and from a mobile browser on iOS, with sound
+    /// and the clipboard beside it;
     /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] beside it have not
     /// been tried.
     RdpGraphics,

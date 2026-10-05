@@ -204,9 +204,7 @@ and commands it carried when it ends, at `info`.
 
 ### The pipeline, passed on
 
-**Beta**, for the reason
-[RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)
-gives. `Connect::pass_graphics` — a session started with the passthrough — has the session hand the
+`Connect::pass_graphics` — a session started with the passthrough — has the session hand the
 pipeline's commands to its caller instead of composing them. The channel is
 still this client's: the capability exchange and the bulk compression are as
 above, since the history is the connection's, and so is writing each frame's
