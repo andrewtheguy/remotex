@@ -902,7 +902,9 @@ Three controls with similar names therefore remain separate:
   replaced as soon as the stream delivers, so neither the Mac's reading of input
   nor the gateway's cores are spent on it. While the stream flows the rectangles
   are still decoded, since ZRLE's deflate stream cannot be inflated across a
-  gap, and dropped. The stream coming back starts at an IDR, announced again by
+  gap, and dropped. Two virtual displays' legs deliver apart, so each display
+  shown keeps its rectangles until its own leg has delivered, and the stream
+  carries the picture once all of them have (`stream_carries`). The stream coming back starts at an IDR, announced again by
   its `VideoFormat`. The resize notice covers only a resize in progress, as on
   the virtual display under Standard mode.
 - **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive

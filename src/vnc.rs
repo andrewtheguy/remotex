@@ -701,8 +701,14 @@ struct DesktopState {
     /// A High Performance layout has arrived: the virtual display the session
     /// asked for exists, and a media-stream offer can name its size.
     laid_out: bool,
-    /// The picture comes from the media stream ([`vnc_apple_media`]): a decoded
-    /// picture of the current size has been shown since the last display change.
+    /// The canvas's display has had a picture of its current size from the media
+    /// stream since the stream last stopped, so the Mac's rectangles no longer
+    /// stand in for it there. A second display's tab keeps its own
+    /// ([`TabFeed::live`]): the legs deliver apart.
+    canvas_live: bool,
+    /// The picture comes from the media stream ([`vnc_apple_media`]): every
+    /// display shown has had one of its current size since the stream last
+    /// stopped ([`stream_carries`]).
     /// Pixel polling then holds to [`HP_HOLD_REQUEST`], which still brings the
     /// cursor shapes and layouts. Until then, and again from the next display
     /// change or stream restart, the Mac's rectangles are the picture.
@@ -1676,6 +1682,9 @@ struct TabFeed {
     display: u32,
     sink: VideoSink,
     shadow: SharedShadow,
+    /// The tab's display has had a picture from the media stream since the
+    /// stream last stopped, as [`DesktopState::canvas_live`] says of the canvas's.
+    live: bool,
 }
 
 /// The tab showing the second display, shared by the engine's two loops: the
@@ -2905,6 +2914,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         view: HpView::default(),
         second_points: None,
         laid_out: false,
+        canvas_live: false,
         media_live: false,
         media_stream,
     }));
@@ -3755,19 +3765,52 @@ async fn show_picture(
         if picture.size != d.size || d.hp.holds_pixels() {
             return Ok(());
         }
-        !std::mem::replace(&mut d.media_live, true)
+        !std::mem::replace(&mut d.canvas_live, true)
     };
     if first {
         info!("vnc: the picture now comes from the Mac's HEVC media stream");
-        // The armed region too, or the Mac would go on pushing ZRLE for every
-        // change on screen — and it reads nothing from this side while it writes.
+    }
+    stream_carries(shared).await?;
+    blit_picture(&shared.shadow, picture, sink).await
+}
+
+/// Say the media stream carries the picture once every display shown has had one
+/// from it: the canvas's, and a second display's in its tab while one is open.
+/// Pixel polling and the armed region narrow to [`HP_HOLD_REQUEST`] from then,
+/// or the Mac would go on pushing ZRLE for every change on screen — and it reads
+/// nothing from this side while it writes. Until then its rectangles still stand
+/// in for whichever display is waiting.
+async fn stream_carries(shared: &Shared) -> anyhow::Result<()> {
+    let carried = {
+        let mut d = shared.desktop.lock().unwrap();
+        let tab_live = shared.tab.lock().unwrap().as_ref().is_none_or(|tab| tab.live);
+        d.canvas_live && tab_live && !std::mem::replace(&mut d.media_live, true)
+    };
+    if carried {
         send(
             &shared.uplink,
             &vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_MEDIA_US, HP_HOLD_REQUEST),
         )
         .await?;
     }
-    blit_picture(&shared.shadow, picture, sink).await
+    Ok(())
+}
+
+/// The media stream stopped, for a display change or on the Mac's own account:
+/// the Mac's rectangles stand in for every display again.
+fn stream_stopped(d: &mut DesktopState, tab: &SharedTab) {
+    d.canvas_live = false;
+    d.media_live = false;
+    if let Some(tab) = tab.lock().unwrap().as_mut() {
+        tab.live = false;
+    }
+}
+
+/// The tab's display has had a picture from the media stream.
+fn tab_live(tab: &SharedTab) {
+    if let Some(tab) = tab.lock().unwrap().as_mut() {
+        tab.live = true;
+    }
 }
 
 /// A whole-display picture into the stream, as much of it as the browser lacks.
@@ -3812,17 +3855,12 @@ async fn pass_unit(
             sink.restart_pass();
             return Ok(());
         }
-        !std::mem::replace(&mut d.media_live, true)
+        !std::mem::replace(&mut d.canvas_live, true)
     };
     if first {
         info!("vnc: the picture is now the Mac's HEVC media stream, passed to the browser");
-        // As in `show_picture`: the Mac would otherwise go on pushing ZRLE.
-        send(
-            &shared.uplink,
-            &vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_MEDIA_US, HP_HOLD_REQUEST),
-        )
-        .await?;
     }
+    stream_carries(shared).await?;
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
     if !sink.pass_hevc(w, h, unit.data, passed).await? {
@@ -3848,6 +3886,7 @@ async fn tab_picture(shared: &Shared, leg: usize, picture: &vnc_apple_media::Pic
     if !tab_takes(shared, leg, picture.size) {
         return;
     }
+    tab_live(&shared.tab);
     if let Err(e) = blit_picture(&shadow, picture, &sink).await {
         tab_gone(&shared.tab, shared.media.as_ref(), &e);
     }
@@ -3863,6 +3902,7 @@ async fn tab_unit(shared: &Shared, leg: usize, unit: PassedUnit, media: &SharedM
         sink.restart_pass();
         return;
     }
+    tab_live(&shared.tab);
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
     match sink.pass_hevc(w, h, unit.data, passed).await {
@@ -4157,7 +4197,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         }
                         match shown_on(&shared, leg) {
                             ShownOn::Canvas => show_picture(&shared, &picture, &sink).await?,
-                            ShownOn::Tab => tab_picture(&shared, leg, &picture).await,
+                            ShownOn::Tab => {
+                                tab_picture(&shared, leg, &picture).await;
+                                stream_carries(&shared).await?;
+                            }
                             ShownOn::Nowhere => {}
                         }
                     }
@@ -4166,7 +4209,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         media.lock().unwrap().pictured(leg, unit.size);
                         match shown_on(&shared, leg) {
                             ShownOn::Canvas => pass_unit(&shared, leg, unit, &sink, media).await?,
-                            ShownOn::Tab => tab_unit(&shared, leg, unit, media).await,
+                            ShownOn::Tab => {
+                                tab_unit(&shared, leg, unit, media).await;
+                                stream_carries(&shared).await?;
+                            }
                             ShownOn::Nowhere => {}
                         }
                     }
@@ -4342,6 +4388,11 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 {
                     tab_gone(&shared.tab, media.as_ref(), &e);
                 }
+                // A tab that went while its display was waited on leaves the
+                // canvas's stream carrying the picture.
+                if media.is_some() {
+                    stream_carries(&shared).await?;
+                }
                 cycle.framed();
                 // Not in an update that carried a layout: the layout armed the
                 // region it left, and the pixels it earns are a whole repaint.
@@ -4402,7 +4453,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         let request =
                             if offer_out { None } else { d.hp_take_request(tokio::time::Instant::now()) };
                         if request.is_some() {
-                            d.media_live = false;
+                            stream_stopped(&mut d, &shared.tab);
                             if let Some(media) = media {
                                 media.lock().unwrap().stopped();
                             }
@@ -5528,7 +5579,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
             }
             let (armed, interval) = {
                 let mut d = desktop.lock().unwrap();
-                d.media_live = false;
+                stream_stopped(&mut d, &shared.tab);
                 (d.poll_size(), d.push_interval_us)
             };
             send(uplink, &vnc_apple::auto_framebuffer_update(interval, armed)).await?;
@@ -5636,13 +5687,16 @@ async fn accept_rect(shadow: &SharedShadow, rect: Rect, rgb: &[u8], sink: &Video
 /// virtual displays: the part of it on the canvas's display to the canvas, and
 /// the part on the second to its tab while one shows it, each where its display
 /// starts. Standing in for the media stream, as every rectangle shown of such a
-/// session is.
+/// session is, and for each display only until its own leg delivers.
 async fn show_spanned(shared: &Shared, rect: Rect, rgb: &[u8], sink: &VideoSink) -> anyhow::Result<()> {
     let (canvas, tab) = {
         let d = shared.desktop.lock().unwrap();
         let tab = d.view.tab_leg(HP_TAB_DISPLAY, d.virtuals.len());
-        (d.virtuals.get(d.view.active).copied(), tab.and_then(|leg| d.virtuals.get(leg).copied()))
+        let canvas = if d.canvas_live { None } else { d.virtuals.get(d.view.active).copied() };
+        (canvas, tab.and_then(|leg| d.virtuals.get(leg).copied()))
     };
+    // Each only until its own leg of the stream delivers.
+    let tab = tab.filter(|_| shared.tab.lock().unwrap().as_ref().is_some_and(|tab| !tab.live));
     if let Some(display) = canvas
         && let Some((part, pixels)) = on_display(display, rect, rgb)
     {
@@ -6312,6 +6366,7 @@ async fn hp_tab_shown(
         display,
         sink: VideoSink::new("vnc", feed.frames, plan, feed.feedback, Oversize::Refuse),
         shadow: Arc::new(std::sync::Mutex::new(Shadow::new("vnc", shown.size.0, shown.size.1))),
+        live: false,
     });
     tab_repaint(shared, macos).await;
 }
@@ -6476,7 +6531,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             // Mac's rectangles are the picture until the stream is offered for it
             // and delivers.
             if changed {
-                d.media_live = false;
+                stream_stopped(&mut d, &shared.tab);
                 if let Some(media) = &shared.media {
                     media.lock().unwrap().stopped();
                 }
@@ -9474,6 +9529,7 @@ mod tests {
             view: HpView::default(),
             second_points: None,
             laid_out: false,
+            canvas_live: false,
             media_live: false,
             media_stream: false,
         }))
@@ -11192,7 +11248,7 @@ mod tests {
         assert!(shadow.lock().unwrap().copy_out(whole).is_none(), "nor recorded as sent");
 
         // The stream stops, and the same screen is the picture.
-        desktop.lock().unwrap().media_live = false;
+        stream_stopped(&mut desktop.lock().unwrap(), &shared.tab);
         let err = read_loop(screen(), shared, false, None, sink.clone()).await.unwrap_err();
         assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
         assert!(!sink.passing(), "the Mac's rectangles carry the picture between streams");
@@ -12598,6 +12654,23 @@ mod tests {
         tab_sink.flush().await;
         let sent: Vec<ServerMsg> = std::iter::from_fn(|| tab_rx.try_recv().ok()).collect();
         assert!(sent.iter().any(|msg| matches!(msg, ServerMsg::Video(_))), "{sent:?}");
+
+        // The legs deliver apart. The tab's has, so the Mac's rectangles stand in
+        // for the canvas alone until its own does, and only then does the stream
+        // carry the picture.
+        assert!(!desktop.lock().unwrap().media_live, "the canvas's leg has not delivered");
+        let span = Rect::from_size(0, 0, 288, 100).unwrap();
+        show_spanned(&shared, span, &vec![0x80; 288 * 100 * 3], &sink).await.unwrap();
+        let canvas = Rect::from_size(0, 0, 160, 100).unwrap();
+        assert!(shared.shadow.lock().unwrap().copy_out(canvas).is_some(), "the canvas is shown them");
+        tab_sink.frame().await.unwrap();
+        tab_sink.flush().await;
+        assert!(tab_rx.try_recv().is_err(), "the tab's stream is not displaced");
+        show_picture(&shared, &picture((160, 100)), &sink).await.unwrap();
+        assert!(desktop.lock().unwrap().media_live);
+        // A display change stops both legs.
+        stream_stopped(&mut desktop.lock().unwrap(), &shared.tab);
+        assert!(!shared.tab.lock().unwrap().as_ref().unwrap().live);
 
         // Its window sizes it in a session that follows the window, and the first
         // display keeps its own.
