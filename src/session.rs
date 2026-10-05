@@ -1123,7 +1123,8 @@ impl SessionManager {
             return Err(DisplayRefused::NotShown(display));
         }
         let opener = tab.map(|tab| tab.id);
-        let same_tab = |slot: &DisplaySlot| slot.tab.as_deref() == opener;
+        // Two sockets that name no tab are not one tab's.
+        let same_tab = |slot: &DisplaySlot| opener.is_some() && slot.tab.as_deref() == opener;
         if display != FIRST_DISPLAY
             && !tab.is_some_and(|tab| tab.take_over)
             && st.displays.get(&display).is_some_and(|slot| !same_tab(slot))
@@ -3039,6 +3040,13 @@ mod tests {
         let Some(ClientMsg::DisplayShown { display: 2, feed: Some(_) }) = input_rx.recv().await else {
             panic!("the engine is handed the next tab's feed");
         };
+        // A socket naming no tab opens a display nobody shows, and is no tab's
+        // own next socket: a second one is refused like any other tab's.
+        mgr.detach_display(third.id);
+        assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, feed: None })));
+        let third = mgr.attach_display("login", 2, None).unwrap();
+        assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, feed: Some(_) })));
+        assert!(matches!(mgr.attach_display("login", 2, None), Err(DisplayRefused::InUse(2))));
         let control = || ClientMsg::Key { code: "ControlLeft".into(), pressed: true, caps: false };
         mgr.forward_display_input(third.id, control());
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::OnDisplay { display: 2, .. })));

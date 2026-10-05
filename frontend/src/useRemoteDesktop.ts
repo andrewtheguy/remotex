@@ -140,19 +140,53 @@ export const SESSION_KEY = "remotex.sessionId";
 // tab back in, and another tab has another.
 const TAB_KEY = "remotex.displayTab";
 
-function tabId(): string {
+// Whether `id` is this page's alone: a duplicated tab starts with a copy of the
+// storage it was made from, the name included, and the page it was copied from
+// still holds the name's lock. Held for the page's life, so a reload, whose last
+// document let go of it, gets it again. True where there are no locks to ask.
+async function tabIdIsFree(id: string): Promise<boolean> {
+  if (!navigator.locks) {
+    return true;
+  }
+  return new Promise((resolve) => {
+    void navigator.locks.request(
+      `${TAB_KEY}.${id}`,
+      { ifAvailable: true },
+      (lock) => {
+        resolve(lock !== null);
+        // Never settles: the lock goes with the page.
+        return lock === null ? undefined : new Promise<void>(() => {});
+      },
+    );
+  });
+}
+
+async function nameTab(): Promise<string> {
+  let kept: string | null = null;
   try {
-    const kept = sessionStorage.getItem(TAB_KEY);
-    if (kept) {
-      return kept;
-    }
-    const made = crypto.randomUUID();
-    sessionStorage.setItem(TAB_KEY, made);
-    return made;
+    kept = sessionStorage.getItem(TAB_KEY);
   } catch {
     // Storage blocked: a name for this page load, so a reload is another tab's.
-    return crypto.randomUUID();
   }
+  if (kept && (await tabIdIsFree(kept))) {
+    return kept;
+  }
+  const made = crypto.randomUUID();
+  await tabIdIsFree(made);
+  try {
+    sessionStorage.setItem(TAB_KEY, made);
+  } catch {
+    // Storage blocked: kept in `tabName` for as long as this page is.
+  }
+  return made;
+}
+
+// Named once for the page, so every socket it opens presents the same name.
+let tabName: Promise<string> | null = null;
+
+function tabId(): Promise<string> {
+  tabName ??= nameTab();
+  return tabName;
 }
 // The Mac-host Command-to-Control preference, default on. localStorage rather
 // than sessionStorage: unlike the session identity this is a lasting choice about
@@ -1158,7 +1192,10 @@ export function useRemoteDesktop(
         return;
       }
       if (tabDisplay !== null) {
-        openDisplay(tabDisplay, force);
+        const tab = await tabId();
+        if (!disposed) {
+          openDisplay(tabDisplay, { id: tab, takeover: force });
+        }
         return;
       }
       await claimAndOpen(force);
@@ -1404,13 +1441,11 @@ export function useRemoteDesktop(
 
     // A display's socket, which carries no claim: the gateway lets it in by the
     // login cookie this browser carries (src/session.rs, `attach_display`).
-    const openDisplay = (display: number, takeover = false) => {
-      const socket = new WebSocket(
-        gatewayDisplaySocketUrl(
-          display,
-          tabDisplay === null ? null : { id: tabId(), takeover },
-        ),
-      );
+    const openDisplay = (
+      display: number,
+      tab: { id: string; takeover: boolean } | null = null,
+    ) => {
+      const socket = new WebSocket(gatewayDisplaySocketUrl(display, tab));
       const generation = advancePaintGeneration(paintGenerationRef);
       paintSocket = socket;
       socket.binaryType = "arraybuffer";
