@@ -121,7 +121,7 @@ touch.
   picker, which keeps the first display here and links to the second, **Open
   Display 2 ↗** under the menu's Display button: it opens at `/display/2` in a
   new tab of the same browser, just that display, with its own pointer and
-  keyboard. The picker's `Display 1` and `Display 2` show one display alone on
+  keyboard, and clicked again it brings that tab to the front. The picker's `Display 1` and `Display 2` show one display alone on
   this page; the gateway encodes only what is shown. A window dragged over the edge between the two tabs arrives on the
   other display, as the pointer does, however their windows are arranged. With
   each tab full screen on a display of its own the edges meet, so it arrives

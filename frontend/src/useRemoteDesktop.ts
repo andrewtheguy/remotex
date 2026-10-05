@@ -219,8 +219,8 @@ const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
 // Mute and Unmute change. Unset is the browser's default (`STARTS_MUTED`).
 // sessionStorage, like the session identity: it belongs to this tab's session, so
 // a reload or a dropped socket comes back as it was left, and every Start clears
-// it.
-const MUTED_KEY = "remotex.muted";
+// it. Exported so a display's tab (App.tsx) can drop the copy it was opened with.
+export const MUTED_KEY = "remotex.muted";
 // The touchscreen preference: fingers forwarded to the remote as touch contacts
 // rather than read as trackpad gestures. Remembered like the Mac-keys one, and
 // for the same reason — it describes the device in hand, not a session — and

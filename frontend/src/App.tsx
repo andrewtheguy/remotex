@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
+import { standAlone } from "./displayTab.ts";
 import { gatewayFetch, gatewayUrl } from "./gateway.ts";
 import { gatewayConfig } from "./gatewayConfig.ts";
 import Login from "./Login.tsx";
 import RemoteDesktop from "./RemoteDesktop.tsx";
-import { SESSION_KEY } from "./useRemoteDesktop.ts";
+import { MUTED_KEY, SESSION_KEY } from "./useRemoteDesktop.ts";
 
 // The display a page at `/display/2` shows in a tab of its own, beside the session
 // another tab of this browser holds; null for every other path, which is the page
@@ -14,6 +15,14 @@ function tabDisplayOf(path: string): number | null {
 }
 
 const TAB_DISPLAY = tabDisplayOf(globalThis.location?.pathname ?? "/");
+
+// A display's tab opened from the session's page starts with a copy of that
+// page's storage (displayTab.ts). What is the session's goes before anything
+// here reads it: the claim, which this page never makes, and the choice of
+// sound, which is that page's.
+if (TAB_DISPLAY !== null) {
+  standAlone([SESSION_KEY, MUTED_KEY]);
+}
 
 // Gate the desktop behind the web login. The desktop is only mounted
 // once authenticated — mounting it claims the session slot, which must not
