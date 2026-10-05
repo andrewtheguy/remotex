@@ -243,8 +243,8 @@ record layer.
 
 **Apple's viewer**, logging in with a name and password, tries 33, then 36, then
 30, with Kerberos first or after them depending on its own preference. Asking
-for permission, it tries 32, then 31. Which form of 33 it sends is not
-established.
+for permission, it tries 32, then 31. Of 33 it sends the SRP form to a Mac that
+lists 36, and the plain login to one that does not.
 
 ### ServerInit's name field is not a name
 
@@ -1087,7 +1087,12 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
   that video 2 has a blob exactly when it was offered. The answer sometimes comes twice for one offer.
   Apple's viewer disregards an answer that comes before message 1.
 - **message 3**, a 16-byte error: the common header, then `u32` type and `u32`
-  sub-code.
+  sub-code. Type 2 answers an offer the Mac could make no configuration
+  from. Type 1 with sub-code 1 answers a `SetEncodings` naming 1010 from a
+  second viewer: the Mac gives the stream to one viewer at a time, and ignores
+  the display configurations of any other while it runs, so that viewer's
+  layouts go on showing the first one's display. Remotex ends the session on
+  either and names the other viewer for the second.
 
 Each offer is a binary property list of four keys around a deflated
 AVConference protobuf. Remotex rebuilds Apple's offers field by field and changes
@@ -1096,7 +1101,22 @@ two fields:
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
-| `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips of 256 rows. Each strip is coded as a separate picture of one bitstream, in its own sequence-number space with a DONL, and nothing in a packet names its strip. One tile is one picture of the whole display, without DONL. |
+| `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips. Each strip is coded as a separate picture and sent as an RTP stream of its own, with a DONL: its SSRC is the display's plus the strip's number, counted from 0. One tile is one picture of the whole display on the one SSRC, without DONL. |
+
+The video offer names two codecs by their RTP payload numbers, 123 for H.264
+and 100 for HEVC, each with its own feature string. Offered both, the Mac sends
+HEVC.
+
+Offered 123 alone, the Mac sends H.264 instead, as RTP payload type 123 on the
+same leg and under the same keys, with the sound unchanged. On macOS 26.6 at
+1600×1000 with one tile it was High profile, level 4.0, 8-bit 4:2:0, declaring 5
+reference frames and a 13-bit picture order count, and tagged with the HEVC
+stream's colours: Display P3 primaries, sRGB transfer, BT.709 matrix. Its
+parameter sets do not come as NAL units of their own. A keyframe's first packet
+is an MP4 `avc1` sample description holding them, and the IDR follows as FU-A
+fragments. Remotex does not ask for it. Seen in one short run on the virtual Mac
+only: no browser was given it, and a display change, a keyframe request and
+more than one tile were not tried.
 
 The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
 sets its bits and then byte-swaps the word before sending it. A published
@@ -1182,6 +1202,12 @@ other failures (see [Liveness](#the-stream)).
 - **RTCP.** The viewer sends a receiver report on both legs every second. A PLI or
   FIR brings an IDR within about 30 ms. Besides sender and receiver reports, the
   Mac accepts a compound packet that starts with PT 192, 193, 204, 205 or 206.
+  - **The Mac drops a keyframe request made too soon.** It keeps the time of the
+    last keyframe it made, which starts at the stream's own start, and discards
+    a PLI or FIR that comes sooner after it than a least gap: 1 s for a stream
+    of one tile, 10 ms for one of more. It logs
+    `Request key frame too soon, discard` and sends nothing, and nothing later
+    makes up for the request.
   - **AVConference's FIR** has two forms, chosen by a per-stream setting: RFC
     5104's (PT 206, FMT 4) and its own PT 192. The PT 192 form is the sender's
     SSRC and a list of 16-bit values, not RFC 2032's FIR, which is what a
@@ -1190,7 +1216,9 @@ other failures (see [Liveness](#the-stream)).
     (the first packets can arrive before the socket is bound), and when the
     decoder falls eight pictures behind, which it warns about; for a passed
     stream, when the browser's link falls 15 behind and when the browser has to
-    start over. It also sends the rate reports described under
+    start over. It sends the PLI again every 500 ms until a picture it can
+    start at arrives, since the Mac may have dropped it and a still screen
+    sends nothing else to show that. It also sends the rate reports described under
     [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
     viewer does.
 - **Liveness.** The `SetEncodings` naming 1010 owes message 1 within 10 s, and so
@@ -1275,8 +1303,9 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   and a passed one: what the browser's link does, the VP9 walk and the passed
   stream's queue answer, not the Mac's controller.
 - **Apple's viewer.** It offers up to 100 Mbit/s and four tiles, sends `RCTL`
-  every 50 ms, and acknowledges each decoded tile picture with a 4-byte APP
-  packet for the encoder's long-term references. On a quiet link its target sat
+  every 50 ms, and acknowledges each decoded tile picture for the encoder's
+  long-term references, with an APP packet whose name is the number 5 and whose
+  four bytes are the picture's RTP timestamp. On a quiet link its target sat
   at 58.4 Mbit/s with a round-trip time of about 1 ms. Its session was encrypted,
   so its reports were not read: the layout above comes from AVConference's code
   that builds and parses them, confirmed by a probe whose reports the Mac took as
@@ -1414,12 +1443,13 @@ is 10 s overdue.
 - **`0x3f3`'s DCT tiles:** how their coefficients, and a partial update's
   refinements, are coded
   ([Apple's own framebuffer encodings](#apples-own-framebuffer-encodings)).
-- **Other login types:** type 35's Kerberos tokens, and which form of type 33
-  Apple's viewer sends ([Other login types](#other-login-types)).
+- **Other login types:** type 35's Kerberos tokens
+  ([Other login types](#other-login-types)).
 - **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers
   the target over longer than 30 s, and whether any offer field lowers the
   20 Mbit/s floor ([Rate control](#rate-control)).
-- **Four-tile frames**: how Apple's viewer places each strip.
+- **Four-tile frames**: how tall each strip is, and whether one strip's
+  pictures predict from another's.
 - **Cases the test Mac could not show:**
   - a non-console user;
   - hardware mirroring;
