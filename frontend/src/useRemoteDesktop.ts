@@ -213,9 +213,10 @@ function tabId(): Promise<string> {
 // than sessionStorage: unlike the session identity this is a lasting choice about
 // how this machine's keyboard behaves, and it should survive a new tab.
 const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
-// Whether this tab muted the session it is on. Whether a session carries the
-// remote's sound is chosen at the picker and held by the gateway; this is only
-// whether this tab is listening to it, which the menu's Mute and Unmute change.
+// What this tab last chose for the session it is on, Mute or Unmute. Whether a
+// session carries the remote's sound is chosen at the picker and held by the
+// gateway; this is only whether this tab is listening to it, which the menu's
+// Mute and Unmute change. Unset is the browser's default (`STARTS_MUTED`).
 // sessionStorage, like the session identity: it belongs to this tab's session, so
 // a reload or a dropped socket comes back as it was left, and every Start clears
 // it.
@@ -258,24 +259,31 @@ function readOnByKey(key: string): boolean {
 }
 function readMuted(): boolean {
   try {
-    return sessionStorage.getItem(MUTED_KEY) === "on";
+    const stored = sessionStorage.getItem(MUTED_KEY);
+    return stored === null ? STARTS_MUTED : stored === "on";
   } catch {
-    return false; // storage disabled or blocked; a session then starts unmuted
+    return STARTS_MUTED; // storage disabled or blocked; the default is still the default
   }
 }
-function writeMuted(muted: boolean): void {
+// `null` forgets the choice, which is what a new session starts from.
+function writeMuted(muted: boolean | null): void {
   try {
-    if (muted) {
-      sessionStorage.setItem(MUTED_KEY, "on");
-    } else {
+    if (muted === null) {
       sessionStorage.removeItem(MUTED_KEY);
+    } else {
+      sessionStorage.setItem(MUTED_KEY, muted ? "on" : "off");
     }
   } catch {
-    // Storage blocked: the mute still holds for this page.
+    // Storage blocked: the choice still holds for this page.
   }
 }
 // Touch clients keep a fixed guest size and use fit-to-width plus pinch zoom.
 export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
+// Whether a session with sound comes up muted here, until Unmute is pressed: on
+// a touch client, where a phone or tablet starting to play is seldom wanted, and
+// in a browser that starts an AudioContext only inside a gesture, where sound
+// could not come back from a reload anyway. Elsewhere it comes up playing.
+const STARTS_MUTED = CAN_PINCH_ZOOM || AUDIO_NEEDS_GESTURE;
 // Any finger at all — what the touchscreen passthrough needs, which is less
 // than the two a pinch needs: one contact is still a tap, a press-and-hold and
 // an edge swipe to the host, so a one-touch digitizer is offered the switch.
@@ -622,9 +630,9 @@ export function useRemoteDesktop(
   // without; this says nothing about activity.
   const [canAudio, setCanAudio] = useState(false);
   // Whether this browser is listening to it, per attachment. A session started
-  // with sound comes up unmuted and stays as the menu's Mute and Unmute leave it
-  // (`seedAudioForAttachment`), except that a browser that needs a click for every
-  // AudioContext comes back muted from anything but that Start.
+  // with sound comes up unmuted, or muted where `STARTS_MUTED`, and stays as the
+  // menu's Mute and Unmute leave it (`seedAudioForAttachment`), except that a
+  // browser that needs a click for every AudioContext always comes back muted.
   const [audioEnabled, setAudioEnabled] = useState(false);
   // Why there is no sound, when there should be. One string, and what is behind it is
   // a decoder that refused or failed — this browser having no WebCodecs at all is not
@@ -1836,13 +1844,14 @@ export function useRemoteDesktop(
 
     // Audio belongs to one attachment: whatever was playing was on a socket that
     // is gone, so a subscription has to be asked for again. A session that
-    // carries sound comes up unmuted — from the picker's Start, a reattach after a
-    // dropped socket and a reload alike — unless this tab muted it.
+    // carries sound comes up as this tab left it — from the picker's Start, a
+    // reattach after a dropped socket and a reload alike — and, where it has
+    // chosen nothing, unmuted or muted as `STARTS_MUTED` says.
     // Where `connect` primed a context inside the Start click, `startAudio` adopts
     // it; otherwise it builds one with no gesture, which a browser that needs a
     // gesture for every context (AUDIO_NEEDS_GESTURE) would leave suspended, so
-    // there anything but a Start comes up muted and Unmute is the click. A
-    // session without sound is silent.
+    // there every attachment comes up muted and Unmute is the click. A session
+    // without sound is silent.
     const seedAudioForAttachment = (hasAudio: boolean) => {
       setAudioError(null);
       const playable = audioContextRef.current !== null || !AUDIO_NEEDS_GESTURE;
@@ -2273,10 +2282,11 @@ export function useRemoteDesktop(
     (target: string, choices: Choices, sound: boolean) => {
       setConnectError(null);
       setPendingTarget(target);
-      // A new session starts unmuted: a mute was the last one's.
-      writeMuted(false);
-      // Where the session will carry sound, spend this click's gesture on an
-      // AudioContext now — the only moment one is playable (see setAudio). The
+      // A new session starts from the default: a mute or an unmute was the last
+      // one's.
+      writeMuted(null);
+      // Where the session will carry sound and comes up playing, spend this
+      // click's gesture on an AudioContext now (see setAudio). The
       // `connected` that confirms it arrives a round trip later, long past any
       // gesture, so it cannot make one then: `handleConnected` adopts this primed
       // context. Primed without asking whether this browser can decode: that
@@ -2284,7 +2294,7 @@ export function useRemoteDesktop(
       // is the first thing to say — and a context that turns out unusable is
       // released there at no cost.
       releaseAudio();
-      if (sound) {
+      if (sound && !STARTS_MUTED) {
         audioContextRef.current = createAudioContext();
       }
       // The connect names this window's screen, so a session that follows the

@@ -226,4 +226,32 @@ test.describe("the audio socket", () => {
       page.getByRole("button", { name: "Mute", exact: true }),
     ).toHaveAttribute("aria-pressed", "true");
   });
+
+  test.describe("on a touch client", () => {
+    // A touch client as the page tells one: the two touch points a pinch needs.
+    test.use({ hasTouch: true });
+
+    test("comes up muted, and Unmute is what opens it", async ({ page }) => {
+      await page.addInitScript(() => {
+        Object.defineProperty(Navigator.prototype, "maxTouchPoints", {
+          get: () => 5,
+        });
+      });
+      const traffic = watchSockets(page);
+      await start(page, true);
+
+      // The session carries sound, so the button is there; nothing has subscribed.
+      await page.getByRole("button", { name: "Open menu" }).click();
+      const unmute = page.getByRole("button", { name: "Unmute", exact: true });
+      await expect(unmute).toBeVisible();
+      expect(traffic.filter((t) => t.url === "/ws/audio")).toHaveLength(0);
+
+      await unmute.click();
+      await expect
+        .poll(() => only(traffic, "/ws/audio").controlTypes, {
+          timeout: 20_000,
+        })
+        .toContain("audioFormat");
+    });
+  });
 });
