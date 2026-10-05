@@ -60,7 +60,8 @@
 //! type 100 packed as RFC 7798 without DONL: single NAL units, aggregation packets
 //! and fragmentation units. [`Depacketizer`] reassembles access units from it, and a
 //! lost packet costs a PLI ([`rtcp_pli`]), which the Mac answers with an IDR within
-//! tens of milliseconds.
+//! tens of milliseconds, unless its last one is under a second old: it drops that
+//! request, so one stays owed until a picture comes of it.
 
 use std::io::Write as _;
 
@@ -281,7 +282,7 @@ fn video_codec(id: u64, levels: &[u64], features: &str, f4: u64) -> Proto {
 }
 
 /// The screen-video offer's blob: one stream at `size` backing pixels offering
-/// HEVC (`123`) and H.264 (`100`), `tiles` pictures to a frame. The stream's fields
+/// H.264 (RTP payload `123`) and HEVC (`100`), `tiles` pictures to a frame. The stream's fields
 /// follow `initWithScreenSSRC:…:customVideoWidth:customVideoHeight:tilesPerFrame:
 /// ltrpEnabled:pixelFormats:…`; the Mac answers with HEVC.
 fn video_offer_blob(ssrc: u32, (width, height): (u16, u16), tiles: u64) -> Vec<u8> {
@@ -1127,6 +1128,13 @@ impl Depacketizer {
     /// could not keep was lost to every picture that predicts from it.
     pub fn resync(&mut self) {
         self.synced = false;
+    }
+
+    /// Start over on a stream whose packets were not pushed for a while: the
+    /// sequence number expected is long gone, and the picture in flight is
+    /// missing its start.
+    pub fn rejoin(&mut self) {
+        *self = Self { ssrc: self.ssrc, damaged: true, ..Self::default() };
     }
 
     /// Close the current picture: it, if it is whole and decodable.
@@ -2181,6 +2189,12 @@ impl MediaStream {
                     self.owed = Owed::Nothing;
                 }
             }
+            // What the Mac answers a viewer that asks for the stream while
+            // another holds it.
+            MediaReply::Error { kind: 1, sub_code: 1 } => anyhow::bail!(
+                "another viewer already has the Mac's High Performance stream, which it gives \
+                 to one at a time (error type 1, sub-code 1)"
+            ),
             MediaReply::Error { kind, sub_code } => anyhow::bail!(
                 "the Mac refused the media stream (error type {kind}, sub-code {sub_code})"
             ),
@@ -2221,7 +2235,9 @@ pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(4
 const DECODE_QUEUE: usize = 8;
 
 /// The least time between two keyframe requests. The Mac answers one in tens of
-/// milliseconds; this keeps a burst of losses from asking for one per packet.
+/// milliseconds; this keeps a burst of losses from asking for one per packet. It
+/// is also how often a request the Mac dropped is made again: with one picture
+/// to a frame the Mac drops any that comes within a second of its last keyframe.
 const PLI_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How often the Mac's rate controller is sent a [`RateFeedback`] report: Apple's
@@ -2374,10 +2390,7 @@ struct VideoLeg {
     keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
     depacketizer: Depacketizer,
     feedback: RateFeedback,
-    last_pli: Option<tokio::time::Instant>,
-    /// A keyframe the session asked for, which goes out as soon as the leg's
-    /// stream has an SSRC to name and [`PLI_INTERVAL`] allows.
-    pli_owed: bool,
+    keyframe_request: KeyframeRequest,
     /// Whether the last packet was handed on, for the start over a display coming
     /// back into view needs.
     was_shown: bool,
@@ -2386,6 +2399,37 @@ struct VideoLeg {
     behind: u64,
     pictures: u64,
     plis: u64,
+}
+
+/// A keyframe still to come on a leg: asked for as soon as the leg's stream has
+/// an SSRC to name, and again every [`PLI_INTERVAL`] until a picture arrives,
+/// since the Mac drops a request made too soon after its last keyframe and a
+/// still screen sends nothing more to show that it did.
+#[derive(Default)]
+struct KeyframeRequest {
+    owed: bool,
+    asked: Option<tokio::time::Instant>,
+}
+
+impl KeyframeRequest {
+    fn want(&mut self) {
+        self.owed = true;
+    }
+
+    /// A picture the stream can go on from has arrived, or the stream it was
+    /// asked of is over.
+    fn settle(&mut self) {
+        self.owed = false;
+    }
+
+    /// Whether to ask at `now`, which counts as asking.
+    fn due(&mut self, now: tokio::time::Instant) -> bool {
+        if !self.owed || self.asked.is_some_and(|at| now.duration_since(at) < PLI_INTERVAL) {
+            return false;
+        }
+        self.asked = Some(now);
+        true
+    }
 }
 
 /// What one datagram on a video leg asks of the receiver.
@@ -2439,15 +2483,20 @@ impl VideoLeg {
         if self.packets == 1 {
             log::info!("vnc: the Mac's {} is flowing (SSRC {:#x})", self.name(alone), header.ssrc);
         }
+        if self.media_ssrc != header.ssrc {
+            // A new stream, after an offer, starts with an IDR of its own.
+            self.keyframe_request.settle();
+        }
         self.media_ssrc = header.ssrc;
         // A display nobody is shown costs its packets' authentication and nothing
         // more, and starts over at an IDR when it comes back into view.
         let shown = self.shared.shown.load(std::sync::atomic::Ordering::Relaxed);
         if !std::mem::replace(&mut self.was_shown, shown) && shown {
-            self.depacketizer.resync();
+            self.depacketizer.rejoin();
             return Ok(Took::Keyframe);
         }
         if !shown {
+            self.keyframe_request.settle();
             return Ok(Took::Nothing);
         }
         let payload = &data[header.payload.0..header.payload.1];
@@ -2455,6 +2504,8 @@ impl VideoLeg {
             Depacketized::Pending => Ok(Took::Nothing),
             Depacketized::Lost => Ok(Took::Keyframe),
             Depacketized::Unit(unit) => {
+                // Only a stream that has had its random-access picture yields one.
+                self.keyframe_request.settle();
                 // The dump is the first display's stream.
                 if self.display == 1
                     && let Some(d) = dump.as_ref()
@@ -2488,18 +2539,16 @@ impl VideoLeg {
         }
     }
 
-    /// Ask the Mac for an IDR, when one is `wanted` now or still owed to the
-    /// session, the leg's stream has named its SSRC and the last request is
-    /// [`PLI_INTERVAL`] old.
+    /// Ask the Mac for an IDR, when one is `wanted` now or still owed, the leg's
+    /// stream has named its SSRC and the last request is [`PLI_INTERVAL`] old. It
+    /// stays owed until [`Self::take`] has a picture.
     async fn ask_keyframe(&mut self, wanted: bool) {
-        if !(wanted || self.pli_owed) {
+        if wanted {
+            self.keyframe_request.want();
+        }
+        if self.media_ssrc == 0 || !self.keyframe_request.due(tokio::time::Instant::now()) {
             return;
         }
-        if self.media_ssrc == 0 || self.last_pli.is_some_and(|at| at.elapsed() < PLI_INTERVAL) {
-            return;
-        }
-        self.pli_owed = false;
-        self.last_pli = Some(tokio::time::Instant::now());
         self.plis += 1;
         let pli = self.rtcp.protect(&rtcp_pli(self.ssrc, self.media_ssrc));
         let _ = self.socket.send(&pli).await;
@@ -2606,8 +2655,7 @@ impl Receiver {
                     keyframe,
                     depacketizer: Depacketizer::default(),
                     feedback: RateFeedback::new(epoch),
-                    last_pli: None,
-                    pli_owed: false,
+                    keyframe_request: KeyframeRequest::default(),
                     was_shown: true,
                     packets: 0,
                     forged: 0,
@@ -2755,7 +2803,7 @@ impl Receiver {
                 }
                 leg = keyframe_wanted(&self.videos) => {
                     self.videos[leg].depacketizer.resync();
-                    self.videos[leg].pli_owed = true;
+                    self.videos[leg].keyframe_request.want();
                 }
             }
             for (leg, wanted) in self.videos.iter_mut().zip(want_keyframe) {
@@ -2922,6 +2970,22 @@ impl Sound {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_keyframe_request_is_repeated_until_a_picture_settles_it() {
+        let start = tokio::time::Instant::now();
+        let mut request = super::KeyframeRequest::default();
+        assert!(!request.due(start), "nothing is owed");
+        request.want();
+        assert!(request.due(start));
+        assert!(!request.due(start + super::PLI_INTERVAL / 2), "too soon to ask again");
+        // The Mac may have dropped the first: it is still owed.
+        assert!(request.due(start + super::PLI_INTERVAL));
+        request.settle();
+        assert!(!request.due(start + super::PLI_INTERVAL * 3), "a picture came");
+        request.want();
+        assert!(request.due(start + super::PLI_INTERVAL * 3));
+    }
+
     use super::*;
 
     fn unhex(hex: &str) -> Vec<u8> {
@@ -3306,6 +3370,26 @@ mod tests {
                 fu
             })
             .collect()
+    }
+
+    /// A display out of view has its packets dropped unread, for as long as it
+    /// is: the sequence number has moved on by any amount when it comes back.
+    #[test]
+    fn a_stream_rejoined_starts_at_the_next_whole_random_access_picture() {
+        let mut d = Depacketizer::default();
+        assert_eq!(d.push(&header(10, 0, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert!(matches!(d.push(&header(11, 0, true), IDR), Depacketized::Unit(_)));
+        // 40,000 packets on, which a sequence number reads as behind.
+        d.rejoin();
+        let on = 11u16.wrapping_add(40_000);
+        // The tail of an IDR whose parameter sets went unread is not a start.
+        assert_eq!(d.push(&header(on, 800, true), IDR), Depacketized::Lost);
+        assert_eq!(d.push(&header(on + 1, 1200, true), TRAIL), Depacketized::Lost);
+        assert_eq!(d.push(&header(on + 2, 1600, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert_eq!(
+            d.push(&header(on + 3, 1600, true), IDR),
+            Depacketized::Unit(vec![VPS.to_vec(), SPS.to_vec(), IDR.to_vec()])
+        );
     }
 
     /// Apple's first picture: the parameter sets aggregated, the IDR fragmented;
