@@ -122,22 +122,40 @@ test.describe("a target that passes its pipeline over two virtual displays", () 
     // All Displays is what two displays start on: the first display is here and
     // the second is a tab's, which the drawer links to.
     await page.getByRole("button", { name: "Open menu" }).click();
-    await expect(
-      page.getByRole("link", { name: "Open Display 2 ↗" }),
-    ).toHaveAttribute("href", /\/display\/2$/);
-    await page.getByRole("button", { name: "Close menu" }).click();
+    const link = page.getByRole("link", { name: "Open Display 2 ↗" });
+    await expect(link).toHaveAttribute("href", /\/display\/2$/);
 
-    // The second display's tab, in this browser: a page of the same context. No
-    // tab shows the display, so it is this one's as it opens.
-    const tab = await context.newPage();
+    // The second display's tab, in this browser, opened by that link. No tab
+    // shows the display, so it is this one's as it opens.
+    const opening = context.waitForEvent("page");
+    await link.click();
+    const tab = await opening;
     const tabSeen = watchDisplays(tab);
-    await tab.goto(new URL("/display/2", BASE_URL).toString());
+    await tab.waitForURL(/\/display\/2$/);
     // Painted from the session page's picture: the canvas it is shown on is up
     // once the paint worker has taken the first update across the browser.
     await expect(tab.locator("canvas.graphics")).toBeVisible({
       timeout: 20_000,
     });
     await expect(tab.getByRole("alert")).toHaveCount(0);
+
+    // The link again shows that tab: no other is opened, and it is not loaded
+    // again. It was opened with a copy of this page's storage and a reference
+    // to this page, and kept neither.
+    const loaded = await tab.evaluate(() => performance.timeOrigin);
+    await link.click();
+    await page.getByRole("button", { name: "Close menu" }).click();
+    expect(context.pages()).toHaveLength(2);
+    expect(await tab.evaluate(() => performance.timeOrigin)).toBe(loaded);
+    expect(
+      await page.evaluate(() => sessionStorage.getItem("remotex.sessionId")),
+    ).not.toBeNull();
+    expect(
+      await tab.evaluate(() => [
+        sessionStorage.getItem("remotex.sessionId"),
+        window.opener,
+      ]),
+    ).toEqual([null, null]);
 
     // Its socket named the second column, beside its size, and carried no
     // picture of its own: nothing to decode in this tab.

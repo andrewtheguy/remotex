@@ -2145,8 +2145,13 @@ as in the display panel and on the Info card. Until the tab is opened it costs
 what the first display alone does, and the engine holds a position made on the
 canvas to the canvas's display, there being none beside it to drag onto. That page is the same SPA with no menu and no picker; it claims
 nothing, since a claim would take the session from the tab holding it, and opens
-`/ws/display?display=2` by the login cookie alone — opened with `noopener`, so it
-shares none of the first tab's storage, the token included. The session lets that
+`/ws/display?display=2` by the login cookie alone. The link opens it under a
+window name (`frontend/src/displayTab.ts`), so a second click shows the tab
+already open, without loading it again, where a new one would only be told the
+display is in use. A tab found by name cannot be opened with `noopener`, so it
+starts with a copy of the first tab's `sessionStorage` and a reference to that
+tab, and its page drops the token, the choice of sound and the reference as it
+loads, before anything reads them. The session lets that
 socket in only while the engine's last list names the tab, and hands the engine a
 feed for it (`ClientMsg::DisplayShown`): a sink, an encoder and a shadow of its
 own over the second column, the same pointer shape, and a repaint when it

@@ -18,8 +18,8 @@
 // session exposes one framebuffer and no list.
 
 import { type ReactNode, useRef } from "react";
+import { displayTabName, displayTabUrl, showDisplayTab } from "./displayTab.ts";
 import { useDockedHeight, useIsDesktop } from "./dockedPanel.ts";
-import { gatewayUrl } from "./gateway.ts";
 import type { DisplayInfo } from "./protocol.ts";
 
 interface Props {
@@ -32,8 +32,9 @@ interface Props {
 
 // The link to a display shown in a tab of its own. It opens in this browser,
 // which is what lets its page in: it carries the login cookie, and is given no
-// session token. `noopener`, so the new tab shares nothing of this one's page
-// state — the session token in this tab's storage included.
+// session token. A click shows the tab already open where there is one
+// (displayTab.ts); a click the browser reads as its own, a modifier held, is
+// left to it.
 export function DisplayTabLink({
   tab,
   className = "dp-tab-link",
@@ -48,10 +49,20 @@ export function DisplayTabLink({
   return (
     <a
       className={className}
-      href={gatewayUrl(`/display/${tab}`)}
-      target="_blank"
-      rel="noopener"
+      href={displayTabUrl(tab)}
+      target={displayTabName(tab)}
       title={title}
+      onClick={(event) => {
+        const plain = !(
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          event.altKey
+        );
+        if (plain && showDisplayTab(tab)) {
+          event.preventDefault();
+        }
+      }}
     >
       {children}
     </a>
