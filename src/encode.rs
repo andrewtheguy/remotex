@@ -373,7 +373,7 @@ impl VideoSink {
     }
 
     /// Say whether the desktop the next `Resize` describes spans more screens than
-    /// one view shows: a Mac's All Displays over more than
+    /// one view shows: a Mac's Combined Display over more than
     /// [`crate::vnc_apple::MAX_COMBINED_SCREENS`]. Read at that `Resize` and every
     /// one after it, a reattach's included, on a source that holds; a count that
     /// changes always changes the combined desktop's size with it.

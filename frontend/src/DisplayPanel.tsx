@@ -9,7 +9,7 @@
 // clicked.
 //
 // Standard Apple Screen Sharing (`subtype = "ard"`) sends the Mac's physical
-// screens plus an "All Displays" entry. High Performance mode sends one virtual
+// screens plus an "Combined Display" entry. High Performance mode sends one virtual
 // display, leaving nothing to choose. A wlshare desktop sends the compositor's
 // outputs, one of which it is capturing. An RDP target or a High Performance Mac
 // asked for virtual displays (alpha) sends the ones the host laid out, and shows

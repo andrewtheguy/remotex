@@ -94,7 +94,7 @@ pub const ENCODING_CURSOR_POS: i32 = 0x44c;
 /// also listed, the layout is what it sends.
 pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 
-/// The most screens All Displays is shown over. Past two, the view is held with a
+/// The most screens Combined Display is shown over. Past two, the view is held with a
 /// notice offering each screen on its own, whatever its size: more than two is an
 /// edge case on Standard, and composing them is too much for a browser to draw.
 pub const MAX_COMBINED_SCREENS: usize = 2;
@@ -631,7 +631,7 @@ impl Layout {
     /// density, without asking Apple to enlarge pixels — the factor Apple's
     /// viewer derives from its own screen's density.
     ///
-    /// A selected screen uses its own density, and All Displays over screens of
+    /// A selected screen uses its own density, and Combined Display over screens of
     /// one density uses theirs: a 2880x1800 backing for a 1440x900 Retina display
     /// arrives at 1440x900 on a 1x browser.
     pub fn server_scale_for(&self, selection: Option<u32>, host_density: f32) -> f32 {
@@ -668,7 +668,7 @@ impl Layout {
     /// points in its own arrangement. Both spaces are moved to start at zero:
     /// the framebuffer already does, and the arrangement's origin is wherever the
     /// main screen puts it.
-    /// Whether this is All Displays over more than [`MAX_COMBINED_SCREENS`], which
+    /// Whether this is Combined Display over more than [`MAX_COMBINED_SCREENS`], which
     /// has no picture ([`crate::encode::VideoSink::hold_screens`]).
     pub fn too_many_screens(&self) -> bool {
         self.current.is_none() && self.displays.len() > MAX_COMBINED_SCREENS
@@ -1449,7 +1449,7 @@ mod tests {
     fn server_scaling_matches_the_chosen_screen_to_the_browser_density() {
         let combined = parse_layout(TWO_REAL_SCREENS).unwrap();
         assert_eq!(combined.viewer_scale(), 1.0);
-        // All Displays over mixed densities is composed from the native pixels.
+        // Combined Display over mixed densities is composed from the native pixels.
         assert_eq!(combined.server_scale_for(None, 1.0), 1.0);
         assert_eq!(combined.server_scale_for(None, 2.0), 1.0);
         assert_eq!(combined.server_scale_for(Some(1), 1.0), 1.0);
@@ -1466,7 +1466,7 @@ mod tests {
         assert_eq!(scaled.viewer_scale(), 0.5);
         assert_eq!(scaled.scale(), 1.0);
 
-        // All Displays at 0.5: the Retina screen arrives at 1x and the 1x screen
+        // Combined Display at 0.5: the Retina screen arrives at 1x and the 1x screen
         // at 0.5x. The densest is what the browser was matched to.
         let mut payload = layout(
             None,
@@ -1512,7 +1512,7 @@ mod tests {
         assert_eq!(parsed.scale(), 2.0);
     }
 
-    /// All Displays is held over three screens and not over two, and a selected
+    /// Combined Display is held over three screens and not over two, and a selected
     /// screen never is, however many there are.
     #[test]
     fn all_displays_over_three_screens_is_too_many() {

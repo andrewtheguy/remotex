@@ -256,7 +256,7 @@ passed.
 - Neither the gateway nor the browser rescales what a remote sends: frames are
   presented at `w / scale` by the density the remote confirmed. When the size or
   density is wrong for the browser, ask the remote to render the right one and
-  output its answer as is. The sole exception is Apple Standard's All Displays
+  output its answer as is. The sole exception is Apple Standard's Combined Display
   over screens of different densities: the gateway sends a `mosaic` and the
   browser composes each screen at its points (`frontend/src/mosaic.ts`). Do not
   extend it to another engine, view or density.
@@ -329,8 +329,8 @@ Displays over more than two screens, whatever its size. On VNC started without
 resize the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
-cropped picture. Two streams for Standard's All Displays are the planned way, in
-[the roadmap](roadmap.md#two-streams-for-standards-all-displays). See
+cropped picture. Two streams for Standard's Combined Display are the planned way, in
+[the roadmap](roadmap.md#two-streams-for-standards-combined-display). See
 [Past the ceiling](#past-the-ceiling).
 
 #### wlshare's VP9 and the `wlshare` subtype
@@ -657,7 +657,7 @@ trip that pins the difference, through the archive's own decoder.
 
 A desktop past the picture ceiling is one a video stream will not encode
 (`video::check_picture`). The gateway sizes every desktop it asks for under it, so
-only a remote it cannot size gets there: a Mac in Standard mode on All Displays —
+only a remote it cannot size gets there: a Mac in Standard mode on Combined Display —
 5376×2287 over a 2x screen beside a 1x one, measured — or a plain or wlshare VNC
 server whose desktop is simply that large.
 
@@ -673,7 +673,7 @@ Resize refuses because it is the gateway sizing the remote: every size it asks
 for is under the ceiling, and a remote that answers past it has refused what it
 was asked. High Performance's virtual display is held under the ceiling.
 
-A `Hold` source holds one more view whatever its size: a Mac's All Displays over
+A `Hold` source holds one more view whatever its size: a Mac's Combined Display over
 more than two screens (`vnc_apple::MAX_COMBINED_SCREENS`). More than two is an edge
 case on Standard, and composing them is too much for a browser to draw. The engine
 tells the sink from each layout, ahead of the `Resize` it brings
@@ -687,7 +687,7 @@ the encoding list, so wlshare codes nothing that would not be sent. After every
 is a cause the page covers the desktop with a notice under the menu, takes no
 input, and says which: the desktop's size, or more screens than one view shows.
 It offers a button for each of the remote's displays but the one being sent, since
-choosing one is how a Mac on All Displays gets back; with no list, it says that
+choosing one is how a Mac on Combined Display gets back; with no list, it says that
 nothing can be shown until the remote's desktop is smaller. A choice is a
 `selectDisplay` like the menu's, and the notice comes down only at a `Resize`
 without a cause. The remote repaints that desktop in full, as after any resize,
@@ -2212,8 +2212,8 @@ configuration, which always names both. The sound is the session's, on the first
 tab. See [Two virtual displays](apple-vnc-889.md#two-virtual-displays).
 
 Where the list is sent, the checkmark moves only when the remote comes back naming
-the screen it is now sending — never on the click. On a Mac the engine prepends an
-*All Displays* entry of its own so a client that picks a screen can get back; see
+the screen it is now sending — never on the click. On a Mac the engine prepends a
+*Combined Display* entry of its own so a client that picks a screen can get back; see
 [`apple-vnc-889.md`](apple-vnc-889.md). wlshare captures one output for a
 connection and has no combined view to offer, so its list is the compositor's
 outputs; see [Switching outputs over VNC with wlshare](wlshare-outputs.md).
@@ -2458,19 +2458,19 @@ for ZRLE in their first `SetEncodings`.
 Mac's physical displays and never sends a viewport size or `SetDesktopSize`.
 Density is handled by the Mac instead: from each `AppleDisplayLayout`, the gateway
 reads the displays' native densities and the viewer scale already applied. It sends
-`SetServerScaling` so the selected display, or All Displays over screens of one
+`SetServerScaling` so the selected display, or Combined Display over screens of one
 density, matches the browser display's density. The answering layout is
 authoritative. Its pixels pass through unchanged, and its effective density
 (`native density × viewer scale`) is the `Resize.scale`.
 
-All Displays over screens of *different* densities is the one view no factor can
+Combined Display over screens of *different* densities is the one view no factor can
 render. There the gateway asks for 1.0, as Apple's viewer does, and sends a
 `ServerMsg::Mosaic` ahead of the `Resize`: each screen's rectangle in the
 framebuffer and in points. The paint worker keeps the framebuffer off screen and
 draws every screen at its points at the browser's own density, and the page maps
 pointer positions back through the same regions (`frontend/src/mosaic.ts`). It is
 the only place the browser rescales remote pixels. See
-[Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
+[Apple RFB 003.889, as measured](apple-vnc-889.md#combined-display-over-mixed-densities).
 Taken at factor 1.0, that combined framebuffer is often past the video ceiling —
 a 2x screen beside a 1x one measured 5376×2287 — and then has no picture: the page
 offers the Mac's screens instead, since one screen is a smaller desktop. All

@@ -106,7 +106,7 @@ test("the video row waits for the format, then names it and whose stream it is",
   );
   assert.equal(
     videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "screens"),
-    "Not in use: All Displays spans more than two screens",
+    "Not in use: Combined Display spans more than two screens",
   );
 });
 

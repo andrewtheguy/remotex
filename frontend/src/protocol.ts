@@ -321,12 +321,12 @@ export type ControlMsg =
   // page never infers it.
   | { type: "resizing"; active: boolean }
   // Why the desktop the `resize` before this describes has no picture, or null
-  // when it has one: past what a video stream encodes, or a Mac's All Displays
+  // when it has one: past what a video stream encodes, or a Mac's Combined Display
   // over more than two screens. No picture follows until a `resize` without a
   // cause. Sent after every `resize` of a source that holds the session open for
   // that, and never by one that ends the session instead. The page says so over
   // the desktop and offers the remote's displays, since choosing one is how a
-  // Mac on All Displays gets back.
+  // Mac on Combined Display gets back.
   | { type: "oversize"; cause: HoldCause | null }
   // The remote's displays and which one is being shared, pushed whenever either
   // changes. The browser holds no display state of its own: the checkmark
