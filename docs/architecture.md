@@ -2143,8 +2143,12 @@ on, except towards the display shown beside it: a browser keeps delivering a hel
 drag's positions to the page it began on, past that page's window and onto the
 next screen, so the page lets a position past that edge through as it is
 (`frontend/src/remotePoint.ts`), and the engine offsets it onto the other display
-as it offsets any position. A window dragged over the edge between two
-full-screen windows, one display each, arrives on the other display; the pointer
+as it offsets any position. A window dragged over the edge between the two pages
+arrives on the other display, however their windows are arranged: nothing here
+asks for full screen. The position is the distance past this page's canvas, so
+two full-screen windows, one display each, whose edges meet, place it where it
+was dragged to, and anything between the two canvases — a window frame, a gap —
+places it short by that much. The pointer
 itself is sent by whichever page it is over. On a session that follows the window the tab's window is
 the second monitor's size: its viewport, sent on its own socket, makes the next
 layout a row of two sizes, top-aligned, and the second keeps that size for as long

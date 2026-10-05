@@ -11,10 +11,12 @@
 // engine knows which edge the other display is against, offsets the position
 // into the remote's arrangement and holds it on a display, so one past any other
 // edge, or beyond a neighbour shorter or narrower than this display, is held
-// there instead of here. A window dragged over the edge between two
-// full-screen windows, one display each, arrives on the other display; the
-// pointer itself is sent by whichever window it is over, so it needs nothing of
-// this.
+// there instead of here. A window dragged over the edge between the two windows
+// arrives on the other display, however they are arranged: the position is the
+// distance past this canvas, so it lands where it was dragged to when the two
+// canvases' edges meet, as with each full screen on a display of its own, and
+// short by whatever lies between them otherwise. The pointer itself is sent by
+// whichever window it is over, so it needs nothing of this.
 
 /** The canvas's client rect: where the displayed framebuffer is on the page. */
 export interface CanvasRect {
