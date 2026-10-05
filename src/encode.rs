@@ -31,6 +31,7 @@ use crate::config::{Chroma, RenderPlan};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
+use crate::vp9::Speed;
 use crate::shadow::Rect;
 use crate::video;
 
@@ -211,9 +212,9 @@ struct Shared {
     pass_restart: AtomicBool,
     /// The configuration string last announced for the passed stream.
     pass_announced: Mutex<Option<String>>,
-    /// The browser's resize notice is to come down behind the next unit queued —
-    /// see [`VideoSink::uncover`].
-    uncover_owed: AtomicBool,
+    /// The pixels being damaged stand in for a stream that is not flowing — see
+    /// [`VideoSink::stand_in`].
+    stand_in: AtomicBool,
     /// Set by [`VideoSink::reset_render`], consumed by [`VideoSink::frame`]. An atomic
     /// rather than a field on [`Video`] so that resetting stays synchronous: its call
     /// sites are already awaiting other things, and none of them should have to wait
@@ -277,7 +278,7 @@ impl Shared {
             passing: AtomicBool::new(false),
             pass_restart: AtomicBool::new(true),
             pass_announced: Mutex::default(),
-            uncover_owed: AtomicBool::new(false),
+            stand_in: AtomicBool::new(false),
             keyframe_owed: AtomicBool::new(false),
             feedback,
             units: AtomicU64::new(0),
@@ -344,8 +345,9 @@ impl VideoSink {
     /// VNC target: they carry the picture again, as the stream encoded here, which
     /// starts at a keyframe behind its announcement for a browser whose decoder was
     /// the passed stream's. The passed stream starts over the same way when it comes
-    /// back. A Mac's media stream has no such gap: its rectangles never reach here
-    /// ([`crate::vnc::DesktopState::media_only`]).
+    /// back. A Mac's media stream has the same gap before it flows and across a
+    /// display change, whose rectangles are encoded as fast as the encoder goes
+    /// ([`Self::stand_in`]).
     pub async fn damage(&self, rect: Rect, rgb: &[u8]) -> anyhow::Result<()> {
         if self.oversized() {
             return Ok(());
@@ -435,6 +437,11 @@ impl VideoSink {
         let Some(mut round) = video.stream.take_round()? else {
             return Ok(());
         };
+        let speed = if self.shared.stand_in.load(Ordering::Relaxed) { Speed::Fastest } else { Speed::Usual };
+        if let Err(e) = round.set_speed(speed) {
+            // The stream is as good as it was at the speed it kept.
+            warn!("{}: could not move the video encoder to {speed:?}: {e:#}", self.engine);
+        }
         video.due_at = Some(now + video.congestion.interval());
         // What the round's encoder really runs at, not the table: a stream that
         // refused a retune is still coarse, and the settle it owes must not be
@@ -467,7 +474,6 @@ impl VideoSink {
         let round_bytes = usize::try_from(self.shared.round_bytes.load(Ordering::Relaxed)).unwrap_or(usize::MAX);
         let held = self.hold(round_bytes).await;
         let pushed = self.push(Pending::Round(handle, held)).await;
-        let pushed = if pushed.is_ok() { self.uncover_behind().await } else { pushed };
         // How long that took is the congestion signal, and it is read whether or not
         // the push succeeded: a push that failed waited just as long, and the verdict
         // is about the link rather than about this round. Waiting on the budget and
@@ -613,10 +619,10 @@ impl VideoSink {
     /// nothing until an IDR, and `false` says this unit was dropped for one: only the
     /// Mac can send it, and a screen that stays still would never bring one unasked.
     ///
-    /// Its gaps — before it flows and across a display change — show nothing new:
-    /// the Mac's rectangles are never encoded on a session with a media stream, so
-    /// one that passes the stream builds no encoder at all. The stream coming back
-    /// after a gap starts over at an IDR, announced again.
+    /// Its gaps — before it flows and across a display change — are the Mac's
+    /// rectangles, encoded here ([`Self::stand_in`]) as [`Self::damage`] takes the
+    /// picture back for any source. The stream coming back after a gap starts over
+    /// at an IDR, announced again.
     pub async fn pass_hevc(
         &self,
         w: u16,
@@ -663,27 +669,16 @@ impl VideoSink {
         }
         let unit = VideoUnit { w, h, keyframe: passed.keyframe, data: frame, held };
         self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
-        self.uncover_behind().await?;
         Ok(true)
     }
 
-    /// Bring the browser's resize notice down behind the next unit queued, encoded
-    /// here or passed: a `Resizing { active: false }` follows that unit on the
-    /// channel, so the notice never lifts on an empty canvas. For an engine whose
-    /// picture is a stream that has just delivered its first picture of a display
-    /// ([`crate::vnc::DesktopState::covered`]): the engine cannot tell when that
-    /// picture is queued, since [`Self::frame`] defers it while a round is out or
-    /// the interval has not passed, and a passed unit may be dropped for a keyframe.
-    pub fn uncover(&self) {
-        self.shared.uncover_owed.store(true, Ordering::Relaxed);
-    }
-
-    /// The notice [`Self::uncover`] owes, once a unit has been queued.
-    async fn uncover_behind(&self) -> anyhow::Result<()> {
-        if self.shared.uncover_owed.swap(false, Ordering::Relaxed) {
-            self.push(Pending::Msg(ServerMsg::Resizing { active: false })).await?;
-        }
-        Ok(())
+    /// Say whether the rectangles damaged from here on stand in for a stream that
+    /// is not flowing: a High Performance Mac's own pixels, before its media stream
+    /// delivers and across a display change. Their rounds are encoded at
+    /// [`Speed::Fastest`], since the picture is replaced as soon as the stream is
+    /// back; every other round is at [`Speed::Usual`].
+    pub fn stand_in(&self, standing_in: bool) {
+        self.shared.stand_in.store(standing_in, Ordering::Relaxed);
     }
 
     /// An RDP host's graphics pipeline starts here, from nothing, and is the picture
@@ -1293,52 +1288,37 @@ mod tests {
         assert!(frame_rx.try_recv().is_err());
     }
 
-    /// The resize notice comes down behind the next unit queued, not when the engine
-    /// asks: a clean mirror queues nothing, and the notice waits with it.
+    /// Standing in moves the encoder's speed and nothing else: the rounds either
+    /// side of it are one chain, with no keyframe and no second announcement.
     #[tokio::test(start_paused = true)]
-    async fn the_notice_comes_down_behind_the_next_unit() {
+    async fn standing_in_costs_the_stream_no_keyframe() {
         let (sink, mut frame_rx) = video_sink(64, 48).await;
         let rect = Rect::from_size(0, 0, 64, 48).unwrap();
 
-        sink.uncover();
-        sink.frame().await.unwrap();
-        sink.flush().await;
-        assert!(frame_rx.try_recv().is_err(), "nothing to queue, nothing to follow");
-
+        sink.stand_in(true);
         sink.damage(rect, &[7; 64 * 48 * 3]).await.unwrap();
         sink.frame().await.unwrap();
         sink.flush().await;
-        let out = drain(&mut frame_rx, 3).await;
+        let out = drain(&mut frame_rx, 2).await;
+        assert!(matches!(&out[0], ServerMsg::VideoFormat { passthrough: false, .. }), "{:?}", out[0]);
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe), "{:?}", out[1]);
-        assert!(matches!(&out[2], ServerMsg::Resizing { active: false }), "{:?}", out[2]);
 
-        // Owed once: the next unit brings no second notice.
-        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
-        sink.damage(rect, &[8; 64 * 48 * 3]).await.unwrap();
-        sink.frame().await.unwrap();
-        sink.flush().await;
-        let out = drain(&mut frame_rx, 1).await;
-        assert!(matches!(&out[0], ServerMsg::Video(_)), "{:?}", out[0]);
+        for (standing_in, shade) in [(true, 8), (false, 9), (true, 10)] {
+            tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+            sink.stand_in(standing_in);
+            sink.damage(rect, &[shade; 64 * 48 * 3]).await.unwrap();
+            sink.frame().await.unwrap();
+            sink.flush().await;
+            let out = drain(&mut frame_rx, 1).await;
+            assert!(matches!(&out[0], ServerMsg::Video(unit) if !unit.keyframe), "{:?}", out[0]);
+        }
         assert!(frame_rx.try_recv().is_err());
-
-        // A passed unit dropped for a keyframe brings it no sooner than the one sent.
-        sink.uncover();
-        let hevc = |keyframe| crate::stream::Passed { decode: "hev1.4.10.L150.BE.8".to_owned(), keyframe };
-        sink.reset_render();
-        assert!(!sink.pass_hevc(64, 48, vec![1; 30], hevc(false)).await.unwrap());
-        sink.flush().await;
-        assert!(frame_rx.try_recv().is_err(), "dropped, so nothing follows");
-        assert!(sink.pass_hevc(64, 48, vec![2; 900], hevc(true)).await.unwrap());
-        sink.flush().await;
-        let out = drain(&mut frame_rx, 3).await;
-        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe), "{:?}", out[1]);
-        assert!(matches!(&out[2], ServerMsg::Resizing { active: false }), "{:?}", out[2]);
     }
 
     /// The sink can switch from passed HEVC back to encoded rectangles for a source
-    /// that uses both, each beginning at a keyframe behind its announcement. A High
-    /// Performance Mac no longer uses that capability: its rectangles never reach
-    /// [`VideoSink::damage`]. A unit dropped for a keyframe says so to the engine.
+    /// that uses both, each beginning at a keyframe behind its announcement, as a
+    /// High Performance Mac does across the gaps in its media stream. A unit dropped
+    /// for a keyframe says so to the engine.
     #[tokio::test]
     async fn a_source_can_switch_between_passed_hevc_and_encoded_rectangles() {
         const HEVC: &str = "hev1.4.10.L150.BE.8";

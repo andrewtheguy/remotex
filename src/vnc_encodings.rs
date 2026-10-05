@@ -28,7 +28,7 @@ use log::{debug, info};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use crate::shadow::{Rect, Shadow};
-use crate::vnc::{BPP, discard};
+use crate::vnc::BPP;
 
 /// Ceiling on one inflated payload, so a hostile or broken stream cannot be
 /// answered with unbounded memory.
@@ -124,9 +124,6 @@ pub struct Decoders {
     /// header. This is the same rule that already forbids a fresh context per
     /// rectangle, applied across encodings instead of across rectangles.
     zrle: Option<Inflater>,
-    /// A ZRLE rectangle has been stepped over uninflated ([`Self::step_over`]), so
-    /// ZRLE's stream has a gap no later chunk can be inflated across.
-    zrle_gap: bool,
     /// The colours a Hextile tile may omit.
     hextile: HextileColours,
     /// Which encodings have already been announced in the log.
@@ -187,37 +184,6 @@ impl Decoders {
         })
     }
 
-    /// Read past one rectangle's payload for a session that shows none of them,
-    /// producing no pixels.
-    ///
-    /// ZRLE and raw pixels are stepped over by their length alone, and ZRLE's
-    /// stream is left uninflated: since its chunks deflate across the connection,
-    /// no ZRLE rectangle can be decoded after one has been stepped over, and one
-    /// that is ends the session rather than inflating garbage. Any other encoding
-    /// is decoded and dropped, keeping the state it carries in step.
-    pub async fn step_over<R: AsyncRead + Unpin>(
-        &mut self,
-        reader: &mut R,
-        payload: Payload,
-        shadow: &std::sync::Mutex<Shadow>,
-        w: u16,
-        h: u16,
-    ) -> anyhow::Result<()> {
-        match payload {
-            Payload::Raw => {
-                self.note(payload);
-                discard(reader, (usize::from(w) * usize::from(h) * BPP) as u64).await
-            }
-            Payload::Zrle => {
-                self.note(payload);
-                let len = zrle_length(reader, w, h).await?;
-                self.zrle_gap = true;
-                discard(reader, u64::from(len)).await
-            }
-            _ => self.decode(reader, payload, shadow, w, h).await.map(drop),
-        }
-    }
-
     /// Encoding 16: 64x64 tiles inside a deflate stream, each tile run-length
     /// encoded, palettised, both, or neither.
     ///
@@ -229,10 +195,6 @@ impl Decoders {
         w: u16,
         h: u16,
     ) -> anyhow::Result<Vec<u8>> {
-        anyhow::ensure!(
-            !self.zrle_gap,
-            "a zrle rect to decode after one was stepped over, which its stream cannot inflate across"
-        );
         let cap = zrle_ceiling(w, h);
         let len = zrle_length(reader, w, h).await?;
         let mut chunk = vec![0u8; len as usize];
@@ -1356,35 +1318,6 @@ mod tests {
         assert!(
             decoders.decode(&mut zrle.as_slice(), Payload::Zlib, &shadow, 8, 8).await.is_err()
         );
-    }
-
-    /// A session that shows none of the rectangles steps over ZRLE by its length,
-    /// leaving the bytes behind it in step, and then refuses to decode one: the
-    /// chunk it never inflated is part of the stream the next would inflate across.
-    #[tokio::test]
-    async fn a_stepped_over_zrle_rect_is_never_inflated_and_leaves_a_gap() {
-        let shadow = unused_shadow();
-        // Not a deflate stream at all, which an inflater would refuse.
-        let mut wire = zlib_payload(&[0xff; 8]);
-        wire.extend_from_slice(&bgrx(4));
-        wire.push(0xaa);
-        let mut reader = wire.as_slice();
-
-        let mut decoders = Decoders::default();
-        decoders.step_over(&mut reader, Payload::Zrle, &shadow, 2, 2).await.unwrap();
-        decoders.step_over(&mut reader, Payload::Raw, &shadow, 2, 2).await.unwrap();
-        assert_eq!(reader, [0xaa], "each stepped over by exactly its length");
-        assert!(decoders.zrle.is_none(), "no inflater was ever made");
-
-        let mut zrle_stream = flate2::Compress::new(flate2::Compression::default(), true);
-        let mut solid = vec![1u8];
-        solid.extend(cp(RED_RGB));
-        let zrle = zlib_payload(&chunk(&mut zrle_stream, &solid));
-        let err = decoders
-            .decode(&mut zrle.as_slice(), Payload::Zrle, &shadow, 8, 8)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("stepped over"), "{err:#}");
     }
 
     #[tokio::test]

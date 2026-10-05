@@ -11,7 +11,7 @@ use crate::config::Chroma;
 use crate::protocol::{Held, VideoUnit};
 use crate::shadow::Rect;
 use crate::video::Mirror;
-use crate::vp9::Stream;
+use crate::vp9::{Speed, Stream};
 
 /// Most rectangles the staged-damage list holds before collapsing to a bounding
 /// box — see [`DesktopStream::stage`].
@@ -366,6 +366,12 @@ impl Round {
     /// [`DesktopStream::put_back`] to try again.
     pub fn quality(&self) -> u8 {
         self.live.quality
+    }
+
+    /// Bring the encoder to `speed` for this round and the ones after it. One it
+    /// is already at costs nothing.
+    pub fn set_speed(&mut self, speed: Speed) -> anyhow::Result<()> {
+        self.live.stream.set_speed(speed)
     }
 
     /// Encode the mirror. Blocking: call it on a worker.
