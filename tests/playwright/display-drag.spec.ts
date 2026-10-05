@@ -203,6 +203,8 @@ test.describe("a drag held past the edge between two displays", () => {
     }
 
     // One display shown, nothing beside it: held at the display's edge both ways.
+    // Chosen, since two displays start shown beside each other.
+    await chooseDisplay(page, "All Displays", "Display 1");
     const alone = await dragPast(page, traffic, 1, viewport.width + PAST);
     const aloneLast = alone.held[alone.held.length - 1];
     expect(aloneLast).toEqual({ x: first.w - 1, y: 0 });
@@ -213,7 +215,6 @@ test.describe("a drag held past the edge between two displays", () => {
     const tab = await context.newPage();
     const tabTraffic = watchTraffic(tab);
     await tab.goto(new URL("/display/2", BASE_URL).toString());
-    await tab.getByRole("button", { name: "Connect" }).click();
     await expect(tab.locator("canvas").first()).toBeVisible({ timeout: 20_000 });
     await expect(tab.getByRole("alert")).toHaveCount(0);
     await expect.poll(() => tabTraffic.size.get(2), { timeout: 20_000 }).toBeDefined();

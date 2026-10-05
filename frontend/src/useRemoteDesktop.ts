@@ -95,8 +95,12 @@ export type ConnectionStatus =
   | "connecting"
   | "connected"
   | "reconnecting"
-  | "busy" // another browser holds the session slot (claim answered 409)
-  | "takenOver" // this socket was evicted by a takeover (close code 4001)
+  // Another browser holds the session slot (claim answered 409), or, on a page
+  // showing a display in a tab of its own, another tab shows that display (4003).
+  | "busy"
+  // This socket was evicted by a takeover (close code 4001), or, on a page showing
+  // a display in a tab of its own, another tab took that display over (4004).
+  | "takenOver"
   // The session could not be opened for a reason waiting cannot change, so nothing
   // is in flight and nothing is scheduled. Its own state because the alternative was
   // leaving "Connecting…" up over a connection that had stopped being attempted,
@@ -104,11 +108,10 @@ export type ConnectionStatus =
   | "failed"
   // A page showing a display in a tab of its own (`/display/2`) whose display the
   // session does not show there: All Displays is not chosen, the target has none,
-  // there is no session in this browser, or another tab shows it. Nothing is
-  // attempted until Retry.
+  // or there is no session in this browser. Nothing is attempted until Retry.
   | "unavailable"
-  // A page showing a display in a tab of its own that has not been asked to yet,
-  // or was asked to stop: the display is not taken for this tab until Connect.
+  // A page showing a display in a tab of its own that was asked to stop, by its
+  // menu's Disconnect: nothing is attempted until Connect.
   | "idle"
   // The gateway is another version than this page (gatewayVersion.ts). Apart from
   // "failed" because trying again cannot change it: the overlay offers Reload.
@@ -132,31 +135,23 @@ export interface RemoteSize {
 // same browser still contend like two browsers — as intended). Exported so
 // logout (App.tsx) can drop it.
 export const SESSION_KEY = "remotex.sessionId";
-// The token that makes this tab the one showing display N in a tab of its own,
-// per tab like the claim: a reload keeps it, and another tab has none.
-const tabTokenKey = (display: number) => `remotex.displayToken.${display}`;
+// This tab's name for itself on the sockets of a display it shows in a tab of
+// its own, per tab like the claim: a reload keeps it, so the gateway lets the
+// tab back in, and another tab has another.
+const TAB_KEY = "remotex.displayTab";
 
-function readTabToken(display: number): string | null {
+function tabId(): string {
   try {
-    return sessionStorage.getItem(tabTokenKey(display));
+    const kept = sessionStorage.getItem(TAB_KEY);
+    if (kept) {
+      return kept;
+    }
+    const made = crypto.randomUUID();
+    sessionStorage.setItem(TAB_KEY, made);
+    return made;
   } catch {
-    return null;
-  }
-}
-
-function writeTabToken(display: number, token: string): void {
-  try {
-    sessionStorage.setItem(tabTokenKey(display), token);
-  } catch {
-    // Storage blocked: this tab keeps the display until it reloads.
-  }
-}
-
-function dropTabToken(display: number): void {
-  try {
-    sessionStorage.removeItem(tabTokenKey(display));
-  } catch {
-    // Storage blocked: there was none to drop.
+    // Storage blocked: a name for this page load, so a reload is another tab's.
+    return crypto.randomUUID();
   }
 }
 // The Mac-host Command-to-Control preference, default on. localStorage rather
@@ -287,13 +282,12 @@ function overClipboardLimit(text: string): boolean {
 const CLOSE_EVICTED = 4001;
 // Close codes a display socket opened in a tab of its own is refused or let go
 // with: not this browser's session (4000), or a display the session no longer
-// shows in a tab (4002), as well as 4001 above — or one another tab shows (4003).
+// shows in a tab (4002), as well as 4001 above — or one another tab shows (4003)
+// or took over (4004).
 const CLOSE_INVALID = 4000;
 const CLOSE_UNSUPPORTED = 4002;
-const CLOSE_TAKEN = 4003;
-// The code this page closes its display socket with to give the display up, for
-// another tab to take (src/ws.rs).
-const CLOSE_RELEASED = 4004;
+const CLOSE_IN_USE = 4003;
+const CLOSE_TAKEN = 4004;
 // The display a page shows unless it is one opened in a tab of its own.
 const FIRST_DISPLAY = 1;
 const MAX_RETRY_DELAY_MS = 15_000;
@@ -555,11 +549,7 @@ export function useRemoteDesktop(
   // nothing else.
   tabDisplay: number | null = null,
 ) {
-  const [status, setStatus] = useState<ConnectionStatus>(() =>
-    tabDisplay !== null && readTabToken(tabDisplay) === null
-      ? "idle"
-      : "connecting",
-  );
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
   // This screen's density, kept in state only so the menu can show it beside the
   // remote's. Nothing about how the desktop is presented reads it — see
@@ -1168,7 +1158,7 @@ export function useRemoteDesktop(
         return;
       }
       if (tabDisplay !== null) {
-        openDisplay(tabDisplay);
+        openDisplay(tabDisplay, force);
         return;
       }
       await claimAndOpen(force);
@@ -1276,7 +1266,7 @@ export function useRemoteDesktop(
       handleControlMsg(msg);
     };
 
-    const closeDisplay = (code?: number) => {
+    const closeDisplay = () => {
       if (displayWs) {
         const old = displayWs;
         displayWs = null; // silence its onclose before closing
@@ -1286,7 +1276,7 @@ export function useRemoteDesktop(
         if (tabDisplay !== null) {
           wsRef.current = null;
         }
-        old.close(code);
+        old.close();
       }
     };
 
@@ -1316,8 +1306,6 @@ export function useRemoteDesktop(
     // socket closed with; null for a close worth reconnecting after.
     const unavailableReason = (display: number, code: number) => {
       switch (code) {
-        case CLOSE_TAKEN:
-          return `Display ${display} is open in another tab. To show it here instead, choose Disconnect in that tab's menu.`;
         case CLOSE_INVALID:
           return "This browser has no session open. Start one in another tab first.";
         case CLOSE_EVICTED:
@@ -1331,14 +1319,20 @@ export function useRemoteDesktop(
     // The socket of the display a tab of its own shows closed.
     const tabClosed = (display: number, code: number) => {
       wsRef.current = null;
+      // Another tab shows this display, or took it from this one, as a claim
+      // holds or takes the session: this tab takes it only when asked to.
+      if (code === CLOSE_IN_USE || code === CLOSE_TAKEN) {
+        clearDesktop();
+        setConnectError(null);
+        setStatus(code === CLOSE_IN_USE ? "busy" : "takenOver");
+        return;
+      }
       const reason = unavailableReason(display, code);
       if (reason === null) {
         scheduleRetry();
         return;
       }
-      // Nothing to wait for: opening it again is the Retry. The token goes, since
-      // whatever it named is no longer this tab's.
-      dropTabToken(display);
+      // Nothing to wait for: opening it again is the Retry.
       clearDesktop();
       setConnectError(reason);
       setStatus("unavailable");
@@ -1410,11 +1404,11 @@ export function useRemoteDesktop(
 
     // A display's socket, which carries no claim: the gateway lets it in by the
     // login cookie this browser carries (src/session.rs, `attach_display`).
-    const openDisplay = (display: number) => {
+    const openDisplay = (display: number, takeover = false) => {
       const socket = new WebSocket(
         gatewayDisplaySocketUrl(
           display,
-          tabDisplay === null ? null : readTabToken(display),
+          tabDisplay === null ? null : { id: tabId(), takeover },
         ),
       );
       const generation = advancePaintGeneration(paintGenerationRef);
@@ -2063,11 +2057,6 @@ export function useRemoteDesktop(
         case "oversize":
           setOversize(msg.cause);
           break;
-        case "displayToken":
-          if (tabDisplay !== null) {
-            writeTabToken(tabDisplay, msg.token);
-          }
-          break;
         case "picker":
           // No target selected (idle attach, switch-target, a takeover, or an
           // engine that ended): show the picker. Drop any retained framebuffer so a later
@@ -2100,15 +2089,14 @@ export function useRemoteDesktop(
       void connect(force);
     };
     startRef.current = start;
-    // A tab gives its display up: the socket closes saying so, which is what
-    // frees the display for another tab, and this one is back to being asked.
+    // A tab stops showing its display: its socket closes, and nothing opens
+    // another until it is asked to.
     releaseTabRef.current = () => {
       if (tabDisplay === null) {
         return;
       }
       clearTimeout(retryTimer);
-      closeDisplay(CLOSE_RELEASED);
-      dropTabToken(tabDisplay);
+      closeDisplay();
       clearDesktop();
       setConnectError(null);
       setStatus("idle");
@@ -2118,13 +2106,10 @@ export function useRemoteDesktop(
       session ? gatewaySocketUrl("/ws/camera", session) : null;
     micUrlRef.current = () =>
       session ? gatewaySocketUrl("/ws/mic", session) : null;
-    // A display in a tab of its own is taken for that tab, so the tab asks first.
-    // One holding a token is a reload of the tab that has it, and gets back in.
-    if (tabDisplay !== null && readTabToken(tabDisplay) === null) {
-      setStatus("idle");
-    } else {
-      start(false);
-    }
+    // A display in a tab of its own opens on load, as the session's page claims:
+    // it is this tab's when no other shows it, and otherwise the gateway refuses
+    // and the page asks before taking it.
+    start(false);
 
     // Window resizes re-report the viewport, debounced so a drag-resize sends
     // one message, not hundreds. The CSS size is re-derived too: the

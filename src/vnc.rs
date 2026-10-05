@@ -792,11 +792,14 @@ struct HpView {
 }
 
 impl HpView {
+    /// *All Displays*, which two virtual displays start on.
+    const BESIDE: Self = Self { active: 0, all: true };
+
     /// The view a picker `id` names, among `count` displays: a display's index,
     /// or [`DisplayState::COMBINED`] for all of them.
     fn chosen(id: u32, count: usize) -> Option<Self> {
         if id == DisplayState::COMBINED {
-            return (count > 1).then_some(Self { active: 0, all: true });
+            return (count > 1).then_some(Self::BESIDE);
         }
         let active = usize::try_from(id).ok().filter(|index| *index < count)?;
         Some(Self { active, all: false })
@@ -1482,9 +1485,10 @@ struct DisplayState {
     /// connection shares: what [`Self::wlshare_list`] builds the list from.
     wlshare_outputs: Vec<DisplayInfo>,
     wlshare_shared: u32,
-    /// *All Displays* was chosen on a wlshare target: its first output on the
-    /// canvas and its second in a tab of its own. The gateway's choice, in force
-    /// once wlshare says the connection is on the first.
+    /// *All Displays* is chosen on a wlshare target, as it is from the moment a
+    /// desk lists two outputs: its first output on the canvas and its second in a
+    /// tab of its own. The gateway's choice, in force once wlshare says the
+    /// connection is on the first.
     wlshare_all: bool,
 }
 
@@ -6151,21 +6155,35 @@ async fn read_output_list<R: AsyncRead + Unpin>(
         "vnc: the server lists {} output(s), sharing id {active}",
         displays.len()
     );
-    let (msg, switched) = {
+    let (msg, switched, ask) = {
         let mut state = display.lock().unwrap();
         // The shared output moved to another: not the session's first list, and
         // not to nothing at all.
         let switched = state.listed && state.wlshare_shared != active && active != 0;
+        // A desk that has just become two outputs starts on *All Displays*, as
+        // two virtual displays do: the canvas is asked onto the first when
+        // wlshare put it on the other.
+        let ask = if displays.len() == 2 && state.wlshare_outputs.len() != 2 {
+            state.wlshare_all = true;
+            displays.first().map(|first| first.id).filter(|first| *first != active)
+        } else {
+            None
+        };
         state.wlshare_outputs = displays;
         state.wlshare_shared = active;
         let changed = state.wlshare_list();
         // Sent only on a change, as the Apple path sends its own: every
         // `SetEncodings` is answered with a list, and a reconnecting browser is
         // told the current one by the reattach path.
-        (changed.then(|| state.displays_msg()).flatten(), switched)
+        (changed.then(|| state.displays_msg()).flatten(), switched, ask)
     };
     if let Some(msg) = msg {
         sink.msg(msg).await?;
+    }
+    if let Some(id) = ask {
+        debug!("vnc: asking the server for output {id}, the first of two");
+        let size = desktop.lock().unwrap().size;
+        send_all(uplink, &[select_output(id).to_vec(), update_request(false, size).to_vec()]).await?;
     }
     if switched {
         send_decided(uplink, desktop, DesktopState::output_switched).await?;
@@ -6557,9 +6575,14 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     let virtuals = hp_virtuals(desktop, &layout, virtual_display);
     let (size, scale) = {
         let mut d = desktop.lock().unwrap();
-        if virtuals.len() < 2 && d.view != HpView::default() {
-            d.view = HpView::default();
-            d.second_points = None;
+        if virtuals.len() < 2 {
+            if d.view != HpView::default() {
+                d.view = HpView::default();
+                d.second_points = None;
+            }
+        } else if d.virtuals.len() < 2 {
+            // Two displays the Mac has just made start shown beside each other.
+            d.view = HpView::BESIDE;
         }
         d.span = (virtuals.len() > 1).then_some(layout.backing);
         match virtuals.get(d.view.active) {
@@ -8477,7 +8500,7 @@ mod tests {
     /// browser holds no display state to correct.
     #[tokio::test]
     async fn an_output_list_becomes_the_display_picker() {
-        let (uplink, _wire) = test_uplink();
+        let (uplink, sent) = test_uplink();
         let desktop = shared_desktop((1920, 1080), None, None);
         let (sink, mut rx) = test_sink();
         let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
@@ -8507,12 +8530,16 @@ mod tests {
         assert_eq!(displays[1].detail, "1728×883 at 2x", "points, then the density");
         assert!(displays[1].virtual_display, "the headless flag is what marks it");
         assert_eq!(display.lock().unwrap().active, 7);
+        // A desk of two starts on All Displays, so the canvas is asked onto the first.
+        assert!(written(&sent).starts_with(&select_output(3)));
+        let asked = written(&sent).len();
 
-        // The same list again: nothing new to say.
+        // The same list again: nothing new to say, and nothing asked again.
         read_output_list(&mut output_list_body(7, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
             .await
             .unwrap();
         assert!(forwarded(&sink, &mut rx).await.is_none());
+        assert_eq!(written(&sent).len(), asked);
 
         // The server switched: the same list, a new checkmark.
         read_output_list(&mut output_list_body(3, &outputs).as_slice(), &uplink, &desktop, &display, &sink)
@@ -8520,15 +8547,15 @@ mod tests {
             .unwrap();
         assert!(matches!(
             forwarded(&sink, &mut rx).await,
-            Some(ServerMsg::Displays { active: 3, .. })
+            Some(ServerMsg::Displays { active: DisplayState::COMBINED, .. })
         ));
     }
 
     /// A desk of two outputs is listed with *All Displays*, which is this
-    /// gateway's choice and in force once wlshare says the canvas is on the first:
-    /// the second is then marked for a tab of its own. Any other number of
-    /// outputs has no such entry, and a list that stops being two drops the
-    /// choice with the tab.
+    /// gateway's choice, the one such a desk starts on, and in force once wlshare
+    /// says the canvas is on the first: the second is then marked for a tab of its
+    /// own. Any other number of outputs has no such entry, and a list that stops
+    /// being two drops the choice with the tab.
     #[tokio::test]
     async fn two_outputs_are_listed_with_all_displays_and_the_second_in_a_tab() {
         let (uplink, _wire) = test_uplink();
@@ -8544,11 +8571,11 @@ mod tests {
             forwarded(&sink, &mut rx).await
         };
 
-        // Chosen while the canvas is on the second: nothing shows in a tab until
+        // Listed while the canvas is on the second: nothing shows in a tab until
         // wlshare has moved the canvas to the first.
-        list(7, &two).await.expect("the list");
-        display.lock().unwrap().wlshare_all = true;
-        assert!(!display.lock().unwrap().wlshare_list(), "the canvas is still on the second output");
+        let Some(ServerMsg::Displays { active: 7, .. }) = list(7, &two).await else {
+            panic!("the canvas is still on the second output");
+        };
         assert!(!display.lock().unwrap().wlshare_tab());
         let Some(ServerMsg::Displays { active, displays }) = list(3, &two).await else {
             panic!("the switch was not forwarded");
@@ -8566,11 +8593,11 @@ mod tests {
         assert_eq!(active, 3);
         assert_eq!(displays.len(), 3);
         assert!(displays.iter().all(|d| d.tab.is_none() && d.id != DisplayState::COMBINED));
-        // Two again does not bring the choice back.
-        let Some(ServerMsg::Displays { active: 3, displays }) = list(3, &two).await else {
+        // Two again starts on it again.
+        let Some(ServerMsg::Displays { active: DisplayState::COMBINED, displays }) = list(3, &two).await else {
             panic!("the shorter list was not forwarded");
         };
-        assert!(displays.iter().all(|d| d.tab.is_none()));
+        assert_eq!(displays[1].tab, Some(BESIDE_DISPLAY));
     }
 
     /// The second connection lists a display and nothing of the session's.
@@ -8609,7 +8636,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             forwarded(&sink, &mut rx).await,
-            Some(ServerMsg::Displays { active: 3, ref displays }) if displays.len() == 3
+            Some(ServerMsg::Displays { active: DisplayState::COMBINED, ref displays }) if displays.len() == 3
         ));
 
         // Every output went away: nothing listed, nothing shared.
@@ -12696,7 +12723,11 @@ mod tests {
         let all = (DisplayState::COMBINED, "All Displays".to_owned(), "One browser tab each".to_owned(), None);
         let first = (0, "Display 1".to_owned(), "1600×1000 at 1x".to_owned(), None);
         let second = |tab| (1, "Display 2".to_owned(), "1280×800 at 1x".to_owned(), tab);
-        assert_eq!(listed(rx.try_recv().unwrap()), (0, vec![first.clone(), second(None), all.clone()]));
+        assert_eq!(
+            listed(rx.try_recv().unwrap()),
+            (DisplayState::COMBINED, vec![first.clone(), second(Some(2)), all.clone()]),
+            "two displays start shown beside each other"
+        );
         assert!(rx.try_recv().is_err());
 
         // The second display alone: the canvas is its size.
@@ -12759,6 +12790,7 @@ mod tests {
             )
         };
         // No tab while one display is chosen: the list names none.
+        hp_select(&shared, 0, &sink, false).await.unwrap();
         let (early, _early_rx) = feed();
         hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(early), plan, true).await;
         assert!(shared.tab.lock().unwrap().is_none());

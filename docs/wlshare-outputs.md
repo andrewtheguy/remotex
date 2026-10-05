@@ -114,7 +114,8 @@ before the wire.
 ## Two outputs at once
 
 A desk with exactly two outputs is listed with a third entry, *All Displays*
-(alpha): the first output stays on the canvas and the second opens at
+(alpha), which is what such a desk starts on, at its first list and whenever its
+outputs become two: the first output stays on the canvas and the second opens at
 `/display/2` in a tab of its own, as an RDP target's or a High Performance Mac's
 second virtual display does. The entry is the gateway's, not wlshare's, and no
 target key asks for it: the outputs are the compositor's, two monitors on a
@@ -125,8 +126,8 @@ wlshare shows a connection one output, so the tab is a second connection
 ([A display beside](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#a-display-beside)).
 What the gateway does:
 
-- **The canvas goes to the first output.** Choosing *All Displays* while the
-  canvas is on the second sends a `SelectOutput` for the first, and the entry is
+- **The canvas goes to the first output.** Starting on *All Displays*, or
+  choosing it, while the canvas is on the second sends a `SelectOutput` for the first, and the entry is
   checked, with the second marked for its tab, once the list comes back saying
   so. With the canvas already there the list is answered from the gateway and
   wlshare is asked nothing.

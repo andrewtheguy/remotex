@@ -81,17 +81,21 @@ export function gatewaySocketUrl(
 /// No claim rides on it. The display socket attaches by the login cookie, which
 /// a page of this browser carries and nothing else does — and which is all a
 /// display opened in another tab has: that tab is given no session token. What
-/// such a tab presents instead is `token`, the one the gateway gave it for the
-/// display, which keeps a second tab from taking the display from the first.
+/// such a tab presents is `tab`, its own name for itself, which tells its reload
+/// from another tab, and `takeover` once its user has confirmed taking the
+/// display from the tab showing it.
 export function gatewayDisplaySocketUrl(
   display: number,
-  token: string | null = null,
+  tab: { id: string; takeover: boolean } | null = null,
 ): string {
   const url = new URL(gatewayUrl("/ws/display"));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("display", String(display));
-  if (token) {
-    url.searchParams.set("token", token);
+  if (tab) {
+    url.searchParams.set("tab", tab.id);
+    if (tab.takeover) {
+      url.searchParams.set("takeover", "true");
+    }
   }
   return url.toString();
 }

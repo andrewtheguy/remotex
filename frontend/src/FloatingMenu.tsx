@@ -442,6 +442,23 @@ function DisplaySection({
       >
         {open ? "Hide displays" : (active?.label ?? "Display")}
       </button>
+      {/* A display shown in a tab of its own is one click from the drawer: All
+          Displays is what a session of two starts on, and the other display is
+          not on screen until its tab is opened. The link the picker has. */}
+      {displays
+        .filter((display) => display.tab !== null)
+        .map((display) => (
+          <a
+            key={display.id}
+            className="toolbar-btn toolbar-link"
+            href={gatewayUrl(`/display/${display.tab}`)}
+            target="_blank"
+            rel="noopener"
+            title={`Show ${display.label} in a browser tab of its own`}
+          >
+            Open {display.label} ↗
+          </a>
+        ))}
     </div>
   );
 }
