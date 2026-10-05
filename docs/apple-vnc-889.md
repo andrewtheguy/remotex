@@ -1361,10 +1361,15 @@ shown.
 An offer goes out with one pixel armed too. The Mac frames the answer on the
 thread that reads the viewer's messages, without the lock its update sender
 frames under, and a record from each at once fails the record layer's integrity
-check and ends the session. So remotex narrows the region when an offer is due,
-asks for that pixel, sends the offer at the end of the update that answers, and
-arms the display again at the Mac's answer, asking for it whole. The Mac's
-rectangles stand still for that long. A cursor change can still meet the answer.
+check and ends the session. So remotex narrows the region when an offer is due
+and asks for that pixel until an update brings it and nothing wider, sends the
+offer at the end of that update, and arms the display again at the Mac's answer,
+asking for it whole. The Mac's rectangles stand still for that long. Narrowing
+alone is not enough: an offer sent 35 ms behind a request for the whole display
+met its repaint. A request that arrives while the Mac writes an update is not
+always answered on its own, so the pixel is asked for again after each update
+that was not it and after half a second of silence. A cursor change can still
+meet the answer.
 A record that fails is reported with its number, its size, and whether its
 trailer is a neighbouring record's, which is what a number drawn twice leaves.
 
