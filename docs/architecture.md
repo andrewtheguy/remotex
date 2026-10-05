@@ -2133,7 +2133,13 @@ it: the browser composes a passed pipeline whole and shows one column of it
 With two columns the list ends with *All Displays* (alpha), under the id Apple's
 own entry uses: the first column on the canvas and the second in a browser tab of
 its own, which the list names as `tab: 2` and the display panel links to as
-`/display/2`. That page is the same SPA with no menu and no picker; it claims
+`/display/2`. It is the choice every engine with two displays starts on, at the
+first list that names two and at any later one that names two again unless one
+display alone was the picker's last choice, so the link
+is there without a choice being made: under the drawer's Display button, as well
+as in the display panel and on the Info card. Until the tab is opened it costs
+what the first display alone does, and the engine holds a position made on the
+canvas to the canvas's display, there being none beside it to drag onto. That page is the same SPA with no menu and no picker; it claims
 nothing, since a claim would take the session from the tab holding it, and opens
 `/ws/display?display=2` by the login cookie alone — opened with `noopener`, so it
 shares none of the first tab's storage, the token included. The session lets that
@@ -2170,21 +2176,22 @@ session — stays in the menu on the session's page. The clipboard's automatic s
 is the exception, kept in both tabs because only the focused one can reach the
 browser's clipboard ([Clipboard](#clipboard)).
 
-The display is one tab's. The first socket for it after the engine lists its tab is
-given a token, sent first on it as `displayToken`; the tab keeps it in its
-`sessionStorage` and presents it on every display socket it opens after
-(`/ws/display?display=2&token=…`), so a reload gets back in. Any other socket for
-the display — a second tab, or one holding a token from before — is closed with
-4003. A page opened without a token asks before it opens a socket, since the
-socket is what takes the display: Connect opens it, and one holding a token is a
-reload and opens it at once. The tab's Disconnect closes its socket with 4004,
-which drops the token at both ends, so the page asks again and the display is
-the next tab's to connect to. The token otherwise lasts while the tab is
-listed: choosing another display and then *All Displays* again frees the display for whichever tab opens it next, as does a
-host laying out one monitor, the engine ending, or the claim or login changing. It
-is not the claim's token, and it opens nothing but that display. A page at
+The display is one tab's, held and taken as the session is by a claim. A page at
+`/display/2` opens its socket as it loads, by the login cookie and naming its tab
+(`/ws/display?display=2&tab=…`, a name the page makes for itself and keeps in its
+`sessionStorage`; it lets nothing in, and only tells one tab's sockets from
+another's). While no socket shows the display, the socket has it. While one does,
+a socket naming the same tab replaces it, which is that tab reloading or
+reconnecting, and any other is closed with 4003: visiting the link takes nothing,
+and the page says the display is in use and offers Take over, as the session's
+page does over a session another browser holds. Take over opens the socket with
+`takeover=true`, and the socket taken from is closed with 4004; its page says so
+and offers Take it back, and does not reconnect by itself, or two tabs would take
+the display from each other in turn. The tab's Disconnect closes its socket and
+leaves the page offering Connect, and the display is then the next tab's to
+open. A page at
 `/display/2` whose display is not shown — *All Displays* not chosen, a target
-without it, no session in this browser, or another tab holding it — says the
+without it, or no session in this browser — says the
 display is not available, why, and offers Retry; it does not keep reconnecting.
 
 An `ard-high-performance` target with `virtual_displays = 2` (alpha) is listed and

@@ -156,7 +156,13 @@ function StatusOverlay({
   return (
     <div className="status-overlay">
       <span className="status-brand">{branding}</span>
-      <span className={`status status-${status}`}>{STATUS_LABEL[status]}</span>
+      <span className={`status status-${status}`}>
+        {tabDisplay !== null && status === "takenOver"
+          ? "Display taken over"
+          : tabDisplay !== null && status === "busy"
+            ? "Display in use"
+            : STATUS_LABEL[status]}
+      </span>
       {/* Why the session is not up, when the reason is known. "Reconnecting…"
           is true and unhelpful next to "the server answered 502", and the
           picker is not on screen to carry it while the overlay is. */}
@@ -167,7 +173,9 @@ function StatusOverlay({
       {status === "busy" && (
         <>
           <span className="status-hint">
-            This desktop is open in another browser.
+            {tabDisplay === null
+              ? "This desktop is open in another browser."
+              : `Display ${tabDisplay} is open in another tab, and is shown in one tab at a time.`}
           </span>
           <button type="button" className="status-action" onClick={onTakeOver}>
             Take over
@@ -179,13 +187,13 @@ function StatusOverlay({
           Retry
         </button>
       )}
-      {/* A display's tab asks before it takes the display: one tab shows it at a
-          time, and the one that connects is the one that has it. */}
+      {/* A display's tab that was disconnected from its menu: one tab shows the
+          display at a time, and the one that connects takes it. */}
       {status === "idle" && (
         <>
           <span className="status-hint">
-            Display {tabDisplay} is shown in one tab at a time. Connect to show
-            it in this one.
+            Display {tabDisplay} is not shown in this tab. Connect to show it
+            here.
           </span>
           <button type="button" className="status-action" onClick={onRetry}>
             Connect
@@ -204,7 +212,9 @@ function StatusOverlay({
       {status === "takenOver" && (
         <>
           <span className="status-hint">
-            Another browser took over this session.
+            {tabDisplay === null
+              ? "Another browser took over this session."
+              : `Another tab took over display ${tabDisplay}.`}
           </span>
           <button type="button" className="status-action" onClick={onTakeOver}>
             Take it back

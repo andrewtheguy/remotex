@@ -56,15 +56,14 @@
 //! - `4000` — the token is missing or superseded; claim again. On a display socket:
 //!   its login is not the one holding the session.
 //! - `4001` — evicted: another browser claimed the slot, or a newer audio, camera,
-//!   microphone or display socket replaced this one, or the session stopped showing
-//!   this display in a tab.
+//!   microphone or first-display socket replaced this one, or the session stopped
+//!   showing this display in a tab.
 //! - `4002` — the running target does not carry this socket's medium (a camera or
 //!   microphone the target does not carry, or no engine running), or shows no tab
 //!   for this display.
-//! - `4003` — another tab shows this display: the socket's `token` is not the one
-//!   that tab was given.
-//! - `4004` — sent by the browser, not to it: the tab showing a display in a tab of
-//!   its own gives the display up, and the next tab to open it is let in.
+//! - `4003` — another tab shows this display, and this socket did not ask to take
+//!   it over: the page asks its user, as it does for a session in use.
+//! - `4004` — another tab took this display over, as a claim takes the session.
 //!
 //! Any other close on the session socket detaches the browser. The owner reattaching
 //! within the grace period restores the picker or live engine; a different claim's
@@ -96,7 +95,7 @@ use crate::{
     mic::MicSignal,
     protocol::{self, ClientMsg, Held, Painted, ServerMsg, WireFrame},
     server::AppState,
-    session::{AttachEvent, DisplayRefused, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
+    session::{AttachEvent, DisplayLetGo, DisplayRefused, DisplayTab, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
     throughput::{Socket, ThroughputMeters},
     wire::Wire,
 };
@@ -109,11 +108,10 @@ const CLOSE_EVICTED: u16 = 4001;
 /// camera or microphone socket on a target that does not carry it, or with no
 /// engine running.
 const CLOSE_UNSUPPORTED: u16 = 4002;
-/// Close code: another tab shows this display ([`DisplayRefused::Taken`]).
-const CLOSE_TAKEN: u16 = 4003;
-/// Close code, from the browser: the tab showing this display gives it up, for
-/// another tab to take ([`SessionManager::release_display`]).
-const CLOSE_RELEASED: u16 = 4004;
+/// Close code: another tab shows this display ([`DisplayRefused::InUse`]).
+const CLOSE_IN_USE: u16 = 4003;
+/// Close code: another tab took this display over ([`DisplayLetGo::Taken`]).
+const CLOSE_TAKEN: u16 = 4004;
 /// Standard internal-error close. The browser treats it as reconnectable, so a
 /// fresh attachment gets a fresh sequence space rather than reusing one.
 const CLOSE_SEQUENCE_EXHAUSTED: u16 = 1011;
@@ -1285,7 +1283,7 @@ async fn outbound<S>(
     outbound_paint: Arc<Mutex<PaintTracker>>,
     outbound_room: Arc<tokio::sync::Notify>,
     heartbeat_interval: Duration,
-    cut: impl std::future::Future<Output = &'static str>,
+    cut: impl std::future::Future<Output = (u16, &'static str)>,
     ended_is_eviction: bool,
 ) where
     S: futures_util::Sink<Message> + Unpin,
@@ -1393,32 +1391,35 @@ async fn outbound<S>(
             }
         }
         };
-        let evicted = tokio::select! {
-            evicted = sending => evicted,
-            reason = cut => {
+        let close = tokio::select! {
+            // The cut first: the slot that lets a socket go also ends its events,
+            // and the cut is what says why.
+            biased;
+            (code, reason) = cut => {
                 info!("ws: {reason}");
                 drop(events);
                 outbound_paint.lock().unwrap().let_go();
-                true
+                Some(code)
             }
+            evicted = sending => evicted.then_some(CLOSE_EVICTED),
         };
-        if evicted {
-            let _ = ws_tx
-                .send(Message::Close(Some(CloseFrame {
-                    code: CLOSE_EVICTED,
-                    reason: "session taken over".into(),
-                })))
-                .await;
+        if let Some(code) = close {
+            let reason = if code == CLOSE_TAKEN { "display taken over" } else { "session taken over" };
+            let _ = ws_tx.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
         }
         info!("ws: outbound totals: {}", wire.totals);
 }
 
 /// The display socket's query string: which display it shows, from one, and for
-/// the second, the token its tab was given ([`crate::protocol::ServerMsg::DisplayToken`]).
+/// one shown in a tab of its own, the tab opening it, by the name it gives
+/// itself, and whether it takes the display from another tab
+/// ([`DisplayTab`]).
 #[derive(Deserialize)]
 pub struct DisplayParams {
     display: u32,
-    token: Option<String>,
+    tab: Option<String>,
+    #[serde(default)]
+    takeover: bool,
 }
 
 pub async fn display_handler(
@@ -1435,7 +1436,7 @@ pub async fn display_handler(
             state.sessions,
             login,
             params.display,
-            params.token,
+            params.tab.map(|id| (id, params.takeover)),
             HEARTBEAT_TIMINGS,
             Arc::clone(&state.throughput.meters),
         )
@@ -1449,12 +1450,15 @@ async fn display(
     sessions: Arc<SessionManager>,
     login: Option<String>,
     display: u32,
-    token: Option<String>,
+    tab: Option<(String, bool)>,
     heartbeat_timings: HeartbeatTimings,
     throughput: Arc<ThroughputMeters>,
 ) {
     let attachment = match login {
-        Some(login) => sessions.attach_display(&login, display, token.as_deref()),
+        Some(login) => {
+            let tab = tab.as_ref().map(|(id, take_over)| DisplayTab { id, take_over: *take_over });
+            sessions.attach_display(&login, display, tab)
+        },
         None => Err(DisplayRefused::NotOwner),
     };
     let attachment = match attachment {
@@ -1464,7 +1468,7 @@ async fn display(
             let code = match refused {
                 DisplayRefused::NotOwner => CLOSE_INVALID_TOKEN,
                 DisplayRefused::NotShown(_) => CLOSE_UNSUPPORTED,
-                DisplayRefused::Taken(_) => CLOSE_TAKEN,
+                DisplayRefused::InUse(_) => CLOSE_IN_USE,
             };
             refuse(socket, code, refused.to_string()).await;
             return;
@@ -1485,8 +1489,10 @@ async fn display(
         Arc::clone(&room),
         heartbeat_timings.interval,
         async move {
-            let _ = evicted.await;
-            "a display socket was let go"
+            match evicted.await {
+                Ok(DisplayLetGo::Taken) => (CLOSE_TAKEN, "a display socket was taken over by another tab"),
+                Err(_) => (CLOSE_EVICTED, "a display socket was let go"),
+            }
         },
         true,
     ));
@@ -1495,8 +1501,6 @@ async fn display(
     // Whether this end gave up on the socket, rather than the browser closing it
     // or the slot letting it go.
     let mut gave_up = false;
-    // Whether the tab gave the display up, which frees it for another tab.
-    let mut released = false;
     let mut heartbeat_check = interval(heartbeat_timings.interval);
     heartbeat_check.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_heartbeat = Instant::now();
@@ -1552,11 +1556,7 @@ async fn display(
                 Ok(other) => warn!("ws: a display socket sent a session message: {other:?}"),
                 Err(e) => warn!("ws: bad client message: {e} (raw: {text})"),
             },
-            Some(Ok(Message::Close(frame))) => {
-                released = frame.is_some_and(|frame| frame.code == CLOSE_RELEASED);
-                break;
-            }
-            None => break,
+            Some(Ok(Message::Close(_))) | None => break,
             Some(Ok(Message::Pong(payload))) => {
                 paint.lock().unwrap().ponged(&payload);
                 room.notify_one();
@@ -1580,11 +1580,7 @@ async fn display(
         outbound.abort();
         outbound_done = true;
     }
-    if released {
-        sessions.release_display(id);
-    } else {
-        sessions.detach_display(id);
-    }
+    sessions.detach_display(id);
     if !outbound_done
         && tokio::time::timeout(std::time::Duration::from_secs(5), &mut outbound)
             .await
@@ -1639,7 +1635,7 @@ async fn session(
         heartbeat_timings.interval,
         async move {
             superseded.notified().await;
-            "superseded by this browser's next socket"
+            (CLOSE_EVICTED, "superseded by this browser's next socket")
         },
         false,
     ));

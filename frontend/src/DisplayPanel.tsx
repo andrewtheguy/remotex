@@ -17,7 +17,7 @@
 // browser tab of its own, which this panel links to; every other RDP or VNC
 // session exposes one framebuffer and no list.
 
-import { useRef } from "react";
+import { type ReactNode, useRef } from "react";
 import { useDockedHeight, useIsDesktop } from "./dockedPanel.ts";
 import { gatewayUrl } from "./gateway.ts";
 import type { DisplayInfo } from "./protocol.ts";
@@ -28,6 +28,34 @@ interface Props {
   onSelect: (id: number) => void;
   onClose: () => void;
   onDockedHeightChange: (height: number) => void;
+}
+
+// The link to a display shown in a tab of its own. It opens in this browser,
+// which is what lets its page in: it carries the login cookie, and is given no
+// session token. `noopener`, so the new tab shares nothing of this one's page
+// state — the session token in this tab's storage included.
+export function DisplayTabLink({
+  tab,
+  className = "dp-tab-link",
+  title,
+  children,
+}: {
+  tab: number;
+  className?: string;
+  title?: string;
+  children: ReactNode;
+}) {
+  return (
+    <a
+      className={className}
+      href={gatewayUrl(`/display/${tab}`)}
+      target="_blank"
+      rel="noopener"
+      title={title}
+    >
+      {children}
+    </a>
+  );
 }
 
 export default function DisplayPanel({
@@ -88,23 +116,16 @@ export default function DisplayPanel({
         })}
       </div>
 
-      {/* A display shown in a tab of its own opens in this browser, which is
-          what lets its page in: it carries the login cookie, and is given no
-          session token. `noopener`, so the new tab shares nothing of this one's
-          page state — the session token in this tab's storage included. */}
       {tabs.length > 0 && (
         <div className="dp-tabs">
-          {tabs.map((display) => (
-            <a
-              key={display.id}
-              className="dp-tab-link"
-              href={gatewayUrl(`/display/${display.tab}`)}
-              target="_blank"
-              rel="noopener"
-            >
-              Open {display.label} in a new tab ↗
-            </a>
-          ))}
+          {tabs.map(
+            (display) =>
+              display.tab !== null && (
+                <DisplayTabLink key={display.id} tab={display.tab}>
+                  Open {display.label} in a new tab ↗
+                </DisplayTabLink>
+              ),
+          )}
         </div>
       )}
     </div>

@@ -393,8 +393,8 @@ two that overlap, or a union that is not the output's size. At connect, where
 there are no definitions, the caller reads the equal monitors and the placement
 it asked for off the union's size. The client composes and reports the span as
 it does any desktop. Which part of it a browser sees, and the pointer offset
-into it, is the engine's (`View` in `src/rdp.rs`), and so is *All Displays*, which
-shows the second column on a socket of its own (`Tab`): nothing of it reaches
+into it, is the engine's (`View` in `src/rdp.rs`), and so is *All Displays*, which two
+monitors start on and which shows the second column on a socket of its own (`Tab`): nothing of it reaches
 the RDP client, which composes the one span either way. In a session that passes
 the pipeline the span is composed in the browser instead, which is told the
 column to show (`ServerMsg::GraphicsView`) and paints the second column's tab

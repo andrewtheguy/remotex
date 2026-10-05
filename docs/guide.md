@@ -116,24 +116,25 @@ touch.
 - **Alpha:** `virtual_displays = 2` asks the host for two displays, each the
   session's size. Where the second sits against the first is chosen under the
   target at the picker, **Second display**: right, left, top or bottom, to match
-  where the client's own second display is. The floating menu's Display picker
-  switches between
-  them; the gateway encodes only the one shown. Its *All Displays* keeps the
-  first display here and links to the second, which opens at `/display/2` in a
-  new tab of the same browser: just that display, with its own pointer and
-  keyboard. A window dragged over the edge between the two tabs arrives on the
+  where the client's own second display is. The session starts on *All Displays*, in the floating menu's Display
+  picker, which keeps the first display here and links to the second, **Open
+  Display 2 ↗** under the menu's Display button: it opens at `/display/2` in a
+  new tab of the same browser, just that display, with its own pointer and
+  keyboard. The picker's `Display 1` and `Display 2` show one display alone on
+  this page; the gateway encodes only what is shown. A window dragged over the edge between the two tabs arrives on the
   other display, as the pointer does, however their windows are arranged. With
   each tab full screen on a display of its own the edges meet, so it arrives
   where it was dragged to; with anything between the two pictures it arrives
   short by that much.
-  While *All Displays* is chosen the menu's **Info** names both
-  displays and carries the same link. The page asks before it shows the display: **Connect** takes
-  the display for that tab. On a session that follows the window, that tab's
-  window sizes display 2. It needs the login of the browser holding the session
-  and is shown in one tab at a time — another says it is open elsewhere — until
-  that tab's menu **Disconnect**s, which lets another tab connect, or another
-  display is chosen, which closes it. Opened while it is not shown, it says it
-  is not available. With the passthrough, the browser holding the session
+  While *All Displays* is chosen the Display picker and the menu's **Info**
+  carry the same link. The page shows the display as it opens. On a session
+  that follows the window, that tab's window sizes display 2. It needs the
+  login of the browser holding the session and is shown in one tab at a time:
+  a tab opening it while another shows it says it is in use and asks before it
+  **Take**s it **over**, as a browser asks before taking a session, and the
+  tab it was taken from says so and offers **Take it back**. That tab's menu
+  **Disconnect**s it, and choosing one display alone closes it. Opened while it
+  is not shown, it says it is not available. With the passthrough, the browser holding the session
   composes both displays once and shows one; the second display's tab is painted
   from that same picture, so nothing is decoded twice. Checked against one
   Windows 11 host, the passthrough over two displays by a headless browser's
@@ -145,9 +146,9 @@ touch.
   **Disconnect**; everything else stays in the menu on the session's page.
 
   The second display's tab is for a client with two physical displays, one for
-  each, and *All Displays* is not recommended on a client with one. It is not
-  supported on a phone or tablet, though the Display picker there does not stop
-  you choosing it.
+  each. A client with one leaves the tab unopened, and has the first display
+  here as it would alone, or picks a display. The tab is not supported on a
+  phone or tablet, though nothing there stops you opening it.
 
 Another RDP server, an older Windows or xrdp say, may happen to work but is not
 tested against. See [The RDP client](rdp-client.md).
@@ -191,9 +192,9 @@ connection with the same error as wrong credentials. See
     display and the pointer crosses the edge they now share — and the Mac may
     keep the arrangement for the next session; when it has not, it is on the
     right again.
-    The Display picker switches between them, and its *All Displays* keeps the
+    The session starts on the Display picker's *All Displays*, which keeps the
     first here and opens the second at `/display/2` in a new tab of the same
-    browser, as on an RDP target; on a session that follows the window that
+    browser, as on an RDP target, and the picker shows either alone; on a session that follows the window that
     tab's window sizes the second display. The Mac sends a stream for each
     display, the second to UDP port 5902, and the gateway decodes or passes
     only the displays shown. As on RDP, a window dragged over the edge between
@@ -247,7 +248,7 @@ microphone as PipeWire devices on the desktop. Without the subtype the same
 server is read as any VNC server is.
 
 - **Alpha:** a desktop with exactly two outputs, monitors or headless ones, is
-  listed with *All Displays*: the first stays here and the second opens at
+  listed with *All Displays* and starts on it: the first stays here and the second opens at
   `/display/2` in a new tab of the same browser, with its own pointer and
   keyboard, as on an `rdp` target with two virtual displays. No key asks for it;
   the outputs are the compositor's, and `virtual_displays` is not a key of this

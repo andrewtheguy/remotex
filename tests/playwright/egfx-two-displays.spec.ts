@@ -119,15 +119,19 @@ test.describe("a target that passes its pipeline over two virtual displays", () 
     expect(shown?.w).toBeGreaterThan(0);
     expect(shown?.h).toBeGreaterThan(0);
 
-    // All Displays: the first display stays here and the second is a tab's.
-    await chooseDisplay(page, "Display 1", "All Displays");
+    // All Displays is what two displays start on: the first display is here and
+    // the second is a tab's, which the drawer links to.
+    await page.getByRole("button", { name: "Open menu" }).click();
+    await expect(
+      page.getByRole("link", { name: "Open Display 2 ↗" }),
+    ).toHaveAttribute("href", /\/display\/2$/);
+    await page.getByRole("button", { name: "Close menu" }).click();
 
-    // The second display's tab, in this browser: a page of the same context.
+    // The second display's tab, in this browser: a page of the same context. No
+    // tab shows the display, so it is this one's as it opens.
     const tab = await context.newPage();
     const tabSeen = watchDisplays(tab);
     await tab.goto(new URL("/display/2", BASE_URL).toString());
-    // The tab asks before it takes the display, which one tab shows at a time.
-    await tab.getByRole("button", { name: "Connect" }).click();
     // Painted from the session page's picture: the canvas it is shown on is up
     // once the paint worker has taken the first update across the browser.
     await expect(tab.locator("canvas.graphics")).toBeVisible({
@@ -146,6 +150,32 @@ test.describe("a target that passes its pipeline over two virtual displays", () 
     expect(second, "a passed pipeline is no video stream").not.toContain("videoFormat");
     expect(tabSeen.binary.get(2) ?? 0, "binary frames on the second display's socket").toBe(0);
     expect(second, "a tab composes no pipeline").not.toContain("graphicsStart");
+
+    // Another tab opening the display takes nothing by visiting: it asks, and
+    // this tab keeps the display through its own reload. Asked to, the other
+    // takes it, and this one says so and does not take it back by itself.
+    const other = await context.newPage();
+    await other.goto(new URL("/display/2", BASE_URL).toString());
+    await expect(other.getByText("Display in use")).toBeVisible({
+      timeout: 10_000,
+    });
+    await tab.reload();
+    await expect(tab.locator("canvas.graphics")).toBeVisible({
+      timeout: 20_000,
+    });
+    await other.getByRole("button", { name: "Take over" }).click();
+    await expect(tab.getByText("Display taken over")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(other.getByText("Display in use")).toHaveCount(0);
+    await tab.getByRole("button", { name: "Take it back" }).click();
+    await expect(other.getByText("Display taken over")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(tab.locator("canvas.graphics")).toBeVisible({
+      timeout: 20_000,
+    });
+    await other.close();
 
     // The session's page is still the first column, and still composing.
     expect(last(seen.views.get(1))?.x).toBe(0);

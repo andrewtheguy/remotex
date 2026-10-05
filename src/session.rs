@@ -148,10 +148,30 @@ pub enum DisplayRefused {
     /// The running engine shows no tab for this display.
     #[error("the session shows no display {0} of its own")]
     NotShown(u32),
-    /// Another tab shows this display: the token presented is not the one the
-    /// display's tab was given.
+    /// Another tab shows this display, and this one did not ask to take it.
     #[error("display {0} is open in another tab")]
-    Taken(u32),
+    InUse(u32),
+}
+
+/// The tab a socket for a display shown in a tab of its own is opened by
+/// ([`SessionManager::attach_display`]).
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayTab<'a> {
+    /// The tab's own name for itself, the same on every socket it opens: what
+    /// tells its reload or reconnect from another tab.
+    pub id: &'a str,
+    /// Take the display from another tab showing it, which the tab's user
+    /// confirmed, as a claim's `force` takes the session.
+    pub take_over: bool,
+}
+
+/// Why a display socket was let go, where its page is owed the reason
+/// ([`DisplayAttachment::evicted`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayLetGo {
+    /// Another tab took the display this one showed in a tab of its own, and
+    /// has it now, as a claim takes the session from the browser holding it.
+    Taken,
 }
 
 /// The browser's media going to the remote, one bridge per medium the target carries.
@@ -202,9 +222,11 @@ pub struct DisplayAttachment {
     /// The display's messages. Only [`AttachEvent::Msg`]: this socket's eviction is
     /// [`Self::evicted`].
     pub events: mpsc::Receiver<AttachEvent>,
-    /// Resolves when the slot lets this socket go: a claim change, a log out, an
-    /// engine that no longer shows its display, or a newer socket for it.
-    pub evicted: oneshot::Receiver<()>,
+    /// Resolves when the slot lets this socket go: with [`DisplayLetGo::Taken`]
+    /// when another tab took the display it showed in a tab of its own, and
+    /// closed for a claim change, a log out, an engine that no longer shows its
+    /// display, or the first display's newer socket.
+    pub evicted: oneshot::Receiver<DisplayLetGo>,
     /// Where this socket's paint tracker publishes the link's lag for the encoder
     /// drawing its display. The first display's is the slot's one handle, freshly
     /// [`LinkFeedback::reset`]; another display's is its own.
@@ -502,6 +524,8 @@ struct MicSlot {
 /// the engine shows it in a tab ([`State::tabs`]).
 struct DisplaySlot {
     id: u64,
+    /// The tab that opened it, by the name it gave ([`DisplayTab::id`]).
+    tab: Option<String>,
     /// The first display's messages arrive here from the pump; another display's
     /// from the engine's [`DisplayFeed`], through a forwarder.
     event_tx: mpsc::Sender<AttachEvent>,
@@ -510,9 +534,9 @@ struct DisplaySlot {
     /// slot that keeps the newest, so the pump never waits on the tab's paint and
     /// copies in quick succession leave the tab holding the last.
     clipboard: Option<tokio::sync::watch::Sender<Option<ServerMsg>>>,
-    /// Held, never sent on — dropping the slot resolves the socket's receiver, as
-    /// for [`AudioSlot`].
-    _close: oneshot::Sender<()>,
+    /// Dropping the slot resolves the socket's receiver, as for [`AudioSlot`];
+    /// sent on only to say another tab took the display.
+    close: oneshot::Sender<DisplayLetGo>,
 }
 
 /// The session the slot holds: a target and what was chosen for it at the picker.
@@ -579,12 +603,6 @@ struct State {
     /// The displays the running engine shows in tabs of their own, from the last
     /// [`ServerMsg::Displays`] it sent ([`crate::protocol::DisplayInfo::tab`]).
     tabs: Vec<u32>,
-    /// The token of the one tab showing the second display, from its first attach
-    /// after the engine listed the tab until the engine stops listing it. A socket
-    /// for that display presenting anything else is refused, so a second tab
-    /// cannot take the display from the first; the same tab reloading presents it
-    /// and is let back in.
-    tab_token: Option<String>,
     /// The first display's picture has lost messages since its socket last had
     /// all of them, so the next socket for it is owed a [`ClientMsg::Refresh`].
     display_lost: bool,
@@ -691,9 +709,6 @@ impl State {
             }
         }
         self.displays.retain(|display, _| *display == FIRST_DISPLAY || tabs.contains(display));
-        if !tabs.contains(&SECOND_DISPLAY) {
-            self.tab_token = None;
-        }
         self.tabs = tabs;
     }
 
@@ -708,7 +723,6 @@ impl State {
             }
         }
         self.displays.clear();
-        self.tab_token = None;
     }
 
     fn evict_camera(&mut self) {
@@ -1088,16 +1102,18 @@ impl SessionManager {
     /// of its own, and the engine is handed where its picture goes. A newer socket
     /// for the same display replaces this one.
     ///
-    /// The second display is one tab's: the first socket for it after the engine
-    /// listed its tab is given a token ([`ServerMsg::DisplayToken`], the first
-    /// message on it), and every later socket for it must present `token` equal to
-    /// it — the same tab reconnecting — or is refused as [`DisplayRefused::Taken`].
-    /// The token lasts until the engine stops listing the tab.
+    /// The second display is one tab's, held as the session is held by a claim.
+    /// While a socket shows it, a socket `tab` names as the same tab's replaces
+    /// it, which is that tab reloading or reconnecting; another tab's is refused
+    /// as [`DisplayRefused::InUse`] unless it asks to take the display over,
+    /// which its page does once its user confirms. The socket taken from is told
+    /// so ([`DisplayLetGo::Taken`]), and its page does not reconnect after. A
+    /// display no socket shows is the next tab's to open.
     pub fn attach_display(
         self: &Arc<Self>,
         login: &str,
         display: u32,
-        token: Option<&str>,
+        tab: Option<DisplayTab<'_>>,
     ) -> Result<DisplayAttachment, DisplayRefused> {
         let mut st = self.state.lock().unwrap();
         if st.claim.is_none() || st.login.as_deref() != Some(login) {
@@ -1106,30 +1122,26 @@ impl SessionManager {
         if display != FIRST_DISPLAY && (display != SECOND_DISPLAY || !st.tabs.contains(&display)) {
             return Err(DisplayRefused::NotShown(display));
         }
-        let given = if display == SECOND_DISPLAY {
-            match &st.tab_token {
-                Some(held) if token == Some(held.as_str()) => None,
-                Some(_) => return Err(DisplayRefused::Taken(display)),
-                None => {
-                    let token = Uuid::new_v4().to_string();
-                    st.tab_token = Some(token.clone());
-                    Some(token)
-                }
-            }
-        } else {
-            None
-        };
-        if st.displays.remove(&display).is_some() {
+        let opener = tab.map(|tab| tab.id);
+        // Two sockets that name no tab are not one tab's.
+        let same_tab = |slot: &DisplaySlot| opener.is_some() && slot.tab.as_deref() == opener;
+        if display != FIRST_DISPLAY
+            && !tab.is_some_and(|tab| tab.take_over)
+            && st.displays.get(&display).is_some_and(|slot| !same_tab(slot))
+        {
+            return Err(DisplayRefused::InUse(display));
+        }
+        if let Some(old) = st.displays.remove(&display) {
             info!("session: superseding the socket of display {display}");
-            if display == FIRST_DISPLAY && st.engine.is_some() {
-                st.display_lost = true;
+            if display == FIRST_DISPLAY {
+                if st.engine.is_some() {
+                    st.display_lost = true;
+                }
+            } else if !same_tab(&old) {
+                let _ = old.close.send(DisplayLetGo::Taken);
             }
         }
         let (event_tx, events) = mpsc::channel(FRAME_BUFFER);
-        // First, ahead of anything the engine sends: the channel is empty.
-        if let Some(token) = given {
-            let _ = event_tx.try_send(AttachEvent::Msg(ServerMsg::DisplayToken { token }));
-        }
         let (close_tx, evicted) = oneshot::channel();
         st.next_display_id += 1;
         let id = st.next_display_id;
@@ -1181,7 +1193,7 @@ impl SessionManager {
             });
             clipboard
         });
-        st.displays.insert(display, DisplaySlot { id, event_tx, clipboard, _close: close_tx });
+        st.displays.insert(display, DisplaySlot { id, tab: opener.map(str::to_owned), event_tx, clipboard, close: close_tx });
         info!("session: display {display}'s socket attached");
         Ok(DisplayAttachment { id, display, events, evicted, feedback })
     }
@@ -1208,20 +1220,6 @@ impl SessionManager {
             engine.release_tab(display);
             let _ = engine.input_tx.send(ClientMsg::DisplayShown { display, feed: None });
         }
-    }
-
-    /// The tab showing a display in a tab of its own gave it up through socket
-    /// `id`: its socket goes as any does, and the display is the next tab's to
-    /// take, as when the engine stops listing it.
-    pub fn release_display(&self, id: u64) {
-        {
-            let mut st = self.state.lock().unwrap();
-            if st.displays.get(&SECOND_DISPLAY).is_some_and(|slot| slot.id == id) {
-                info!("session: display {SECOND_DISPLAY}'s tab gave it up");
-                st.tab_token = None;
-            }
-        }
-        self.detach_display(id);
     }
 
     /// Route input that arrived on display socket `id` to the current engine. The
@@ -2956,7 +2954,8 @@ mod tests {
     /// A display socket carries no token: it attaches under the login the session
     /// was claimed with, and a display other than the first only while the engine
     /// shows it in a tab — which hands the engine where its picture goes, wraps
-    /// the input made over it, and ends with the tab.
+    /// the input made over it, and ends with the tab. Another tab is refused
+    /// the display until it asks to take it over.
     #[tokio::test]
     async fn a_display_socket_attaches_by_login_and_a_tab_while_the_engine_shows_it() {
         let (mgr, hooks) = manager_with_fake_engine();
@@ -2984,23 +2983,37 @@ mod tests {
         };
         frame_tx.send(list(Some(2))).await.unwrap();
         assert!(matches!(recv(&mut att.events).await, AttachEvent::Msg(ServerMsg::Displays { .. })));
-        let mut second = mgr.attach_display("login", 2, None).unwrap();
+        let tab = |id, take_over| Some(DisplayTab { id, take_over });
+        let mut taken = mgr.attach_display("login", 2, tab("a", false)).unwrap();
         let Some(ClientMsg::DisplayShown { display: 2, feed: Some(_) }) = input_rx.recv().await else {
             panic!("the engine is handed the tab's feed");
         };
-        let AttachEvent::Msg(ServerMsg::DisplayToken { token }) = recv(&mut second.events).await else {
-            panic!("the tab is given its token first");
+        // The display is that tab's: its own next socket replaces the last, and
+        // another tab is refused until it asks to take the display over, which
+        // tells the one that had it.
+        let mut taken = {
+            let again = mgr.attach_display("login", 2, tab("a", false)).unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), &mut taken.evicted).await.expect("replaced").is_err(),
+                "a tab's own next socket takes nothing from it"
+            );
+            assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, feed: Some(_) })));
+            again
         };
-        // The display is that tab's: another tab, or a stale token, is refused, and
-        // the same tab reconnecting is let back in.
-        assert!(matches!(mgr.attach_display("login", 2, None), Err(DisplayRefused::Taken(2))));
-        assert!(matches!(mgr.attach_display("login", 2, Some("stale")), Err(DisplayRefused::Taken(2))));
-        let mut second = mgr.attach_display("login", 2, Some(&token)).unwrap();
+        assert!(matches!(mgr.attach_display("login", 2, tab("b", false)), Err(DisplayRefused::InUse(2))));
+        assert!(matches!(mgr.attach_display("login", 2, None), Err(DisplayRefused::InUse(2))));
+        let mut second = mgr.attach_display("login", 2, tab("b", true)).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), &mut taken.evicted).await.expect("the first tab is let go"),
+            Ok(DisplayLetGo::Taken)
+        );
         let Some(ClientMsg::DisplayShown { display: 2, feed: Some(feed) }) = input_rx.recv().await else {
-            panic!("the engine is handed the reconnected tab's feed");
+            panic!("the engine is handed the next tab's feed");
         };
         feed.frames.send(ServerMsg::Resize { w: 7, h: 8, scale: UNSCALED }).await.unwrap();
         assert!(matches!(recv(&mut second.events).await, AttachEvent::Msg(ServerMsg::Resize { w: 7, .. })));
+        // The socket that was taken from going away ends nothing of the tab's.
+        mgr.detach_display(taken.id);
 
         mgr.forward_display_input(second.id, ClientMsg::MouseMove { x: 1, y: 2 });
         assert!(matches!(
@@ -3008,28 +3021,32 @@ mod tests {
             Some(ClientMsg::OnDisplay { display: 2, input }) if matches!(*input, ClientMsg::MouseMove { x: 1, y: 2 })
         ));
 
-        // A list that names no tab lets the tab's socket go.
+        // A list that names no tab lets the tab's socket go, and not as taken.
         frame_tx.send(list(None)).await.unwrap();
         assert!(matches!(recv(&mut att.events).await, AttachEvent::Msg(ServerMsg::Displays { .. })));
-        tokio::time::timeout(Duration::from_secs(5), &mut second.evicted)
-            .await
-            .expect("the tab's socket is let go")
-            .ok();
-        assert!(matches!(mgr.attach_display("login", 2, Some(&token)), Err(DisplayRefused::NotShown(2))));
-        // Listed again, the display is the next tab's to take, the old token's too.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), &mut second.evicted)
+                .await
+                .expect("the tab's socket is let go")
+                .is_err()
+        );
+        assert!(matches!(mgr.attach_display("login", 2, tab("b", true)), Err(DisplayRefused::NotShown(2))));
+        // Listed again with no socket showing it, the display is the next tab's.
         frame_tx.send(list(Some(2))).await.unwrap();
         assert!(matches!(recv(&mut att.events).await, AttachEvent::Msg(ServerMsg::Displays { .. })));
-        let mut third = mgr.attach_display("login", 2, None).unwrap();
-        let AttachEvent::Msg(ServerMsg::DisplayToken { token: fresh }) = recv(&mut third.events).await else {
-            panic!("a new token for the tab that takes it");
-        };
-        assert_ne!(fresh, token);
-        assert!(matches!(mgr.attach_display("login", 2, Some(&token)), Err(DisplayRefused::Taken(2))));
+        let third = mgr.attach_display("login", 2, tab("c", false)).unwrap();
 
         // What a tab holds down is let go of, over its display, when its socket goes.
         let Some(ClientMsg::DisplayShown { display: 2, feed: Some(_) }) = input_rx.recv().await else {
             panic!("the engine is handed the next tab's feed");
         };
+        // A socket naming no tab opens a display nobody shows, and is no tab's
+        // own next socket: a second one is refused like any other tab's.
+        mgr.detach_display(third.id);
+        assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, feed: None })));
+        let third = mgr.attach_display("login", 2, None).unwrap();
+        assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, feed: Some(_) })));
+        assert!(matches!(mgr.attach_display("login", 2, None), Err(DisplayRefused::InUse(2))));
         let control = || ClientMsg::Key { code: "ControlLeft".into(), pressed: true, caps: false };
         mgr.forward_display_input(third.id, control());
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::OnDisplay { display: 2, .. })));
@@ -3040,17 +3057,6 @@ mod tests {
                 if matches!(&*input, ClientMsg::Key { code, pressed: false, .. } if code == "ControlLeft")
         ));
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, feed: None })));
-
-        // A tab that gives the display up frees it for another, where one whose
-        // socket only went keeps it.
-        assert!(matches!(mgr.attach_display("login", 2, None), Err(DisplayRefused::Taken(2))));
-        let fourth = mgr.attach_display("login", 2, Some(&fresh)).unwrap();
-        mgr.release_display(fourth.id);
-        let mut fifth = mgr.attach_display("login", 2, None).unwrap();
-        let AttachEvent::Msg(ServerMsg::DisplayToken { token: next }) = recv(&mut fifth.events).await else {
-            panic!("a new token for the tab that takes a display given up");
-        };
-        assert_ne!(next, fresh);
     }
 
     /// The clipboard crosses a tab's display socket both ways: what the tab sends
@@ -3083,7 +3089,6 @@ mod tests {
         assert!(matches!(recv(&mut att.events).await, AttachEvent::Msg(ServerMsg::Displays { .. })));
         let mut second = mgr.attach_display("login", 2, None).unwrap();
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::DisplayShown { display: 2, .. })));
-        assert!(matches!(recv(&mut second.events).await, AttachEvent::Msg(ServerMsg::DisplayToken { .. })));
 
         mgr.forward_display_clipboard(second.id, ClientMsg::Clipboard { text: "from the tab".into() });
         assert!(matches!(

@@ -631,7 +631,7 @@ fn span(layout: Layout, columns: u16, placement: Placement) -> (u32, u32) {
 /// it shrinks to one, so a browser is not left offering a display the host took away.
 ///
 /// With more than one column the list ends with *All Displays* ([`ALL_DISPLAYS`]),
-/// which puts the first column on the canvas and every other one in a tab of its
+/// the choice a desktop of two starts on, which puts the first column on the canvas and every other one in a tab of its
 /// own: the list names each tab ([`DisplayInfo::tab`]), the browser opens it in
 /// another tab of the same browser, and that tab's display socket is handed to
 /// this engine as a [`Tab`].
@@ -649,6 +649,9 @@ struct View {
     /// Whether *All Displays* is chosen: `active` is then the first column, and
     /// every other one is shown in a tab.
     all: bool,
+    /// Whether one display alone was the picker's last choice, which a second
+    /// monitor coming back does not undo.
+    picked: bool,
     /// Whether a list has ever been sent, so a shrink to one is told as well.
     listed: bool,
 }
@@ -675,12 +678,14 @@ impl View {
             origins: [(0, 0); COLUMNS],
             active: 0,
             all: false,
+            picked: false,
             listed: false,
         };
         if asked > 1 && union {
             // Every monitor the connect asks for is the one size.
             let (w, h) = (narrow(per_monitor.w), narrow(per_monitor.h));
             view.columns = asked;
+            view.all = true;
             view.sizes = [(w, h); COLUMNS];
             view.origins = match placement {
                 Placement::Right => [(0, 0), (w, 0)],
@@ -713,7 +718,9 @@ impl View {
             sizes,
             origins,
             active: if self.active < columns { self.active } else { 0 },
-            all: self.all && columns > 1,
+            // A second monitor the host adds starts shown beside the first, as
+            // one it opened with does, unless one display alone was picked.
+            all: columns > 1 && (self.all || (self.columns <= 1 && !self.picked)),
             ..self
         }
     }
@@ -774,6 +781,12 @@ impl View {
         (clamp_u16(x), clamp_u16(y))
     }
 
+    /// A position made on the canvas, held on the column it shows.
+    fn held(self, x: i32, y: i32) -> (i32, i32) {
+        let (w, h) = self.size();
+        (x.clamp(0, i32::from(w.max(1)) - 1), y.clamp(0, i32::from(h.max(1)) - 1))
+    }
+
     /// The column shown in tab `display`, while *All Displays* is chosen: every
     /// column but the first, numbered from one as the display sockets number them.
     fn tab_column(self, display: u32) -> Option<u16> {
@@ -820,12 +833,14 @@ impl View {
             let moved = self.active != 0;
             self.active = 0;
             self.all = true;
+            self.picked = false;
             return Some(moved);
         }
         let column = u16::try_from(id).ok().filter(|column| *column < self.columns)?;
         let moved = column != self.active;
         self.active = column;
         self.all = false;
+        self.picked = true;
         Some(moved)
     }
 
@@ -1911,6 +1926,16 @@ async fn active_loop(
                     }).await?;
                     continue;
                 }
+                // The page lets a drag past its edge through while the list names a
+                // tab, opened or not: with none open there is no display beside
+                // this one to drag onto, and the position stays here.
+                let msg = match msg {
+                    ClientMsg::MouseMove { x, y } if tab.is_none() => {
+                        let (x, y) = view.held(x, y);
+                        ClientMsg::MouseMove { x, y }
+                    }
+                    other => other,
+                };
                 for event in translate_input(msg, &mut last_pos, &mut wheel, view, view.active) {
                     event.apply(input);
                 }
@@ -2975,7 +3000,7 @@ mod tests {
         let mut view = two;
         let msg = view.displays(Density::One).expect("two displays are a list");
         let ServerMsg::Displays { active, displays } = msg else { panic!("not a list") };
-        assert_eq!(active, 0);
+        assert_eq!(active, ALL_DISPLAYS, "two displays open shown beside each other");
         assert_eq!(
             displays.iter().map(|d| (d.id, d.label.as_str(), d.detail.as_str(), d.main)).collect::<Vec<_>>(),
             vec![
@@ -2984,7 +3009,7 @@ mod tests {
                 (ALL_DISPLAYS, "All Displays", "One browser tab each", false),
             ]
         );
-        assert!(displays.iter().all(|d| d.tab.is_none()), "no tab until All Displays is chosen");
+        assert_eq!(displays.iter().map(|d| d.tab).collect::<Vec<_>>(), vec![None, Some(2), None]);
         // At 2x the detail is in points.
         let mut dense = view.laid_out(&row(&[(2560, 1600), (2560, 1600)]), (5120, 1600));
         let ServerMsg::Displays { displays, .. } = dense.displays(Density::Two).unwrap() else {
@@ -3047,6 +3072,16 @@ mod tests {
             panic!("a list once sent is sent again")
         };
         assert_eq!(displays.len(), 1, "and one display offers no All Displays");
+        // A second monitor the host lays out again leaves a display picked alone
+        // alone, and starts beside the first where All Displays was the choice.
+        let again = one.laid_out(&row(&[(1280, 800), (1280, 800)]), (2560, 800));
+        assert_eq!((again.columns, again.active, again.all), (2, 0, false));
+        let again = two
+            .laid_out(&row(&[(1280, 800)]), (1280, 800))
+            .laid_out(&row(&[(1280, 800), (1280, 800)]), (2560, 800));
+        assert_eq!((again.columns, again.active, again.all), (2, 0, true));
+        // With no tab open a position past the canvas's edge is held on it.
+        assert_eq!(two.held(1300, -4), (1279, 0));
         let mut one_view = View::opened(1, per, (1280, 800), Placement::Right);
         assert_eq!(one_view.select(ALL_DISPLAYS), None);
         // One that never had a list has none to send.

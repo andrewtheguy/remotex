@@ -295,7 +295,12 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     );
     let first = view.output("HEADLESS-1");
     let second = view.output("HEADLESS-2");
-    assert_eq!(view.active(), Some(first), "the configured output is shared first");
+    assert_eq!(view.active(), Some(ALL_DISPLAYS), "two outputs start shown beside each other");
+    assert_eq!(
+        view.displays.as_ref().map(|(_, entries)| entries[0].0),
+        Some(first),
+        "the configured output is the canvas's, listed first"
+    );
     assert_eq!(sway_output(&container, "HEADLESS-1"), (2048, 1536, 2.0));
 
     // The window's points are asked for in the output's pixels.
@@ -368,10 +373,7 @@ async fn all_displays_shows_the_second_output_in_a_tab_of_its_own() {
     view.until(&mut ws, "HEADLESS-1 at 2x", |v| v.size == Some(doubled) && v.displays.is_some()).await;
     let first = view.output("HEADLESS-1");
     assert_eq!(view.output("All Displays"), ALL_DISPLAYS, "two outputs are listed with the entry for both");
-
-    ws.send(Message::text(format!(r#"{{"type":"selectDisplay","id":{ALL_DISPLAYS}}}"#)))
-        .await
-        .unwrap();
+    // A desk of two starts on it, with nothing chosen.
     view.until(&mut ws, "All Displays", |v| v.active() == Some(ALL_DISPLAYS)).await;
 
     // The tab: its window is the second output's size, in the browser's pixels.

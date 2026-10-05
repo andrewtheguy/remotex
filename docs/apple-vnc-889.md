@@ -594,7 +594,7 @@ changes, as read from Apple's viewer and daemon and as macOS 26 answered:
   offered again together, in one message each time, so the rule of one offer at
   a time is unchanged.
 - **Remotex shows one display on a page.** The picker lists `Display 1`,
-  `Display 2` and *All Displays*, which keeps the first on the session's page
+  `Display 2` and *All Displays*, which two displays start on and which keeps the first on the session's page
   and shows the second in a browser tab of its own, where Apple's viewer opens a
   window for each. The choice is answered in the gateway: the Mac sends both legs
   whatever is chosen, and the leg of a display nobody is shown is authenticated,

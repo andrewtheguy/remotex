@@ -10,8 +10,8 @@ import type { RemoteSize } from "./useRemoteDesktop.ts";
 // The menu on a second display's tab: the session page's button and drawer
 // (floatingButton.tsx), holding what belongs to this tab alone. That is immersive
 // full screen — full screen is a window's, and the session page's button reaches
-// only its own — and Disconnect, which gives the display up for another tab to
-// take. Everything the session has one of, its sound, clipboard, display picker
+// only its own — and Disconnect, which stops showing the display in this tab.
+// Everything the session has one of, its sound, clipboard, display picker
 // and End session, stays on the session's page.
 //
 // The button shows the display's number where the session's shows ☰, so the two
@@ -40,8 +40,8 @@ export default function DisplayMenu({
   onLocalShortcut: () => void;
   onFocusDesktop: () => void;
   onViewOnlyChange: (viewOnly: boolean) => void;
-  // Give this display up: the tab goes back to asking, and the display is the
-  // next tab's to connect to. See useRemoteDesktop.
+  // Stop showing this display here: the tab closes its socket and waits to be
+  // asked to connect again. See useRemoteDesktop.
   onDisconnect: () => void;
 }) {
   const { open, setOpen, hidden, toolbarStyle, button } = useFloatingButton({
@@ -87,7 +87,7 @@ export default function DisplayMenu({
                 setOpen(false);
                 onDisconnect();
               }}
-              title="Stop showing this display here, so another tab can connect to it"
+              title="Stop showing this display in this tab"
             >
               Disconnect
             </button>

@@ -328,8 +328,10 @@ password = "change-me"
 
 # ALPHA. Ask the host for this many virtual displays, each the session's size.
 # Where the second sits against the first is chosen at the picker, on an rdp
-# target: right, left, top or bottom. The floating menu's Display picker switches between them, and
-# the gateway encodes only the one shown; the host renders the other for the
+# target: right, left, top or bottom. The session starts on the floating menu's
+# Display picker's All Displays, the first display on the page and the second a
+# link away in a tab of its own; the picker shows either alone, and
+# the gateway encodes only what is shown; the host renders the other for the
 # windows left on it. 1 is the one desktop every target opens; at most 2. RDP
 # and `subtype = "ard-high-performance"` — the key is shared by the target types
 # that can create virtual displays, and refused elsewhere. On RDP the pipeline's
@@ -339,9 +341,9 @@ password = "change-me"
 # second to UDP port 5902), passed or not. Checked against one Windows 11 host
 # and one virtual Mac; the passed span on the Windows host by a headless
 # browser's sockets only, not yet by eye. The second display's tab, which the
-# picker's All Displays opens, is for a client with two physical displays: it is
-# not recommended on a client with one, and not supported on a phone or tablet,
-# though the Display picker there does not stop anyone choosing it.
+# menu links to on All Displays, is for a client with two physical displays: a
+# client with one leaves it unopened, and it is not supported on a phone or
+# tablet, though nothing there stops anyone opening it.
 #virtual_displays = 2
 
 # The clipboard has no key: every target shares its clipboard with the browser.

@@ -968,6 +968,12 @@ body {
   cursor: default;
 }
 
+/* A drawer button that is a link: the display opened in a tab of its own. */
+.toolbar-link {
+  text-align: center;
+  text-decoration: none;
+}
+
 .toolbar-btn-danger {
   color: #f85149;
   border-color: rgba(248, 81, 73, 0.4);
