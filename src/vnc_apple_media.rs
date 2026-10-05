@@ -59,9 +59,11 @@
 //! The stream itself is HEVC Range Extensions, 4:4:4, full-range BT.709, RTP payload
 //! type 100 packed as RFC 7798 without DONL: single NAL units, aggregation packets
 //! and fragmentation units. [`Depacketizer`] reassembles access units from it, and a
-//! lost packet costs a PLI ([`rtcp_pli`]), which the Mac answers with an IDR within
-//! tens of milliseconds, unless its last one is under a second old: it drops that
-//! request, so one stays owed until a picture comes of it.
+//! lost packet costs a refresh ([`rtcp_refresh`]): a picture the Mac predicts from
+//! one this side acknowledged ([`rtcp_reference_ack`]), in place of an IDR. Where
+//! nothing is left to predict from, a PLI ([`rtcp_pli`]) brings an IDR within tens
+//! of milliseconds. The Mac drops either request when its last keyframe is under a
+//! second old, so one stays owed until a picture comes of it.
 
 use std::io::Write as _;
 
@@ -689,9 +691,18 @@ pub struct RtpHeader {
     pub sequence: u16,
     pub timestamp: u32,
     pub ssrc: u32,
+    /// The Mac's mark on a picture that predicts only from one this side
+    /// acknowledged ([`rtcp_reference_ack`]): its answer to [`rtcp_refresh`].
+    pub refresh: bool,
     /// The payload, as a range of the datagram, without the authentication tag.
     pub payload: (usize, usize),
 }
+
+/// The profile of the header extension the Mac's video packets carry, less the
+/// bits that vary, and the bit of it that marks a refresh picture.
+const EXTENSION_PROFILE: u16 = 0x9301;
+const EXTENSION_VARIES: u16 = 0x0030;
+const EXTENSION_REFRESH: u16 = 0x0020;
 
 /// Read an RTP header. RTCP (packet types 200–207 in the whole second byte, which
 /// RTP would read as payload types 72–79) is told apart first.
@@ -704,10 +715,13 @@ fn rtp_header(data: &[u8]) -> Result<RtpHeader, SrtpError> {
     }
     let cc = usize::from(data[0] & 0x0f);
     let mut at = 12 + 4 * cc;
+    let mut refresh = false;
     if data[0] & 0x10 != 0 {
         if data.len() < at + 4 {
             return Err(SrtpError::NotRtp);
         }
+        let profile = u16::from_be_bytes([data[at], data[at + 1]]);
+        refresh = profile & !EXTENSION_VARIES == EXTENSION_PROFILE && profile & EXTENSION_REFRESH != 0;
         let words = usize::from(u16::from_be_bytes([data[at + 2], data[at + 3]]));
         at += 4 + 4 * words;
     }
@@ -720,6 +734,7 @@ fn rtp_header(data: &[u8]) -> Result<RtpHeader, SrtpError> {
         sequence: u16::from_be_bytes([data[2], data[3]]),
         timestamp: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
         ssrc: u32::from_be_bytes([data[8], data[9], data[10], data[11]]),
+        refresh,
         payload: (at, data.len() - AUTH_TAG_LEN),
     })
 }
@@ -855,6 +870,33 @@ pub fn rtcp_receiver_report(ssrc: u32) -> [u8; 8] {
     let mut report = [0x80, 201, 0, 1, 0, 0, 0, 0];
     report[4..].copy_from_slice(&ssrc.to_be_bytes());
     report
+}
+
+/// AVConference's acknowledgement of a picture this side has whole, by its RTP
+/// `timestamp`: an APP packet whose name is the number 5. The Mac's encoder keeps
+/// the newest acknowledged picture as a long-term reference, which is what lets it
+/// answer [`rtcp_refresh`] without an IDR. Alone in its datagram, as the rate
+/// report is.
+pub fn rtcp_reference_ack(ssrc: u32, timestamp: u32) -> [u8; 16] {
+    let mut ack = [0x80, 204, 0, 3, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0];
+    ack[4..8].copy_from_slice(&ssrc.to_be_bytes());
+    ack[12..].copy_from_slice(&timestamp.to_be_bytes());
+    ack
+}
+
+/// AVConference's request for a picture to go on from after a loss, from `ssrc`
+/// about `media_ssrc`: payload-specific feedback of format 2 carrying the
+/// stream's `size`, which the Mac checks against its encoder's. It answers with a
+/// picture predicted from the last one acknowledged, marked
+/// [`RtpHeader::refresh`], or with an IDR when it holds none; the IDR is a
+/// fraction of the size of the one a PLI brings.
+pub fn rtcp_refresh(ssrc: u32, media_ssrc: u32, size: (u16, u16)) -> [u8; 16] {
+    let mut refresh = [0x82, 206, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    refresh[4..8].copy_from_slice(&ssrc.to_be_bytes());
+    refresh[8..12].copy_from_slice(&media_ssrc.to_be_bytes());
+    refresh[12..14].copy_from_slice(&size.0.to_be_bytes());
+    refresh[14..].copy_from_slice(&size.1.to_be_bytes());
+    refresh
 }
 
 /// A Picture Loss Indication (RFC 4585 §6.3.1) from `ssrc` about `media_ssrc`: the
@@ -1014,8 +1056,9 @@ pub enum Depacketized {
     Pending,
     /// A whole access unit, decodable from what came before it.
     Unit(AccessUnit),
-    /// Packets were lost: everything up to the next random-access picture is
-    /// dropped, and the sender should be asked for one.
+    /// Packets were lost: everything up to the next picture the stream can go on
+    /// from is dropped, and the sender should be asked for one —
+    /// [`Depacketizer::resumes_at_refresh`] says which kind.
     Lost,
 }
 
@@ -1023,8 +1066,8 @@ pub enum Depacketized {
 ///
 /// A picture ends at the packet with the marker bit, or where the timestamp moves
 /// on. A gap in the sequence numbers drops the picture it fell in and everything
-/// after it until an IRAP picture arrives, because every other picture predicts
-/// from one that was lost.
+/// after it until an IRAP picture or one the Mac marks as a refresh arrives,
+/// because every other picture predicts from one that was lost.
 #[derive(Default)]
 pub struct Depacketizer {
     ssrc: Option<u32>,
@@ -1037,6 +1080,12 @@ pub struct Depacketizer {
     /// Whether the stream is decodable from here: a random-access picture has
     /// arrived since the last loss.
     synced: bool,
+    /// The current picture carries the Mac's refresh mark.
+    refresh: bool,
+    /// Out of step by lost packets alone, with every picture before them handed
+    /// on: a refresh picture predicts from one of those, so the stream goes on
+    /// from it. Not after [`Self::resync`], which gave pictures up.
+    resumable: bool,
 }
 
 impl Depacketizer {
@@ -1065,10 +1114,12 @@ impl Depacketizer {
         }
         if lost {
             self.damaged = true;
+            self.resumable |= self.synced;
             self.synced = false;
             out = Depacketized::Lost;
         }
         self.timestamp = Some(header.timestamp);
+        self.refresh |= header.refresh;
         self.parse(payload);
         if header.marker {
             if let Some(unit) = self.finish() {
@@ -1128,6 +1179,13 @@ impl Depacketizer {
     /// could not keep was lost to every picture that predicts from it.
     pub fn resync(&mut self) {
         self.synced = false;
+        self.resumable = false;
+    }
+
+    /// Whether a refresh picture is enough to go on from, where the stream is
+    /// out of step: the pictures handed on are all still there to predict from.
+    pub fn resumes_at_refresh(&self) -> bool {
+        !self.synced && self.resumable
     }
 
     /// Start over on a stream whose packets were not pushed for a while: the
@@ -1141,11 +1199,15 @@ impl Depacketizer {
     fn finish(&mut self) -> Option<AccessUnit> {
         let unit = std::mem::take(&mut self.unit);
         let damaged = std::mem::take(&mut self.damaged) || self.fragment.take().is_some();
+        let refresh = std::mem::take(&mut self.refresh);
         if damaged || unit.is_empty() {
             return None;
         }
-        if !self.synced && unit.iter().any(|nal| is_random_access(nal_type(nal[0]))) {
+        if !self.synced
+            && (refresh && self.resumable || unit.iter().any(|nal| is_random_access(nal_type(nal[0]))))
+        {
             self.synced = true;
+            self.resumable = false;
         }
         self.synced.then_some(unit)
     }
@@ -2391,6 +2453,11 @@ struct VideoLeg {
     depacketizer: Depacketizer,
     feedback: RateFeedback,
     keyframe_request: KeyframeRequest,
+    /// The stream's picture size, from its parameter sets: what a refresh
+    /// request names.
+    size: Option<(u16, u16)>,
+    /// The RTP timestamp of a picture handed on and not yet acknowledged.
+    unacknowledged: Option<u32>,
     /// Whether the last packet was handed on, for the start over a display coming
     /// back into view needs.
     was_shown: bool,
@@ -2401,42 +2468,55 @@ struct VideoLeg {
     plis: u64,
 }
 
-/// A keyframe still to come on a leg: asked for as soon as the leg's stream has
-/// an SSRC to name, and again every [`PLI_INTERVAL`] until a picture arrives,
-/// since the Mac drops a request made too soon after its last keyframe and a
-/// still screen sends nothing more to show that it did.
+/// The picture a leg's stream needs before it can go on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Ask {
+    /// One predicted from a picture already handed on, after lost packets
+    /// ([`rtcp_refresh`]).
+    Refresh,
+    /// An IDR ([`rtcp_pli`]): whoever is shown the stream has nothing to predict
+    /// from.
+    Keyframe,
+}
+
+/// A picture still to come on a leg: asked for as soon as the leg's stream has
+/// an SSRC to name, and again every [`PLI_INTERVAL`] until one arrives, since
+/// the Mac drops a request made too soon after its last keyframe and a still
+/// screen sends nothing more to show that it did.
 #[derive(Default)]
 struct KeyframeRequest {
-    owed: bool,
+    owed: Option<Ask>,
     asked: Option<tokio::time::Instant>,
 }
 
 impl KeyframeRequest {
-    fn want(&mut self) {
-        self.owed = true;
+    /// An IDR wanted outlasts a refresh wanted, not the other way round.
+    fn want(&mut self, ask: Ask) {
+        self.owed = self.owed.max(Some(ask));
     }
 
     /// A picture the stream can go on from has arrived, or the stream it was
     /// asked of is over.
     fn settle(&mut self) {
-        self.owed = false;
+        self.owed = None;
     }
 
-    /// Whether to ask at `now`, which counts as asking.
-    fn due(&mut self, now: tokio::time::Instant) -> bool {
-        if !self.owed || self.asked.is_some_and(|at| now.duration_since(at) < PLI_INTERVAL) {
-            return false;
+    /// What to ask for at `now`, which counts as asking.
+    fn due(&mut self, now: tokio::time::Instant) -> Option<Ask> {
+        if self.asked.is_some_and(|at| now.duration_since(at) < PLI_INTERVAL) {
+            return None;
         }
+        let ask = self.owed?;
         self.asked = Some(now);
-        true
+        Some(ask)
     }
 }
 
 /// What one datagram on a video leg asks of the receiver.
 enum Took {
     Nothing,
-    /// The stream cannot go on from here without an IDR.
-    Keyframe,
+    /// The stream cannot go on from here without this.
+    Wants(Ask),
 }
 
 impl VideoLeg {
@@ -2486,6 +2566,7 @@ impl VideoLeg {
         if self.media_ssrc != header.ssrc {
             // A new stream, after an offer, starts with an IDR of its own.
             self.keyframe_request.settle();
+            self.size = None;
         }
         self.media_ssrc = header.ssrc;
         // A display nobody is shown costs its packets' authentication and nothing
@@ -2493,7 +2574,7 @@ impl VideoLeg {
         let shown = self.shared.shown.load(std::sync::atomic::Ordering::Relaxed);
         if !std::mem::replace(&mut self.was_shown, shown) && shown {
             self.depacketizer.rejoin();
-            return Ok(Took::Keyframe);
+            return Ok(Took::Wants(Ask::Keyframe));
         }
         if !shown {
             self.keyframe_request.settle();
@@ -2502,10 +2583,16 @@ impl VideoLeg {
         let payload = &data[header.payload.0..header.payload.1];
         match self.depacketizer.push(&header, payload) {
             Depacketized::Pending => Ok(Took::Nothing),
-            Depacketized::Lost => Ok(Took::Keyframe),
+            Depacketized::Lost if self.depacketizer.resumes_at_refresh() => Ok(Took::Wants(Ask::Refresh)),
+            Depacketized::Lost => Ok(Took::Wants(Ask::Keyframe)),
             Depacketized::Unit(unit) => {
-                // Only a stream that has had its random-access picture yields one.
+                // Only a stream that has had a picture it can go on from yields one.
                 self.keyframe_request.settle();
+                if let Some(params) =
+                    unit.iter().find(|nal| nal_type(nal[0]) == NAL_SPS).and_then(|sps| parse_sps(sps))
+                {
+                    self.size = Some(params.size);
+                }
                 // The dump is the first display's stream.
                 if self.display == 1
                     && let Some(d) = dump.as_ref()
@@ -2517,6 +2604,7 @@ impl VideoLeg {
                 match self.onward.send(unit) {
                     Sent::Queued => {
                         self.pictures += 1;
+                        self.unacknowledged = Some(header.timestamp);
                         Ok(Took::Nothing)
                     }
                     Sent::Full(depth) => {
@@ -2530,28 +2618,43 @@ impl VideoLeg {
                             );
                         }
                         self.depacketizer.resync();
-                        Ok(Took::Keyframe)
+                        Ok(Took::Wants(Ask::Keyframe))
                     }
-                    Sent::Unready => Ok(Took::Keyframe),
+                    Sent::Unready => Ok(Took::Wants(Ask::Keyframe)),
                     Sent::Stopped => Err(anyhow::anyhow!("{} stopped", self.onward.name())),
                 }
             }
         }
     }
 
-    /// Ask the Mac for an IDR, when one is `wanted` now or still owed, the leg's
+    /// Ask the Mac for the picture `wanted` now or still owed, when the leg's
     /// stream has named its SSRC and the last request is [`PLI_INTERVAL`] old. It
     /// stays owed until [`Self::take`] has a picture.
-    async fn ask_keyframe(&mut self, wanted: bool) {
-        if wanted {
-            self.keyframe_request.want();
+    async fn ask_keyframe(&mut self, wanted: Option<Ask>) {
+        if let Some(ask) = wanted {
+            self.keyframe_request.want(ask);
         }
-        if self.media_ssrc == 0 || !self.keyframe_request.due(tokio::time::Instant::now()) {
+        if self.media_ssrc == 0 {
             return;
         }
+        let Some(ask) = self.keyframe_request.due(tokio::time::Instant::now()) else {
+            return;
+        };
         self.plis += 1;
-        let pli = self.rtcp.protect(&rtcp_pli(self.ssrc, self.media_ssrc));
-        let _ = self.socket.send(&pli).await;
+        let request = match (ask, self.size) {
+            (Ask::Refresh, Some(size)) => self.rtcp.protect(&rtcp_refresh(self.ssrc, self.media_ssrc, size)),
+            _ => self.rtcp.protect(&rtcp_pli(self.ssrc, self.media_ssrc)),
+        };
+        let _ = self.socket.send(&request).await;
+    }
+
+    /// Tell the Mac's encoder of the picture just handed on, which it may then
+    /// predict a refresh from.
+    async fn acknowledge(&mut self) {
+        if let Some(timestamp) = self.unacknowledged.take() {
+            let ack = self.rtcp.protect(&rtcp_reference_ack(self.ssrc, timestamp));
+            let _ = self.socket.send(&ack).await;
+        }
     }
 }
 
@@ -2656,6 +2759,8 @@ impl Receiver {
                     depacketizer: Depacketizer::default(),
                     feedback: RateFeedback::new(epoch),
                     keyframe_request: KeyframeRequest::default(),
+                    size: None,
+                    unacknowledged: None,
                     was_shown: true,
                     packets: 0,
                     forged: 0,
@@ -2693,7 +2798,7 @@ impl Receiver {
         let mut sound_datagram = vec![0u8; 2048];
         let mut dump = MediaDump::from_env();
         let failure = loop {
-            let mut want_keyframe = [false; MAX_DISPLAYS];
+            let mut want_keyframe = [None; MAX_DISPLAYS];
             tokio::select! {
                 _ = rtcp.tick() => {
                     let audio = self.audio_rtcp.protect(&rtcp_receiver_report(self.audio_ssrc));
@@ -2781,7 +2886,7 @@ impl Receiver {
                     };
                     match self.videos[0].take(&mut datagram[..len], arrived, &mut dump, alone) {
                         Ok(Took::Nothing) => {}
-                        Ok(Took::Keyframe) => want_keyframe[0] = true,
+                        Ok(Took::Wants(ask)) => want_keyframe[0] = Some(ask),
                         Err(e) => break e,
                     }
                 }
@@ -2797,13 +2902,13 @@ impl Receiver {
                     };
                     match self.videos[1].take(&mut second_datagram[..len], arrived, &mut dump, alone) {
                         Ok(Took::Nothing) => {}
-                        Ok(Took::Keyframe) => want_keyframe[1] = true,
+                        Ok(Took::Wants(ask)) => want_keyframe[1] = Some(ask),
                         Err(e) => break e,
                     }
                 }
                 leg = keyframe_wanted(&self.videos) => {
                     self.videos[leg].depacketizer.resync();
-                    self.videos[leg].keyframe_request.want();
+                    self.videos[leg].keyframe_request.want(Ask::Keyframe);
                 }
             }
             for (leg, wanted) in self.videos.iter_mut().zip(want_keyframe) {
@@ -2811,7 +2916,8 @@ impl Receiver {
                 if failed {
                     leg.depacketizer.resync();
                 }
-                leg.ask_keyframe(wanted || failed).await;
+                leg.acknowledge().await;
+                leg.ask_keyframe(if failed { Some(Ask::Keyframe) } else { wanted }).await;
             }
         };
         // The stream has failed while the RFB session goes on. The reason, then
@@ -2972,18 +3078,81 @@ impl Sound {
 mod tests {
     #[test]
     fn a_keyframe_request_is_repeated_until_a_picture_settles_it() {
+        use super::Ask;
         let start = tokio::time::Instant::now();
         let mut request = super::KeyframeRequest::default();
-        assert!(!request.due(start), "nothing is owed");
-        request.want();
-        assert!(request.due(start));
-        assert!(!request.due(start + super::PLI_INTERVAL / 2), "too soon to ask again");
+        assert_eq!(request.due(start), None, "nothing is owed");
+        request.want(Ask::Refresh);
+        assert_eq!(request.due(start), Some(Ask::Refresh));
+        assert_eq!(request.due(start + super::PLI_INTERVAL / 2), None, "too soon to ask again");
         // The Mac may have dropped the first: it is still owed.
-        assert!(request.due(start + super::PLI_INTERVAL));
+        assert_eq!(request.due(start + super::PLI_INTERVAL), Some(Ask::Refresh));
+        // An IDR wanted meanwhile is what goes out, and a refresh does not undo it.
+        request.want(Ask::Keyframe);
+        request.want(Ask::Refresh);
+        assert_eq!(request.due(start + super::PLI_INTERVAL * 2), Some(Ask::Keyframe));
         request.settle();
-        assert!(!request.due(start + super::PLI_INTERVAL * 3), "a picture came");
-        request.want();
-        assert!(request.due(start + super::PLI_INTERVAL * 3));
+        assert_eq!(request.due(start + super::PLI_INTERVAL * 4), None, "a picture came");
+    }
+
+    /// The packets a probe of macvm sent, which its encoder answered with a
+    /// refresh picture.
+    #[test]
+    fn the_refresh_request_and_the_acknowledgement_are_avconferences() {
+        assert_eq!(
+            super::rtcp_refresh(0xb54e_0c1c, 0x39b8_5839, (1600, 1000)),
+            [0x82, 0xce, 0, 3, 0xb5, 0x4e, 0x0c, 0x1c, 0x39, 0xb8, 0x58, 0x39, 0x06, 0x40, 0x03, 0xe8]
+        );
+        assert_eq!(
+            super::rtcp_reference_ack(0x1203_c98d, 200_800),
+            [0x80, 0xcc, 0, 3, 0x12, 0x03, 0xc9, 0x8d, 0, 0, 0, 5, 0x00, 0x03, 0x10, 0x60]
+        );
+    }
+
+    /// The Mac's extension word is `0x9301` or `0x9311`, and `0x9331` on a
+    /// refresh picture.
+    #[test]
+    fn a_refresh_picture_is_marked_in_the_header_extension() {
+        let packet = |profile: u16| {
+            let mut data = vec![0x90, 100, 0, 1, 0, 0, 0, 0, 0, 0, 0, 9];
+            data.extend_from_slice(&profile.to_be_bytes());
+            data.extend_from_slice(&[0, 1, 0, 1, 0xd5, 0x2f]);
+            data.extend_from_slice(&[0; 2 + super::AUTH_TAG_LEN]);
+            super::rtp_header(&data).map(|header| header.refresh)
+        };
+        assert_eq!(packet(0x9301), Ok(false));
+        assert_eq!(packet(0x9311), Ok(false));
+        assert_eq!(packet(0x9331), Ok(true));
+        assert_eq!(packet(0x1020), Ok(false), "another extension's bits mean nothing");
+    }
+
+    /// After lost packets the pictures handed on are still there to predict
+    /// from, so the stream goes on at the Mac's refresh picture; after a resync
+    /// they are not, and only a random-access picture will do.
+    #[test]
+    fn a_stream_goes_on_from_a_refresh_picture_after_a_loss_but_not_after_a_resync() {
+        let refresh = |sequence, timestamp| RtpHeader { refresh: true, ..header(sequence, timestamp, true) };
+        let mut d = Depacketizer::default();
+        assert_eq!(d.push(&header(10, 0, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert!(matches!(d.push(&header(11, 0, true), IDR), Depacketized::Unit(_)));
+        // 12 is lost: 13 predicts from it, and the refresh picture does not.
+        assert_eq!(d.push(&header(13, 800, true), TRAIL), Depacketized::Lost);
+        assert!(d.resumes_at_refresh());
+        assert_eq!(d.push(&header(14, 1200, true), TRAIL), Depacketized::Lost);
+        assert_eq!(d.push(&refresh(15, 1600), TRAIL), Depacketized::Unit(vec![TRAIL.to_vec()]));
+        assert!(!d.resumes_at_refresh());
+        assert_eq!(d.push(&header(16, 2000, true), TRAIL), Depacketized::Unit(vec![TRAIL.to_vec()]));
+        // A refresh picture that lost a packet of its own is no start.
+        assert_eq!(d.push(&RtpHeader { marker: false, ..refresh(18, 2400) }, TRAIL), Depacketized::Lost);
+        assert_eq!(d.push(&header(20, 2400, true), TRAIL), Depacketized::Lost);
+        assert!(d.resumes_at_refresh());
+        // Whoever was shown the stream gave pictures up: a refresh predicts from
+        // one of them.
+        d.resync();
+        assert!(!d.resumes_at_refresh());
+        assert_eq!(d.push(&refresh(21, 2800), TRAIL), Depacketized::Lost);
+        assert_eq!(d.push(&header(22, 3200, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert!(matches!(d.push(&header(23, 3200, true), IDR), Depacketized::Unit(_)));
     }
 
     use super::*;
@@ -3338,7 +3507,7 @@ mod tests {
     }
 
     fn header(sequence: u16, timestamp: u32, marker: bool) -> RtpHeader {
-        RtpHeader { payload_type: 100, marker, sequence, timestamp, ssrc: 9, payload: (0, 0) }
+        RtpHeader { payload_type: 100, marker, sequence, timestamp, ssrc: 9, refresh: false, payload: (0, 0) }
     }
 
     const VPS: &[u8] = &[0x40, 0x01, 0xaa];

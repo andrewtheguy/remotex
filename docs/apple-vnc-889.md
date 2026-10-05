@@ -1155,8 +1155,9 @@ other failures (see [Liveness](#the-stream)).
 ### The stream
 
 - **RTP.** Payload type 100, with a one-word header extension under profile
-  `0x9311` or `0x9301` holding the picture's packet count and a frame counter;
-  remotex ignores it. The marker bit ends a picture. RFC 7798 packetization:
+  `0x9311` or `0x9301` holding the picture's packet count and a frame counter.
+  The profile is `0x9331` on a refresh picture (below), and that bit is all
+  remotex reads of it. The marker bit ends a picture. RFC 7798 packetization:
   single NAL units, aggregation packets, fragmentation units.
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
   transfer, Display P3 primaries, with wavefront parallel processing
@@ -1212,13 +1213,38 @@ other failures (see [Liveness](#the-stream)).
     5104's (PT 206, FMT 4) and its own PT 192. The PT 192 form is the sender's
     SSRC and a list of 16-bit values, not RFC 2032's FIR, which is what a
     published description calls it.
-  - **Remotex sends a PLI** after a loss, when a stream starts without an IDR
-    (the first packets can arrive before the socket is bound), and when the
-    decoder falls eight pictures behind, which it warns about; for a passed
-    stream, when the browser's link falls 15 behind and when the browser has to
-    start over. It sends the PLI again every 500 ms until a picture it can
-    start at arrives, since the Mac may have dropped it and a still screen
-    sends nothing else to show that. It also sends the rate reports described under
+  - **A loss can be mended without a keyframe.** The viewer acknowledges each
+    picture it has whole, with an APP packet alone in its datagram whose name
+    is the number 5 and whose four bytes are the picture's RTP timestamp, and
+    the Mac's encoder keeps the newest acknowledged picture as a long-term
+    reference. After a loss the viewer asks with payload-specific feedback of
+    format 2 (PT 206) carrying the stream's width and height as two `u16`s
+    after the two SSRCs. The Mac answers with a refresh picture: an ordinary
+    picture predicted from the acknowledged one, marked by the `0x9331`
+    profile, which a decoder that kept every acknowledged picture goes on
+    from. The pictures between the loss and it predict from what was lost.
+    Without an acknowledged picture the same request brings an IDR, as it did
+    3 s into a stream that had been acknowledged throughout; that IDR, and the
+    one a PT 192 request naming the size brings, came at about 27 KB where a
+    PLI's and an RFC 5104 FIR's came at about 110 KB, on a 1600×1000 display
+    the encoder had spent seconds refining. The request is subject to the
+    least gap above. A PLI and a FIR bring an IDR whatever was acknowledged.
+  - **Remotex acknowledges every picture it hands on,** to its decoder or to
+    the browser, and after lost packets asks for a refresh and drops pictures
+    until the marked one or an IDR. With 0.3% of the picture's packets dropped
+    on the way to a gateway decoding the stream, the Mac's encoder logged three
+    refreshes and no IDR after the stream's first, and no picture failed to
+    decode. A browser decoding a passed stream across a refresh has not been
+    watched.
+  - **Remotex sends a PLI** where whoever is shown the stream has nothing left
+    to predict from: when a stream starts without an IDR (the first packets
+    can arrive before the socket is bound), when a picture fails to decode,
+    when the decoder falls eight pictures behind, which it warns about, and
+    when a display comes back into view; for a passed stream, when the
+    browser's link falls 15 behind and when the browser has to start over. It
+    sends either request again every 500 ms until a picture it can go on from
+    arrives, since the Mac may have dropped it and a still screen sends
+    nothing else to show that. It also sends the rate reports described under
     [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
     viewer does.
 - **Liveness.** The `SetEncodings` naming 1010 owes message 1 within 10 s, and so
@@ -1304,8 +1330,7 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   stream's queue answer, not the Mac's controller.
 - **Apple's viewer.** It offers up to 100 Mbit/s and four tiles, sends `RCTL`
   every 50 ms, and acknowledges each decoded tile picture for the encoder's
-  long-term references, with an APP packet whose name is the number 5 and whose
-  four bytes are the picture's RTP timestamp. On a quiet link its target sat
+  long-term references ([The stream](#the-stream)). On a quiet link its target sat
   at 58.4 Mbit/s with a round-trip time of about 1 ms. Its session was encrypted,
   so its reports were not read: the layout above comes from AVConference's code
   that builds and parses them, confirmed by a probe whose reports the Mac took as
