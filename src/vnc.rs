@@ -693,6 +693,9 @@ struct DesktopState {
     span: Option<(u16, u16)>,
     /// Which of two virtual displays is shown where.
     view: HpView,
+    /// One display alone was the picker's last choice, which the Mac making its
+    /// second display again does not undo.
+    hp_picked: bool,
     /// The points the second display follows while it is shown in a tab of its
     /// own in a session started with resize: that tab's window. `None` gives it
     /// the first display's points, as before the tab reported and once *All
@@ -1490,6 +1493,9 @@ struct DisplayState {
     /// tab of its own. The gateway's choice, in force once wlshare says the
     /// connection is on the first.
     wlshare_all: bool,
+    /// One output alone was the picker's last choice, which a desk becoming two
+    /// outputs again does not undo.
+    wlshare_picked: bool,
 }
 
 impl DisplayState {
@@ -2934,6 +2940,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         virtuals: Vec::new(),
         span: None,
         view: HpView::default(),
+        hp_picked: false,
         second_points: None,
         laid_out: false,
         canvas_live: false,
@@ -3228,6 +3235,17 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 // inside it ([`DesktopState::hp_span_point`]).
                 let input = match input {
                     ClientMsg::MouseMove { x, y } => {
+                        // The page lets a drag past its edge through while the
+                        // list names a tab, opened or not: with none open there
+                        // is no display beside the canvas's to drag onto, and
+                        // the position stays on it.
+                        let alone = on_leg.is_none() && beside.is_none() && tab.lock().unwrap().is_none();
+                        let (x, y) = if alone {
+                            let (w, h) = desktop.lock().unwrap().size;
+                            (x.clamp(0, i32::from(w.max(1)) - 1), y.clamp(0, i32::from(h.max(1)) - 1))
+                        } else {
+                            (x, y)
+                        };
                         let (x, y) = display.lock().unwrap().apple_pointer(x, y);
                         let (x, y) = {
                             let d = desktop.lock().unwrap();
@@ -3555,6 +3573,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let (ask, answer) = {
                             let mut state = display.lock().unwrap();
                             state.wlshare_all = id == DisplayState::COMBINED;
+                            state.wlshare_picked = !state.wlshare_all;
                             let ask = if state.wlshare_all {
                                 state.wlshare_outputs.first().map(|first| first.id).filter(|first| *first != state.wlshare_shared)
                             } else {
@@ -6161,9 +6180,9 @@ async fn read_output_list<R: AsyncRead + Unpin>(
         // not to nothing at all.
         let switched = state.listed && state.wlshare_shared != active && active != 0;
         // A desk that has just become two outputs starts on *All Displays*, as
-        // two virtual displays do: the canvas is asked onto the first when
-        // wlshare put it on the other.
-        let ask = if displays.len() == 2 && state.wlshare_outputs.len() != 2 {
+        // two virtual displays do, unless one output alone was picked: the
+        // canvas is asked onto the first when wlshare put it on the other.
+        let ask = if displays.len() == 2 && state.wlshare_outputs.len() != 2 && !state.wlshare_picked {
             state.wlshare_all = true;
             displays.first().map(|first| first.id).filter(|first| *first != active)
         } else {
@@ -6467,6 +6486,7 @@ async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> 
             return Ok(());
         }
         let was = std::mem::replace(&mut d.view, now);
+        d.hp_picked = !now.all;
         if !now.all {
             // The second display is the first's size again.
             d.second_points = None;
@@ -6580,8 +6600,9 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
                 d.view = HpView::default();
                 d.second_points = None;
             }
-        } else if d.virtuals.len() < 2 {
-            // Two displays the Mac has just made start shown beside each other.
+        } else if d.virtuals.len() < 2 && !d.hp_picked {
+            // Two displays the Mac has just made start shown beside each other,
+            // unless one alone was picked before the second went away.
             d.view = HpView::BESIDE;
         }
         d.span = (virtuals.len() > 1).then_some(layout.backing);
@@ -9624,6 +9645,7 @@ mod tests {
             virtuals: Vec::new(),
             span: None,
             view: HpView::default(),
+            hp_picked: false,
             second_points: None,
             laid_out: false,
             canvas_live: false,

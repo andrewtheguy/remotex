@@ -1392,18 +1392,20 @@ async fn outbound<S>(
         }
         };
         let close = tokio::select! {
-            evicted = sending => evicted.then_some(CLOSE_EVICTED),
+            // The cut first: the slot that lets a socket go also ends its events,
+            // and the cut is what says why.
+            biased;
             (code, reason) = cut => {
                 info!("ws: {reason}");
                 drop(events);
                 outbound_paint.lock().unwrap().let_go();
                 Some(code)
             }
+            evicted = sending => evicted.then_some(CLOSE_EVICTED),
         };
         if let Some(code) = close {
-            let _ = ws_tx
-                .send(Message::Close(Some(CloseFrame { code, reason: "session taken over".into() })))
-                .await;
+            let reason = if code == CLOSE_TAKEN { "display taken over" } else { "session taken over" };
+            let _ = ws_tx.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
         }
         info!("ws: outbound totals: {}", wire.totals);
 }

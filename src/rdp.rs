@@ -649,6 +649,9 @@ struct View {
     /// Whether *All Displays* is chosen: `active` is then the first column, and
     /// every other one is shown in a tab.
     all: bool,
+    /// Whether one display alone was the picker's last choice, which a second
+    /// monitor coming back does not undo.
+    picked: bool,
     /// Whether a list has ever been sent, so a shrink to one is told as well.
     listed: bool,
 }
@@ -675,6 +678,7 @@ impl View {
             origins: [(0, 0); COLUMNS],
             active: 0,
             all: false,
+            picked: false,
             listed: false,
         };
         if asked > 1 && union {
@@ -715,8 +719,8 @@ impl View {
             origins,
             active: if self.active < columns { self.active } else { 0 },
             // A second monitor the host adds starts shown beside the first, as
-            // one it opened with does.
-            all: columns > 1 && (self.all || self.columns <= 1),
+            // one it opened with does, unless one display alone was picked.
+            all: columns > 1 && (self.all || (self.columns <= 1 && !self.picked)),
             ..self
         }
     }
@@ -777,6 +781,12 @@ impl View {
         (clamp_u16(x), clamp_u16(y))
     }
 
+    /// A position made on the canvas, held on the column it shows.
+    fn held(self, x: i32, y: i32) -> (i32, i32) {
+        let (w, h) = self.size();
+        (x.clamp(0, i32::from(w.max(1)) - 1), y.clamp(0, i32::from(h.max(1)) - 1))
+    }
+
     /// The column shown in tab `display`, while *All Displays* is chosen: every
     /// column but the first, numbered from one as the display sockets number them.
     fn tab_column(self, display: u32) -> Option<u16> {
@@ -823,12 +833,14 @@ impl View {
             let moved = self.active != 0;
             self.active = 0;
             self.all = true;
+            self.picked = false;
             return Some(moved);
         }
         let column = u16::try_from(id).ok().filter(|column| *column < self.columns)?;
         let moved = column != self.active;
         self.active = column;
         self.all = false;
+        self.picked = true;
         Some(moved)
     }
 
@@ -1914,6 +1926,16 @@ async fn active_loop(
                     }).await?;
                     continue;
                 }
+                // The page lets a drag past its edge through while the list names a
+                // tab, opened or not: with none open there is no display beside
+                // this one to drag onto, and the position stays here.
+                let msg = match msg {
+                    ClientMsg::MouseMove { x, y } if tab.is_none() => {
+                        let (x, y) = view.held(x, y);
+                        ClientMsg::MouseMove { x, y }
+                    }
+                    other => other,
+                };
                 for event in translate_input(msg, &mut last_pos, &mut wheel, view, view.active) {
                     event.apply(input);
                 }
@@ -3050,9 +3072,16 @@ mod tests {
             panic!("a list once sent is sent again")
         };
         assert_eq!(displays.len(), 1, "and one display offers no All Displays");
-        // A second monitor the host lays out again starts beside the first.
+        // A second monitor the host lays out again leaves a display picked alone
+        // alone, and starts beside the first where All Displays was the choice.
         let again = one.laid_out(&row(&[(1280, 800), (1280, 800)]), (2560, 800));
+        assert_eq!((again.columns, again.active, again.all), (2, 0, false));
+        let again = two
+            .laid_out(&row(&[(1280, 800)]), (1280, 800))
+            .laid_out(&row(&[(1280, 800), (1280, 800)]), (2560, 800));
         assert_eq!((again.columns, again.active, again.all), (2, 0, true));
+        // With no tab open a position past the canvas's edge is held on it.
+        assert_eq!(two.held(1300, -4), (1279, 0));
         let mut one_view = View::opened(1, per, (1280, 800), Placement::Right);
         assert_eq!(one_view.select(ALL_DISPLAYS), None);
         // One that never had a list has none to send.

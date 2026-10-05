@@ -115,7 +115,7 @@ before the wire.
 
 A desk with exactly two outputs is listed with a third entry, *All Displays*
 (alpha), which is what such a desk starts on, at its first list and whenever its
-outputs become two: the first output stays on the canvas and the second opens at
+outputs become two unless one output alone was picked: the first output stays on the canvas and the second opens at
 `/display/2` in a tab of its own, as an RDP target's or a High Performance Mac's
 second virtual display does. The entry is the gateway's, not wlshare's, and no
 target key asks for it: the outputs are the compositor's, two monitors on a

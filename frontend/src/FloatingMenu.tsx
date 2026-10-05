@@ -10,7 +10,7 @@ import {
 import { AppVersion } from "./AppVersion.tsx";
 import { appWindow, onAppWindowChange } from "./appWindow.ts";
 import { ClipboardPanel } from "./ClipboardPanel.tsx";
-import DisplayPanel from "./DisplayPanel.tsx";
+import DisplayPanel, { DisplayTabLink } from "./DisplayPanel.tsx";
 import { desktopViewportSize, sizeWindowToDesktop } from "./desktopWindow.ts";
 import {
   FloatingButton,
@@ -23,7 +23,6 @@ import {
   onFullscreenChange,
   toggleFullscreen,
 } from "./fullscreen.ts";
-import { gatewayUrl } from "./gateway.ts";
 import { keyboardLockSupported } from "./keyboardLock.ts";
 import {
   type AudioRow,
@@ -445,20 +444,19 @@ function DisplaySection({
       {/* A display shown in a tab of its own is one click from the drawer: All
           Displays is what a session of two starts on, and the other display is
           not on screen until its tab is opened. The link the picker has. */}
-      {displays
-        .filter((display) => display.tab !== null)
-        .map((display) => (
-          <a
-            key={display.id}
-            className="toolbar-btn toolbar-link"
-            href={gatewayUrl(`/display/${display.tab}`)}
-            target="_blank"
-            rel="noopener"
-            title={`Show ${display.label} in a browser tab of its own`}
-          >
-            Open {display.label} ↗
-          </a>
-        ))}
+      {displays.map(
+        (display) =>
+          display.tab !== null && (
+            <DisplayTabLink
+              key={display.id}
+              tab={display.tab}
+              className="toolbar-btn toolbar-link"
+              title={`Show ${display.label} in a browser tab of its own`}
+            >
+              Open {display.label} ↗
+            </DisplayTabLink>
+          ),
+      )}
     </div>
   );
 }
@@ -679,14 +677,9 @@ function DisplaysHelp({ shown }: { shown: DisplayInfo[] }) {
               {display.tab === null ? (
                 "On this page"
               ) : (
-                <a
-                  className="dp-tab-link"
-                  href={gatewayUrl(`/display/${display.tab}`)}
-                  target="_blank"
-                  rel="noopener"
-                >
+                <DisplayTabLink tab={display.tab}>
                   Open in a new tab ↗
-                </a>
+                </DisplayTabLink>
               )}
             </dd>
           </div>

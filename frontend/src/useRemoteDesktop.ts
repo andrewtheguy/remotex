@@ -140,25 +140,48 @@ export const SESSION_KEY = "remotex.sessionId";
 // tab back in, and another tab has another.
 const TAB_KEY = "remotex.displayTab";
 
+// How long a page waits for the lock on a name it found in its storage: a
+// reload's last document may not have let go of it yet, and a duplicated tab's
+// original never will.
+const TAB_LOCK_WAIT_MS = 500;
+
 // Whether `id` is this page's alone: a duplicated tab starts with a copy of the
 // storage it was made from, the name included, and the page it was copied from
 // still holds the name's lock. Held for the page's life, so a reload, whose last
-// document let go of it, gets it again. True where there are no locks to ask.
-async function tabIdIsFree(id: string): Promise<boolean> {
-  if (!navigator.locks) {
-    return true;
-  }
+// document lets go of it, gets it again. True where there are no locks to ask,
+// or asking fails: the name is then used as it is.
+function tabIdIsFree(id: string): Promise<boolean> {
   return new Promise((resolve) => {
-    void navigator.locks.request(
-      `${TAB_KEY}.${id}`,
-      { ifAvailable: true },
-      (lock) => {
-        resolve(lock !== null);
-        // Never settles: the lock goes with the page.
-        return lock === null ? undefined : new Promise<void>(() => {});
-      },
-    );
+    try {
+      navigator.locks
+        .request(
+          `${TAB_KEY}.${id}`,
+          { signal: AbortSignal.timeout(TAB_LOCK_WAIT_MS) },
+          () => {
+            resolve(true);
+            // Never settles: the lock goes with the page.
+            return new Promise<void>(() => {});
+          },
+        )
+        .catch((cause: unknown) =>
+          // Still held when the wait ran out: another page's.
+          resolve(
+            !(cause instanceof DOMException && cause.name === "TimeoutError"),
+          ),
+        );
+    } catch {
+      resolve(true);
+    }
   });
+}
+
+function makeTabId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    // No secure context: a name only has to differ from another tab's.
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
 }
 
 async function nameTab(): Promise<string> {
@@ -171,7 +194,7 @@ async function nameTab(): Promise<string> {
   if (kept && (await tabIdIsFree(kept))) {
     return kept;
   }
-  const made = crypto.randomUUID();
+  const made = makeTabId();
   await tabIdIsFree(made);
   try {
     sessionStorage.setItem(TAB_KEY, made);
@@ -2240,8 +2263,8 @@ export function useRemoteDesktop(
   /// Try again after a failure that stopped the retries. Unforced, unlike
   /// `takeOver`: nothing here is holding the slot, so there is nobody to evict.
   const retry = useCallback(() => startRef.current?.(false), []);
-  /// Give up the display this page shows in a tab of its own, for another tab to
-  /// take. Connecting again is `retry`.
+  /// Stop showing the display this page shows in a tab of its own. Connecting
+  /// again is `retry`.
   const releaseTab = useCallback(() => releaseTabRef.current?.(), []);
 
   // Start a target from the picker, with what was chosen under it: its session

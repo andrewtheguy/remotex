@@ -2134,10 +2134,12 @@ With two columns the list ends with *All Displays* (alpha), under the id Apple's
 own entry uses: the first column on the canvas and the second in a browser tab of
 its own, which the list names as `tab: 2` and the display panel links to as
 `/display/2`. It is the choice every engine with two displays starts on, at the
-first list that names two and at any later one that names two again, so the link
+first list that names two and at any later one that names two again unless one
+display alone was the picker's last choice, so the link
 is there without a choice being made: under the drawer's Display button, as well
 as in the display panel and on the Info card. Until the tab is opened it costs
-what the first display alone does. That page is the same SPA with no menu and no picker; it claims
+what the first display alone does, and the engine holds a position made on the
+canvas to the canvas's display, there being none beside it to drag onto. That page is the same SPA with no menu and no picker; it claims
 nothing, since a claim would take the session from the tab holding it, and opens
 `/ws/display?display=2` by the login cookie alone — opened with `noopener`, so it
 shares none of the first tab's storage, the token included. The session lets that
