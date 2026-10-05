@@ -33,8 +33,10 @@
 //! sound within [`STREAM_START`] of its offer, one that sends neither for
 //! [`STREAM_SILENCE`], and one whose receiver fails ([`MediaStream::overdue`],
 //! [`MediaStream::failure`]).
-//! ZRLE rectangles are stepped over by their length, never inflated or shown. Until the first media picture, and across display changes which stop the
-//! stream until the next offer, the browser stays behind its resize notice.
+//! Until the first media picture, and across display changes which stop the
+//! stream until the next offer, the Mac's ZRLE rectangles stand in for it
+//! ([`crate::encode::VideoSink::stand_in`]); while it flows they are decoded and
+//! dropped.
 //!
 //! Every packet in is authenticated before it is decrypted — AES-256 counter mode
 //! with an HMAC-SHA1-80 tag, RFC 3711 keys from the masters this side put in the
@@ -2104,8 +2106,8 @@ impl MediaStream {
 
     /// Act on an encoding-1010 rectangle. `true` when a stream offered for the
     /// displays went down with it: the Mac named its ports again, which it does
-    /// after every display change, its own included, and the browser stays covered
-    /// until the offer that naming allows delivers.
+    /// after every display change, its own included, and its rectangles are the
+    /// picture until the offer that naming allows delivers.
     ///
     /// An error ends the session: the Mac refused the stream, or described one this
     /// side cannot receive. Apple's viewer shows the refusal and closes.

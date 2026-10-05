@@ -411,8 +411,8 @@ that selects the stream. See
   the picture: `/api/targets` says so, the picker shows the passthrough as
   chosen, and a session started without it all the same ends before it dials
   the Mac.
-  ZRLE is stepped over by its length, never inflated or shown; the
-  browser remains covered until the media stream sends the display's first picture.
+  ZRLE stands in until the media stream sends the display's first picture, and
+  is decoded and dropped once it flows.
   A stream that fails ends the session: do not add a subtype
   without the stream or a fallback to zlib, combinations Apple's viewer never
   offers. The Mac's own controller sets the rate from the offer's bitrate
@@ -430,9 +430,11 @@ that selects the stream. See
   at the picker to a browser that said it decodes the HEVC; a session started
   without it is sent VP9. The sound is not part of the choice: AAC-ELD units go
   on `/ws/audio` either way. Decoded or passed, the
-  stream is the whole picture: the Mac's ZRLE rectangles are never shown, and
-  the browser stays behind its resize notice until the stream's first picture,
-  at connect and across every display change. A PLI is a passed stream's
+  stream is the picture once it flows. Until its first picture, at connect and
+  across every display change, the Mac's ZRLE rectangles stand in for it: left
+  at the one push a second a High Performance session arms, and encoded as VP9
+  at the encoder's fastest speed (`VideoSink::stand_in`), since the stream
+  replaces them. A PLI is a passed stream's
   repaint. The page answers for the
   sound by decoding one of the Mac's units in each form `isConfigSupported`
   accepts, since it accepts forms that do not decode, and plays in the form that
@@ -890,16 +892,21 @@ Three controls with similar names therefore remain separate:
   A link that cannot carry the stream fills the receiver's queue of 15 units, half
   a second of the display's refresh; a full queue drops to the next keyframe, as
   the decoder's queue does.
-- **The gaps show nothing.** ZRLE never carries the picture of a session with a
-  media stream, passed or decoded: its rectangles are decoded only to keep the
-  deflate stream in step and reach neither the shadow nor the encoder, so a passed
-  session builds no encoder at all, and nothing is encoded here — a repaint is the
-  Mac's IDR, not a VP9 keyframe. Before the stream is up, across every display
-  change and across a stream the Mac restarts on its own, the browser stays behind
-  its resize notice, which the gateway sends down behind the stream's first unit of
-  the display (`VideoSink::uncover`), never ahead of it, and not while a resize in
-  progress has covered the browser for the display it brings. The stream coming
-  back starts at an IDR, announced again by its `VideoFormat`.
+- **The gaps show the Mac's rectangles.** Before the stream is up, across every
+  display change and across a stream the Mac restarts on its own, ZRLE carries
+  the picture as it does on `ard` with `virtual_display = true`: decoded, and
+  encoded here as VP9, which `VideoSink::damage` starts at a keyframe behind its
+  own `VideoFormat`. Two things differ from that mode. The Mac is left pushing
+  once a second, the interval a High Performance session arms, and the rounds
+  are encoded at `Speed::Fastest` (`VideoSink::stand_in`): the picture is
+  replaced as soon as the stream delivers, so neither the Mac's reading of input
+  nor the gateway's cores are spent on it. While the stream flows the rectangles
+  are still decoded, since ZRLE's deflate stream cannot be inflated across a
+  gap, and dropped. Two virtual displays' legs deliver apart, so each display
+  shown keeps its rectangles until its own leg has delivered, and the stream
+  carries the picture once all of them have (`stream_carries`). The stream coming back starts at an IDR, announced again by
+  its `VideoFormat`. The resize notice covers only a resize in progress, as on
+  the virtual display under Standard mode.
 - **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
   walk govern only VP9: the whole picture of a browser that says no.
   `render_adaptive` neither enables nor disables the Mac's separate, always-on
@@ -2182,10 +2189,10 @@ the canvas is one leg's pictures and the display in the tab the other's, decoded
 here or passed, each through a sink of its own, and the leg of a display nobody
 is shown is authenticated and dropped at the receiver, neither decoded nor
 passed. A `selectDisplay` is answered in the gateway and asks the Mac for nothing
-but the keyframe a display coming into view starts at; the canvas stays behind
-its resize notice until that picture, as it does across any display change. The
+but the keyframe a display coming into view starts at. The
 framebuffer the Mac spans over both displays is only the space its rectangles,
-stepped over, and pointer positions are addressed in: a position made on the
+cut to each display shown while they stand in for its stream, and pointer
+positions are addressed in: a position made on the
 second display is offset by where the layout places it, and held on a display
 (`DesktopState::hp_span_point`). Where that is is the Mac's to say: the second
 display is created to the right of the first and can be arranged anywhere
@@ -2506,11 +2513,9 @@ settled and decoded in the gateway by the host's FFmpeg libavcodec (`src/vnc_app
 or passed to the browser in a session started with the passthrough. The gateway's
 decoder runs four slice threads because one is too slow for 60 pictures a second:
 on one core of an i5-8500T a 1600×1000 picture took 14–23 ms, on four 7–14 ms.
-ZRLE rectangles never carry the
-picture: the browser stays behind its resize notice until the stream delivers, at
-connect and across every display change, as Apple's viewer keeps its curtain up
-until its stream is hooked up, and a session that passes the stream builds no video
-encoder at all. A stream the
+ZRLE rectangles carry the picture only until the stream delivers, at connect and
+across every display change, a second apart and encoded at the encoder's fastest
+speed. A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings
 cursor shapes and layouts. Apple's resolution-preset control remains
