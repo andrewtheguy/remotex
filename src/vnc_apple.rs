@@ -94,9 +94,10 @@ pub const ENCODING_CURSOR_POS: i32 = 0x44c;
 /// also listed, the layout is what it sends.
 pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 
-/// The most screens Combined Display is shown over. Past two, the view is held with a
-/// notice offering each screen on its own, whatever its size: more than two is an
-/// edge case on Standard, and composing them is too much for a browser to draw.
+/// The most screens Combined Display is shown over, which is two. Past that the
+/// view is held with a notice offering each screen on its own, whatever its size:
+/// more than two is an edge case on Standard, and composing them is too much for a
+/// browser to draw.
 pub const MAX_COMBINED_SCREENS: usize = 2;
 
 /// What this client advertises to a Mac.
