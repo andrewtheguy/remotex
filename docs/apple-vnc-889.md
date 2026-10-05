@@ -1370,6 +1370,10 @@ answer carrying the trailer of the record before it. `SetEncodings` is acted on
 under that lock, so an update being written is out before the offer is read, and
 none follows. A layout that changes the display is answered with the list that
 has ZRLE first again, so the Mac's rectangles stand in until the next offer.
+From the offer until then remotex asks for and arms one pixel, so the Mac is left
+holding no request for a display that may have shrunk by the time it serves one,
+and a resize goes out as it falls due: the update a resize otherwise waits for
+never comes from a Mac that sends no pixels.
 A cursor change can still meet the answer, as it can for Apple's viewer.
 
 The Mac counts the media stream as a codec only in its Apple silicon build: the
