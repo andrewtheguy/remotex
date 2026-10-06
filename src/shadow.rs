@@ -219,18 +219,8 @@ impl Shadow {
     }
 
     /// The pixels of `rect` as packed RGB888, or `None` when any of them is
-    /// unknown.
-    ///
-    /// CopyRect names a region of the framebuffer instead of carrying pixels, and a
-    /// client here is sent a video stream rather than draw commands, so the source
-    /// has to be read back out of the only copy this side keeps. A region the shadow never
-    /// learned cannot be reproduced, and inventing one would leave wrong pixels on
-    /// screen for as long as nothing else changed there — suppressed by this very
-    /// shadow on every later update. So the caller is told to ask for a repaint
-    /// rather than handed a guess.
-    ///
-    /// The pixels are copied out before the caller writes the destination, so a
-    /// source overlapping its destination still copies the original.
+    /// unknown: what a test asks to learn what the client has been sent.
+    #[cfg(test)]
     pub fn copy_out(&self, rect: Rect) -> Option<Vec<u8>> {
         if rect.right >= self.w || rect.bottom >= self.h {
             return None;
@@ -398,7 +388,6 @@ mod tests {
         assert_eq!(Rect::from_size(4, 4, 1, 1), Some(rect(4, 4, 4, 4)));
     }
 
-    /// What CopyRect reads back, and the one thing it must refuse.
     #[test]
     fn copy_out_returns_known_pixels_and_nothing_else() {
         let mut shadow = Shadow::new("test", 8, 4);
@@ -412,8 +401,7 @@ mod tests {
         assert_eq!(shadow.copy_out(rect(6, 1, 9, 2)), None);
     }
 
-    /// `forget` drops the claim to know the pixels, so a CopyRect right after a
-    /// browser refresh has nothing to read and asks for a repaint instead.
+    /// `forget` drops the claim to know the pixels.
     #[test]
     fn copy_out_refuses_everything_a_forget_has_disclaimed() {
         let mut shadow = Shadow::new("test", 8, 4);

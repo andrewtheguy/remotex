@@ -8,12 +8,9 @@
 # xfonts-base is needed for the X server's builtin 'fixed' font at startup, and
 # x11-xserver-utils for xsetroot.
 #
-# The root window is deliberately not left at its default flat colour. TigerVNC
-# sends a solid rectangle as RRE with zero subrectangles whatever encoding the
-# client preferred, because that is the cheapest way to say "all one colour" —
-# so a blank desktop exercises RRE and never reaches the ZRLE encoder at all.
-# A two-colour pattern makes the rectangles real, and ZRLE is then what a client
-# advertising it actually receives.
+# The root window is deliberately not left at its default flat colour: a blank
+# desktop is one solid ZRLE tile after another, which exercises one subencoding
+# of the decoder. A two-colour pattern makes the tiles real.
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

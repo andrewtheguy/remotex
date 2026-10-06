@@ -149,8 +149,8 @@ to the link. Nothing of it is passed through.
 
 Every other VNC server is a plain `vnc` target, reached through the RFB baseline
 and always encoded as VP9 in the gateway, at 1x and without sound. The gateway
-reads the standard lossless encodings, ZRLE first, then zlib, Hextile, RRE and
-Raw, with CopyRect beside them; Tight and the other vendor or lossy ones are not
+asks for ZRLE and reads nothing else but Raw, which RFB lets any server send; the
+older standard encodings, Tight and the other vendor or lossy ones are not
 listed. A wlshare server behind a plain target is read the same way: its
 fallback for ordinary VNC clients. Plain VNC stays supported, and is worked on
 as needed rather than ahead of the tiers.
@@ -591,7 +591,7 @@ Five rules hold the stream up, and each is a rule somewhere:
   blit into. `VideoSink::frame` encodes it, called at RDP's outputs-loop end (and its
   `Refresh` arm, which `continue`s past that) and at VNC's `FramebufferUpdate` end.
   It is a no-op when nothing was blitted, because RDP's loop turns once per PDU and
-  most redraw nothing. VNC's CopyRect is read back out of the shadow as pixels.
+  most redraw nothing.
 - **A frame boundary is a proposal, not a frame rate.** Those boundaries occur at
   whatever rate the remote reports damage — 126 a second, measured, on a busy RDP
   desktop against a 30 Hz stream and a 60 Hz screen — and a full encode at every
@@ -2397,8 +2397,8 @@ The built-in client speaks two dialects, chosen by the target's `subtype`, that
 share everything below the handshake — one read loop, one input path, one video
 path. Both force the same 32-bit true-color BGRX pixel format rather than
 negotiating one, and use the same shadow and encoder path as RDP. `src/vnc_encodings.rs`
-decodes whichever encoding a server picks into the packed RGB888 the shadow and the
-mirror take, so nothing above it knows which was chosen.
+decodes ZRLE, and the Raw a server may send in its place, into the packed RGB888
+the shadow and the mirror take, so nothing above it knows which arrived.
 
 **RFB 3.8** is the dialect of a plain target and of a `wlshare` one. The dialect
 and the baseline below are what the two share. A `wlshare` target is a subtype
@@ -2430,16 +2430,13 @@ is the only end that knows what the host keyboard is. The
 server also drops pointer and key input during the first seconds of a session;
 `tests/ws_probe.py --key` waits eight seconds before injecting for that reason.
 
-A plain target and a `wlshare` one advertise the standard lossless encodings in
-preference order —
-CopyRect, ZRLE, zlib, Hextile, RRE, Raw — and a server encodes with the first it
-supports, so a modern one settles on ZRLE and uses CopyRect for scrolls and window
-moves. Tight, TightPNG, JPEG and H.264 are deliberately absent: vendor or lossy,
-and this gateway re-encodes every frame for the browser anyway. CopyRect names a
-source region rather than carrying pixels, so its source is read back out of the
-shadow — the VNC link still carries no pixels for a scroll — and a source the
-shadow does not know costs one non-incremental repaint rather than an invented
-picture.
+A plain target and a `wlshare` one advertise two pixel encodings, ZRLE and Raw.
+ZRLE is the one asked for, as it is of a Mac: RFC 6143 defines it and every
+current server has it. Raw is listed because RFB lets a server send it whatever a
+client lists. Everything else is deliberately absent — CopyRect, zlib, Hextile
+and RRE, which only a server without ZRLE needs, and Tight, TightPNG, JPEG and
+H.264, which are vendor or lossy — so there is one decoder to keep and to test,
+and a rectangle in an encoding that was not listed ends the session.
 
 A `wlshare` target also lists wlshare's own encodings after those: its VP9
 stream at their head for a desktop within the ceiling, the density and
@@ -2462,7 +2459,7 @@ the client then asks for the whole desktop and stops polling: updates arrive as
 the screen changes rather than one per request, which takes a round trip out of
 every frame. Non-incremental requests are unaffected and still go where they went,
 because a repaint no amount of waiting for damage will produce is exactly what a
-reattach, a resize and an unknown CopyRect source need; a resize also re-sends the
+reattach and a resize need; a resize also re-sends the
 enable, since the region is part of the request. What that removes is this
 engine's only pacing, which is what Fence restores: the server sends a marker down
 the stream and asks for it back, and the read loop echoes it immediately, so its

@@ -274,9 +274,9 @@ vnc_password = "change-me"
 ```
 
 A plain target takes `vnc_password` for classic VNC authentication, or
-`username` and `password` for RSA-AES. The gateway reads the standard lossless
-encodings (ZRLE, zlib, Hextile, RRE, Raw and CopyRect); Tight and the other
-vendor or lossy encodings are not listed. The target is asked for its size once,
+`username` and `password` for RSA-AES. The gateway asks for ZRLE, which every
+current VNC server has, and reads nothing else but Raw; the older standard
+encodings, Tight and the other vendor or lossy ones are not listed. The target is asked for its size once,
 shown at 1x, and carries no sound, camera or microphone. Standard RFB cannot say
 that its pixels are HiDPI; see [HiDPI over standard RFB](standard-rfb-hidpi.md).
 
