@@ -467,7 +467,6 @@ impl VideoSink {
         let round_bytes = usize::try_from(self.shared.round_bytes.load(Ordering::Relaxed)).unwrap_or(usize::MAX);
         let held = self.hold(round_bytes).await;
         let pushed = self.push(Pending::Round(handle, held)).await;
-        let pushed = if pushed.is_ok() { self.uncover_behind().await } else { pushed };
         // How long that took is the congestion signal, and it is read whether or not
         // the push succeeded: a push that failed waited just as long, and the verdict
         // is about the link rather than about this round. Waiting on the budget and
@@ -668,7 +667,7 @@ impl VideoSink {
     }
 
     /// Bring the browser's notice that the screen is not available down behind the
-    /// next unit queued, encoded here or passed: a
+    /// next unit sent, encoded here or passed: a
     /// `ScreenUnavailable { active: false }` follows that unit on the channel, so
     /// the notice never lifts on a canvas with nothing new on it. For an engine
     /// whose picture is a stream that has just delivered its first picture of a
@@ -686,7 +685,9 @@ impl VideoSink {
         self.shared.uncover_owed.store(false, Ordering::Relaxed);
     }
 
-    /// The notice [`Self::uncover`] owes, once a unit has been queued.
+    /// The notice [`Self::uncover`] owes, behind a passed unit just queued. An
+    /// encoded round's follows the unit it produces, in the order task, since a
+    /// round may produce none.
     async fn uncover_behind(&self) -> anyhow::Result<()> {
         if self.shared.uncover_owed.swap(false, Ordering::Relaxed) {
             self.push(Pending::Msg(ServerMsg::ScreenUnavailable { active: false })).await?;
@@ -1050,6 +1051,13 @@ async fn order_loop(
         );
         if frame_tx.send(ServerMsg::Video(unit)).await.is_err() {
             break; // browser gone; the engine learns it from its own next push
+        }
+        // Here and not where the round was queued: a round that produced no unit
+        // has put no picture ahead of the notice, and its pixels ride the next.
+        if shared.uncover_owed.swap(false, Ordering::Relaxed)
+            && frame_tx.send(ServerMsg::ScreenUnavailable { active: false }).await.is_err()
+        {
+            break;
         }
     }
 }

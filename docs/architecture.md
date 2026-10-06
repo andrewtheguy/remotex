@@ -908,7 +908,11 @@ Three controls with similar names therefore remain separate:
   until the next display change. `active: false` follows the first unit of the
   stream's first picture of the display on the channel (`VideoSink::uncover`),
   encoded here or passed, so the notice never lifts on a canvas with nothing new
-  on it; a second display's tab has its own. Two virtual displays' legs deliver
+  on it: an encoded round's follows the unit it produced, since a round may
+  produce none. The page lifts it only once its paint worker has drawn what
+  came ahead of it (`mark`, `onReached`), and starts the notice over with each
+  display socket, not at the session socket's `connected`, which is not
+  ordered against it. A second display's tab has its own. Two virtual displays' legs deliver
   apart, and pixel polling narrows to one pixel once every display shown has had
   a picture (`stream_carries`). The stream coming back starts at an IDR,
   announced again by its `VideoFormat`. The resize notice covers a resize in

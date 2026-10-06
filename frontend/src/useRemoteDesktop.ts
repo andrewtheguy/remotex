@@ -1053,6 +1053,21 @@ export function useRemoteDesktop(
     // abandons whatever is pending so a late echo cannot resurrect a size the
     // attachment it belonged to has already left behind.
     let resizeSeq = 0;
+    // The gateway's latest word on `screenUnavailable`, numbered. The notice
+    // goes up on arrival, and comes down only when the paint worker has drawn
+    // the picture sent ahead of that word (`mark`, `onReached`): the picture
+    // is still in the worker's queue when the word arrives, and lifting the
+    // notice then would show the old display or an empty canvas. A later word
+    // or a new display socket takes a new number, so a late echo lifts nothing.
+    let unavailableSeq = 0;
+    const screenUnavailableSaid = (active: boolean) => {
+      unavailableSeq += 1;
+      if (active || !painter) {
+        setScreenUnavailable(active);
+      } else {
+        painter.mark(unavailableSeq);
+      }
+    };
     // Each queued resize with the composition it presents, so the two are
     // presented together.
     const pendingResizes = new Map<
@@ -1097,6 +1112,11 @@ export function useRemoteDesktop(
         if (applied) {
           pendingResizes.delete(seq);
           presentResize(applied.size, applied.view);
+        }
+      },
+      onReached: (seq) => {
+        if (seq === unavailableSeq) {
+          setScreenUnavailable(false);
         }
       },
     });
@@ -1479,6 +1499,13 @@ export function useRemoteDesktop(
     ) => {
       const socket = new WebSocket(gatewayDisplaySocketUrl(display, tab));
       const generation = advancePaintGeneration(paintGenerationRef);
+      // What a display socket says of its picture starts over with the socket,
+      // here and not at the session socket's `connected`: the two sockets are
+      // not ordered against each other, and a reattach's replay of either word
+      // can arrive ahead of that `connected`.
+      unavailableSeq += 1;
+      setRemoteResizing(false);
+      setScreenUnavailable(false);
       paintSocket = socket;
       socket.binaryType = "arraybuffer";
       displayWs = socket;
@@ -1877,8 +1904,6 @@ export function useRemoteDesktop(
       setPendingTarget(null);
       setMode("desktop");
       setCanTouch(false);
-      setRemoteResizing(false);
-      setScreenUnavailable(false);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
       // Nothing here turns a camera on: unlike sound, the session is not started
@@ -1966,6 +1991,7 @@ export function useRemoteDesktop(
       // would silently stop translating Command for a Windows guest.
       setRemoteIsMac(false);
       setCanTouch(false);
+      unavailableSeq += 1;
       setRemoteResizing(false);
       setScreenUnavailable(false);
       setDisplays([]);
@@ -2125,7 +2151,7 @@ export function useRemoteDesktop(
           setRemoteResizing(msg.active);
           break;
         case "screenUnavailable":
-          setScreenUnavailable(msg.active);
+          screenUnavailableSaid(msg.active);
           break;
         case "oversize":
           setOversize(msg.cause);

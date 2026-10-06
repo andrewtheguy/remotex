@@ -147,6 +147,33 @@ test("a batch frame reaches the painter; anything else is dropped", async () => 
   ]);
 });
 
+test("a mark is echoed only once the draw ahead of it has finished", async () => {
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(4),
+    sequence: 4,
+    generation: 2,
+  });
+  h.host.handle({ type: "mark", seq: 3 });
+  await settled();
+  // The picture is still being drawn: a notice over it stays up.
+  assert.deepEqual(h.events, []);
+  h.release();
+  await settled();
+  assert.deepEqual(h.events, [
+    {
+      type: "painted",
+      sequence: 4,
+      generation: 2,
+      queuedMs: 0,
+      drawMs: 0,
+    },
+    { type: "reached", seq: 3 },
+  ]);
+});
+
 test("resize and videoFormat hold their place behind a stalled draw", async () => {
   const h = harness();
   h.stall();
