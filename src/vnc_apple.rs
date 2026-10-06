@@ -117,9 +117,9 @@ pub const MAX_COMBINED_SCREENS: usize = 2;
 /// here. That is why Apple's own private framebuffer codecs are absent — the
 /// reference leaves their payload formats unresolved, so advertising them would
 /// ask for rectangles this client could only guess at. Media-stream encoding 1010 is
-/// absent from the opening list: High Performance adds it in a second
+/// absent from the opening list: High Performance puts it first in a second
 /// `SetEncodings` once the display it offers the stream for exists
-/// ([`crate::vnc_apple_media::encodings_with_media_stream`]).
+/// ([`crate::vnc_apple_media::encodings_preferring_media_stream`]).
 pub const ENCODINGS: &[i32] = &[
     ENCODING_RAW,
     ENCODING_CURSOR_POS,
@@ -230,10 +230,10 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
 pub const PUSH_INTERVAL_US: u32 = 33_333;
 
 /// The interval a High Performance session arms, in microseconds. Its picture is
-/// the media stream, and the Mac's pixel updates only stand in for it before the
-/// stream is up and across a display change: one a second shows the display
-/// through those gaps and keeps the arming, and the cursor shapes that depend on
-/// it, at the least the Mac can be made to push.
+/// the media stream and the Mac's pixel updates are stepped over undecoded, so
+/// there is nothing to gain from more of them: one a second keeps the arming,
+/// and the cursor shapes that depend on it, at the least the Mac can be made to
+/// push before the stream is up and across a display change.
 pub const PUSH_INTERVAL_MEDIA_US: u32 = 1_000_000;
 
 /// The longest interval [`PushPace`] arms: the second that starves a physical

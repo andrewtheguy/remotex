@@ -87,9 +87,10 @@ function OversizeNotice({
 }
 
 // What can lie over a live session's desktop, under the menu, which stays the way
-// to another target from all three.
+// to another target from all of them.
 function SessionCovers({
   resizing,
+  unavailable,
   oversize,
   size,
   displays,
@@ -97,6 +98,7 @@ function SessionCovers({
   onSelectDisplay,
 }: {
   resizing: boolean;
+  unavailable: boolean;
   oversize: HoldCause | null;
   size: RemoteSize | null;
   displays: DisplayInfo[];
@@ -112,6 +114,21 @@ function SessionCovers({
       {resizing && (
         <output className="resize-overlay">
           <span className="status">Resizing…</span>
+        </output>
+      )}
+
+      {/* A High Performance Mac whose media stream has sent no picture of this
+          display: at connect, after a display change, and when the Mac restarts
+          its stream. Nothing else is that session's picture, so the page says so
+          rather than showing an empty or stale canvas. Like the resize notice it
+          takes no input, so the pointer and keys still reach the Mac's display,
+          which is there; the resize notice stands in front while both hold. */}
+      {unavailable && !resizing && (
+        <output className="resize-overlay">
+          <span className="status">Screen not available</span>
+          <span className="status-hint">
+            Waiting for the Mac's picture. Input still reaches it.
+          </span>
         </output>
       )}
 
@@ -289,6 +306,7 @@ export default function RemoteDesktop({
     touchActive,
     setTouchEnabled,
     remoteResizing,
+    screenUnavailable,
     setViewOnly,
     onLocalShortcut,
     takeOver,
@@ -466,6 +484,7 @@ export default function RemoteDesktop({
       {mode === "desktop" && !showStatus && (
         <SessionCovers
           resizing={remoteResizing}
+          unavailable={screenUnavailable}
           oversize={oversize}
           size={size}
           displays={displays}

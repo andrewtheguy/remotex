@@ -49,6 +49,8 @@ export interface PainterHandlers {
    * previous desktop's backlog onto the previous bitmap.
    */
   onResized: (seq: number) => void;
+  /** Everything posted before the `mark` of this number has been drawn. */
+  onReached: (seq: number) => void;
 }
 
 export interface DesktopPainter {
@@ -69,6 +71,8 @@ export interface DesktopPainter {
   ): void;
   /** Recompose what is already painted under `view`, or show it whole. */
   setView(view: MosaicView | null, seq: number): void;
+  /** Ask for `onReached(seq)` once every frame handed over so far is drawn. */
+  mark(seq: number): void;
   setVideoFormat(format: VideoFormat): void;
   /** An RDP host's graphics pipeline starts, for the worker to compose. */
   startGraphics(): void;
@@ -138,6 +142,8 @@ export function desktopPainterFor(
       handlers?.onVideoNeedsKeyframe(event.reason);
     } else if (event.type === "resized") {
       handlers?.onResized(event.seq);
+    } else if (event.type === "reached") {
+      handlers?.onReached(event.seq);
     } else {
       handlers?.onPainted(
         event.sequence,
@@ -179,6 +185,9 @@ export function desktopPainterFor(
     },
     setView(view, seq) {
       post({ type: "view", view, seq });
+    },
+    mark(seq) {
+      post({ type: "mark", seq });
     },
     setVideoFormat(format) {
       post({ type: "videoFormat", format });

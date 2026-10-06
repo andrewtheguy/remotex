@@ -11,7 +11,7 @@ use crate::config::Chroma;
 use crate::protocol::{Held, VideoUnit};
 use crate::shadow::Rect;
 use crate::video::Mirror;
-use crate::vp9::{Speed, Stream};
+use crate::vp9::Stream;
 
 /// Most rectangles the staged-damage list holds before collapsing to a bounding
 /// box — see [`DesktopStream::stage`].
@@ -368,23 +368,6 @@ impl Round {
         self.live.quality
     }
 
-    /// Bring the encoder to `quality` for this round alone:
-    /// [`DesktopStream::put_back`] returns it to the stream's. One it is already at
-    /// costs nothing.
-    pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
-        if quality != self.live.quality {
-            self.live.stream.set_quality(quality)?;
-            self.live.quality = quality;
-        }
-        Ok(())
-    }
-
-    /// Bring the encoder to `speed` for this round and the ones after it. One it
-    /// is already at costs nothing.
-    pub fn set_speed(&mut self, speed: Speed) -> anyhow::Result<()> {
-        self.live.stream.set_speed(speed)
-    }
-
     /// Encode the mirror. Blocking: call it on a worker.
     ///
     /// A stream the encoder produced no bitstream for keeps its dirty flag and its
@@ -555,25 +538,6 @@ mod tests {
             stream.blit(report, &flat(64, 8, 7)).expect("a blit");
         }
         assert_eq!(stream.staged.len(), 1, "the list outgrew its cap");
-    }
-
-    /// A round's own quality is that round's: the stream's dial does not move, and
-    /// the encoder is back at it for the next.
-    #[test]
-    fn a_rounds_own_quality_leaves_with_the_round() {
-        let mut stream = stream(64, 64);
-        let dial = stream.quality();
-        let whole = placed(0, 0, 64, 64);
-        stream.blit(whole, &flat(64, 64, 10)).expect("a blit");
-        let mut round = stream.take_round().unwrap().expect("a dirty stream means a round");
-        round.set_quality(dial - 40).expect("a retune");
-        assert_eq!(round.quality(), dial - 40);
-        round.encode().expect("an encode");
-        stream.put_back(round);
-        assert_eq!(stream.quality(), dial);
-        stream.blit(whole, &flat(64, 64, 11)).expect("a blit");
-        let next = stream.take_round().unwrap().expect("a dirty stream means a round");
-        assert_eq!(next.quality(), dial, "the next round kept the last one's quality");
     }
 
     /// The double buffer, end to end: rounds stay serial, damage that lands while a

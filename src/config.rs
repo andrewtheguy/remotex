@@ -64,9 +64,9 @@ pub enum Subtype {
     /// the same wire as [`Subtype::Ard`] on a virtual display, with the picture as
     /// HEVC and the sound as AAC-ELD over the media
     /// stream Screen Sharing negotiates on the RFB connection and sends over UDP
-    /// with SRTP ([`crate::vnc_apple_media`]). ZRLE rectangles stand in for the
-    /// picture until the media stream sends the display's first one, and are
-    /// decoded and dropped once it flows. A stream that
+    /// with SRTP ([`crate::vnc_apple_media`]). ZRLE rectangles are stepped over
+    /// unread and never shown; the browser says the screen is not available
+    /// until the media stream sends the display's first picture. A stream that
     /// fails ends the session, as it ends Apple's viewer's.
     ///
     /// None of this is documented by Apple: the revision, its record layer and its

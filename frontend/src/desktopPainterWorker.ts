@@ -90,6 +90,12 @@ export type PainterCommand =
    * Echoed as `resized` like a resize.
    */
   | { type: "view"; view: MosaicView | null; seq: number }
+  /**
+   * A place in the queue, echoed back as `reached` once everything posted
+   * before it has been drawn: how the page holds a notice over the canvas
+   * until the picture that ends it is on screen.
+   */
+  | { type: "mark"; seq: number }
   | { type: "videoFormat"; format: VideoFormat }
   /** An RDP host's graphics pipeline starts, and this worker composes it. */
   | { type: "graphicsStart" }
@@ -116,6 +122,7 @@ export type PainterEvent =
       drawMs: number;
     }
   | { type: "resized"; seq: number }
+  | { type: "reached"; seq: number }
   /**
    * Whether the canvas over the desktop's is to be shown: it holds a pipeline's
    * picture, or the software HEVC decoder's.
@@ -321,6 +328,9 @@ export function createPainterWorker(
             setView(command.view);
             post({ type: "resized", seq: command.seq });
           });
+          break;
+        case "mark":
+          queued(() => post({ type: "reached", seq: command.seq }));
           break;
         case "videoFormat":
           queued(() => painter?.setVideoFormat(command.format));

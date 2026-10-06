@@ -26,7 +26,7 @@ layer.
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
 | `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
-| `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC over the media stream, a leg per display, with ZRLE standing in until it is up | AAC-ELD over the media stream |
+| `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
@@ -50,7 +50,7 @@ official modes alone.
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density Combined Display view is composed in the browser, as Apple's viewer does. |
-| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Until the stream is up and across display changes its ZRLE rectangles stand in for the picture, a second apart, encoded as VP9 at the encoder's fastest speed and at a lower quality than the session's. |
+| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Its ZRLE rectangles are stepped over unread and never shown, so a session that passes the stream builds no video encoder: until the stream is up and across display changes the page says the screen is not available, and input still reaches the Mac. |
 | Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
@@ -617,8 +617,9 @@ a physical Mac, and what Apple's viewer does beside it have not been.
 Three behaviours of the Mac shape how remotex resizes:
 
 - **A display change stops the Mac's media stream.** The Mac restarts nothing until
-  it is offered again, so remotex shows the Mac's ZRLE rectangles until the new
-  display's stream delivers — see [Display changes](#display-changes).
+  it is offered again, so there is no picture until the new display's stream
+  delivers: remotex sends `screenUnavailable`, and the page says the screen is
+  not available — see [Display changes](#display-changes).
 - **A read racing a shrink crashes the Mac's capture agent.** Serving a pixel read
   sized for the old display after the display shrank crashes `ScreensharingAgent`.
   The session then loses its virtual display, and often its connection. The update
@@ -749,8 +750,8 @@ rectangle.
   a few updates, up to 1,000,000, and comes back to 33,333 as the cost falls. It
   arms again only when the interval moves by half, and at most twice a second.
   High Performance arms 1,000,000 and keeps it: its picture is the media stream,
-  and the Mac's pixel updates only stand in for it before the stream is up and
-  across a display change, where one a second shows the display.
+  and the Mac's pixel updates are stepped over unread, so one a second is the
+  least it can be made to push while still arming the cursor shapes.
 - **`0xffffffff` turns the pushes off.** The daemon records whether the word is
   the all-ones value and pushes nothing while it is. A published description reads
   the word as a screen id, with all-ones meaning all displays. It is not one:
@@ -1021,11 +1022,15 @@ from RFB. RFB only negotiates a media stream: the viewer sends an offer, and
 `ScreensharingAgent` then sends the screen and the system audio through
 AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with SRTP,
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
-(`src/vnc_apple_media.rs`). ZRLE stands in until the stream delivers, at connect
-and across display changes: the Mac's rectangles, pushed a second apart, encoded
-here as VP9 at the encoder's fastest speed and at quality 50 at most, as `ard` with `virtual_display = true`
-shows them at its own pace. While the stream flows they are decoded, which keeps
-ZRLE's deflate stream in step, and dropped. A stream that fails ends the session, as it
+(`src/vnc_apple_media.rs`). The stream alone is the picture. The Mac's ZRLE
+rectangles are stepped over by their length, never inflated and never encoded,
+so a session that passes the stream builds no VP9 encoder, with the worker
+threads and frame buffers one holds for a session's life. Until the stream
+delivers, at connect, across display changes and across a stream the Mac
+restarts, the gateway sends `screenUnavailable` and the page says "Screen not
+available" over the canvas, which goes on taking input: the Mac's display is
+there, only its picture is not. The notice comes down behind the stream's first
+picture of the display. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
@@ -1035,8 +1040,8 @@ decodes the Mac's HEVC: then each access unit goes to the browser as it came,
 described by the stream's own sequence parameter set, and a PLI is its repaint.
 The sound is never decoded here: in every session each sound unit goes on
 `/ws/audio` as it came, described by the AudioSpecificConfig below. Either
-way ZRLE's rectangles carry the picture only in the stream's gaps, as VP9
-encoded here, which a passed stream takes over from at an IDR. See
+way the stream's gaps show nothing: ZRLE's rectangles are stepped over, the
+page says the screen is not available, and the stream comes back at an IDR. See
 [Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
 
 The one decoder is FFmpeg's HEVC decoder for the picture (libavcodec,
@@ -1409,11 +1414,11 @@ region.
 Once a picture of the current size has arrived, remotex polls and arms one pixel.
 That still brings every cursor shape and layout: 11 cursor shapes in 20 s of
 moving over a TextEdit window, with 123 bytes of zlib. A login once pushed a whole
-screen unasked, which is decoded to keep the deflate stream in step and not
-shown.
+screen unasked, which is stepped over like every rectangle of such a session.
 
-An offer goes out behind a `SetEncodings` that lists the media stream first, as
-Apple's viewer lists it for the whole of a High Performance session. The Mac's
+Once the first layout has arrived, a `SetEncodings` lists the media stream
+first and is held for the rest of the session, as Apple's viewer lists it for
+the whole of a High Performance session. The Mac's
 preferred codec is the first it knows in the list, and its framebuffer sender
 sends no pixels to a viewer whose preferred codec is the media stream: cursor
 shapes, layouts and message 1 still come. That keeps the Mac's two framing
@@ -1421,11 +1426,10 @@ threads apart. Its sender frames updates under a lock, and the thread that reads
 the viewer's messages frames the answer to an offer without it; a record from
 each at once fails the record layer's integrity check and ends the session, the
 answer carrying the trailer of the record before it. `SetEncodings` is acted on
-under that lock, so an update being written is out before the offer is read, and
-none follows. A layout that changes the display is answered with the list that
-has ZRLE first again, so the Mac's rectangles stand in until the next offer.
-From the offer until then remotex asks for and arms one pixel, so the Mac is left
-holding no request for a display that may have shrunk by the time it serves one,
+under that lock, so an update being written is out before the first offer is
+read, and none follows it or any later offer, across display changes too.
+From that list on remotex asks for and arms one pixel, so the Mac is left
+holding no request for a display that may have shrunk,
 and a resize goes out as it falls due: the update a resize otherwise waits for
 never comes from a Mac that sends no pixels.
 A cursor change can still meet the answer, as it can for Apple's viewer.
@@ -1448,8 +1452,9 @@ until the new stream starts. The Mac then re-sends message 1 on its own,
 with no stream behind it. The offer it allows starts a new stream on the same
 ports, under a new SSRC, with an IDR at the new size. Remotex offers once message
 1 has come and the display has settled. The resize's cover comes down when the
-display settles, and the Mac's ZRLE rectangles are the picture until that IDR is
-on its way to the browser.
+display settles, and `screenUnavailable` holds the page at "Screen not
+available", with input still reaching the Mac, until that IDR is on its way to
+the browser. Any rectangle the Mac sends meanwhile is stepped over.
 
 ### Reaching the gateway
 
