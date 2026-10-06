@@ -53,7 +53,7 @@ use crate::shadow::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
 use crate::vnc_apple_media::{self, MediaStream, PassedUnit, Pictures};
 use crate::vnc_audio::{self, ServerAudio};
-use crate::vnc_encodings::{Decoded, Decoders, Payload};
+use crate::vnc_encodings::{Decoders, Payload};
 use crate::vnc_apple_clipboard;
 use crate::camera::CameraSignal;
 use crate::vnc_camera::{self, ServerCamera};
@@ -89,20 +89,10 @@ const ARD_FIELD_LEN: usize = 64;
 /// was already answered from the cache.
 const APPLE_CLIPBOARD_IDLE_GAP: Duration = Duration::from_secs(1);
 const ENCODING_RAW: i32 = 0;
-/// CopyRect: two `u16`s naming where in the framebuffer this rectangle's pixels
-/// already are, and no pixels at all.
-const ENCODING_COPY_RECT: i32 = 1;
-/// RRE: a background colour and a run of coloured sub-rectangles over it.
-const ENCODING_RRE: i32 = 2;
-/// Hextile: RRE applied to each 16x16 tile of the rectangle in turn.
-const ENCODING_HEXTILE: i32 = 5;
 /// ZRLE: 64x64 tiles, run-length encoded or palettised, inside a deflate stream.
-/// The best of the lossless standard encodings and the one RFC 6143 defines for the
-/// job. Also the one codec a Mac is offered — see [`vnc_apple::ENCODINGS`].
+/// The one pixel encoding any target is asked for, a Mac included — see
+/// [`vnc_apple::ENCODINGS`].
 pub(crate) const ENCODING_ZRLE: i32 = 16;
-/// Standard RFB zlib: `u32 length` then that many bytes of one deflate stream
-/// shared by every rectangle on the connection.
-const ENCODING_ZLIB: i32 = 6;
 /// Cursor pseudo-encoding: the server hands over the pointer shape (pixels +
 /// a 1-bit mask, the rect's x/y being the hotspot) instead of drawing it into
 /// the framebuffer.
@@ -2574,22 +2564,15 @@ fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
 }
 
 fn rfb38_encoding_list() -> Vec<i32> {
-    // A preference order, because a server reads it as one: it encodes with the
-    // first entry it supports and keeps that choice for the session.
+    // ZRLE is the one pixel encoding asked for: it takes the redundancy out tile by
+    // tile before deflate sees the bytes, RFC 6143 defines it, and every server in
+    // use has it. Raw follows because RFB makes it every server's to send whatever
+    // a client lists, so listing it promises nothing new.
     //
-    // CopyRect leads because it is not a competitor. It carries no pixels, so a
-    // server does not pick it *instead* of something — it uses it for scrolls and
-    // window moves whatever else it chose. ZRLE is first among the pixel encodings:
-    // it takes the redundancy out tile by tile before deflate sees the bytes, so it
-    // beats plain zlib on interface content, and RFC 6143 defines it, so a modern
-    // server has it. zlib next for the servers that do not. Hextile and RRE are the
-    // uncompressed fallbacks, in the order of how much they usually save. Raw last —
-    // the encoding every server has and none should choose.
-    //
-    // Deliberately absent: Tight and TightPNG are vendor encodings, JPEG and H.264
-    // are lossy, and a gateway that re-encodes every tile for the browser anyway
-    // gains nothing from pixels that have already lost information. Advertising an
-    // encoding is a promise to decode it.
+    // Deliberately absent: everything else. CopyRect, zlib, Hextile and RRE are
+    // what a server without ZRLE falls back to, Tight and TightPNG are vendor
+    // encodings, JPEG and H.264 are lossy. Advertising an encoding is a promise to
+    // decode it, and each one is a decoder to keep and to test.
     //
     // Cursor is unconditional (the browser can always draw a pointer), and so is
     // Cursor With Alpha, which only improves on it, and so are the two size
@@ -2608,11 +2591,7 @@ fn rfb38_encoding_list() -> Vec<i32> {
     // cannot do that unless the pseudo-encoding is in this list. A server with
     // neither is unaffected: it says nothing, and the polling loop below never stops.
     vec![
-        ENCODING_COPY_RECT,
         ENCODING_ZRLE,
-        ENCODING_ZLIB,
-        ENCODING_HEXTILE,
-        ENCODING_RRE,
         ENCODING_RAW,
         ENCODING_CURSOR,
         ENCODING_CURSOR_WITH_ALPHA,
@@ -4647,8 +4626,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // one thing that has to stop — it is the round trip per frame this
                 // removes. Non-incremental requests are unaffected and still go where
                 // they went: this gateway needs a full repaint that no amount of
-                // waiting for damage will produce, on a reattach, a resize, or a
-                // CopyRect whose source it never learned.
+                // waiting for damage will produce, on a reattach or a resize.
                 let poll = poll && !continuous;
                 if hp_holding {
                     send(uplink, &update_request(true, HP_HOLD_REQUEST)).await?;
@@ -5615,13 +5593,10 @@ async fn read_rect<R: AsyncRead + Unpin>(
     let h = reader.read_u16().await?;
     let encoding = reader.read_i32().await?;
     // How this rectangle's pixels arrive. Decided here so the bounds check and the
-    // tile path stay one path for all of them.
+    // tile path stay one path for both.
     let payload;
     match encoding {
         ENCODING_RAW => payload = Payload::Raw,
-        ENCODING_COPY_RECT => payload = Payload::CopyRect,
-        ENCODING_RRE => payload = Payload::Rre,
-        ENCODING_HEXTILE => payload = Payload::Hextile,
         ENCODING_ZRLE => payload = Payload::Zrle,
         // Cursor: the rect header carries the hotspot (x, y) and the shape
         // size, never a framebuffer position — so it skips the bounds check
@@ -5657,9 +5632,6 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 .await
                 .map(RectEffect::resized);
         }
-        // Ungated, like [`ENCODING_RAW`]: an Apple server cannot send what its own
-        // list omits.
-        ENCODING_ZLIB => payload = Payload::Zlib,
         vnc_apple::ENCODING_CURSOR_IMAGE if apple.is_some() => {
             read_cursor_image(reader, apple, cursor, (x, y), (w, h), sink).await?;
             // A display shown in a tab of its own is told the same shape.
@@ -5800,8 +5772,8 @@ async fn read_rect<R: AsyncRead + Unpin>(
         size.1
     );
     // Read the payload before deciding a rectangle of no pixels has nothing to do.
-    // An encoding that frames itself — a length word, a subrect count, a source
-    // position — sends that framing whatever its geometry says, and the RFB stream
+    // ZRLE frames itself with a length word, which it sends whatever its geometry
+    // says, and the RFB stream
     // has no framing of its own above the record layer, so stepping past by the
     // wrong number of bytes desyncs everything after it.
     //
@@ -5811,21 +5783,12 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // login, and sends the display between streams. They are stepped over, not
     // decoded, and reach no encoder.
     if desktop.lock().unwrap().media_stream {
-        decoders.step_over(reader, payload, shadow, w, h).await?;
+        decoders.step_over(reader, payload, w, h).await?;
         return Ok(Rect::from_size(x, y, w, h).map_or(RectEffect::NOTHING, RectEffect::pixels));
     }
-    let decoded = decoders
-        .decode(reader, payload, shadow, w, h)
-        .await?;
+    let rgb = decoders.decode(reader, payload, w, h).await?;
     let Some(rect) = Rect::from_size(x, y, w, h) else {
         return Ok(RectEffect::NOTHING);
-    };
-    let rgb = match decoded {
-        Decoded::Pixels(rgb) => rgb,
-        // A CopyRect whose source this side never learned. Guessing would leave
-        // wrong pixels on screen until something else happened to change that area;
-        // one full request makes the source known instead.
-        Decoded::Unavailable => return Ok(RectEffect::FULL_REPAINT),
     };
 
     // What of this rect the browser does not already have. A server that
@@ -8160,11 +8123,7 @@ mod tests {
     #[tokio::test]
     async fn the_generic_encoding_list_is_in_preference_order() {
         let generic = vec![
-            ENCODING_COPY_RECT,
             ENCODING_ZRLE,
-            ENCODING_ZLIB,
-            ENCODING_HEXTILE,
-            ENCODING_RRE,
             ENCODING_RAW,
             ENCODING_CURSOR,
             ENCODING_CURSOR_WITH_ALPHA,
@@ -8236,7 +8195,6 @@ mod tests {
         let encodings = vnc_apple::ENCODINGS;
         assert!(encodings.contains(&vnc_apple::ENCODING_DISPLAY_LAYOUT));
         assert!(encodings.contains(&ENCODING_ZRLE));
-        assert!(!encodings.contains(&ENCODING_ZLIB));
         for generic in [
             vnc_clipboard::ENCODING,
             vnc_audio::ENCODING,
@@ -11282,38 +11240,17 @@ mod tests {
 
     use crate::vnc_encodings::deflate_chunk;
 
-    /// A zlib rectangle: the geometry, then a `u32` length and that much of a
-    /// deflate stream.
-    fn zlib_rect(
+    /// A ZRLE rectangle: the geometry, then a `u32` length and that much of a
+    /// deflate stream holding `tiles`.
+    fn zrle_rect(
         deflate: &mut flate2::Compress,
         (x, y, w, h): (u16, u16, u16, u16),
-        pixels: &[u8],
+        tiles: &[u8],
     ) -> Vec<u8> {
-        let chunk = deflate_chunk(deflate, pixels);
-        let mut msg = geometry(x, y, w, h, ENCODING_ZLIB);
+        let chunk = deflate_chunk(deflate, tiles);
+        let mut msg = geometry(x, y, w, h, ENCODING_ZRLE);
         msg.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
         msg.extend_from_slice(&chunk);
-        msg
-    }
-
-    /// A CopyRect rectangle: the destination geometry, then the source position.
-    fn copy_rect(dst: (u16, u16, u16, u16), src: (u16, u16)) -> Vec<u8> {
-        let mut msg = geometry(dst.0, dst.1, dst.2, dst.3, ENCODING_COPY_RECT);
-        msg.extend_from_slice(&src.0.to_be_bytes());
-        msg.extend_from_slice(&src.1.to_be_bytes());
-        msg
-    }
-
-    /// A raw rectangle with a colour whose channels all differ, so a swap shows.
-    fn raw_rect(x: u16, y: u16, w: u16, h: u16, bgr: [u8; 3]) -> Vec<u8> {
-        let mut msg = geometry(x, y, w, h, ENCODING_RAW);
-        msg.extend(
-            std::iter::repeat_n(
-                [bgr[0], bgr[1], bgr[2], 0],
-                usize::from(w) * usize::from(h),
-            )
-            .flatten(),
-        );
         msg
     }
 
@@ -11342,17 +11279,17 @@ mod tests {
     /// The whole read-side design in one test: a rectangle whose bytes are split
     /// across two records reaches the tile path as one rectangle, and nothing above
     /// the record layer knows the records were there.
-    /// The same picture in five encodings, and only the first of them is forwarded.
+    /// The same picture in both encodings, and only the first of them is forwarded.
     ///
-    /// The shadow suppresses an update that holds nothing new, so four of these
-    /// costing nothing *is* the proof that all five decoders produced the same
-    /// bytes — no table of expected pixels can go stale against it, and a channel
-    /// swapped in one decoder alone cannot pass. The picture is deliberately not
-    /// grey and not solid: a wrong byte order or a transposed tile shows up as a
-    /// second tile on the channel.
+    /// The shadow suppresses an update that holds nothing new, so the second
+    /// costing nothing *is* the proof that both decoders produced the same bytes —
+    /// no table of expected pixels can go stale against it, and a channel swapped
+    /// in one decoder alone cannot pass. The picture is deliberately not grey and
+    /// not solid: a wrong byte order or a transposed tile shows up as a second
+    /// tile on the channel.
     #[tokio::test]
-    async fn the_same_picture_in_five_encodings_is_forwarded_once() {
-        // A 2x2 of four different colours, which every encoding below has to spell
+    async fn the_same_picture_in_both_encodings_is_forwarded_once() {
+        // A 2x2 of four different colours, which each encoding below has to spell
         // out in its own way.
         let colours: [[u8; 3]; 4] = [
             [0xf0, 0x00, 0x00],
@@ -11371,45 +11308,19 @@ mod tests {
         raw.extend_from_slice(&bgrx);
         rects.push(raw);
 
-        // Hextile: one tile, raw, since a 2x2 of four colours is what raw is for.
-        let mut hextile = geometry(0, 0, 2, 2, ENCODING_HEXTILE);
-        hextile.push(0x01);
-        hextile.extend_from_slice(&bgrx);
-        rects.push(hextile);
-
-        // RRE: any background, then a subrect per pixel.
-        let mut rre = geometry(0, 0, 2, 2, ENCODING_RRE);
-        rre.extend_from_slice(&4u32.to_be_bytes());
-        rre.extend_from_slice(&[0, 0, 0, 0]);
-        for (i, colour) in colours.iter().enumerate() {
-            rre.extend_from_slice(&[colour[2], colour[1], colour[0], 0]);
-            for value in [(i % 2) as u16, (i / 2) as u16, 1, 1] {
-                rre.extend_from_slice(&value.to_be_bytes());
-            }
-        }
-        rects.push(rre);
-
-        // ZRLE: one raw tile of CPIXELs, in its own deflate stream.
+        // ZRLE: one raw tile of CPIXELs.
         let mut zrle_stream = flate2::Compress::new(flate2::Compression::default(), true);
         let mut tile = vec![0u8];
         for colour in &colours {
             tile.extend_from_slice(&[colour[2], colour[1], colour[0]]);
         }
-        let mut zrle = geometry(0, 0, 2, 2, ENCODING_ZRLE);
-        let chunk = deflate_chunk(&mut zrle_stream, &tile);
-        zrle.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
-        zrle.extend_from_slice(&chunk);
-        rects.push(zrle);
-
-        // zlib: the raw pixels, in a stream of their own.
-        let mut zlib_stream = flate2::Compress::new(flate2::Compression::default(), true);
-        rects.push(zlib_rect(&mut zlib_stream, (0, 0, 2, 2), &bgrx));
+        rects.push(zrle_rect(&mut zrle_stream, (0, 0, 2, 2), &tile));
 
         let (uplink, _sent) = test_uplink();
         let (sink, mut rx) = sized_sink((2, 2)).await;
         let shadow = test_shadow((2, 2));
         let shared = test_shared(uplink, shared_desktop((2, 2), None, None), Arc::clone(&shadow));
-        // Kept, not discarded: a decoder that bailed on the third encoding would
+        // Kept, not discarded: a decoder that bailed on the second encoding would
         // leave the first rectangle's pixels in the shadow and the check below would
         // still pass. Running out of stream is the only acceptable way to stop.
         let err = read_loop(
@@ -11425,11 +11336,11 @@ mod tests {
 
         sink.flush().await;
         assert_eq!(units(&mut rx).len(), 1, "one update, one access unit");
-        // Every encoding decoded the same picture, so the shadow — which holds what
+        // Both encodings decoded the same picture, so the shadow — which holds what
         // the last of them left — matches the first.
         let held = shadow.lock().unwrap().copy_out(Rect::from_size(0, 0, 2, 2).unwrap());
         let first: Vec<u8> = bgrx.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0]]).collect();
-        assert_eq!(held, Some(first), "five encodings of one picture, one picture");
+        assert_eq!(held, Some(first), "two encodings of one picture, one picture");
     }
 
     /// The picture of a session with a media stream is the stream alone: the
@@ -11557,82 +11468,35 @@ mod tests {
         assert!(desktop.lock().unwrap().covered, "still owed to the display the resize brings");
     }
 
-    /// CopyRect saves the VNC link its pixels: the source is read back out of the
-    /// shadow and lands at the destination, in the mirror the next unit encodes.
+    /// An encoding that was never listed is a server breaking the protocol, and
+    /// the ones a server falls back to without ZRLE are no exception: none of them
+    /// is read, so there is no payload length to step over by.
     #[tokio::test]
-    async fn a_copy_rect_is_read_back_out_of_the_shadow() {
-        let wire = update(&[
-            raw_rect(0, 0, 2, 2, [0x30, 0x20, 0x10]),
-            copy_rect((2, 0, 2, 2), (0, 0)),
-        ]);
-
-        let (uplink, _sent) = test_uplink();
-        let (sink, mut rx) = sized_sink((4, 2)).await;
-        let shadow = test_shadow((4, 2));
-        let shared = test_shared(uplink, shared_desktop((4, 2), None, None), Arc::clone(&shadow));
-        let err = read_loop(
-            std::io::Cursor::new(wire),
-            shared,
-            false,
-            None,
-            sink.clone(),
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
-
-        sink.flush().await;
-        assert_eq!(units(&mut rx).len(), 1, "the paint and the copy are one update");
-        let shadow = shadow.lock().unwrap();
-        assert_eq!(
-            shadow.copy_out(Rect::from_size(2, 0, 2, 2).unwrap()),
-            shadow.copy_out(Rect::from_size(0, 0, 2, 2).unwrap()),
-            "the copy landed at the destination"
-        );
-    }
-
-    /// A source the shadow never learned cannot be reproduced, and inventing pixels
-    /// would leave them wrong until something else happened to change that area. So
-    /// the rectangle costs one non-incremental request instead.
-    #[tokio::test]
-    async fn a_copy_rect_with_an_unknown_source_asks_for_a_full_repaint() {
-        let wire = update(&[copy_rect((2, 0, 2, 2), (0, 0))]);
-
-        let (uplink, sent) = test_uplink();
-        let (sink, mut rx) = test_sink();
-        let shared = test_shared(
-            uplink,
-            shared_desktop((4, 2), None, None),
-            test_shadow((4, 2)),
-        );
-        let err = read_loop(
-            std::io::Cursor::new(wire),
-            shared,
-            false,
-            None,
-            sink.clone(),
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
-
-        assert_eq!(written(&sent), update_request(false, (4, 2)));
-        sink.flush().await;
-        assert!(rx.try_recv().is_err(), "and no invented pixels");
+    async fn an_encoding_that_was_not_listed_ends_the_session() {
+        // CopyRect, RRE, Hextile and zlib.
+        for encoding in [1, 2, 5, 6] {
+            let wire = update(&[geometry(0, 0, 2, 2, encoding)]);
+            let (uplink, _sent) = test_uplink();
+            let (sink, _rx) = test_sink();
+            let shared = test_shared(uplink, shared_desktop((2, 2), None, None), test_shadow((2, 2)));
+            let err = read_loop(std::io::Cursor::new(wire), shared, false, None, sink)
+                .await
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("which was not advertised"), "{encoding}: {err:#}");
+        }
     }
 
     /// A rectangle of no pixels still carries its encoding's framing, and stepping
     /// past that framing is what keeps everything behind it readable.
     ///
-    /// The zero-size check used to run *before* the payload was read, so a 0x0 zlib
-    /// rectangle left its length word and chunk in the stream and every byte after
-    /// it was read as something else.
+    /// A 0x0 ZRLE rectangle whose length word and chunk were left in the stream
+    /// would have every byte after it read as something else.
     #[tokio::test]
     async fn a_zero_sized_rectangle_still_consumes_its_payload() {
         let mut deflate = flate2::Compress::new(flate2::Compression::default(), true);
         let mut wire = vec![0u8, 0];
         wire.extend_from_slice(&2u16.to_be_bytes()); // two rectangles
-        wire.extend_from_slice(&zlib_rect(&mut deflate, (0, 0, 0, 0), &[]));
+        wire.extend_from_slice(&zrle_rect(&mut deflate, (0, 0, 0, 0), &[]));
         // The rectangle that has to survive the one before it.
         let mut raw = Vec::new();
         for value in [0u16, 0, 2, 2] {

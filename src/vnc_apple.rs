@@ -1006,7 +1006,7 @@ impl CursorCache {
                 }
             });
         }
-        // Each store is an independent zlib stream. Unlike framebuffer encoding 6,
+        // Each store is an independent zlib stream. Unlike a framebuffer encoding's,
         // Apple does not carry the deflate window from one cursor image to the next.
         // A fresh inflater also means a malformed shape can be skipped without
         // poisoning every cursor that follows it.

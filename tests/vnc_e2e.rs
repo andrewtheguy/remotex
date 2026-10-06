@@ -9,12 +9,11 @@
 //! pipeline: RFB handshake + DES auth -> the video stream -> the same
 //! binary WS frames the engines emit.
 //!
-//! This is also the ZRLE test of record — but only because the container paints a
-//! pattern on its root window (`tests/vnc-dummy/Containerfile`). TigerVNC sends a
-//! solid rectangle as RRE whatever the client preferred, so against a blank desktop
-//! this test never reaches the ZRLE encoder at all. With the pattern it does, and a
-//! decoder bug fails here rather than going unnoticed. `remotex::vnc_encodings` logs
-//! which encoding a server actually chose, which is the way to check.
+//! This is also the ZRLE test of record. The container paints a pattern on its
+//! root window (`tests/vnc-dummy/Containerfile`), so the rectangles hold real
+//! tiles rather than one solid colour, and a decoder bug fails here rather than
+//! going unnoticed. `remotex::vnc_encodings` logs which encoding a server actually
+//! chose, which is the way to check.
 //!
 //! None of the assertions below depend on the encoding: the first update is
 //! non-incremental against an empty shadow, so nothing is suppressed and the whole

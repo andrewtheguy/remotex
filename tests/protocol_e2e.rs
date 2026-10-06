@@ -187,11 +187,11 @@ async fn serve_fake_vnc(
     }
 }
 
-// ── Continuous Updates, Fence and CopyRect, scripted ────────────────────────
+// ── Continuous Updates and Fence, scripted ──────────────────────────────────
 //
 // A second RFB 3.8 server, separate from the one above rather than a flag on it,
 // because it plays a different game: it announces the ContinuousUpdates extension,
-// pushes updates the client never asked for, and moves a region with CopyRect.
+// and pushes updates the client never asked for.
 //
 // Written from the extension's own definition, not from `src/vnc.rs` — the point of
 // an e2e here is that two independent readings of the wire agree.
@@ -201,7 +201,8 @@ const ENCODING_FENCE: i32 = -312;
 const ENCODING_CONTINUOUS_UPDATES: i32 = -313;
 const MSG_END_OF_CONTINUOUS_UPDATES: u8 = 150;
 const MSG_FENCE: u8 = 248;
-/// The half of the fake desktop that is painted, then copied to the other half.
+/// The half of the fake desktop that is painted on request; the other half is
+/// painted unasked.
 const SCROLL_W: u16 = FAKE_DESKTOP / 2;
 
 /// What the scripted server saw the client do, in wire order.
@@ -215,7 +216,7 @@ enum ScrollRequest {
     Fence { flags: u32, payload: Vec<u8> },
 }
 
-/// A scripted RFB 3.8 server that supports Continuous Updates and scrolls.
+/// A scripted RFB 3.8 server that supports Continuous Updates and pushes.
 ///
 /// The sequence, and every step of it is answered rather than timed:
 ///
@@ -224,8 +225,8 @@ enum ScrollRequest {
 /// 2. A non-incremental request paints the left half of the desktop.
 /// 3. `EnableContinuousUpdates` is answered with a fence asking to be echoed, so
 ///    the echo can be asserted rather than assumed.
-/// 4. A pointer event — which the test sends once it has seen the paint — pushes a
-///    CopyRect moving that half to the right, **unasked**. Nothing in RFB permits
+/// 4. A pointer event — which the test sends once it has seen the paint — pushes
+///    the right half, **unasked**. Nothing in RFB permits
 ///    that without the extension, so the record arriving at the browser is also the
 ///    proof that continuous updates are on.
 async fn spawn_scrolling_vnc() -> (u16, mpsc::UnboundedReceiver<ScrollRequest>) {
@@ -313,7 +314,7 @@ async fn serve_scrolling_vnc(
             4 => {
                 stream.read_exact(&mut [0u8; 7]).await?;
             }
-            // PointerEvent: the cue to scroll. The client asked for nothing here.
+            // PointerEvent: the cue to push. The client asked for nothing here.
             5 => {
                 stream.read_exact(&mut [0u8; 5]).await?;
                 let mut update = vec![0u8, 0];
@@ -321,9 +322,14 @@ async fn serve_scrolling_vnc(
                 for value in [SCROLL_W, 0, SCROLL_W, FAKE_DESKTOP] {
                     update.extend_from_slice(&value.to_be_bytes());
                 }
-                update.extend_from_slice(&1i32.to_be_bytes()); // CopyRect
-                update.extend_from_slice(&0u16.to_be_bytes()); // source x
-                update.extend_from_slice(&0u16.to_be_bytes()); // source y
+                update.extend_from_slice(&0i32.to_be_bytes()); // raw
+                update.extend(
+                    std::iter::repeat_n(
+                        [0x10u8, 0x40, 0x90, 0],
+                        usize::from(SCROLL_W) * usize::from(FAKE_DESKTOP),
+                    )
+                    .flatten(),
+                );
                 stream.write_all(&update).await?;
             }
             // ClientCutText
@@ -1490,15 +1496,15 @@ async fn an_audio_socket_without_a_valid_token_is_closed_with_4000() {
     );
 }
 
-/// The two halves of the RFB scroll path, end to end over the real socket: the
-/// server drives the update cycle, and a region it says has moved — read back out
-/// of the shadow — reaches the browser as a frame it never asked for.
+/// Continuous updates, end to end over the real socket: the server drives the
+/// update cycle, and a region it paints on its own reaches the browser as a frame
+/// this client never asked for.
 ///
 /// Both are asserted from the other side of a wire nothing in `src/vnc.rs` wrote:
 /// the scripted server reads the client's messages itself, and the records are
 /// parsed by `common::batch_units`.
 #[tokio::test]
-async fn continuous_updates_carry_an_unasked_copyrect_to_the_browser() {
+async fn continuous_updates_carry_an_unasked_update_to_the_browser() {
     let (vnc_port, mut seen) = spawn_scrolling_vnc().await;
     let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
@@ -1539,7 +1545,7 @@ async fn continuous_updates_carry_an_unasked_copyrect_to_the_browser() {
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_frame(&mut ws).await;
 
-    // The cue for the scroll, and an input event rather than a request: what comes
+    // The cue for the push, and an input event rather than a request: what comes
     // back is an update this client never asked for.
     ws.send(Message::text(r#"{"type":"mouseMove","x":1,"y":1}"#))
         .await
@@ -1547,7 +1553,7 @@ async fn continuous_updates_carry_an_unasked_copyrect_to_the_browser() {
 
     expect_frame(&mut ws).await;
 
-    // Nothing between the first request and the copy was an incremental poll: the
+    // Nothing between the first request and the push was an incremental poll: the
     // round trip per frame is the whole point of the extension.
     while let Ok(request) = seen.try_recv() {
         assert_ne!(

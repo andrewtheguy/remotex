@@ -248,11 +248,12 @@ unit makes the saving worth that has not been measured.
 
 ## Not planned
 
-### Tight, JPEG and H.264 on a plain VNC target
+### Encodings other than ZRLE on a plain VNC target
 
-A plain `vnc` target advertises only the lossless standard encodings: Tight and
-TightPNG are vendor encodings, JPEG and H.264 are lossy, and advertising an
-encoding is a promise to decode it. Decoding the Tight family, or handing a
+A plain `vnc` target advertises ZRLE, and Raw beside it: CopyRect, zlib, Hextile
+and RRE are for servers without ZRLE, Tight and TightPNG are vendor encodings,
+JPEG and H.264 are lossy, and advertising an encoding is a promise to decode
+it. Decoding the Tight family, or handing a
 lossy payload to the browser untouched, would remove upstream bytes and a
 transcode at the cost of a decoder this repo would then own. That work is for a
 server outside the three the project prioritizes, which is reached through the
