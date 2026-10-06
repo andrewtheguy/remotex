@@ -94,17 +94,10 @@ pub const PASSED_SOUND: crate::audio::PassedFormat = crate::audio::PassedFormat 
     head: &crate::aac_eld::AUDIO_SPECIFIC_CONFIG,
 };
 
-/// The second `SetEncodings`, sent once the first layout has arrived: the opening
-/// list with the media stream appended. ZRLE stays the Mac's preferred codec, and
-/// naming the stream makes it name its ports.
-pub fn encodings_with_media_stream() -> Vec<i32> {
-    let mut encodings = vnc_apple::ENCODINGS.to_vec();
-    encodings.push(ENCODING_MEDIA_STREAM);
-    encodings
-}
-
-/// The list an offer goes out behind: the media stream first, as Apple's viewer
-/// lists it in High Performance mode. The Mac's preferred codec is the first it
+/// The second `SetEncodings`, sent once the first layout has arrived and held
+/// for the rest of the session: the media stream first, as Apple's viewer
+/// lists it in High Performance mode. Naming the stream makes the Mac name its
+/// ports. The Mac's preferred codec is the first it
 /// knows in the list, and to a viewer whose preferred codec is the media stream
 /// its framebuffer sender sends no pixels: cursor shapes, layouts and the stream's
 /// ports still come.
@@ -113,8 +106,8 @@ pub fn encodings_with_media_stream() -> Vec<i32> {
 /// updates under a lock, and the thread that reads this side's messages frames
 /// the answer to an offer without it; a record from each at once fails its
 /// integrity check here and ends the session. `SetEncodings` is acted on under
-/// that lock, so an update being written is out before the offer behind it is
-/// read, and none follows.
+/// that lock, so an update being written is out before the first offer is
+/// read, and none follows it or any later offer.
 pub fn encodings_preferring_media_stream() -> Vec<i32> {
     let mut encodings = vec![ENCODING_MEDIA_STREAM];
     encodings.extend_from_slice(vnc_apple::ENCODINGS);

@@ -728,8 +728,8 @@ struct DesktopState {
     covered: bool,
     /// The list the Mac holds names the media stream first, so it sends this
     /// session no pixels ([`vnc_apple_media::encodings_preferring_media_stream`]):
-    /// from an offer until a layout that changes the display, which is answered
-    /// with the list that has ZRLE first again.
+    /// from the `SetEncodings` that asks for the stream's ports to the session's
+    /// end, as Apple's viewer lists it.
     media_preferred: bool,
     /// The read loop is inside a `FramebufferUpdate`. A layout it has read may
     /// not have reached [`HpResize::layout`] yet, and a High Performance resize
@@ -3874,8 +3874,7 @@ async fn offer_media(
         return Ok(());
     };
     // The uplink first, then the decision, as [`send_decided`] does: the list the
-    // Mac holds is the one [`DesktopState::media_preferred`] says it holds, whatever
-    // a layout read meanwhile sends.
+    // Mac holds is the one [`DesktopState::media_preferred`] says it holds.
     let mut uplink = uplink.lock().await;
     let (sizes, offer) = {
         let mut d = desktop.lock().unwrap();
@@ -3884,7 +3883,7 @@ async fn offer_media(
         }
         let sizes = d.hp_sizes();
         let offer = media.lock().unwrap().offer(&sizes);
-        if matches!(offer, Some(vnc_apple_media::Offer::Configuration(_))) {
+        if matches!(offer, Some(vnc_apple_media::Offer::Encodings)) {
             d.media_preferred = true;
         }
         (sizes, offer)
@@ -3892,14 +3891,14 @@ async fn offer_media(
     match offer {
         None => Ok(()),
         Some(vnc_apple_media::Offer::Encodings) => {
+            // The Mac's pixels stop here, for the session: an offer's answer must
+            // not meet one.
             debug!("vnc: asking the Mac to name its media-stream ports");
-            uplink.send(&set_encodings(&vnc_apple_media::encodings_with_media_stream())).await
+            uplink.send(&set_encodings(&vnc_apple_media::encodings_preferring_media_stream())).await
         }
         Some(vnc_apple_media::Offer::Configuration(configuration)) => {
             let sizes: Vec<String> = sizes.iter().map(|(w, h)| format!("{w}x{h}")).collect();
             info!("vnc: offering the Mac's media stream for its {} display", sizes.join(" and "));
-            // The Mac's pixels stop for the offer: its answer must not meet one.
-            uplink.send(&set_encodings(&vnc_apple_media::encodings_preferring_media_stream())).await?;
             uplink.send(&configuration).await
         }
     }
@@ -6661,7 +6660,6 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         }
     };
     let resized = apply_resize(desktop, shadow, size, scale, sink).await?;
-    let mut display_changed = false;
     if virtual_display {
         // Which leg carries which display changes under a canvas changing
         // display, which reads and sets who is shown each: one at a time.
@@ -6694,7 +6692,6 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         };
         drop(switch);
         hp_wake.notify_one();
-        display_changed = changed;
         if changed {
             cover(desktop, sink).await?;
             tab_laid_out(shared, &virtuals).await;
@@ -6784,20 +6781,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // A layout that answered nothing leaves a High Performance change out, and
     // the region stays narrowed until the one that answers it — see
     // [`HP_HOLD_REQUEST`].
-    //
-    // The Mac was told to send no pixels and the display has changed: the list
-    // with ZRLE first is the one it answers a resize prompt and the next offer
-    // under, until the stream is offered for the new display.
-    // Decided with the uplink held, as [`offer_media`] decides the other list.
     let mut uplink = uplink.lock().await;
-    let (zrle_again, armed, interval) = {
-        let mut d = desktop.lock().unwrap();
-        let zrle_again = display_changed && std::mem::take(&mut d.media_preferred);
-        (zrle_again, d.poll_size(), d.push_interval_us)
+    let (armed, interval) = {
+        let d = desktop.lock().unwrap();
+        (d.poll_size(), d.push_interval_us)
     };
-    if zrle_again {
-        uplink.send(&set_encodings(&vnc_apple_media::encodings_with_media_stream())).await?;
-    }
     if virtual_display {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }

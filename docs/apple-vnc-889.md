@@ -1415,8 +1415,9 @@ That still brings every cursor shape and layout: 11 cursor shapes in 20 s of
 moving over a TextEdit window, with 123 bytes of zlib. A login once pushed a whole
 screen unasked, which is stepped over like every rectangle of such a session.
 
-An offer goes out behind a `SetEncodings` that lists the media stream first, as
-Apple's viewer lists it for the whole of a High Performance session. The Mac's
+Once the first layout has arrived, a `SetEncodings` lists the media stream
+first and is held for the rest of the session, as Apple's viewer lists it for
+the whole of a High Performance session. The Mac's
 preferred codec is the first it knows in the list, and its framebuffer sender
 sends no pixels to a viewer whose preferred codec is the media stream: cursor
 shapes, layouts and message 1 still come. That keeps the Mac's two framing
@@ -1424,12 +1425,10 @@ threads apart. Its sender frames updates under a lock, and the thread that reads
 the viewer's messages frames the answer to an offer without it; a record from
 each at once fails the record layer's integrity check and ends the session, the
 answer carrying the trailer of the record before it. `SetEncodings` is acted on
-under that lock, so an update being written is out before the offer is read, and
-none follows. A layout that changes the display is answered with the list that
-has ZRLE first again, the list a resize prompt and the next offer are answered
-under; the rectangles it brings until that offer are stepped over.
-From the offer until then remotex asks for and arms one pixel, so the Mac is left
-holding no request for a display that may have shrunk by the time it serves one,
+under that lock, so an update being written is out before the first offer is
+read, and none follows it or any later offer, across display changes too.
+From that list on remotex asks for and arms one pixel, so the Mac is left
+holding no request for a display that may have shrunk,
 and a resize goes out as it falls due: the update a resize otherwise waits for
 never comes from a Mac that sends no pixels.
 A cursor change can still meet the answer, as it can for Apple's viewer.

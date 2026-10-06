@@ -117,9 +117,9 @@ pub const MAX_COMBINED_SCREENS: usize = 2;
 /// here. That is why Apple's own private framebuffer codecs are absent — the
 /// reference leaves their payload formats unresolved, so advertising them would
 /// ask for rectangles this client could only guess at. Media-stream encoding 1010 is
-/// absent from the opening list: High Performance adds it in a second
+/// absent from the opening list: High Performance puts it first in a second
 /// `SetEncodings` once the display it offers the stream for exists
-/// ([`crate::vnc_apple_media::encodings_with_media_stream`]).
+/// ([`crate::vnc_apple_media::encodings_preferring_media_stream`]).
 pub const ENCODINGS: &[i32] = &[
     ENCODING_RAW,
     ENCODING_CURSOR_POS,
