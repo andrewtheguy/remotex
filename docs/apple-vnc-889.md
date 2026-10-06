@@ -617,8 +617,9 @@ a physical Mac, and what Apple's viewer does beside it have not been.
 Three behaviours of the Mac shape how remotex resizes:
 
 - **A display change stops the Mac's media stream.** The Mac restarts nothing until
-  it is offered again, so remotex shows the Mac's ZRLE rectangles until the new
-  display's stream delivers — see [Display changes](#display-changes).
+  it is offered again, so there is no picture until the new display's stream
+  delivers: remotex sends `screenUnavailable`, and the page says the screen is
+  not available — see [Display changes](#display-changes).
 - **A read racing a shrink crashes the Mac's capture agent.** Serving a pixel read
   sized for the old display after the display shrank crashes `ScreensharingAgent`.
   The session then loses its virtual display, and often its connection. The update
@@ -1039,8 +1040,8 @@ decodes the Mac's HEVC: then each access unit goes to the browser as it came,
 described by the stream's own sequence parameter set, and a PLI is its repaint.
 The sound is never decoded here: in every session each sound unit goes on
 `/ws/audio` as it came, described by the AudioSpecificConfig below. Either
-way ZRLE's rectangles carry the picture only in the stream's gaps, as VP9
-encoded here, which a passed stream takes over from at an IDR. See
+way the stream's gaps show nothing: ZRLE's rectangles are stepped over, the
+page says the screen is not available, and the stream comes back at an IDR. See
 [Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
 
 The one decoder is FFmpeg's HEVC decoder for the picture (libavcodec,
@@ -1451,8 +1452,9 @@ until the new stream starts. The Mac then re-sends message 1 on its own,
 with no stream behind it. The offer it allows starts a new stream on the same
 ports, under a new SSRC, with an IDR at the new size. Remotex offers once message
 1 has come and the display has settled. The resize's cover comes down when the
-display settles, and the Mac's ZRLE rectangles are the picture until that IDR is
-on its way to the browser.
+display settles, and `screenUnavailable` holds the page at "Screen not
+available", with input still reaching the Mac, until that IDR is on its way to
+the browser. Any rectangle the Mac sends meanwhile is stepped over.
 
 ### Reaching the gateway
 
