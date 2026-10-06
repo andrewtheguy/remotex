@@ -412,8 +412,9 @@ that selects the stream. See
   the picture: `/api/targets` says so, the picker shows the passthrough as
   chosen, and a session started without it all the same ends before it dials
   the Mac.
-  ZRLE stands in until the media stream sends the display's first picture, and
-  is decoded and dropped once it flows.
+  The media stream alone is the picture: ZRLE is stepped over unread and never
+  encoded, and the page says the screen is not available until the stream sends
+  the display's first picture.
   A stream that fails ends the session: do not add a subtype
   without the stream or a fallback to zlib, combinations Apple's viewer never
   offers. The Mac's own controller sets the rate from the offer's bitrate
@@ -431,12 +432,13 @@ that selects the stream. See
   at the picker to a browser that said it decodes the HEVC; a session started
   without it is sent VP9. The sound is not part of the choice: AAC-ELD units go
   on `/ws/audio` either way. Decoded or passed, the
-  stream is the picture once it flows. Until its first picture, at connect and
-  across every display change, the Mac's ZRLE rectangles stand in for it: left
-  at the one push a second a High Performance session arms, and encoded as VP9
-  at the encoder's fastest speed and at quality 50 at most
-  (`VideoSink::stand_in`), since the stream
-  replaces them. A PLI is a passed stream's
+  stream is the only picture. Until its first picture, at connect and
+  across every display change, the page says the screen is not available
+  (`screenUnavailable`) and input still reaches the Mac; the Mac's ZRLE
+  rectangles are stepped over unread and never reach an encoder, so a session
+  that passes the stream builds none. Do not show them in the gaps: that
+  builds a VP9 encoder a passed session then holds idle for its whole life.
+  A PLI is a passed stream's
   repaint. The page answers for the
   sound by decoding one of the Mac's units in each form `isConfigSupported`
   accepts, since it accepts forms that do not decode, and plays in the form that
@@ -894,22 +896,23 @@ Three controls with similar names therefore remain separate:
   A link that cannot carry the stream fills the receiver's queue of 15 units, half
   a second of the display's refresh; a full queue drops to the next keyframe, as
   the decoder's queue does.
-- **The gaps show the Mac's rectangles.** Before the stream is up, across every
-  display change and across a stream the Mac restarts on its own, ZRLE carries
-  the picture as it does on `ard` with `virtual_display = true`: decoded, and
-  encoded here as VP9, which `VideoSink::damage` starts at a keyframe behind its
-  own `VideoFormat`. Two things differ from that mode. The Mac is left pushing
-  once a second, the interval a High Performance session arms, and the rounds
-  are encoded at `Speed::Fastest` and at quality 50 at most
-  (`VideoSink::stand_in`): the picture is
-  replaced as soon as the stream delivers, so neither the Mac's reading of input
-  nor the gateway's cores are spent on it. While the stream flows the rectangles
-  are still decoded, since ZRLE's deflate stream cannot be inflated across a
-  gap, and dropped. Two virtual displays' legs deliver apart, so each display
-  shown keeps its rectangles until its own leg has delivered, and the stream
-  carries the picture once all of them have (`stream_carries`). The stream coming back starts at an IDR, announced again by
-  its `VideoFormat`. The resize notice covers only a resize in progress, as on
-  the virtual display under Standard mode.
+- **The gaps show nothing.** Before the stream is up, across every display
+  change and across a stream the Mac restarts on its own, there is no picture:
+  the gateway sends `screenUnavailable` with `active: true`, and the page says
+  "Screen not available" over the canvas, which takes no input of its own, so
+  the pointer and keys still reach the Mac's display. The Mac's ZRLE rectangles
+  are stepped over by their length (`Decoders::step_over`), never inflated and
+  never handed to `VideoSink::damage`, so a session that passes the stream
+  builds no VP9 encoder: one held idle for a session's life was some 240 MB at
+  1080p 4:4:4. Few come at all, since the Mac sends no pixels from an offer
+  until the next display change. `active: false` follows the first unit of the
+  stream's first picture of the display on the channel (`VideoSink::uncover`),
+  encoded here or passed, so the notice never lifts on a canvas with nothing new
+  on it; a second display's tab has its own. Two virtual displays' legs deliver
+  apart, and pixel polling narrows to one pixel once every display shown has had
+  a picture (`stream_carries`). The stream coming back starts at an IDR,
+  announced again by its `VideoFormat`. The resize notice covers a resize in
+  progress and stands in front while both hold.
 - **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
   walk govern only VP9: the whole picture of a browser that says no.
   `render_adaptive` neither enables nor disables the Mac's separate, always-on
@@ -2091,7 +2094,9 @@ with `active: true`, and the page covers the desktop with a dimmed, blurred
 session opens covered. The display it connects to is the Mac's own, and the
 virtual display and then the window's size follow. The cover takes no input and leaves the menu reachable, and a
 browser that reattaches mid-resize is told again. No other engine sends
-`resizing`. The measurements are in
+`resizing`. Once the display has settled, a session with a media stream says
+"Screen not available" in its place until the stream's first picture of the new
+display (`screenUnavailable`), with input still going to the Mac. The measurements are in
 [Resizing a High Performance display](apple-vnc-889.md#resizing-a-high-performance-display-as-measured).
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
@@ -2214,7 +2219,7 @@ is shown is authenticated and dropped at the receiver, neither decoded nor
 passed. A `selectDisplay` is answered in the gateway and asks the Mac for nothing
 but the keyframe a display coming into view starts at. The
 framebuffer the Mac spans over both displays is only the space its rectangles,
-cut to each display shown while they stand in for its stream, and pointer
+which are never shown, and pointer
 positions are addressed in: a position made on the
 second display is offset by where the layout places it, and held on a display
 (`DesktopState::hp_span_point`). Where that is is the Mac's to say: the second

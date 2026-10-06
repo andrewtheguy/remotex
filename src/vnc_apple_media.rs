@@ -33,10 +33,10 @@
 //! sound within [`STREAM_START`] of its offer, one that sends neither for
 //! [`STREAM_SILENCE`], and one whose receiver fails ([`MediaStream::overdue`],
 //! [`MediaStream::failure`]).
+//! ZRLE rectangles are stepped over by their length, never inflated or shown.
 //! Until the first media picture, and across display changes which stop the
-//! stream until the next offer, the Mac's ZRLE rectangles stand in for it
-//! ([`crate::encode::VideoSink::stand_in`]); while it flows they are decoded and
-//! dropped.
+//! stream until the next offer, the browser says the screen is not available
+//! ([`crate::protocol::ServerMsg::ScreenUnavailable`]).
 //!
 //! Every packet in is authenticated before it is decrypted — AES-256 counter mode
 //! with an HMAC-SHA1-80 tag, RFC 3711 keys from the masters this side put in the
@@ -95,8 +95,8 @@ pub const PASSED_SOUND: crate::audio::PassedFormat = crate::audio::PassedFormat 
 };
 
 /// The second `SetEncodings`, sent once the first layout has arrived: the opening
-/// list with the media stream appended. ZRLE stays the Mac's preferred codec, so
-/// its rectangles are the picture, and naming the stream makes it name its ports.
+/// list with the media stream appended. ZRLE stays the Mac's preferred codec, and
+/// naming the stream makes it name its ports.
 pub fn encodings_with_media_stream() -> Vec<i32> {
     let mut encodings = vnc_apple::ENCODINGS.to_vec();
     encodings.push(ENCODING_MEDIA_STREAM);
@@ -2209,8 +2209,8 @@ impl MediaStream {
 
     /// Act on an encoding-1010 rectangle. `true` when a stream offered for the
     /// displays went down with it: the Mac named its ports again, which it does
-    /// after every display change, its own included, and its rectangles are the
-    /// picture until the offer that naming allows delivers.
+    /// after every display change, its own included, and the browser is told the
+    /// screen is not available until the offer that naming allows delivers.
     ///
     /// An error ends the session: the Mac refused the stream, or described one this
     /// side cannot receive. Apple's viewer shows the refusal and closes.

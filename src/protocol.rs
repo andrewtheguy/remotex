@@ -1109,6 +1109,14 @@ pub enum ServerMsg {
     /// Sent only by the Apple High Performance engine, and again on reattach
     /// while a resize is in progress.
     Resizing { active: bool },
+    /// A High Performance Mac's media stream has sent no picture of the display
+    /// shown: `active` is true from connect, from every display change and from a
+    /// stream the Mac restarts, and false behind the stream's first picture of
+    /// the display. Nothing else is the picture of such a session, so the browser
+    /// says the screen is not available meanwhile, over a canvas that goes on
+    /// taking input: the Mac's display is there and takes it. Sent only by the
+    /// Apple High Performance engine, and again on reattach while it holds.
+    ScreenUnavailable { active: bool },
     /// Why the desktop the `Resize` before this describes has no picture, or `None`
     /// when it has one: past what a video stream encodes, or a Mac's Combined Display
     /// over more screens than one view shows. No picture follows until a `Resize`
@@ -1280,6 +1288,7 @@ enum ControlMsg<'a> {
     RemoteOs { macos: bool },
     TouchReady,
     Resizing { active: bool },
+    ScreenUnavailable { active: bool },
     Oversize { cause: Option<HoldCause> },
     Clipboard {
         text: &'a str,
@@ -1360,6 +1369,7 @@ impl ServerMsg {
                 | ServerMsg::Mosaic { .. }
                 | ServerMsg::Oversize { .. }
                 | ServerMsg::Resizing { .. }
+                | ServerMsg::ScreenUnavailable { .. }
                 | ServerMsg::RemoteOs { .. }
                 | ServerMsg::TouchReady
         )
@@ -1447,6 +1457,7 @@ impl ServerMsg {
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
+            ServerMsg::ScreenUnavailable { active } => control(&ControlMsg::ScreenUnavailable { active: *active }),
             ServerMsg::Oversize { cause } => control(&ControlMsg::Oversize { cause: *cause }),
             ServerMsg::AudioFormat {
                 codec,
@@ -1967,6 +1978,13 @@ mod tests {
                     format!(r#"{{"type":"resizing","active":{active}}}"#)
                 ),
                 None => panic!("resizing must be a text frame"),
+            }
+            match (ServerMsg::ScreenUnavailable { active }).text_frame() {
+                Some(json) => assert_eq!(
+                    json,
+                    format!(r#"{{"type":"screenUnavailable","active":{active}}}"#)
+                ),
+                None => panic!("screenUnavailable must be a text frame"),
             }
         }
         for (cause, wire) in [(None, "null"), (Some(HoldCause::Size), r#""size""#), (Some(HoldCause::Screens), r#""screens""#)] {

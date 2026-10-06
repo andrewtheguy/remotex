@@ -16,7 +16,7 @@ use anyhow::Context as _;
 use crate::config::Chroma;
 use crate::video::{AccessUnit, Mirror, check_picture};
 
-pub use screen_vp9::{FrameHeader, Speed, frame_header};
+pub use screen_vp9::{FrameHeader, frame_header};
 
 /// The frame rate the level of a stream this gateway encodes is figured at.
 ///
@@ -121,13 +121,6 @@ impl Stream {
             anyhow::bail!("a retune refused on the test's orders");
         }
         self.encoder.set_quality(quality).context("retuning the VP9 encoder")
-    }
-
-    /// Move the encoder's speed on the live encoder, without a keyframe: what a
-    /// picture that only stands in for another gives up to be out sooner
-    /// ([`crate::encode::VideoSink::stand_in`]).
-    pub fn set_speed(&mut self, speed: Speed) -> anyhow::Result<()> {
-        self.encoder.set_speed(speed).context("moving the VP9 encoder's speed")
     }
 
     /// Encode `mirror` as it stands.

@@ -729,6 +729,9 @@ export function useRemoteDesktop(
   // A High Performance resize is settling — the gateway's `resizing`. Reset on
   // every connect and disconnect: a reattach mid-resize is told again.
   const [remoteResizing, setRemoteResizing] = useState(false);
+  // A High Performance Mac's media stream has sent no picture of this display —
+  // the gateway's `screenUnavailable`. Reset as `remoteResizing` is.
+  const [screenUnavailable, setScreenUnavailable] = useState(false);
   const [touchEnabled, setTouchEnabled] = useState(() =>
     readOnByKey(TOUCHSCREEN_KEY),
   );
@@ -1875,6 +1878,7 @@ export function useRemoteDesktop(
       setMode("desktop");
       setCanTouch(false);
       setRemoteResizing(false);
+      setScreenUnavailable(false);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
       // Nothing here turns a camera on: unlike sound, the session is not started
@@ -1963,6 +1967,7 @@ export function useRemoteDesktop(
       setRemoteIsMac(false);
       setCanTouch(false);
       setRemoteResizing(false);
+      setScreenUnavailable(false);
       setDisplays([]);
       setActiveDisplayId(null);
       if (tabDisplay === null) {
@@ -2118,6 +2123,9 @@ export function useRemoteDesktop(
           break;
         case "resizing":
           setRemoteResizing(msg.active);
+          break;
+        case "screenUnavailable":
+          setScreenUnavailable(msg.active);
           break;
         case "oversize":
           setOversize(msg.cause);
@@ -3091,6 +3099,7 @@ export function useRemoteDesktop(
     setTouchEnabled,
     // The cover over a settling High Performance resize.
     remoteResizing,
+    screenUnavailable,
     viewOnly,
     setViewOnly,
     onLocalShortcut,

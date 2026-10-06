@@ -163,14 +163,17 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* A settling High Performance resize: the last frame dimmed and blurred under a
-   label, over the desktop but under the menu (z-index 900 and up), and
-   transparent to input: the desktop is still on screen under it. */
+/* A settling High Performance resize, or a High Performance display whose
+   picture has not come: the last frame dimmed and blurred under a label, over
+   the desktop but under the menu (z-index 900 and up), and transparent to
+   input: the remote's display is still there under it. */
 .resize-overlay {
   position: fixed;
   inset: 0;
   z-index: 2;
   display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
   align-items: center;
   justify-content: center;
   pointer-events: none;

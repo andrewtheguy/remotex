@@ -527,9 +527,8 @@ password = "change-me"
 # Mac negotiates on the RFB connection and then sends over UDP with SRTP — the
 # picture at up to 30 frames a second, without zlib's deflate holding up the
 # Mac's reading of your input. Until the stream sends its first picture, at
-# connect and across display changes, the Mac's own ZRLE picture stands in for
-# it, about once a second, encoded as fast as the encoder goes and at a lower
-# quality than the session's. A stream that
+# connect and across display changes, the browser says the screen is not
+# available, and your input still reaches the Mac. A stream that
 # fails ends the session, as it does in Apple's viewer.
 # The Mac sends to this gateway's address on UDP 5900 and 5901, and 5902 for a
 # second display, so a firewall or NAT between them must let that through, or the
@@ -555,8 +554,8 @@ password = "change-me"
 # the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded
 # here from decoded pictures. Every picture the
 # Mac sends goes, up to 30 a second, at the Mac's own quality. Its ZRLE rectangles
-# are shown only while the media stream is not flowing, as VP9 encoded here, and
-# the stream takes over from them at a keyframe. The HEVC is
+# are never read or shown, so such a session builds no video encoder here.
+# The HEVC is
 # walked between 20 and 60 Mbit/s
 # by the Mac's own rate controller, from the delay this gateway reports as Apple's
 # viewer does, which ends at the gateway: the browser's link does not slow it. High

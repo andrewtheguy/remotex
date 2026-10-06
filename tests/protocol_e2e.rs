@@ -1969,12 +1969,13 @@ async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
 /// reading for one kind reads that socket alone, so what it skips past is never
 /// a message of the other socket that a later helper is waiting for.
 fn socket_for<'a>(ws: &'a mut Ws, kind: &str) -> &'a mut common::Socket {
-    const DISPLAY: [&str; 9] = [
+    const DISPLAY: [&str; 10] = [
         "resize",
         "cursor",
         "mosaic",
         "oversize",
         "resizing",
+        "screenUnavailable",
         "remoteOs",
         "touchReady",
         "videoFormat",
@@ -2333,7 +2334,8 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     assert_eq!(displays[0]["virtual"], true, "{msg}");
     assert_eq!(msg["active"], MAC_VIRTUAL_DISPLAY, "{msg}");
     // No picture: the Mac's ZRLE is stepped over, and the picture is the media
-    // stream alone, which this fake Mac never delivers.
+    // stream alone, which this fake Mac never delivers, so the browser has been
+    // told its screen is not available.
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true),
