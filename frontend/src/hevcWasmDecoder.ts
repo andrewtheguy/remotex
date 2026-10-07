@@ -1,10 +1,10 @@
 // BETA: a software decoder for a High Performance Mac's passed HEVC, for a
 // browser whose `VideoDecoder` does not take it (appleMedia.ts decides).
 //
-// libavcodec's HEVC decoder compiled to WebAssembly (andrewtheguy/hevc-wasm), with
-// its SIMD128 kernels and its slice threads, running in a worker of its own beside
-// the paint worker: a picture takes tens of milliseconds of CPU, and the paint
-// worker has to go on answering a `clear` while one does.
+// andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and compiled to
+// WebAssembly with SIMD128 and threads, running in a worker of its own beside
+// the paint worker: a picture takes milliseconds of CPU, and the paint worker
+// has to go on answering a `clear` while one does.
 //
 // It is shaped as a `VideoDecoder` — configure, decode, close, an output and an
 // error callback — so `createVideoStream` (videoDecoder.ts) runs it exactly as it
@@ -28,12 +28,7 @@
 /** What the paint worker sends the decode worker. */
 export type HevcCommand =
   | { type: "create"; id: number }
-  | {
-      type: "decode";
-      id: number;
-      data: ArrayBuffer;
-      keyframe: boolean;
-    }
+  | { type: "decode"; id: number; data: ArrayBuffer }
   /** The paint worker is done reading the picture last answered with. */
   | { type: "release"; id: number }
   | { type: "destroy"; id: number };
@@ -82,7 +77,12 @@ export type HevcEvent =
    * module or a picture this browser cannot run at all, `EncodingError` for a unit
    * that failed to decode.
    */
-  | { type: "failed"; id: number; name: string; message: string };
+  | { type: "failed"; id: number; name: string; message: string }
+  /**
+   * The module did not load, and cannot in this worker again: every decoder in
+   * it is over, and the next stream starts another worker.
+   */
+  | { type: "broken"; message: string };
 
 /** What `createVideoStream` builds a decoder with. */
 export interface VideoDecoderLikeInit {
@@ -104,7 +104,7 @@ export interface VideoDecoderLike {
 }
 
 interface Client {
-  onEvent: (event: HevcEvent) => void;
+  onEvent: (event: Exclude<HevcEvent, { type: "broken" }>) => void;
 }
 
 // One decode worker for the paint worker's lifetime, started by the first HEVC
@@ -122,8 +122,28 @@ function decodeWorker(): Worker {
     type: "module",
     name: "hevc-decoder",
   });
+  // The worker is over, and every decoder in it: the next stream starts another.
+  const over = (message: string) => {
+    if (worker !== started) {
+      return;
+    }
+    worker = null;
+    for (const [id, client] of clients) {
+      client.onEvent({
+        type: "failed",
+        id,
+        name: "NotSupportedError",
+        message,
+      });
+    }
+    started.terminate();
+  };
   started.onmessage = (ev: MessageEvent<HevcEvent>) => {
     const event = ev.data;
+    if (event.type === "broken") {
+      over(event.message);
+      return;
+    }
     const client = clients.get(event.id);
     if (client) {
       client.onEvent(event);
@@ -134,16 +154,7 @@ function decodeWorker(): Worker {
   started.onerror = (ev) => {
     // A worker that failed to start takes every decoder in it down.
     ev.preventDefault();
-    worker = null;
-    for (const [id, client] of clients) {
-      client.onEvent({
-        type: "failed",
-        id,
-        name: "NotSupportedError",
-        message: `the HEVC decoder's worker failed (${ev.message || "no message"})`,
-      });
-    }
-    started.terminate();
+    over(`the HEVC decoder's worker failed (${ev.message || "no message"})`);
   };
   worker = started;
   return started;
@@ -241,12 +252,7 @@ export function createWasmHevcDecoder(
       const data = new ArrayBuffer(chunk.byteLength);
       chunk.copyTo(data);
       decodeWorker().postMessage(
-        {
-          type: "decode",
-          id,
-          data,
-          keyframe: chunk.type === "key",
-        } satisfies HevcCommand,
+        { type: "decode", id, data } satisfies HevcCommand,
         [data],
       );
     },

@@ -100,10 +100,11 @@ export function gatewayDisplaySocketUrl(
   return url.toString();
 }
 
-/// The software HEVC decoder's files, `hevc.js` and `hevc.wasm`: a release of
-/// andrewtheguy/hevc-wasm the gateway serves beside the bundle when it has the
-/// release archive, as they were built, because the module starts its slice
-/// threads as workers of its own script, found by its own URL.
+/// The software HEVC decoder's files, `hevc.js` (wasm-bindgen's glue) and
+/// `hevc.wasm`: a release of andrewtheguy/hevc-wasm the gateway serves beside
+/// the bundle when it has the release archive. The decode worker and each
+/// thread of the decoder's pool import the glue by this URL, and the glue is
+/// given the module's.
 export function hevcDecoderUrl(file: "hevc.js" | "hevc.wasm"): string {
   return gatewayUrl(`/hevc/${file}`);
 }

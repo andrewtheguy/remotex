@@ -2,12 +2,13 @@
 //! `VideoDecoder` refuses a High Performance Mac's 4:4:4 picture
 //! (`frontend/src/hevcWasmDecoder.ts`).
 //!
-//! It is libavcodec's HEVC decoder compiled to WebAssembly, a release of
-//! andrewtheguy/hevc-wasm published to the private
+//! It is andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and
+//! compiled to WebAssembly, a release published to the private
 //! andrewtheguy/hevc-wasm-archives, and no build of this binary holds it, since
-//! FFmpeg's licence keeps it out of every artifact as it keeps the native
-//! decoder out ([`crate::libav`]): an operator who wants it downloads the release archive into the gateway's data
-//! directory, or anywhere else and names it in `[hevc_wasm]`. The
+//! its licence keeps it out of every artifact as the native decoder's keeps that
+//! out ([`crate::libav`]): an operator who wants it downloads the release archive
+//! into the gateway's data directory, or anywhere else and names it in
+//! `[hevc_wasm]`. The
 //! gateway reads that archive once at start-up, refuses it unless it is exactly the
 //! release pinned here — the page's worker calls the module's exports as this
 //! version has them, so any other build is one the page cannot drive — and serves
@@ -23,10 +24,10 @@ use flate2::read::GzDecoder;
 use sha2::{Digest as _, Sha256};
 
 /// The hevc-wasm release this gateway's page is written against.
-pub const VERSION: &str = "0.0.1";
+pub const VERSION: &str = "0.0.2";
 
 /// The SHA-256 of that release's archive, as its `SHA256SUMS` publishes it.
-const SHA256: &str = "4a1a758d5157a53e5478982d2a0e2658de31e3a8955496e1c003eaf61a5906f4";
+const SHA256: &str = "469d086e00b77c12cd0a735370fd0809ec38ad0415604e6cbb669e3c729d9ddc";
 
 /// The archive's name as released, which is also `[hevc_wasm].archive`'s default.
 pub fn archive_name() -> String {
@@ -53,7 +54,7 @@ pub struct DecoderFile {
 /// The decoder's two files, held for the life of the gateway.
 #[derive(Clone, Debug)]
 pub struct HevcDecoder {
-    /// `hevc.js`, Emscripten's ES module glue, which also starts the slice threads.
+    /// `hevc.js`, wasm-bindgen's ES module glue.
     js: DecoderFile,
     /// `hevc.wasm`.
     wasm: DecoderFile,

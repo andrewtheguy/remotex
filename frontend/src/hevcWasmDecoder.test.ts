@@ -42,7 +42,10 @@ class FakeWorker {
   postMessage(command: { type: string; id: number }) {
     this.posted.push(command);
   }
-  terminate() {}
+  terminated = false;
+  terminate() {
+    this.terminated = true;
+  }
 }
 
 const PLANES = {
@@ -102,6 +105,40 @@ test("a picture is released to the decode worker when it is closed, once", () =>
       "decode",
       "destroy",
     ]);
+  } finally {
+    globals.Worker = before;
+  }
+});
+
+test("a worker whose module did not load is ended, and the next stream starts another", () => {
+  const globals = globalThis as unknown as { Worker: unknown };
+  const before = globals.Worker;
+  globals.Worker = FakeWorker;
+  try {
+    const errors: Error[] = [];
+    const first = createWasmHevcDecoder({
+      output: () => assert.fail("no output"),
+      error: (e) => errors.push(e),
+    });
+    first.configure({ codec: "hev1.4.10.L150.BE.8" });
+    const broken = FakeWorker.made[FakeWorker.made.length - 1];
+    const made = FakeWorker.made.length;
+    broken.onmessage?.({ data: { type: "broken", message: "no threads" } });
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].name, "NotSupportedError");
+    assert.equal(first.state, "closed");
+    assert.equal(broken.terminated, true);
+
+    const second = createWasmHevcDecoder({
+      output: () => assert.fail("no output"),
+      error: (e) => assert.fail(e.message),
+    });
+    second.configure({ codec: "hev1.4.10.L150.BE.8" });
+    assert.equal(FakeWorker.made.length, made + 1);
+    // The ended worker saying so again takes nothing of the new one down.
+    broken.onmessage?.({ data: { type: "broken", message: "no threads" } });
+    assert.equal(second.state, "configured");
+    second.close();
   } finally {
     globals.Worker = before;
   }
