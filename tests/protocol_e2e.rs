@@ -958,7 +958,7 @@ async fn serve_fake_mac_records(
                 );
                 let message =
                     fake_mac_clipboard_message(MAC_CLIPBOARD_SESSION, MAC_REMOTE_CLIPBOARD);
-                write_half.write_all(writer.frame(&message).unwrap()).await?;
+                write_half.write_all(writer.frame(&message)).await?;
                 clipboard_fetch_pending = false;
                 continue;
             }
@@ -989,7 +989,7 @@ async fn serve_fake_mac_records(
                     let mut update = vec![0u8, 0];
                     update.extend_from_slice(&1u16.to_be_bytes());
                     update.extend_from_slice(&fake_mac_ports());
-                    write_half.write_all(writer.frame(&update).unwrap()).await?;
+                    write_half.write_all(writer.frame(&update)).await?;
                 }
             }
             // FramebufferUpdateRequest. A non-incremental one is answered, with
@@ -1022,12 +1022,12 @@ async fn serve_fake_mac_records(
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
                     rect.extend_from_slice(&fake_mac_layout(display, points, density));
-                    write_half.write_all(writer.frame(&rect).unwrap()).await?;
+                    write_half.write_all(writer.frame(&rect)).await?;
                 }
                 shade = shade.wrapping_add(0x10);
                 let pixels = ((points.0 * density).min(rect[2]), (points.1 * density).min(rect[3]));
                 write_half
-                    .write_all(writer.frame(&fake_mac_update(shade, pixels)).unwrap())
+                    .write_all(writer.frame(&fake_mac_update(shade, pixels)))
                     .await?;
             }
             // KeyEvent
@@ -1077,13 +1077,13 @@ async fn serve_fake_mac_records(
                 assert!(!clipboard_fetch_pending, "overlapping clipboard fetches");
                 clipboard_fetch_pending = true;
                 write_half
-                    .write_all(writer.frame(&[0, 0, 0, 0]).unwrap())
+                    .write_all(writer.frame(&[0, 0, 0, 0]))
                     .await?;
                 let mut fence = vec![MSG_FENCE, 0, 0, 0];
                 fence.extend_from_slice(&(1u32 << 31).to_be_bytes());
                 fence.push(4);
                 fence.extend_from_slice(b"clip");
-                write_half.write_all(writer.frame(&fence).unwrap()).await?;
+                write_half.write_all(writer.frame(&fence)).await?;
             }
             // SetDisplayMessage, reported so a later request can order assertions
             // without relying on a timeout.
@@ -1103,7 +1103,7 @@ async fn serve_fake_mac_records(
                 // frame. A real Mac may send this status at any time after setup.
                 if !std::mem::replace(&mut sent_clipboard_status, true) {
                     let status = [0x14, 0, 0, 4, 0, 1, 0, 2];
-                    write_half.write_all(writer.frame(&status).unwrap()).await?;
+                    write_half.write_all(writer.frame(&status)).await?;
                 }
             }
             // SetDisplayConfiguration: the High Performance subtype's one virtual
@@ -1130,7 +1130,7 @@ async fn serve_fake_mac_records(
                     if media_listed {
                         rect.extend_from_slice(&fake_mac_ports());
                     }
-                    write_half.write_all(writer.frame(&rect).unwrap()).await?;
+                    write_half.write_all(writer.frame(&rect)).await?;
                 }
             }
             // RFBMediaStreamServerConfiguration: the media-stream offer, accepted or
@@ -1146,7 +1146,7 @@ async fn serve_fake_mac_records(
                 let mut update = vec![0u8, 0];
                 update.extend_from_slice(&1u16.to_be_bytes());
                 update.extend_from_slice(&fake_mac_answer(answer));
-                write_half.write_all(writer.frame(&update).unwrap()).await?;
+                write_half.write_all(writer.frame(&update)).await?;
             }
             // ClipboardSend: independently inflate and parse what the browser put
             // on the fake Mac's pasteboard.

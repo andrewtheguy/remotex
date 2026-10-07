@@ -474,9 +474,9 @@ async fn write_queued(
 enum Framing {
     /// Bare RFB, as it has always been written.
     Plain,
-    /// Apple's record layer, one record per message. Boxed: two AES key
-    /// schedules and a staging buffer, an order of magnitude more than the
-    /// other two, that every plain session would otherwise carry.
+    /// Apple's record layer, as many records per message as its length needs.
+    /// Boxed: two AES key schedules and a staging buffer, an order of magnitude
+    /// more than the other two, that every plain session would otherwise carry.
     Records(Box<RecordWriter>),
     /// RSA-AES's frames, as many per message as its length needs.
     Frames(Sealer),
@@ -532,7 +532,7 @@ impl Uplink {
         let Self { out, framing } = self;
         let framed = match framing {
             Framing::Plain => std::borrow::Cow::Borrowed(msg),
-            Framing::Records(records) => std::borrow::Cow::Borrowed(records.frame(msg)?),
+            Framing::Records(records) => std::borrow::Cow::Borrowed(records.frame(msg)),
             Framing::Frames(sealer) => std::borrow::Cow::Owned(sealer.frame(msg)),
         };
         match out {
@@ -11192,7 +11192,7 @@ mod tests {
         let mut writer = RecordWriter::new(apple_keys());
         let mut wire = Vec::new();
         for msg in msgs {
-            wire.extend_from_slice(writer.frame(msg).unwrap());
+            wire.extend_from_slice(writer.frame(msg));
         }
         wire
     }
