@@ -5,7 +5,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "build:wasm": "wasm-pack build wasm/egfx --release --target web --no-pack && wasm-pack build wasm/flac --release --target web --no-pack",
+    "build:wasm": "wasm-pack build wasm/egfx --release --target web --no-pack && wasm-pack build wasm/flac --release --target web --no-pack && bun wasm/vp9/fetch.ts",
     "build": "bun run build:wasm && tsc -b && vite build",
     "test": "bun run build:wasm && bun test src",
     "lint": "biome lint .",
