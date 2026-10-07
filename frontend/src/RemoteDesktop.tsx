@@ -109,8 +109,9 @@ function SessionCovers({
     <>
       {/* A High Performance resize that has not settled: the Mac's intermediate
           modes and repaints stay behind this, as they do behind Apple's own
-          client's. It takes no input and sits below the menu, so the menu stays
-          reachable; the gateway says when it comes down. */}
+          client's. It sits below the menu, so the menu stays reachable, and
+          nothing is sent to the Mac while it is up; the gateway says when it
+          comes down. */}
       {resizing && (
         <output className="resize-overlay">
           <span className="status">Resizing…</span>
@@ -121,13 +122,13 @@ function SessionCovers({
           display: at connect, after a display change, and when the Mac restarts
           its stream. Nothing else is that session's picture, so the page says so
           rather than showing an empty or stale canvas. Like the resize notice it
-          takes no input, so the pointer and keys still reach the Mac's display,
-          which is there; the resize notice stands in front while both hold. */}
+          holds input back: a key or a click would land on a display nobody is
+          looking at. The resize notice stands in front while both hold. */}
       {unavailable && !resizing && (
         <output className="resize-overlay">
           <span className="status">Screen not available</span>
           <span className="status-hint">
-            Waiting for the Mac's picture. Input still reaches it.
+            Waiting for the Mac's picture. Input is held until it is back.
           </span>
         </output>
       )}

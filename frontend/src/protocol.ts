@@ -320,8 +320,8 @@ export type ControlMsg =
   // A High Performance Mac's media stream has sent no picture of the display
   // shown: true from connect, from every display change and from a stream the
   // Mac restarts, false behind the stream's first picture of the display. The
-  // page says the screen is not available meanwhile and goes on sending input:
-  // the Mac's display is there, only its picture is not. Pushed by the gateway
+  // page says the screen is not available meanwhile and sends no input, as
+  // under `resizing`: nobody can see what it would do. Pushed by the gateway
   // and again on reattach while it holds; the page never infers it.
   | { type: "screenUnavailable"; active: boolean }
   // Why the desktop the `resize` before this describes has no picture, or null
