@@ -560,7 +560,9 @@ changes, as read from Apple's viewer and daemon and as macOS 26 answered:
 - **One configuration names both.** The display count is 2 and the descriptors
   follow back to back, each led by its own length, which is how the Mac steps
   from one to the next. Remotex sends the one-mode descriptor above for each
-  display, in the opening configuration and in every resize. The Mac creates the
+  display, in the opening configuration and in every resize, the second's at
+  the density of the screen its tab's window is on once that tab has reported
+  one, and at the first's until then. The Mac creates the
   second display to the right of the first, top-aligned: 1440×900 beside
   1440×900 put it at 1440 points across, and 1366×768 beside 1024×700 at 1366.
   Nothing known in the descriptor says where; the arrangement is changed on the

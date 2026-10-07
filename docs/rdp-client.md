@@ -339,6 +339,11 @@ opening density counts as applied only when the desktop comes back at the size t
 asked for it; otherwise the session is 1x and the client's `hostDisplay` asks again
 through Display Control. RDP reports no scale factor back, so the density here is
 declared rather than measured.
+Each monitor of a layout carries its own scale factor ([MS-RDPEDISP] 2.2.2.2.1,
+`DISPLAYCONTROL_MONITOR_LAYOUT`), and a second monitor shown in a browser tab of
+its own states the density of the screen that tab's window is on, with its
+window's points in pixels at it; until the tab reports one, and once it is no
+longer shown, it states the first's.
 The layout always says a monitor is upright: a window taller than it is wide is not a rotated
 screen, and a server told otherwise turns the desktop on its side.
 

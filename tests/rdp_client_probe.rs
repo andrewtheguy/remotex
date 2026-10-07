@@ -584,7 +584,7 @@ async fn resize_to(
     let started = Instant::now();
     let deadline = started + RESIZE_BUDGET;
     loop {
-        session.input().resize(&[(size.0, size.1)], 100);
+        session.input().resize(&[(size.0, size.1)], &[100]);
         let retry = (Instant::now() + RESIZE_RETRY).min(deadline);
         if pump(session, events, tally, retry, |t| t.resizes.last() == Some(&size)).await {
             return started.elapsed();
@@ -1162,7 +1162,7 @@ async fn pass_the_pipeline() {
         let started = Instant::now();
         let deadline = started + RESIZE_BUDGET;
         loop {
-            session.input().resize(&[(size.0, size.1)], 100);
+            session.input().resize(&[(size.0, size.1)], &[100]);
             let retry = (Instant::now() + RESIZE_RETRY).min(deadline);
             if pump(&mut events, &mut passed, retry, |p| p.resizes.last() == Some(&size)).await {
                 break;

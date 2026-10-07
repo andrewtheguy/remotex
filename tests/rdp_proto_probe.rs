@@ -305,7 +305,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             display.caps.is_some(),
             "Display Control is not usable until its capabilities arrive"
         );
-        let layout = display::monitor_layout(&[(RESIZED.0.into(), RESIZED.1.into())], remotex::config::Placement::Right, 100);
+        let layout = display::monitor_layout(&[(RESIZED.0.into(), RESIZED.1.into())], remotex::config::Placement::Right, &[100]);
         let pdu = dvc::data(control, &layout).unwrap();
         for chunk in channel::chunks(&pdu, demand.chunk, Channel::DYNAMIC.chunk_flags()).unwrap()
         {
@@ -890,7 +890,7 @@ fn our_monitor_layout_encodes_to_the_bytes_ironrdp_sends() {
         )),
     ];
     for (width, height, scale, theirs) in LAYOUTS {
-        let ours = display::monitor_layout(&[(width, height)], remotex::config::Placement::Right, scale);
+        let ours = display::monitor_layout(&[(width, height)], remotex::config::Placement::Right, &[scale]);
         assert_eq!(
             hex(&ours).replace(' ', ""),
             theirs,

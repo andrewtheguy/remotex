@@ -199,6 +199,14 @@ async def main() -> int:
         help="seconds to wait before --tab-viewport goes out, so it changes a "
         "second display whose stream is already flowing",
     )
+    parser.add_argument(
+        "--tab-display",
+        type=host_display,
+        default=None,
+        help="the screen display 2's tab is on, WIDTHxHEIGHT@SCALE, sent beside "
+        "--tab-viewport: the second display's own density in a session started "
+        "with --resize",
+    )
     parser.add_argument("--mouse", type=coordinates, default=None)
     parser.add_argument(
         "--display",
@@ -632,6 +640,11 @@ async def main() -> int:
                                     await tab.send(
                                         json.dumps({"type": "viewport", "w": w, "h": h})
                                     )
+                                    if args.tab_display is not None:
+                                        print(f"  [2] -> hostDisplay {args.tab_display}")
+                                        await tab.send(
+                                            json.dumps({"type": "hostDisplay", **args.tab_display})
+                                        )
 
                                 move_tasks.append(asyncio.create_task(size_tab()))
                             if args.tab_mouse is not None and not tab_mouse_sent:

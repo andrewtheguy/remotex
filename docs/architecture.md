@@ -2178,8 +2178,10 @@ two full-screen windows, one display each, whose edges meet, place it where it
 was dragged to, and anything between the two canvases — a window frame, a gap —
 places it short by that much. The pointer
 itself is sent by whichever page it is over. On a session that follows the window the tab's window is
-the second monitor's size: its viewport, sent on its own socket, makes the next
-layout a row of two sizes, top-aligned, and the second keeps that size for as long
+the second monitor's size, and the screen that window is on its density: its
+viewport and its screen, sent on its own socket, make the next
+layout a row of two sizes, top-aligned, each at its own scale factor, and the
+second keeps that size and density for as long
 as *All Displays* is chosen — a tab reloading does not reset it — and is the
 first's again once it is not. Choosing a display, a host that lays out one
 monitor, or the engine ending takes the tab away, and the session closes its
@@ -2233,7 +2235,8 @@ against it in the Mac's Displays settings, and each layout places both in the
 framebuffer as they then sit. The legs follow the same arrangement, the display
 that starts the framebuffer on the first, so the engine reads which display a
 leg carries off the layout too (`MediaStream::arrange`). On a session that follows
-the window the tab's window sizes the second display through the same
+the window the tab's window sizes the second display, at the density of the
+screen it is on, through the same
 configuration, which always names both. The sound is the session's, on the first
 tab. See [Two virtual displays](apple-vnc-889.md#two-virtual-displays).
 
