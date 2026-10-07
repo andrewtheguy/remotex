@@ -538,6 +538,11 @@ impl Second {
         (self.w, self.h)
     }
 
+    /// A window of `w` by `h` points, at 1x.
+    fn points(w: u32, h: u32) -> Self {
+        Self { w, h, density: Density::One }
+    }
+
     /// The same number of points at another density.
     fn at_density(self, density: Density) -> Self {
         let px = |v: u32| v * density.percent() / self.density.percent();
@@ -1444,6 +1449,11 @@ async fn active_loop(
     // The display shown in a tab of its own, while *All Displays* is chosen and its
     // socket is attached. One at most: a session has two columns at most.
     let mut tab: Option<Tab> = None;
+    // The tab's window as it last reported it, in points, for as long as *All
+    // Displays* is chosen: what a change of its screen's density re-expresses.
+    // The layout's own pixels will not do, being already held under the ceiling:
+    // 2560×1440 points at 2x is held to 3840×2400, and fits whole at 1x.
+    let mut tab_points: Option<(u32, u32)> = None;
 
     // The density the desktop is *known* to be at — known, because this only moves
     // when a resize proves it.
@@ -1497,6 +1507,9 @@ async fn active_loop(
         // once it is not asks for the first display's size again. Only a pending
         // one: leaving All Displays asks for the equal row once, and a host that
         // never applied it is not asked again every turn.
+        if !view.all {
+            tab_points = None;
+        }
         if resize
             && !view.all
             && let Some(wanted) = pending_layout.as_ref().map(|p| p.layout).filter(|l| l.second.is_some())
@@ -1897,8 +1910,8 @@ async fn active_loop(
                     if let ClientMsg::Viewport { w, h } = *made {
                         if resize {
                             let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
-                            let points = Second { w: u32::from(w), h: u32::from(h), density: Density::One };
-                            let second = points.at_density(base.second().density);
+                            tab_points = Some((u32::from(w), u32::from(h)));
+                            let second = Second::points(u32::from(w), u32::from(h)).at_density(base.second().density);
                             install_layout(
                                 base.with_second(Some(second)).held(),
                                 view.current(applied),
@@ -1910,11 +1923,16 @@ async fn active_loop(
                     }
                     // The screen the tab's window is on: the second monitor's
                     // density, as the session's own report is the first's. The
-                    // same points, re-expressed.
+                    // points its window reported, re-expressed, or the monitor's
+                    // own where it has reported none.
                     if let ClientMsg::HostDisplay(screen) = *made {
                         if resize {
                             let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
-                            let second = base.second().at_density(Density::from_host(screen.scale));
+                            let density = Density::from_host(screen.scale);
+                            let second = tab_points.map_or_else(
+                                || base.second().at_density(density),
+                                |(w, h)| Second::points(w, h).at_density(density),
+                            );
                             install_layout(
                                 base.with_second(Some(second)).held(),
                                 view.current(applied),
@@ -3547,6 +3565,14 @@ mod tests {
         assert_eq!(
             mixed.at_density(Density::One),
             Layout { w: 1280, h: 800, density: Density::One, second: None }
+        );
+        // A window past the ceiling at 2x is held under it, and fits whole at 1x
+        // when re-expressed from its points rather than from the held pixels.
+        let wide = even.with_second(Some(Second::points(2560, 1440).at_density(Density::Two))).held();
+        assert_eq!(wide.second, Some(Second { w: 3840, h: 2400, density: Density::Two }));
+        assert_eq!(
+            even.with_second(Some(Second::points(2560, 1440).at_density(Density::One))).held().second,
+            Some(Second { w: 2560, h: 1440, density: Density::One })
         );
         // Open, the tab's monitor stays what it was while the first changes;
         // with no tab it is the first over again.
