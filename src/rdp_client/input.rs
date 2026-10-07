@@ -20,7 +20,7 @@ pub(super) enum Command {
     /// Ask the server to repaint the whole desktop.
     Refresh,
     /// Ask the server for a new desktop size, over Display Control.
-    Resize { sizes: Vec<(u32, u32)>, scale_percent: u32 },
+    Resize { sizes: Vec<(u32, u32)>, scales: Vec<u32> },
     /// Something for the clipboard channel, in the three shapes a clipboard has.
     Clipboard(Clipboard),
     /// A frame of a passed graphics pipeline has been composed.
@@ -138,8 +138,9 @@ impl Input {
     /// gives up. This does not do it, because a retry ladder needs a clock and a
     /// policy, and both belong to whoever owns the timers.
     ///
-    /// `scale_percent` is the desktop's **DesktopScaleFactor**: 100 for an ordinary
-    /// display and 200 for a 2x one. It rides the same PDU as the size and cannot be
+    /// `scales` is each monitor's **DesktopScaleFactor**, in the order of `sizes`: 100
+    /// for an ordinary display and 200 for a 2x one, the last one stated being every
+    /// later monitor's. It rides the same PDU as the size and cannot be
     /// sent without one — a size sent without it tells the server to forget a scale
     /// it is already applying.
     ///
@@ -151,9 +152,10 @@ impl Input {
     /// `sizes` is each monitor's, left to right, the primary first: one for a single
     /// desktop, and a row of [`Connect::monitors`](super::Connect::monitors) for a
     /// session that asked for more, in which each may be its own size.
-    pub fn resize(&self, sizes: &[(u32, u32)], scale_percent: u32) {
+    pub fn resize(&self, sizes: &[(u32, u32)], scales: &[u32]) {
         let sizes = sizes.iter().map(|&(width, height)| sanitise_size(width, height)).collect();
-        self.push(Command::Resize { sizes, scale_percent: sanitise_scale(scale_percent) });
+        let scales = scales.iter().map(|&percent| sanitise_scale(percent)).collect();
+        self.push(Command::Resize { sizes, scales });
     }
 
     /// Tell the remote what this end's clipboard now holds, as Windows format ids.

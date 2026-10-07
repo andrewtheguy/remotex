@@ -117,19 +117,23 @@ pub fn adjust_size(width: u32, height: u32) -> (u32, u32) {
 /// Each size comes from a browser window and is clamped to what the protocol
 /// permits — [`MIN_DIMENSION`] to [`MAX_DIMENSION`], with an odd width rounded down
 /// — rather than refused: a window can be any size, and the nearest desktop the
-/// host will open is a better answer than none. `scale` is the browser's pixel
-/// density as a percentage, and is written only if the server would read it; every
-/// monitor states the same one. The layout is held to 1 to [`MAX_MONITORS`]
+/// host will open is a better answer than none. `scales` is each monitor's pixel
+/// density as a percentage, the density of the screen its browser window is on,
+/// and the last one stated is every later monitor's; one is written only if the
+/// server would read it. The layout is held to 1 to [`MAX_MONITORS`]
 /// monitors, an empty one being one of 0×0 brought into range. The primary is the
 /// first, its corner the origin every position is relative to ([MS-RDPEDISP]
 /// 2.2.2.2.1), so a monitor to its left or above it has a negative one; each
 /// monitor after the second continues the way the second went.
-pub fn monitor_layout(sizes: &[(u32, u32)], placement: Placement, scale: u32) -> Vec<u8> {
+pub fn monitor_layout(sizes: &[(u32, u32)], placement: Placement, scales: &[u32]) -> Vec<u8> {
     let sizes: Vec<(u32, u32)> = if sizes.is_empty() { vec![(0, 0)] } else { sizes.to_vec() };
     let sizes: Vec<(u32, u32)> =
         sizes.iter().take(MAX_MONITORS as usize).map(|&(w, h)| adjust_size(w, h)).collect();
     let monitors = sizes.len() as u32;
-    let scale = if (MIN_SCALE..=MAX_SCALE).contains(&scale) { Some(scale) } else { None };
+    let scale = |index: usize| {
+        let scale = scales.get(index).or(scales.last()).copied().unwrap_or(0);
+        (MIN_SCALE..=MAX_SCALE).contains(&scale).then_some(scale)
+    };
 
     let length = LAYOUT_HEAD + ENTRY * monitors;
     let mut w = Writer::with_capacity(length as usize);
@@ -146,8 +150,8 @@ pub fn monitor_layout(sizes: &[(u32, u32)], placement: Placement, scale: u32) ->
         w.u32_le(0); // PhysicalWidth
         w.u32_le(0); // PhysicalHeight
         w.u32_le(0); // Orientation
-        w.u32_le(scale.unwrap_or(0)); // DesktopScaleFactor
-        w.u32_le(scale.map_or(0, |_| DEVICE_SCALE));
+        w.u32_le(scale(index).unwrap_or(0)); // DesktopScaleFactor
+        w.u32_le(scale(index).map_or(0, |_| DEVICE_SCALE));
     }
     w.finish()
 }
@@ -193,7 +197,7 @@ mod tests {
 
     #[test]
     fn a_pdu_that_is_not_the_capabilities_is_refused_by_type() {
-        let layout = monitor_layout(&[(1280, 800)], Placement::Right, 100);
+        let layout = monitor_layout(&[(1280, 800)], Placement::Right, &[100]);
         let err = capabilities(&layout).unwrap_err();
         assert!(matches!(err, Malformed::Refused { field: "a PDU type", value: 2, .. }));
 
@@ -207,7 +211,7 @@ mod tests {
     /// numbers a caller sets.
     #[test]
     fn a_layout_is_one_primary_monitor_of_the_size_that_was_asked_for() {
-        let bytes = monitor_layout(&[(1280, 800)], Placement::Right, 150);
+        let bytes = monitor_layout(&[(1280, 800)], Placement::Right, &[150]);
         let mut r = Reader::new("a test", &bytes);
         assert_eq!(r.u32_le().unwrap(), MONITOR_LAYOUT);
         assert_eq!(r.u32_le().unwrap(), LAYOUT_HEAD + ENTRY);
@@ -228,11 +232,12 @@ mod tests {
     }
 
     /// Two monitors are a row: the primary at the left, the second starting at the
-    /// primary's right edge, each the size that was asked for and both at the same
-    /// density, and the PDU's length counts both entries.
+    /// primary's right edge, each the size that was asked for and at the density
+    /// stated for it, the last one stated where it has none of its own, and the
+    /// PDU's length counts both entries.
     #[test]
     fn a_layout_of_two_monitors_is_a_row_with_the_primary_at_the_left() {
-        let bytes = monitor_layout(&[(1281, 800), (1024, 700)], Placement::Right, 200);
+        let bytes = monitor_layout(&[(1281, 800), (1024, 700)], Placement::Right, &[200]);
         assert_eq!(bytes.len(), (LAYOUT_HEAD + 2 * ENTRY) as usize);
         let mut r = Reader::new("a test", &bytes);
         assert_eq!(r.u32_le().unwrap(), MONITOR_LAYOUT);
@@ -251,13 +256,19 @@ mod tests {
         // The odd width was rounded down, and the second monitor starts at it.
         assert_eq!(entries[0], [PRIMARY, 0, 0, 1280, 800, 0, 0, 0, 200, DEVICE_SCALE]);
         assert_eq!(entries[1], [0, 1280, 0, 1024, 700, 0, 0, 0, 200, DEVICE_SCALE]);
+        let mixed = monitor_layout(&[(1280, 800), (1024, 700)], Placement::Right, &[200, 100]);
+        let scale = |entry: u32| {
+            let at = (LAYOUT_HEAD + entry * ENTRY + 32) as usize;
+            u32::from_le_bytes(mixed[at..at + 4].try_into().unwrap())
+        };
+        assert_eq!((scale(0), scale(1)), (200, 100), "each monitor states its own");
         // Anywhere but the right, the second is placed against the primary's
         // corner, which stays the origin: negative to its left and above it.
         let corner = |placement| {
-            let bytes = monitor_layout(&[(1280, 800), (1024, 700)], placement, 100);
+            let bytes = monitor_layout(&[(1280, 800), (1024, 700)], placement, &[100]);
             let at = (LAYOUT_HEAD + ENTRY + 4) as usize;
             let field = |at: usize| i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-            assert_eq!(&bytes[..(LAYOUT_HEAD + ENTRY) as usize], &monitor_layout(&[(1280, 800), (1024, 700)], Placement::Right, 100)[..(LAYOUT_HEAD + ENTRY) as usize]);
+            assert_eq!(&bytes[..(LAYOUT_HEAD + ENTRY) as usize], &monitor_layout(&[(1280, 800), (1024, 700)], Placement::Right, &[100])[..(LAYOUT_HEAD + ENTRY) as usize]);
             (field(at), field(at + 4))
         };
         assert_eq!(corner(Placement::Right), (1280, 0));
@@ -265,8 +276,8 @@ mod tests {
         assert_eq!(corner(Placement::Top), (0, -700));
         assert_eq!(corner(Placement::Bottom), (0, 800));
         // No monitors is one, and more than the protocol allows is the most it does.
-        assert_eq!(monitor_layout(&[], Placement::Right, 100), monitor_layout(&[(0, 0)], Placement::Right, 100));
-        assert_eq!(monitor_layout(&[(1280, 800); 99], Placement::Right, 100).len(), (LAYOUT_HEAD + MAX_MONITORS * ENTRY) as usize);
+        assert_eq!(monitor_layout(&[], Placement::Right, &[100]), monitor_layout(&[(0, 0)], Placement::Right, &[100]));
+        assert_eq!(monitor_layout(&[(1280, 800); 99], Placement::Right, &[100]).len(), (LAYOUT_HEAD + MAX_MONITORS * ENTRY) as usize);
     }
 
     /// A window is whatever size the person made it; a desktop has to be one the
@@ -276,7 +287,7 @@ mod tests {
         let sizes =
             [((1367, 768), (1366, 768)), ((100, 99), (200, 200)), ((9000, 9000), (8192, 8192))];
         for (asked, sent) in sizes {
-            let bytes = monitor_layout(&[asked], Placement::Right, 100);
+            let bytes = monitor_layout(&[asked], Placement::Right, &[100]);
             let mut r = Reader::new("a test", &bytes[28..]);
             assert_eq!((r.u32_le().unwrap(), r.u32_le().unwrap()), sent, "asked for {asked:?}");
         }
@@ -287,10 +298,10 @@ mod tests {
     #[test]
     fn a_scale_the_server_would_ignore_is_left_out_with_the_one_beside_it() {
         for scale in [0, 99, 501] {
-            let bytes = monitor_layout(&[(1280, 800)], Placement::Right, scale);
+            let bytes = monitor_layout(&[(1280, 800)], Placement::Right, &[scale]);
             assert_eq!(&bytes[48..], &[0; 8], "a scale of {scale}");
         }
-        let bytes = monitor_layout(&[(1280, 800)], Placement::Right, 500);
+        let bytes = monitor_layout(&[(1280, 800)], Placement::Right, &[500]);
         assert_eq!(&bytes[48..], &[0xF4, 0x01, 0, 0, 100, 0, 0, 0]);
     }
 }

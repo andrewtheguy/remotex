@@ -690,6 +690,10 @@ struct DesktopState {
     /// the first display's points, as before the tab reported and once *All
     /// Displays* is no longer chosen.
     second_points: Option<(u16, u16)>,
+    /// The density the second display is asked for at while it is shown in a tab
+    /// of its own in a session started with resize: that of the screen the tab's
+    /// window is on. `None` gives it the first display's, as `second_points` does.
+    second_density: Option<f32>,
     /// A High Performance layout has arrived: the virtual display the session
     /// asked for exists, and a media-stream offer can name its size.
     laid_out: bool,
@@ -1116,20 +1120,39 @@ impl DesktopState {
     fn hp_noop(&self, points: (u16, u16)) -> bool {
         let asked = self.hp_modes(points);
         let sizes = self.hp_sizes();
+        let scales: Vec<f32> = if self.virtuals.is_empty() {
+            vec![self.scale]
+        } else {
+            self.virtuals.iter().map(|display| display.scale).collect()
+        };
         asked.len() == sizes.len()
             && asked.iter().zip(&sizes).all(|(mode, size)| mode.pixels == *size)
-            && (self.scale - self.host_density).abs() < 0.005
+            && self.hp_densities().iter().zip(&scales).all(|(asked, scale)| (scale - asked).abs() < 0.005)
+    }
+
+    /// The density each virtual display is asked for at: the first the session's
+    /// screen's, the second its tab's screen's ([`Self::second_density`]), or the
+    /// first's.
+    fn hp_densities(&self) -> Vec<f32> {
+        let mut densities = vec![self.host_density];
+        if self.hp_displays > 1 {
+            densities.push(self.second_density.unwrap_or(self.host_density));
+        }
+        densities
     }
 
     /// The mode each virtual display is asked for when the first is `points`: the
-    /// second its tab's window ([`Self::second_points`]), or the first's size.
+    /// second its tab's window ([`Self::second_points`]), or the first's size,
+    /// each at its own density ([`Self::hp_densities`]).
     fn hp_modes(&self, points: (u16, u16)) -> Vec<vnc_apple::VirtualMode> {
-        let mode = |points| vnc_apple::virtual_display_mode(points, self.host_density);
-        let mut modes = vec![mode(points)];
-        if self.hp_displays > 1 {
-            modes.push(mode(self.second_points.unwrap_or(points)));
-        }
-        modes
+        self.hp_densities()
+            .into_iter()
+            .enumerate()
+            .map(|(leg, density)| {
+                let points = if leg == 0 { points } else { self.second_points.unwrap_or(points) };
+                vnc_apple::virtual_display_mode(points, density)
+            })
+            .collect()
     }
 
     /// Each virtual display's backing size, in the Mac's order: what the media
@@ -1195,8 +1218,8 @@ impl DesktopState {
             return None;
         }
         debug!(
-            "vnc: requesting Apple virtual-display resize to {}x{} points at {}x",
-            want.0, want.1, self.host_density,
+            "vnc: requesting Apple virtual-display resize to {}x{} points at {:?}x",
+            want.0, want.1, self.hp_densities(),
         );
         Some(vnc_apple::set_display_configuration(&self.hp_modes(want)))
     }
@@ -2957,6 +2980,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         view: HpView::default(),
         hp_picked: false,
         second_points: None,
+        second_density: None,
         laid_out: false,
         canvas_live: false,
         media_live: false,
@@ -3237,11 +3261,25 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                                 }
                                 continue;
                             }
-                            // The session's window states the density and makes
-                            // the choices; the tab has no menu to make one from.
+                            // The screen the tab's window is on: the second
+                            // display's density, as the session's own report
+                            // is the first's.
+                            (ClientMsg::HostDisplay(screen), Some(_)) => {
+                                if resize {
+                                    let density = crate::protocol::render_density(screen.scale);
+                                    desktop.lock().unwrap().second_density = Some(density);
+                                    if let Err(e) =
+                                        request_resize(&uplink, &desktop, ResizeAsk::Density, virtual_display).await
+                                    {
+                                        break Err(e);
+                                    }
+                                }
+                                continue;
+                            }
+                            // The session's window makes the choices; the tab
+                            // has no menu to make one from.
                             (
-                                ClientMsg::HostDisplay(_)
-                                | ClientMsg::SelectDisplay { .. }
+                                ClientMsg::SelectDisplay { .. }
                                 | ClientMsg::DisplayShown { .. }
                                 | ClientMsg::OnDisplay { .. },
                                 Some(_),
@@ -6500,6 +6538,7 @@ async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> 
         if !now.all {
             // The second display is the first's size again.
             d.second_points = None;
+            d.second_density = None;
         }
         (was, now, d.virtuals[now.active])
     };
@@ -6610,6 +6649,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             if d.view != HpView::default() {
                 d.view = HpView::default();
                 d.second_points = None;
+                d.second_density = None;
             }
         } else if d.virtuals.len() < 2 && !d.hp_picked {
             // Two displays the Mac has just made start shown beside each other,
@@ -9644,6 +9684,7 @@ mod tests {
             view: HpView::default(),
             hp_picked: false,
             second_points: None,
+            second_density: None,
             laid_out: false,
             canvas_live: false,
             media_live: false,
@@ -12834,13 +12875,23 @@ mod tests {
         assert!(!desktop.lock().unwrap().hp_noop((160, 100)), "the second display is still 128x80");
         desktop.lock().unwrap().second_points = Some((128, 80));
         assert!(desktop.lock().unwrap().hp_noop((160, 100)));
+        // And its screen gives it a density of its own: the same points, at 2x.
+        desktop.lock().unwrap().second_density = Some(2.0);
+        let modes = desktop.lock().unwrap().hp_modes((160, 100));
+        assert_eq!(
+            modes.iter().map(|mode| (mode.pixels, mode.scaled)).collect::<Vec<_>>(),
+            [((160, 100), (160, 100)), ((256, 160), (128, 80))]
+        );
+        assert!(!desktop.lock().unwrap().hp_noop((160, 100)), "the second display is still 1x");
+        desktop.lock().unwrap().second_density = Some(1.0);
+        assert!(desktop.lock().unwrap().hp_noop((160, 100)));
 
         // The Mac lays out one display: nothing to choose between, and no tab.
         let one = layout_payload(None, &[(9, (160, 100), (160, 100), 0x01)]);
         read_display_layout(&mut one.as_slice(), &shared, true, &sink).await.unwrap();
         assert!(shared.tab.lock().unwrap().is_none());
         let d = desktop.lock().unwrap();
-        assert_eq!((d.view, d.span, d.second_points), (HpView::default(), None, None));
+        assert_eq!((d.view, d.span, d.second_points, d.second_density), (HpView::default(), None, None, None));
     }
 
     /// A layout does three things, and the third is the one that is easy to miss:

@@ -696,7 +696,7 @@ struct Active<'a> {
     /// The most recent size asked for before the channel was ready — only the most
     /// recent, since a resize supersedes every earlier one rather than queueing
     /// behind it.
-    pending_resize: Option<(Vec<(u32, u32)>, u32)>,
+    pending_resize: Option<MonitorRow>,
     /// Whether the server has sent Monitor Ready, which is what opens the clipboard:
     /// nothing may be said on that channel before this end's capabilities answer it.
     clip_ready: bool,
@@ -718,6 +718,9 @@ struct Active<'a> {
     /// for room in the caller's queue end — see [`Self::deliver`].
     stop: watch::Receiver<bool>,
 }
+
+/// A monitor layout to ask for: each monitor's size, and each one's scale factor.
+type MonitorRow = (Vec<(u32, u32)>, Vec<u32>);
 
 /// The dynamic channels this client takes, and the numbers the server's Create
 /// Requests gave them.
@@ -1560,7 +1563,7 @@ impl<'a> Active<'a> {
         let (Some(control), Some(dynamic)) = (self.dynamics.control, self.dynamic) else {
             return Ok(());
         };
-        let Some((sizes, scale)) = self.pending_resize.take() else {
+        let Some((sizes, scales)) = self.pending_resize.take() else {
             return Ok(());
         };
         // Held to what the server said it lays out. A layout past either limit is
@@ -1585,8 +1588,8 @@ impl<'a> Active<'a> {
             );
         }
         let sizes = &sizes[..monitors];
-        debug!("rdp: sending a monitor layout of {sizes:?} at {scale}%");
-        let layout = display::monitor_layout(sizes, self.dynamics.placement, scale);
+        debug!("rdp: sending a monitor layout of {sizes:?} at {scales:?}%");
+        let layout = display::monitor_layout(sizes, self.dynamics.placement, &scales);
         self.write_channel(dynamic, &dvc::data(control, &layout)?).await
     }
 
@@ -1610,8 +1613,8 @@ impl<'a> Active<'a> {
                     match other {
                         Command::Shutdown => return Ok(true),
                         Command::Refresh => self.refresh().await?,
-                        Command::Resize { sizes, scale_percent } => {
-                            self.pending_resize = Some((sizes, scale_percent));
+                        Command::Resize { sizes, scales } => {
+                            self.pending_resize = Some((sizes, scales));
                             self.send_layout().await?;
                         }
                         Command::Clipboard(what) => self.send_clipboard(what).await?,

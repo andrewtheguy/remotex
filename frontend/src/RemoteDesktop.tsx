@@ -12,7 +12,9 @@ import {
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connecting: "Connecting…",
-  connected: "Connected",
+  // The gateway has given this browser the session and has yet to announce the
+  // remote's desktop: it may still be dialling a remote that never answers.
+  connected: "Connecting to the remote desktop…",
   reconnecting: "Reconnecting…",
   busy: "Session in use",
   takenOver: "Session taken over",
@@ -157,7 +159,6 @@ function StatusOverlay({
   branding,
   status,
   connectError,
-  waiting,
   tabDisplay,
   onTakeOver,
   onRetry,
@@ -166,8 +167,6 @@ function StatusOverlay({
   status: ConnectionStatus;
   connectError: string | null;
   tabDisplay: number | null;
-  // The session is up and its first frame has not come.
-  waiting: boolean;
   onTakeOver: () => void;
   onRetry: () => void;
 }) {
@@ -185,9 +184,6 @@ function StatusOverlay({
           is true and unhelpful next to "the server answered 502", and the
           picker is not on screen to carry it while the overlay is. */}
       {connectError && <span className="status-hint">{connectError}</span>}
-      {waiting && (
-        <span className="status-hint">Waiting for the remote desktop…</span>
-      )}
       {status === "busy" && (
         <>
           <span className="status-hint">
@@ -499,7 +495,6 @@ export default function RemoteDesktop({
           branding={branding}
           status={status}
           connectError={connectError}
-          waiting={status === "connected"}
           tabDisplay={tabDisplay}
           onTakeOver={takeOver}
           onRetry={retry}

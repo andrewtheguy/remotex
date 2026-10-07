@@ -242,18 +242,18 @@ async fn session(
     let applied = if (u32::from(width), u32::from(height))
         == span(opening.adjusted(), view.columns, choices.placement)
     {
-        opening.density
+        Densities::even(opening.density)
     } else {
-        Density::One
+        Densities::even(Density::One)
     };
     info!(
         "rdp: connected, desktop {width}x{height} at {}x over {} display(s)",
-        applied.percent() / 100,
+        applied.first.percent() / 100,
         view.columns
     );
 
     let (w, h) = view.size();
-    if sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await.is_err() {
+    if sink.msg(ServerMsg::Resize { w, h, scale: applied.of(view.active).scale() }).await.is_err() {
         return; // browser already gone
     }
     // A passed pipeline is composed whole in the browser: which part of it the
@@ -510,10 +510,11 @@ impl Density {
 /// shrinks everything drawn in them. MS-RDPEDISP puts both on one PDU, and
 /// [`Input::resize`] takes both for the same reason.
 ///
-/// `w` and `h` are the first monitor's, and every monitor is that size unless
-/// `second` says otherwise: the second monitor's size, where a display shown
-/// in a browser tab of its own follows that tab's window rather than the first's.
-/// `None` whenever it would be the same size, so a layout is spelt one way. Where
+/// `w`, `h` and `density` are the first monitor's, and every monitor is that
+/// unless `second` says otherwise: the second monitor's size and density, where
+/// a display shown in a browser tab of its own follows that tab's window, and
+/// the screen it is on, rather than the first's. `None` whenever it would be the
+/// same, so a layout is spelt one way. Where
 /// the second sits is not part of it: that is the session's, chosen once
 /// ([`Placement`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,19 +522,82 @@ struct Layout {
     w: u32,
     h: u32,
     density: Density,
-    second: Option<(u32, u32)>,
+    second: Option<Second>,
+}
+
+/// The second monitor of a [`Layout`], where it is not the first over again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Second {
+    w: u32,
+    h: u32,
+    density: Density,
+}
+
+impl Second {
+    fn size(self) -> (u32, u32) {
+        (self.w, self.h)
+    }
+
+    /// A window of `w` by `h` points, at 1x.
+    fn points(w: u32, h: u32) -> Self {
+        Self { w, h, density: Density::One }
+    }
+
+    /// The same number of points at another density.
+    fn at_density(self, density: Density) -> Self {
+        let px = |v: u32| v * density.percent() / self.density.percent();
+        Self { w: px(self.w), h: px(self.h), density }
+    }
+
+    fn sized(self, (w, h): (u32, u32)) -> Self {
+        Self { w, h, ..self }
+    }
+}
+
+/// The density each monitor of the desktop is known to be at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Densities {
+    first: Density,
+    second: Density,
+}
+
+impl Densities {
+    fn even(density: Density) -> Self {
+        Self { first: density, second: density }
+    }
+
+    /// `column`'s: the first's, or every later monitor's.
+    fn of(self, column: u16) -> Density {
+        if column == 0 { self.first } else { self.second }
+    }
 }
 
 impl Layout {
-    /// `second`, as `None` when it is the first monitor's size.
+    /// `second`, as `None` when it is the first monitor over again.
     fn normalized(self) -> Self {
-        Self { second: self.second.filter(|second| *second != (self.w, self.h)), ..self }
+        let first = Second { w: self.w, h: self.h, density: self.density };
+        Self { second: self.second.filter(|second| *second != first), ..self }
+    }
+
+    /// The second monitor, whether or not it is the first over again.
+    fn second(self) -> Second {
+        self.second.unwrap_or(Second { w: self.w, h: self.h, density: self.density })
+    }
+
+    /// Each monitor's density.
+    fn densities(self) -> Densities {
+        Densities { first: self.density, second: self.second().density }
     }
 
     /// Each monitor's size, the first first, for a layout of `monitors`.
     fn row(self, monitors: u16) -> Vec<(u32, u32)> {
-        let second = self.second.unwrap_or((self.w, self.h));
+        let second = self.second().size();
         (0..monitors.max(1)).map(|index| if index == 0 { (self.w, self.h) } else { second }).collect()
+    }
+
+    /// Each monitor's `DesktopScaleFactor`, in [`Self::row`]'s order.
+    fn scales(self, monitors: u16) -> Vec<u32> {
+        (0..monitors.max(1)).map(|index| self.densities().of(index).percent()).collect()
     }
 
     /// The same request at the size the protocol would actually accept: an even
@@ -544,7 +608,7 @@ impl Layout {
     /// number different from the one that will be sent asks forever.
     fn adjusted(self) -> Self {
         let (w, h) = client::sanitise_size(self.w, self.h);
-        let second = self.second.map(|(w, h)| client::sanitise_size(w, h));
+        let second = self.second.map(|second| second.sized(client::sanitise_size(second.w, second.h)));
         Self { w, h, second, ..self }.normalized()
     }
 
@@ -558,13 +622,16 @@ impl Layout {
     /// viewport reported in the announced density's pixels is carried up to a
     /// denser one still waiting for the channel, so both reach the server as a
     /// single monitor layout rather than two.
+    ///
+    /// The density is the first monitor's. A second that is the first over again
+    /// goes with it, and one of its own keeps what its tab's window and screen
+    /// made it.
     fn at_density(self, density: Density) -> Self {
         if density == self.density {
             return self;
         }
         let px = |v: u32| v * density.percent() / self.density.percent();
-        let second = self.second.map(|(w, h)| (px(w), px(h)));
-        Self { w: px(self.w), h: px(self.h), density, second }
+        Self { w: px(self.w), h: px(self.h), density, second: self.second }.normalized()
     }
 
     /// The same request held under the video stream's picture ceiling.
@@ -579,7 +646,7 @@ impl Layout {
     /// [`Self::adjusted`] makes of it.
     fn held(self) -> Self {
         let (w, h) = crate::video::fit_ceiling(self.size());
-        let second = self.second.map(crate::video::fit_ceiling);
+        let second = self.second.map(|second| second.sized(crate::video::fit_ceiling(second.size())));
         if (w, h) != self.size() || second != self.second {
             info!("rdp: holding {self} under the video stream's picture ceiling");
         }
@@ -590,8 +657,15 @@ impl Layout {
         (self.w, self.h)
     }
 
-    /// The same first monitor, with `second` as the second's size.
-    fn with_second(self, second: Option<(u32, u32)>) -> Self {
+    /// What the second monitor stays when the first changes: itself while its tab
+    /// is `open`, whose window and screen it follows, and otherwise whatever it
+    /// already was, the first over again included.
+    fn tab_second(self, open: bool) -> Option<Second> {
+        if open { Some(self.second()) } else { self.second }
+    }
+
+    /// The same first monitor, with `second` as the second.
+    fn with_second(self, second: Option<Second>) -> Self {
         Self { second, ..self }.normalized()
     }
 }
@@ -599,10 +673,11 @@ impl Layout {
 impl std::fmt::Display for Layout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}x{}", self.w, self.h)?;
-        if let Some((w, h)) = self.second {
-            write!(f, " and {w}x{h}")?;
+        write!(f, " at {}x", self.density.percent() / 100)?;
+        if let Some(Second { w, h, density }) = self.second {
+            write!(f, " and {w}x{h} at {}x", density.percent() / 100)?;
         }
-        write!(f, " at {}x", self.density.percent() / 100)
+        Ok(())
     }
 }
 
@@ -613,7 +688,7 @@ fn span(layout: Layout, columns: u16, placement: Placement) -> (u32, u32) {
     if columns <= 1 {
         return layout.size();
     }
-    placement.union(layout.size(), layout.second.unwrap_or(layout.size()))
+    placement.union(layout.size(), layout.second().size())
 }
 
 /// The virtual displays the host laid out, and the one the browser is looking at.
@@ -812,15 +887,19 @@ impl View {
         }
     }
 
-    /// The layout as it stands, at `density`: what one asked for is compared against.
-    fn current(self, density: Density) -> Layout {
+    /// The layout as it stands, each monitor at its density in `applied`: what one
+    /// asked for is compared against.
+    fn current(self, applied: Densities) -> Layout {
         let size = |column: u16| {
             let (w, h) = self.column_size(column);
             (u32::from(w), u32::from(h))
         };
         let (w, h) = size(0);
-        let second = (self.columns > 1).then(|| size(1));
-        Layout { w, h, density, second }.normalized()
+        let second = (self.columns > 1).then(|| {
+            let (w, h) = size(1);
+            Second { w, h, density: applied.second }
+        });
+        Layout { w, h, density: applied.first, second }.normalized()
     }
 
     /// Take the picker's choice: `None` for an id the list does not have, else
@@ -847,13 +926,14 @@ impl View {
     /// The list and the checkmark for the browser, or `None` while there is one
     /// display and never was more: such a session shows no picker, which is the
     /// rule for every engine with nothing to choose between.
-    fn displays(&mut self, density: Density) -> Option<ServerMsg> {
+    fn displays(&mut self, applied: Densities) -> Option<ServerMsg> {
         if self.columns <= 1 && !self.listed {
             return None;
         }
         self.listed = true;
-        let points = |pixels: u16| (f32::from(pixels) / density.scale()).round() as u32;
         let detail = |column: u16| {
+            let density = applied.of(column);
+            let points = |pixels: u16| (f32::from(pixels) / density.scale()).round() as u32;
             let (w, h) = self.column_size(column);
             format!("{}×{} at {}x", points(w), points(h), density.percent() / 100)
         };
@@ -1340,7 +1420,7 @@ async fn active_loop(
     session: &Session,
     mut events: mpsc::Receiver<Event>,
     flags: Flags,
-    connected_density: Density,
+    connected_density: Densities,
     mut view: View,
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
@@ -1369,6 +1449,11 @@ async fn active_loop(
     // The display shown in a tab of its own, while *All Displays* is chosen and its
     // socket is attached. One at most: a session has two columns at most.
     let mut tab: Option<Tab> = None;
+    // The tab's window as it last reported it, in points, for as long as *All
+    // Displays* is chosen: what a change of its screen's density re-expresses.
+    // The layout's own pixels will not do, being already held under the ceiling:
+    // 2560×1440 points at 2x is held to 3840×2400, and fits whole at 1x.
+    let mut tab_points: Option<(u32, u32)> = None;
 
     // The density the desktop is *known* to be at — known, because this only moves
     // when a resize proves it.
@@ -1422,6 +1507,9 @@ async fn active_loop(
         // once it is not asks for the first display's size again. Only a pending
         // one: leaving All Displays asks for the equal row once, and a host that
         // never applied it is not asked again every turn.
+        if !view.all {
+            tab_points = None;
+        }
         if resize
             && !view.all
             && let Some(wanted) = pending_layout.as_ref().map(|p| p.layout).filter(|l| l.second.is_some())
@@ -1568,7 +1656,7 @@ async fn active_loop(
                         if let Some(pending) =
                             pending_layout.take_if(|p| confirms(p, &monitors))
                         {
-                            applied = pending.layout.density;
+                            applied = pending.layout.densities();
                             layout_retry_at = None;
                         }
                         info!(
@@ -1586,7 +1674,7 @@ async fn active_loop(
                             last_pos.0.min(desktop.0.saturating_sub(1)),
                             last_pos.1.min(desktop.1.saturating_sub(1)),
                         );
-                        sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await?;
+                        sink.msg(ServerMsg::Resize { w, h, scale: applied.of(view.active).scale() }).await?;
                         if pass_graphics {
                             sink.msg(view.graphics_view()).await?;
                         }
@@ -1597,7 +1685,7 @@ async fn active_loop(
                         if let Some(tab) = &mut tab {
                             let size = view.column_size(tab.column());
                             let passing = sink.passing().then(|| graphics_view(view.column_rect(tab.column())));
-                            tab.resized(size, applied, passing).await;
+                            tab.resized(size, applied.of(tab.column()), passing).await;
                         }
                         if let Some(msg) = view.displays(applied) {
                             sink.msg(msg).await?;
@@ -1668,7 +1756,7 @@ async fn active_loop(
                     // history a single redraw rather than motion.
                     sink.reset_render();
                     let (w, h) = view.size();
-                    sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await?;
+                    sink.msg(ServerMsg::Resize { w, h, scale: applied.of(view.active).scale() }).await?;
                     sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
                     // The list is pushed, never asked for, so a browser that attaches
                     // is told it here.
@@ -1736,7 +1824,7 @@ async fn active_loop(
                                 shadow.resize(w, h);
                                 shadow.forget();
                                 sink.reset_render();
-                                sink.msg(ServerMsg::Resize { w, h, scale: applied.scale() }).await?;
+                                sink.msg(ServerMsg::Resize { w, h, scale: applied.of(view.active).scale() }).await?;
                                 if pass_graphics {
                                     sink.msg(view.graphics_view()).await?;
                                 }
@@ -1782,7 +1870,7 @@ async fn active_loop(
                                 shadow: Shadow::new("rdp", w, h),
                                 failed: false,
                             };
-                            shown.repaint(framebuffer, view, applied, pointer.current(), sink.passing()).await;
+                            shown.repaint(framebuffer, view, applied.of(shown.column()), pointer.current(), sink.passing()).await;
                             tab = Some(shown);
                         }
                         Some(_) => debug!("rdp: display {display} is not shown in a tab"),
@@ -1813,18 +1901,40 @@ async fn active_loop(
                         continue;
                     };
                     if matches!(*made, ClientMsg::Refresh) {
-                        shown.repaint(framebuffer, view, applied, pointer.current(), sink.passing()).await;
+                        shown.repaint(framebuffer, view, applied.of(shown.column()), pointer.current(), sink.passing()).await;
                         continue;
                     }
                     // The tab's window: the second monitor's size, in points, as
-                    // the session's own viewport is the first's.
+                    // the session's own viewport is the first's, at the density
+                    // the second monitor has or is about to.
                     if let ClientMsg::Viewport { w, h } = *made {
                         if resize {
                             let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
-                            let points = Layout { w: u32::from(w), h: u32::from(h), density: Density::One, second: None };
-                            let second = points.at_density(base.density).held().size();
+                            tab_points = Some((u32::from(w), u32::from(h)));
+                            let second = Second::points(u32::from(w), u32::from(h)).at_density(base.second().density);
                             install_layout(
-                                Layout { second: Some(second), ..base }.normalized(),
+                                base.with_second(Some(second)).held(),
+                                view.current(applied),
+                                &mut pending_layout,
+                                &mut layout_retry_at,
+                            );
+                        }
+                        continue;
+                    }
+                    // The screen the tab's window is on: the second monitor's
+                    // density, as the session's own report is the first's. The
+                    // points its window reported, re-expressed, or the monitor's
+                    // own where it has reported none.
+                    if let ClientMsg::HostDisplay(screen) = *made {
+                        if resize {
+                            let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
+                            let density = Density::from_host(screen.scale);
+                            let second = tab_points.map_or_else(
+                                || base.second().at_density(density),
+                                |(w, h)| Second::points(w, h).at_density(density),
+                            );
+                            install_layout(
+                                base.with_second(Some(second)).held(),
                                 view.current(applied),
                                 &mut pending_layout,
                                 &mut layout_retry_at,
@@ -1857,8 +1967,11 @@ async fn active_loop(
                         let base = pending_layout
                             .as_ref()
                             .map_or_else(|| view.current(applied), |p| p.layout);
+                        // The first monitor's: a second shown in a tab is on
+                        // that tab's screen, which this report says nothing of.
+                        let second = base.tab_second(view.all && tab.is_some());
                         install_layout(
-                            base.at_density(want).held(),
+                            base.at_density(want).with_second(second).held(),
                             view.current(applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
@@ -1889,11 +2002,11 @@ async fn active_loop(
                         // until another window change. The points go out at the
                         // density already pending when one is, else the applied one,
                         // so a size and a density never race to set `applied`.
-                        let density = pending_layout.as_ref().map_or(applied, |p| p.layout.density);
+                        let density = pending_layout.as_ref().map_or(applied.first, |p| p.layout.density);
                         // The second monitor keeps the size its tab asked for while
                         // All Displays is chosen; otherwise it is the first's.
                         let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
-                        let second = base.second.filter(|_| view.all);
+                        let second = base.tab_second(tab.is_some()).filter(|_| view.all);
                         install_layout(
                             Layout { w, h, density: Density::One, second: None }
                                 .at_density(density)
@@ -2148,7 +2261,7 @@ fn request_layout(input: &Input, ready: bool, current: Layout, wanted: Layout, m
         return Asked::Redundant;
     }
     info!("rdp: requesting {wanted}");
-    input.resize(&wanted.row(monitors), wanted.density.percent());
+    input.resize(&wanted.row(monitors), &wanted.scales(monitors));
     Asked::Sent
 }
 
@@ -2953,7 +3066,7 @@ mod tests {
         // A desktop that is not the union asked for is one display.
         assert_eq!(opened(Placement::Bottom, (2560, 800)).0, 1);
         assert_eq!(span(per, 2, Placement::Top), (1280, 1600));
-        assert_eq!(span(Layout { second: Some((1024, 700)), ..per }, 2, Placement::Left), (2304, 800));
+        assert_eq!(span(Layout { second: Some(Second { w: 1024, h: 700, density: Density::One }), ..per }, 2, Placement::Left), (2304, 800));
 
         // A position made on a display is offset to where that display starts, and
         // one past the edge between them lands on the other.
@@ -2977,8 +3090,8 @@ mod tests {
         assert_eq!(moved.column_rect(1), rect(0, 0, 1023, 699));
         assert_eq!(moved.desktop(), (2624, 900));
         assert_eq!(
-            moved.current(Density::One),
-            Layout { w: 1600, h: 900, density: Density::One, second: Some((1024, 700)) }
+            moved.current(Densities::even(Density::One)),
+            Layout { w: 1600, h: 900, density: Density::One, second: Some(Second { w: 1024, h: 700, density: Density::One }) }
         );
     }
 
@@ -2998,7 +3111,7 @@ mod tests {
         assert_eq!(View::opened(1, per, (1280, 800), Placement::Right).size(), (1280, 800));
 
         let mut view = two;
-        let msg = view.displays(Density::One).expect("two displays are a list");
+        let msg = view.displays(Densities::even(Density::One)).expect("two displays are a list");
         let ServerMsg::Displays { active, displays } = msg else { panic!("not a list") };
         assert_eq!(active, ALL_DISPLAYS, "two displays open shown beside each other");
         assert_eq!(
@@ -3012,7 +3125,7 @@ mod tests {
         assert_eq!(displays.iter().map(|d| d.tab).collect::<Vec<_>>(), vec![None, Some(2), None]);
         // At 2x the detail is in points.
         let mut dense = view.laid_out(&row(&[(2560, 1600), (2560, 1600)]), (5120, 1600));
-        let ServerMsg::Displays { displays, .. } = dense.displays(Density::Two).unwrap() else {
+        let ServerMsg::Displays { displays, .. } = dense.displays(Densities::even(Density::Two)).unwrap() else {
             panic!("not a list")
         };
         assert_eq!(displays[1].detail, "1280×800 at 2x");
@@ -3025,7 +3138,7 @@ mod tests {
         assert_eq!(view.select(1), Some(false));
         assert_eq!(view.select(2), None);
         assert_eq!(view.active, 1);
-        let ServerMsg::Displays { active, .. } = view.displays(Density::One).unwrap() else {
+        let ServerMsg::Displays { active, .. } = view.displays(Densities::even(Density::One)).unwrap() else {
             panic!("not a list")
         };
         assert_eq!(active, 1);
@@ -3038,7 +3151,7 @@ mod tests {
         assert_eq!(view.tab_column(1), None, "the first display is the canvas, not a tab");
         assert_eq!(view.tab_column(3), None);
         assert_eq!(view.column_rect(1), rect(1280, 0, 2559, 799));
-        let ServerMsg::Displays { active, displays } = view.displays(Density::One).unwrap() else {
+        let ServerMsg::Displays { active, displays } = view.displays(Densities::even(Density::One)).unwrap() else {
             panic!("not a list")
         };
         assert_eq!(active, ALL_DISPLAYS);
@@ -3053,10 +3166,10 @@ mod tests {
         assert_eq!(unequal.column_size(1), (1024, 700));
         assert_eq!(unequal.column_rect(1), rect(1600, 0, 2623, 699));
         assert_eq!(
-            unequal.current(Density::One),
-            Layout { w: 1600, h: 900, density: Density::One, second: Some((1024, 700)) }
+            unequal.current(Densities::even(Density::One)),
+            Layout { w: 1600, h: 900, density: Density::One, second: Some(Second { w: 1024, h: 700, density: Density::One }) }
         );
-        assert_eq!(two.current(Density::One), per, "an even row has no second size");
+        assert_eq!(two.current(Densities::even(Density::One)), per, "an even row has no second size");
 
         assert!(!view.laid_out(&row(&[(1280, 800)]), (1280, 800)).all, "one monitor has nothing to show beside it");
         assert_eq!(view.select(1), Some(true));
@@ -3068,7 +3181,7 @@ mod tests {
         let one = view.laid_out(&row(&[(1280, 800)]), (1280, 800));
         assert_eq!((one.columns, one.active), (1, 0));
         let mut one = one;
-        let ServerMsg::Displays { displays, .. } = one.displays(Density::One).unwrap() else {
+        let ServerMsg::Displays { displays, .. } = one.displays(Densities::even(Density::One)).unwrap() else {
             panic!("a list once sent is sent again")
         };
         assert_eq!(displays.len(), 1, "and one display offers no All Displays");
@@ -3085,13 +3198,13 @@ mod tests {
         let mut one_view = View::opened(1, per, (1280, 800), Placement::Right);
         assert_eq!(one_view.select(ALL_DISPLAYS), None);
         // One that never had a list has none to send.
-        assert!(View::opened(1, per, (1280, 800), Placement::Right).displays(Density::One).is_none());
+        assert!(View::opened(1, per, (1280, 800), Placement::Right).displays(Densities::even(Density::One)).is_none());
         // A reset over two monitors confirms a layout against its row.
         let pending = PendingLayout::new(per);
         assert!(confirms(&pending, &row(&[(1280, 800), (1280, 800)])));
         assert!(!confirms(&pending, &row(&[(640, 800), (640, 800)])));
         assert!(confirms(&pending, &row(&[(1280, 800)])), "a host that laid out one of them");
-        let unequal = PendingLayout::new(Layout { second: Some((1024, 700)), ..per });
+        let unequal = PendingLayout::new(Layout { second: Some(Second { w: 1024, h: 700, density: Density::One }), ..per });
         assert!(confirms(&unequal, &row(&[(1280, 800), (1024, 700)])));
         assert!(!confirms(&unequal, &row(&[(1280, 800), (1280, 800)])), "the second's own size is what was asked");
         assert_eq!(unequal.layout.row(2), vec![(1280, 800), (1024, 700)]);
@@ -3434,6 +3547,46 @@ mod tests {
         assert_eq!(two.at_density(Density::One), one);
         // A no-op conversion is the identity, not a rounding of itself.
         assert_eq!(one.at_density(Density::One), one);
+    }
+
+    /// A display in a tab of its own is on that tab's screen: its monitor has a
+    /// density of its own, stated beside the first's, and the first's changing
+    /// leaves it alone while the tab is open.
+    #[test]
+    fn a_second_monitor_keeps_the_density_of_its_tabs_screen() {
+        let even = Layout { w: 2560, h: 1600, density: Density::Two, second: None };
+        assert_eq!(even.scales(2), [200, 200]);
+        // The tab's screen is 1x: the same points, in half the pixels.
+        let mixed = even.with_second(Some(even.second().at_density(Density::One)));
+        assert_eq!(mixed.second, Some(Second { w: 1280, h: 800, density: Density::One }));
+        assert_eq!((mixed.row(2), mixed.scales(2)), (vec![(2560, 1600), (1280, 800)], vec![200, 100]));
+        assert_eq!(mixed.densities(), Densities { first: Density::Two, second: Density::One });
+        // The first moves to a 1x screen too, and they are one layout again.
+        assert_eq!(
+            mixed.at_density(Density::One),
+            Layout { w: 1280, h: 800, density: Density::One, second: None }
+        );
+        // A window past the ceiling at 2x is held under it, and fits whole at 1x
+        // when re-expressed from its points rather than from the held pixels.
+        let wide = even.with_second(Some(Second::points(2560, 1440).at_density(Density::Two))).held();
+        assert_eq!(wide.second, Some(Second { w: 3840, h: 2400, density: Density::Two }));
+        assert_eq!(
+            even.with_second(Some(Second::points(2560, 1440).at_density(Density::One))).held().second,
+            Some(Second { w: 2560, h: 1440, density: Density::One })
+        );
+        // Open, the tab's monitor stays what it was while the first changes;
+        // with no tab it is the first over again.
+        let one = Layout { w: 1280, h: 800, density: Density::One, second: None };
+        let moved = one.at_density(Density::Two);
+        assert_eq!(moved.with_second(one.tab_second(true)), Layout { second: Some(one.second()), ..moved });
+        assert_eq!(moved.with_second(one.tab_second(false)), moved);
+        // What the host laid out reads back as the same layout.
+        let view = View::opened(2, even, (5120, 1600), Placement::Right)
+            .laid_out(
+            &[Placed { x: 0, y: 0, w: 2560, h: 1600 }, Placed { x: 2560, y: 0, w: 1280, h: 800 }],
+            (3840, 1600),
+        );
+        assert_eq!(view.current(mixed.densities()), mixed);
     }
 
     /// A screen the video encoder would refuse is asked for as the desktop it
