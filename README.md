@@ -43,6 +43,10 @@ side.
   pipeline, wlshare and a Mac's virtual display can follow the browser window at
   its screen density. A Mac's physical displays are shown at the density they
   report. Standard VNC cannot report density and is shown at 1x.
+- **Two resizable virtual displays on a High Performance Mac (alpha).** Each
+  display has a browser tab of its own, and each tab's window sizes its
+  display. Apple's own viewer on macOS 26 does not offer this: with two virtual
+  displays it reports that dynamic resolution is not available.
 - **Adaptive VP9, or the remote's own picture path.** The gateway's VP9 follows
   the browser link; wlshare's passed VP9 does too. For a LAN, a High Performance
   Mac's HEVC can instead pass unchanged, or a Windows host's graphics pipeline
