@@ -88,8 +88,8 @@
 # it out of every remotex build as the native decoder's keeps that out: download
 # the release this gateway pins from the private andrewtheguy/hevc-wasm-archives,
 #
-#   gh release download v0.0.2 --repo andrewtheguy/hevc-wasm-archives \
-#     --pattern hevc-wasm-v0.0.2.tar.gz
+#   gh release download v0.0.3 --repo andrewtheguy/hevc-wasm-archives \
+#     --pattern hevc-wasm-v0.0.3.tar.gz
 #
 # as it is, into share/remotex in the gateway's release tree, beside the
 # share/doc/remotex that holds this file: /usr/share/remotex for the .deb and
@@ -108,7 +108,7 @@
 # compositor's threads; the decoder's threads require that isolation too.
 #
 #[hevc_wasm]
-#archive = "/srv/remotex/hevc-wasm-v0.0.2.tar.gz"
+#archive = "/srv/remotex/hevc-wasm-v0.0.3.tar.gz"
 
 # On Windows, the folder an `ard-high-performance` target's HEVC decoder is
 # loaded from: FFmpeg's avcodec and avutil DLLs. With nothing set here the
