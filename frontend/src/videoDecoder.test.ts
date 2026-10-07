@@ -13,7 +13,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import type {
   VideoDecoderLike,
   VideoDecoderLikeInit,
-} from "./hevcWasmDecoder.ts";
+} from "./softwareDecoder.ts";
 import { createDesktopVideo, createVideoStream } from "./videoDecoder.ts";
 
 /** A frame the fake decoder emitted, so a test can see it was handed over and closed. */
@@ -178,7 +178,7 @@ test("the stalled stream waits for its keyframe rather than erroring per frame",
 });
 
 test("a unit that completes no picture settles to null, and the next picture is its own unit's", async () => {
-  // The software HEVC decoder answers every unit, a none included.
+  // A software decoder answers every unit, a none included.
   let init: VideoDecoderLikeInit | undefined;
   const stalls: string[] = [];
   const stream = createVideoStream(
@@ -241,4 +241,57 @@ test("a new picture size replaces the decoder", async () => {
   assert.equal(decoder.closes, 1);
   s.decoder().emit(0xb2);
   assert.equal(tagOf(await resized), 0xb2);
+});
+
+test("a stream is decoded in software only where the page said so and a module decodes it", async () => {
+  // The decode workers made, by name: a software decoder starts its module's.
+  const workers: string[] = [];
+  const globals = globalThis as unknown as { Worker: unknown };
+  const before = globals.Worker;
+  // The last one made, which a case ends so the next stream starts another.
+  const last: {
+    worker: { onmessage: ((ev: { data: unknown }) => void) | null } | null;
+  } = { worker: null };
+  globals.Worker = class {
+    onmessage = null;
+    onerror = null;
+    constructor(_url: URL, options: { name: string }) {
+      workers.push(options.name);
+      last.worker = this;
+    }
+    postMessage() {}
+    terminate() {}
+  };
+  try {
+    const cases: [string[], string, string | null][] = [
+      // The page decodes 4:4:4 in the module: profile 1 is its, profile 0 the browser's.
+      [["vp9"], "vp09.01.40.08.03.06.06.06.00", "vp9-decoder"],
+      [["vp9"], "vp09.00.40.08.01.06.06.06.00", null],
+      // A page that did not say so decodes neither there.
+      [[], "vp09.01.40.08.03.06.06.06.00", null],
+      [["hevc"], "vp09.01.40.08.03.06.06.06.00", null],
+      [["hevc", "vp9"], "hev1.4.10.L150.BE.8", "hevc-decoder"],
+    ];
+    for (const [software, decode, named] of cases) {
+      const browsers = built.length;
+      workers.length = 0;
+      const table = createDesktopVideo(
+        { onError: () => {}, onNeedsKeyframe: () => {} },
+        STALL_MS,
+        software as ("hevc" | "vp9")[],
+      );
+      table.setFormat({ decode });
+      void table.decode(size, unit(1), true);
+      const which = `${software.join("+") || "none"} / ${decode}`;
+      assert.deepEqual(workers, named ? [named] : [], which);
+      assert.equal(built.length - browsers, named ? 0 : 1, which);
+      table.close();
+      last.worker?.onmessage?.({
+        data: { type: "broken", message: "ended" },
+      });
+      last.worker = null;
+    }
+  } finally {
+    globals.Worker = before;
+  }
 });

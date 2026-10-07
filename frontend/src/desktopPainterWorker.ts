@@ -34,9 +34,10 @@
 
 import { createGraphicsPicture, type PicturePart } from "./egfxPicture.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
-import { createHevcPicture } from "./hevcPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
+import { createPlanesPicture } from "./planesPicture.ts";
 import { binaryFrameKind } from "./protocol.ts";
+import type { SoftwareModule } from "./softwareDecoder.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 /**
@@ -53,11 +54,14 @@ export type PainterCommand =
       /**
        * The canvas the page lays over the desktop's for the two pictures drawn on
        * the GPU and nowhere else: an RDP host's graphics pipeline (egfxPicture.ts)
-       * and the software HEVC decoder's (hevcPicture.ts).
+       * and a software decoder's (planesPicture.ts).
        */
       graphics: OffscreenCanvas;
-      /** BETA: decode passed HEVC in software (appleMedia.ts). */
-      softwareHevc: boolean;
+      /**
+       * BETA: the streams this page decodes in software: a Mac's passed HEVC
+       * (appleMedia.ts), VP9 at 4:4:4 (videoChroma.ts).
+       */
+      software: SoftwareModule[];
     }
   | {
       type: "frame";
@@ -125,7 +129,7 @@ export type PainterEvent =
   | { type: "reached"; seq: number }
   /**
    * Whether the canvas over the desktop's is to be shown: it holds a pipeline's
-   * picture, or the software HEVC decoder's.
+   * picture, or a software decoder's.
    * `epoch` is how many `clear`s this worker had taken when it said so: one said
    * for an attachment that has since been cleared is not the page's to act on.
    */
@@ -252,10 +256,10 @@ export function createPainterWorker(
             onVideoNeedsKeyframe: (reason) =>
               post({ type: "videoNeedsKeyframe", reason }),
             makePicture: () => createGraphicsPicture(command.graphics),
-            makeHevcPicture: () => createHevcPicture(command.graphics),
+            makePlanesPicture: () => createPlanesPicture(command.graphics),
             onGraphicsShown: (shown) =>
               post({ type: "graphicsShown", shown, epoch }),
-            softwareHevc: command.softwareHevc,
+            software: command.software,
           });
           break;
         case "frame": {

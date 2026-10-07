@@ -104,7 +104,7 @@ export function gatewayDisplaySocketUrl(
 /// `hevc.wasm`: a release of andrewtheguy/hevc-wasm the gateway serves beside
 /// the bundle when it has the release archive. The decode worker and each
 /// thread of the decoder's pool import the glue by this URL, and the glue is
-/// given the module's.
+/// given the module's (softwareDecoderModule.ts).
 export function hevcDecoderUrl(file: "hevc.js" | "hevc.wasm"): string {
   return gatewayUrl(`/hevc/${file}`);
 }

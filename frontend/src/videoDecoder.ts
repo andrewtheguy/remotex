@@ -2,7 +2,9 @@
 //
 // This decodes the whole desktop as one inter-frame stream: normally VP9, or the
 // HEVC a High Performance Mac made when that stream is passed through (see
-// `VideoUnit` in src/protocol.rs). The units arrive as VIDEO records in the batches
+// `VideoUnit` in src/protocol.rs). The decoder is the browser's `VideoDecoder`,
+// or for a stream the page was told to decode in software, a decoder of the same
+// shape over a WebAssembly module (softwareDecoder.ts). The units arrive as VIDEO records in the batches
 // and are painted onto the canvas. What is not ordinary is that the stream is a
 // *chain* — every frame means "what changed since the one before it" — so none of
 // them may be dropped, reordered, or decoded twice.
@@ -31,12 +33,13 @@
 // this file hands out a promise rather than a hope.
 
 import {
-  createWasmHevcDecoder,
+  createSoftwareDecoder,
   type DecodedPicture,
-  isHevc,
+  type SoftwareModule,
+  softwareModuleFor,
   type VideoDecoderLike,
   type VideoDecoderLikeInit,
-} from "./hevcWasmDecoder.ts";
+} from "./softwareDecoder.ts";
 
 /**
  * How to decode the stream, from the gateway's `videoFormat` message.
@@ -93,11 +96,13 @@ export function createDesktopVideo(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
   /**
-   * BETA: decode a passed HEVC stream in software (hevcWasmDecoder.ts)
-   * rather than with the browser's `VideoDecoder`, which appleMedia.ts found does
-   * not take it.
+   * BETA: the modules this page decodes in software (softwareDecoder.ts) rather
+   * than with the browser's `VideoDecoder`: a passed HEVC stream where
+   * appleMedia.ts said so, VP9 profile 1 where videoChroma.ts did. A stream is a
+   * module's by its configuration string, so VP9 profile 0 is the browser's
+   * whatever is listed.
    */
-  softwareHevc = false,
+  software: readonly SoftwareModule[] = [],
 ): DesktopVideo {
   interface Live {
     stream: VideoStream;
@@ -123,6 +128,15 @@ export function createDesktopVideo(
   const dropDecoder = () => {
     live?.stream.close();
     live = null;
+  };
+
+  // What builds the decoder of a stream this page decodes in software, or
+  // undefined for the browser's own.
+  const softwareDecoderFor = (decode: string) => {
+    const module = softwareModuleFor(decode);
+    return module !== null && software.includes(module)
+      ? (init: VideoDecoderLikeInit) => createSoftwareDecoder(module, init)
+      : undefined;
   };
 
   // The decoder, built on demand and replaced when its picture changes.
@@ -171,9 +185,7 @@ export function createDesktopVideo(
           },
         },
         stallMs,
-        softwareHevc && isHevc(format.decode)
-          ? createWasmHevcDecoder
-          : undefined,
+        softwareDecoderFor(format.decode),
       );
     } catch (e) {
       // A throw from here would escape into the paint loop and drop the batch.
@@ -410,7 +422,7 @@ export function createVideoStream(
 
   const decoder = makeDecoder({
     output: (frame) => settle(frame),
-    // A decoder that says a unit completed no picture (hevcWasmDecoder.ts): that
+    // A decoder that says a unit completed no picture (softwareDecoder.ts): that
     // unit is settled, so the next picture resolves its own unit and not this one.
     noPicture: () => settle(null),
     error: (e) => {

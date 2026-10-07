@@ -13,14 +13,18 @@ import {
 } from "./egfxCompositor.ts";
 import type { GraphicsPicture, PicturePart } from "./egfxPicture.ts";
 import { createEgfxVideo, type EgfxVideo } from "./egfxVideo.ts";
-import type { HevcPicture } from "./hevcPicture.ts";
-import { type DecodedPicture, isHevcPlanes } from "./hevcWasmDecoder.ts";
+import type { PlanesPicture } from "./planesPicture.ts";
 import {
   type BatchRecord,
   decodeBatchFrame,
   type GraphicsMsg,
   type VideoMsg,
 } from "./protocol.ts";
+import {
+  type DecodedPicture,
+  isSoftwarePlanes,
+  type SoftwareModule,
+} from "./softwareDecoder.ts";
 import {
   createDesktopVideo,
   type DesktopVideo,
@@ -79,7 +83,7 @@ export interface FramePainter {
    * The desktop's canvas was replaced at this size and filled black. A pipeline's
    * picture is shown over that canvas, so its canvas is blanked with it, and what
    * it holds is kept for the `graphicsView` that follows: over a span, the resize
-   * is the picker's switch between displays. The software HEVC decoder's is no
+   * is the picker's switch between displays. A software decoder's is no
    * longer shown, until the stream's next picture.
    */
   blank(w: number, h: number): void;
@@ -128,10 +132,10 @@ export function createFramePainter(options: {
    */
   makeGraphicsVideo?: () => EgfxVideo;
   /**
-   * BETA: where the software HEVC decoder's pictures are drawn, the same
-   * canvas (hevcPicture.ts). A painter given none presents none.
+   * BETA: where a software decoder's pictures are drawn, the same canvas
+   * (planesPicture.ts). A painter given none presents none.
    */
-  makeHevcPicture?: () => HevcPicture;
+  makePlanesPicture?: () => PlanesPicture;
   /**
    * Whether that canvas holds what the page should be showing: true once a
    * pipeline has drawn its first run or the software decoder a picture, false
@@ -139,8 +143,8 @@ export function createFramePainter(options: {
    * desktop's, and only the page can show or hide it.
    */
   onGraphicsShown?: (shown: boolean) => void;
-  /** BETA: decode passed HEVC in software (see `createDesktopVideo`). */
-  softwareHevc?: boolean;
+  /** BETA: the streams decoded in software (see `createDesktopVideo`). */
+  software?: readonly SoftwareModule[];
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and
   // is not queued behind draws — an eviction closes the socket from under whatever
@@ -240,26 +244,30 @@ export function createFramePainter(options: {
   const describe = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
 
-  // The software HEVC decoder's picture, made by the first one it decodes. The
-  // Mac's stream gives way to VP9 encoded here across a display change, which is
-  // painted on the desktop's own canvas, so `shown` goes both ways in a session.
+  // A software decoder's picture, made by the first one it decodes. A Mac's
+  // passed stream gives way to VP9 encoded here across a display change, which
+  // the browser's decoder may take and is then painted on the desktop's own
+  // canvas, so `shown` goes both ways in a session.
   // `broken` once the GPU would not take a picture: said once, and the pictures
   // after it are dropped, since nothing sent again would be taken either.
-  const hevc: { picture: HevcPicture | null; shown: boolean; broken: boolean } =
-    { picture: null, shown: false, broken: false };
+  const planar: {
+    picture: PlanesPicture | null;
+    shown: boolean;
+    broken: boolean;
+  } = { picture: null, shown: false, broken: false };
 
-  const hideHevc = () => {
-    if (hevc.shown) {
-      hevc.shown = false;
+  const hidePlanes = () => {
+    if (planar.shown) {
+      planar.shown = false;
       options.onGraphicsShown?.(false);
     }
   };
 
-  const releaseHevc = () => {
-    hideHevc();
-    hevc.picture?.close();
-    hevc.picture = null;
-    hevc.broken = false;
+  const releasePlanes = () => {
+    hidePlanes();
+    planar.picture?.close();
+    planar.picture = null;
+    planar.broken = false;
   };
 
   // What is on screen about video, and whether a painted frame may take it down.
@@ -294,7 +302,7 @@ export function createFramePainter(options: {
   const releaseVideo = () => {
     releasePipeline();
     releaseMirror();
-    releaseHevc();
+    releasePlanes();
     video?.close();
     video = null;
     videoComplained = false;
@@ -318,7 +326,7 @@ export function createFramePainter(options: {
         onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
       },
       undefined,
-      options.softwareHevc,
+      options.software,
     );
     videoComplained = false;
     options.onVideoError(null);
@@ -445,32 +453,32 @@ export function createFramePainter(options: {
     );
   };
 
-  // One of the software decoder's pictures, onto the canvas over the desktop's.
+  // One of a software decoder's pictures, onto the canvas over the desktop's.
   // False when the GPU would not take it, which is said and ends the presenting.
   const presentPlanes = (
-    planes: Parameters<HevcPicture["draw"]>[0],
+    planes: Parameters<PlanesPicture["draw"]>[0],
     w: number,
     h: number,
   ): boolean => {
-    if (hevc.broken || !options.makeHevcPicture) {
+    if (planar.broken || !options.makePlanesPicture) {
       return false;
     }
     try {
-      hevc.picture ??= options.makeHevcPicture();
-      hevc.picture.draw(planes, w, h);
+      planar.picture ??= options.makePlanesPicture();
+      planar.picture.draw(planes, w, h);
     } catch (error) {
-      hideHevc();
-      hevc.picture?.close();
-      hevc.picture = null;
-      hevc.broken = true;
+      hidePlanes();
+      planar.picture?.close();
+      planar.picture = null;
+      planar.broken = true;
       videoComplained = false;
       options.onVideoError(
         `This browser could not present the decoded picture (${describe(error)}). Reload the page to start the session over.`,
       );
       return false;
     }
-    if (!hevc.shown) {
-      hevc.shown = true;
+    if (!planar.shown) {
+      planar.shown = true;
       options.onGraphicsShown?.(true);
     }
     return true;
@@ -478,7 +486,7 @@ export function createFramePainter(options: {
 
   const paint = (record: VideoMsg, image: DecodedPicture) => {
     const context = options.context();
-    if (isHevcPlanes(image)) {
+    if (isSoftwarePlanes(image)) {
       if (!presentPlanes(image, record.w, record.h)) {
         return;
       }
@@ -489,7 +497,7 @@ export function createFramePainter(options: {
       // can be a pixel wider or taller than the desktop.
       context?.drawImage(image, 0, 0, w, h, 0, 0, w, h);
       // The desktop's own canvas is the picture again.
-      hideHevc();
+      hidePlanes();
     }
     if (videoComplained) {
       // Video is painting again, so whatever was said about it has stopped being
@@ -643,7 +651,7 @@ export function createFramePainter(options: {
       mirror.sink.show(display, part);
     },
     blank(w, h) {
-      hideHevc();
+      hidePlanes();
       if (mirror) {
         try {
           mirror.picture.blank(w, h);

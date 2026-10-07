@@ -22,6 +22,8 @@ import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { batchFrameSequence } from "./protocol.ts";
+import type { SoftwareModule } from "./softwareDecoder.ts";
+import { videoDecoder } from "./videoChroma.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 export interface PainterHandlers {
@@ -96,7 +98,7 @@ let current: {
 /**
  * The painter for the page's one desktop canvas, built on first ask. `graphics`
  * is the canvas laid over it for what is drawn on the GPU, an RDP host's graphics
- * pipeline and the software HEVC decoder's pictures: the worker draws them there,
+ * pipeline and a software decoder's pictures: the worker draws them there,
  * and says when it is to be shown.
  */
 export function desktopPainterFor(
@@ -157,12 +159,20 @@ export function desktopPainterFor(
     worker.postMessage(command, transfer);
   const offscreen = canvas.transferControlToOffscreen();
   const offscreenGraphics = graphics.transferControlToOffscreen();
+  // BETA: what this page decodes in software, as it answered at load.
+  const software: SoftwareModule[] = [];
+  if (appleHevcDecoder() === "software") {
+    software.push("hevc");
+  }
+  if (videoDecoder() === "software") {
+    software.push("vp9");
+  }
   post(
     {
       type: "init",
       canvas: offscreen,
       graphics: offscreenGraphics,
-      softwareHevc: appleHevcDecoder() === "software",
+      software,
     },
     [offscreen, offscreenGraphics],
   );

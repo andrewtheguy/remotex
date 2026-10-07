@@ -1,5 +1,5 @@
-// BETA: the software HEVC decoder's pictures (hevcWasmDecoder.ts), shown
-// from the GPU.
+// BETA: the software decoders' pictures (softwareDecoder.ts), shown from the
+// GPU.
 //
 // A picture is three 8-bit planes in the decoder's memory. Each is uploaded as a
 // texture of its own from where the decoder left it, and one draw on the WebGL
@@ -7,9 +7,9 @@
 // colors they stand for. The planes are read only inside `draw`, which is what
 // lets the decoder have their memory back when the picture is closed.
 import { openPictureCanvas } from "./glPicture.ts";
-import type { DecodedPlanes } from "./hevcWasmDecoder.ts";
+import type { DecodedPlanes } from "./softwareDecoder.ts";
 
-export interface HevcPicture {
+export interface PlanesPicture {
   /**
    * Draw `planes` as the desktop's picture, `w` by `h`: the decoded picture can
    * be a pixel or so larger, and what is past the desktop is not shown. Throws
@@ -75,7 +75,7 @@ function conversion(matrix: DecodedPlanes["matrix"], fullRange: boolean) {
 }
 
 /** The decoder's pictures on `canvas`, the one the page shows them on. */
-export function createHevcPicture(canvas: OffscreenCanvas): HevcPicture {
+export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
   const surface = openPictureCanvas(canvas, FRAGMENT);
   const { gl, program } = surface;
   const uniform = (name: string) => gl.getUniformLocation(program, name);

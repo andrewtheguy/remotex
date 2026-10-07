@@ -91,7 +91,7 @@ function harness() {
     type: "init",
     canvas: canvas as unknown as OffscreenCanvas,
     graphics: {} as OffscreenCanvas,
-    softwareHevc: false,
+    software: [],
   });
 
   return {

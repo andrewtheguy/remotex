@@ -1,6 +1,6 @@
 // The WebGL canvas the page lays over the desktop's (RemoteDesktop.tsx), as the two
 // pictures drawn on it hold it: an RDP host's graphics pipeline (egfxPicture.ts)
-// and the software HEVC decoder's (hevcPicture.ts). Both are pixels in a memory
+// and a software decoder's (planesPicture.ts). Both are pixels in a memory
 // WebAssembly threads share, which the desktop's 2D canvas takes no image data
 // out of and a WebGL texture takes an upload from as it is.
 //

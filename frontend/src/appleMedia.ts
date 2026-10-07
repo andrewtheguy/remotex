@@ -30,10 +30,10 @@
 //
 // BETA: a picture the browser's `VideoDecoder` refuses can still be decoded
 // in software — andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and
-// compiled to WebAssembly with SIMD128 and threads (hevcWasmDecoder.ts) — where the gateway has the decoder's
+// compiled to WebAssembly with SIMD128 and threads (softwareDecoder.ts) — where the gateway has the decoder's
 // archive, and so serves it, and the browser runs shared-memory SIMD
 // WebAssembly on the cross-origin isolated page every gateway serves, and presents
-// its pictures on a WebGL 2 canvas (hevcPicture.ts). The page asks the
+// its pictures on a WebGL 2 canvas (softwareSupport.ts, planesPicture.ts). The page asks the
 // gateway for the decoder rather than assuming it. Chrome on a GPU without HEVC
 // Range Extensions then says yes, decoding the picture here. `?hevc_decoder=software` in the page's URL takes the
 // software decoder even where the browser's own would do, to try it.
@@ -44,6 +44,7 @@
 // whose host lacks the HEVC decoder's library, which has no other picture to send.
 
 import { hevcDecoderUrl } from "./gateway.ts";
+import { runsSoftwareDecoder, softwareRequested } from "./softwareSupport.ts";
 
 /**
  * The picture asked about: macwork's stream, 1600×1000, as its sequence parameter
@@ -117,82 +118,15 @@ let answer: { picture: HevcDecoder | null } | null = null;
 let soundForm: Description | null | undefined;
 let soundProbe: Promise<void> | null = null;
 
-/** A function returning a SIMD128 value, which only a SIMD engine validates. */
-const SIMD_PROBE = Uint8Array.of(
-  0,
-  97,
-  115,
-  109,
-  1,
-  0,
-  0,
-  0,
-  1,
-  5,
-  1,
-  96,
-  0,
-  1,
-  123,
-  3,
-  2,
-  1,
-  0,
-  10,
-  10,
-  1,
-  8,
-  0,
-  65,
-  0,
-  253,
-  15,
-  253,
-  98,
-  11,
-);
-
 /**
- * Whether this browser presents the software decoder's pictures (hevcPicture.ts): on
- * a WebGL 2 canvas off the page, as the paint worker's is, that can be given the
- * Mac's primaries. Asked here because a yes that cannot be presented is a session
- * with no picture, where a no is one sent VP9.
- */
-function presentsSoftwarePictures(): boolean {
-  const gl = new OffscreenCanvas(1, 1).getContext("webgl2");
-  if (!gl || gl.isContextLost()) {
-    return false;
-  }
-  const takesPrimaries = "drawingBufferColorSpace" in gl;
-  gl.getExtension("WEBGL_lose_context")?.loseContext();
-  return takesPrimaries;
-}
-
-/**
- * Whether the gateway serves the software decoder, this page can run it, and it can
- * present its pictures.
+ * Whether the page can run the software decoder and present its pictures, in the
+ * Mac's primaries, and the gateway serves it.
  */
 async function decodesPictureInSoftware(): Promise<boolean> {
+  if (!runsSoftwareDecoder({ widePrimaries: true })) {
+    return false;
+  }
   try {
-    // Every gateway isolates the page; a proxy that drops the headers does not,
-    // and says so first.
-    if (globalThis.crossOriginIsolated !== true) {
-      return false;
-    }
-    if (!WebAssembly.validate(SIMD_PROBE)) {
-      return false;
-    }
-    const memory = new WebAssembly.Memory({
-      initial: 1,
-      maximum: 1,
-      shared: true,
-    });
-    if (!(memory.buffer instanceof SharedArrayBuffer)) {
-      return false;
-    }
-    if (!presentsSoftwarePictures()) {
-      return false;
-    }
     const served = await fetch(hevcDecoderUrl("hevc.wasm"), {
       method: "HEAD",
       signal: AbortSignal.timeout(attemptTimeoutMs),
@@ -203,16 +137,8 @@ async function decodesPictureInSoftware(): Promise<boolean> {
   }
 }
 
-function softwareRequested(): boolean {
-  return (
-    new URLSearchParams(globalThis.location?.search ?? "").get(
-      "hevc_decoder",
-    ) === "software"
-  );
-}
-
 async function decodesPicture(): Promise<HevcDecoder | null> {
-  if (softwareRequested()) {
+  if (softwareRequested("hevc_decoder")) {
     return (await decodesPictureInSoftware()) ? "software" : null;
   }
   try {

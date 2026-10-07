@@ -12,12 +12,18 @@ export interface GatewayConfig {
   logo: boolean;
   /** Whether the gateway records throughput `GET /api/throughput` can read. */
   throughput: boolean;
+  /**
+   * BETA: whether the gateway lets the page decode VP9 at 4:4:4 in software
+   * (`[vp9_wasm].enabled`), which videoChroma.ts decides by.
+   */
+  vp9Wasm: boolean;
 }
 
 const FALLBACK: GatewayConfig = {
   branding: "remotex",
   logo: false,
   throughput: false,
+  vp9Wasm: false,
 };
 
 /** The config in a response body, holding each key to its type and its fallback. */
@@ -28,6 +34,7 @@ export function parseGatewayConfig(
     branding: config.branding || FALLBACK.branding,
     logo: config.logo === true,
     throughput: config.throughput === true,
+    vp9Wasm: config.vp9Wasm === true,
   };
 }
 
