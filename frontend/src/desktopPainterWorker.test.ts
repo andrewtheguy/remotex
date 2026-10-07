@@ -350,7 +350,7 @@ test("the next attachment paints without waiting for the stuck one", async () =>
   h.host.handle({ type: "clear" });
   // The stuck draw is *still* stuck — that is the whole point, and releasing it
   // here would test the recovery rather than the escape. The new target: the echo
-  // the page's "Waiting for the remote desktop…" overlay is held up by, and then
+  // the page's "Connecting to the remote desktop…" overlay is held up by, and then
   // its own first batch.
   h.unstall();
   h.host.handle({ type: "resize", w: 800, h: 600, seq: 2, view: null });

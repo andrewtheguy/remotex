@@ -169,7 +169,7 @@ export function targetNamePattern(name: string): RegExp {
 
 // Log in and get to a live desktop, which the page says in two steps, neither of
 // them about canvas pixels: the floating menu's button, once the gateway has given
-// this browser the session, and the end of "Waiting for the remote desktop…", once
+// this browser the session, and the end of "Connecting to the remote desktop…", once
 // the gateway has reached the remote and announced its desktop.
 //
 // The second is what a spec that then acts on the remote needs. The button alone
@@ -285,7 +285,7 @@ async function landOn(
   await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
     timeout: 20_000,
   });
-  await expect(page.getByText("Waiting for the remote desktop…")).toBeHidden({
+  await expect(page.getByText("Connecting to the remote desktop…")).toBeHidden({
     timeout: 20_000,
   });
 }
