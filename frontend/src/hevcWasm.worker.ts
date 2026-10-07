@@ -86,55 +86,37 @@ function load(): Promise<HevcModule> {
     }
     return { glue, memory };
   })();
-  // A load that failed is not kept: the next stream tries again.
-  loading.catch(() => {
-    loading = null;
-  });
   return loading;
 }
 
-/**
- * The pool's threads started, each with its instance made, before the pool is.
- * When one does not start, none is left running.
- */
-async function seatThreads(seat: PoolSeat): Promise<void> {
-  const threads: Worker[] = [];
-  try {
-    await Promise.all(
-      Array.from(
-        { length: THREADS },
-        () =>
-          new Promise<void>((resolve, reject) => {
-            const thread = new Worker(
-              new URL("./hevcPool.worker.ts", import.meta.url),
-              { type: "module", name: "hevc-thread" },
+/** The pool's threads started, each with its instance made, before the pool is. */
+function seatThreads(seat: PoolSeat): Promise<unknown> {
+  return Promise.all(
+    Array.from(
+      { length: THREADS },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const thread = new Worker(
+            new URL("./hevcPool.worker.ts", import.meta.url),
+            { type: "module", name: "hevc-thread" },
+          );
+          thread.onmessage = ({ data }: MessageEvent<string | null>) => {
+            if (data === null) {
+              resolve();
+            } else {
+              reject(new Error(data));
+            }
+          };
+          thread.onerror = (ev) => {
+            ev.preventDefault();
+            reject(
+              new Error(ev.message || "a thread of the decoder did not start"),
             );
-            threads.push(thread);
-            thread.onmessage = ({ data }: MessageEvent<string | null>) => {
-              if (data === null) {
-                resolve();
-              } else {
-                reject(new Error(data));
-              }
-            };
-            thread.onerror = (ev) => {
-              ev.preventDefault();
-              reject(
-                new Error(
-                  ev.message || "a thread of the decoder did not start",
-                ),
-              );
-            };
-            thread.postMessage(seat);
-          }),
-      ),
-    );
-  } catch (e) {
-    for (const thread of threads) {
-      thread.terminate();
-    }
-    throw e;
-  }
+          };
+          thread.postMessage(seat);
+        }),
+    ),
+  );
 }
 
 // The stream's colour description, in H.265's codes, for what the page's shader presents
@@ -218,11 +200,13 @@ async function create(id: number): Promise<void> {
   try {
     module = await load();
   } catch (e) {
-    failed(
-      id,
-      "NotSupportedError",
-      `the HEVC decoder did not load (${reason(e)})`,
-    );
+    // Not to be tried again here: a thread that took its seat holds the seats
+    // for good, in a memory this worker's module stays on. The paint worker
+    // ends this worker, and its threads with it, and the next stream has a new one.
+    scope.postMessage({
+      type: "broken",
+      message: `the HEVC decoder did not load (${reason(e)})`,
+    });
     return;
   }
   decoders.set(id, new module.glue.Decoder(THREADS));
