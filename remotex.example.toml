@@ -84,9 +84,9 @@
 # BETA: the page's software HEVC decoder, for a browser whose own
 # VideoDecoder refuses a High Performance Mac's 4:4:4 picture passed through
 # — Chrome on a GPU without HEVC Range Extensions, for one. It is
-# andrewtheguy/hevc-wasm's decoder compiled to WebAssembly, which no remotex
-# build holds while it is BETA: download the release this gateway pins from the
-# private andrewtheguy/hevc-wasm-archives,
+# andrewtheguy/hevc-wasm's decoder compiled to WebAssembly, whose licence keeps
+# it out of every remotex build as the native decoder's keeps that out: download
+# the release this gateway pins from the private andrewtheguy/hevc-wasm-archives,
 #
 #   gh release download v0.0.2 --repo andrewtheguy/hevc-wasm-archives \
 #     --pattern hevc-wasm-v0.0.2.tar.gz

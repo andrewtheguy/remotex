@@ -836,8 +836,8 @@ Three controls with similar names therefore remain separate:
   decoder written for the Mac's shape of stream and compiled to WebAssembly with
   SIMD128 and threads, bit-exact with FFmpeg's, at `/hevc/`; its threads share
   their memory through the cross-origin isolation every gateway serves the page
-  with (`src/assets.rs`). No build holds the decoder while it is BETA: the
-  operator downloads the
+  with (`src/assets.rs`). No build holds the decoder, for the licence reason
+  that keeps the native decoder out of every artifact: the operator downloads the
   release archive from the private `andrewtheguy/hevc-wasm-archives` into
   `share/remotex` in the gateway's release tree, beside `share/doc/remotex`,
   where the gateway looks for it and, finding it, serves it with nothing
