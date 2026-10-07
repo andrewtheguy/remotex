@@ -434,7 +434,7 @@ that selects the stream. See
   on `/ws/audio` either way. Decoded or passed, the
   stream is the only picture. Until its first picture, at connect and
   across every display change, the page says the screen is not available
-  (`screenUnavailable`) and input still reaches the Mac; the Mac's ZRLE
+  (`screenUnavailable`) and sends the Mac no input; the Mac's ZRLE
   rectangles are stepped over unread and never reach an encoder, so a session
   that passes the stream builds none. Do not show them in the gaps: that
   builds a VP9 encoder a passed session then holds idle for its whole life.
@@ -899,8 +899,9 @@ Three controls with similar names therefore remain separate:
 - **The gaps show nothing.** Before the stream is up, across every display
   change and across a stream the Mac restarts on its own, there is no picture:
   the gateway sends `screenUnavailable` with `active: true`, and the page says
-  "Screen not available" over the canvas, which takes no input of its own, so
-  the pointer and keys still reach the Mac's display. The Mac's ZRLE rectangles
+  "Screen not available" over the canvas and sends no input meanwhile: the
+  pointer and keys would land on a display nobody can see, so the page drops its
+  input listeners and releases what was held. The Mac's ZRLE rectangles
   are stepped over by their length (`Decoders::step_over`), never inflated and
   never handed to `VideoSink::damage`, so a session that passes the stream
   builds no VP9 encoder: one held idle for a session's life was some 240 MB at
@@ -2096,11 +2097,11 @@ answering layout has held still for half a second, the gateway sends `resizing`
 with `active: true`, and the page covers the desktop with a dimmed, blurred
 "Resizing…" as Apple's client does, instead of showing each intermediate mode. A
 session opens covered. The display it connects to is the Mac's own, and the
-virtual display and then the window's size follow. The cover takes no input and leaves the menu reachable, and a
+virtual display and then the window's size follow. While the cover is up the page sends the Mac no input, releasing what was held; the menu stays reachable, and a
 browser that reattaches mid-resize is told again. No other engine sends
 `resizing`. Once the display has settled, a session with a media stream says
 "Screen not available" in its place until the stream's first picture of the new
-display (`screenUnavailable`), with input still going to the Mac. The measurements are in
+display (`screenUnavailable`), and holds input back the same way. The measurements are in
 [Resizing a High Performance display](apple-vnc-889.md#resizing-a-high-performance-display-as-measured).
 
 `hostDisplay` reports the screen the client's window is on — its full resolution

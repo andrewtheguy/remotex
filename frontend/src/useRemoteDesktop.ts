@@ -732,6 +732,14 @@ export function useRemoteDesktop(
   // A High Performance Mac's media stream has sent no picture of this display —
   // the gateway's `screenUnavailable`. Reset as `remoteResizing` is.
   const [screenUnavailable, setScreenUnavailable] = useState(false);
+  // Either notice is over the desktop, which is what input and focus follow: a
+  // key or a click sent to a Mac whose picture is not on screen lands wherever
+  // the display that comes back happens to put it.
+  const covered = remoteResizing || screenUnavailable;
+  const coveredRef = useRef(covered);
+  useEffect(() => {
+    coveredRef.current = covered;
+  }, [covered]);
   const [touchEnabled, setTouchEnabled] = useState(() =>
     readOnByKey(TOUCHSCREEN_KEY),
   );
@@ -2541,8 +2549,12 @@ export function useRemoteDesktop(
   // Inject a key chord from the floating toolbar — keys the browser swallows
   // (F5, Ctrl+W, Alt+F4…) or a bare modifier tap. Each DOM `code` is pressed in
   // order then released in reverse; transient, so nothing joins the held-key
-  // set the input effect tracks. A no-op while the socket is down.
+  // set the input effect tracks. A no-op while the socket is down, and while a
+  // notice covers the desktop, as every other key is.
   const sendKeyCombo = useCallback((codes: string[]) => {
+    if (coveredRef.current) {
+      return;
+    }
     const send = sendRef.current;
     // Synthetic sends have no CapsLock state; case is expressed by including an
     // explicit Shift code in `codes` (the soft keyboard's one-shot modifier).
@@ -2694,8 +2706,10 @@ export function useRemoteDesktop(
     // of them tests, so there is no path left that could forward a key or a
     // click while the menu has the screen. A held desktop is the same: the
     // remote is not on screen to see what a key does to it, and the notice over
-    // it wants Tab for its own buttons.
-    if (!el || viewOnly || held) {
+    // it wants Tab for its own buttons. So is one a High Performance notice
+    // covers, and the teardown that takes the listeners away lets go of what
+    // was held when the notice went up.
+    if (!el || viewOnly || held || covered) {
       return;
     }
 
@@ -3058,6 +3072,7 @@ export function useRemoteDesktop(
     touchActive,
     viewOnly,
     held,
+    covered,
   ]);
 
   // The desktop takes the keyboard as soon as it is on screen, so the first
@@ -3074,11 +3089,11 @@ export function useRemoteDesktop(
   // opens only once its fetch has answered, which is a later commit than the one
   // that closed the drawer, so its own focus lands after this.
   useEffect(() => {
-    if (mode !== "desktop" || viewOnly || held) {
+    if (mode !== "desktop" || viewOnly || held || covered) {
       return;
     }
     overlayRef.current?.focus({ preventScroll: true });
-  }, [mode, viewOnly, held, overlayRef]);
+  }, [mode, viewOnly, held, covered, overlayRef]);
 
   return {
     status,

@@ -1113,8 +1113,8 @@ pub enum ServerMsg {
     /// shown: `active` is true from connect, from every display change and from a
     /// stream the Mac restarts, and false behind the stream's first picture of
     /// the display. Nothing else is the picture of such a session, so the browser
-    /// says the screen is not available meanwhile, over a canvas that goes on
-    /// taking input: the Mac's display is there and takes it. Sent only by the
+    /// says the screen is not available meanwhile and sends no input, as under
+    /// [`ServerMsg::Resizing`]: nobody can see what it would do. Sent only by the
     /// Apple High Performance engine, and again on reattach while it holds.
     ScreenUnavailable { active: bool },
     /// Why the desktop the `Resize` before this describes has no picture, or `None`
