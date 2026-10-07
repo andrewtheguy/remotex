@@ -82,6 +82,15 @@ Sticky key, and its Sym page, whose row is the F-keys
 and where a shifted symbol is Shift and its key. It asserts frames and accessible state, never repeat or how long a
 key is held, which is timing, or where a key is drawn.
 
+`input-held.spec.ts` is a High Performance notice holding input back: that while
+the gateway's `resizing` or `screenUnavailable` is true the page sends no `key`
+frame, and that a key held when the notice went up is released. The session
+socket is passed through the spec, which keeps the gateway's word on both from
+the page and says them itself, so when the notice is up is the spec's decision
+rather than a Mac's display settling, and it runs against whatever target the
+run is configured for. It asserts the order of the frames the page sent and
+whether the notice is in the DOM.
+
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
 asserts which socket receives the format and packets, that a session started with
 sound opens that socket and one started without it does not, and that opening and
@@ -258,6 +267,13 @@ REMOTEX_PLAYWRIGHT_PASSWORD='hunter2' \
 REMOTEX_PLAYWRIGHT_AUDIO_TARGET='test-tone' \
 REMOTEX_PLAYWRIGHT_PICKER_TARGET='test-tone' \
 bunx playwright test '/(audio-socket|picker-options)\.spec\.ts$'
+```
+
+The notice spec runs against the same gateway, as the run's target:
+
+```sh
+REMOTEX_PLAYWRIGHT_TARGET='test-tone' \
+bunx playwright test '/input-held\.spec\.ts$'
 ```
 
 The picker spec also runs against a live RDP host, named the same way.
