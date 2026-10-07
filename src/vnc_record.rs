@@ -218,7 +218,10 @@ impl RecordWriter {
     pub fn frame(&mut self, msg: &[u8]) -> &[u8] {
         self.buf.clear();
         let records = msg.len().div_ceil(MAX_BODY).max(1);
-        self.buf.reserve(records * (2 + MAX_CIPHERTEXT));
+        // Each record adds its outer length, body length, trailer and at most a
+        // block less one of filler to the bytes of the message it carries.
+        self.buf
+            .reserve(msg.len() + records * (2 + BODY_LEN + TRAILER + BLOCK - 1));
         let mut rest = msg;
         loop {
             let (body, after) = rest.split_at(rest.len().min(MAX_BODY));
