@@ -173,8 +173,8 @@ passed.
   bundle privately or stages that artifact. Do not add a web root, a
   `static_dir`, or any run-time path the SPA is read from. Every URL the page
   uses goes through `frontend/src/gateway.ts`.
-- The bundle holds two WebAssembly modules, each a directory of its own under
-  `frontend/wasm` and built by the frontend's build for
+- The bundle holds three WebAssembly modules, each a directory of its own under
+  `frontend/wasm`. Two are built by the frontend's build for
   `wasm32-unknown-unknown`. `frontend/wasm/egfx` is the compositor, around
   `crates/remotex-rdp-graphics`, built with threads by the dated nightly that
   directory's `rust-toolchain.toml` pins. The pin is that module's alone: the
@@ -184,8 +184,17 @@ passed.
   `frontend/wasm/flac` is the lossless sound's decoder, the page's
   alone: the gateway's FLAC is libFLAC and shares no code with it, so it has no
   crate under `crates/`. It has no threads, needs no shared memory, and builds
-  on stable. Do not fold one module into the other, or add a third without a
-  stream that needs it.
+  on stable. `frontend/wasm/vp9` is the BETA software VP9 decoder, for the
+  4:4:4 stream a browser's own decoder refuses
+  ([Choosing a chroma](#choosing-a-chroma)). It is not built here: it is a
+  release of [vp9-wasm](https://github.com/andrewtheguy/vp9-wasm), which
+  `pin.json` in that directory names by version and SHA-256. The frontend's
+  build unpacks it beside the pin (`fetch.ts`), from the release's own download
+  or from the copy of the archive `REMOTEX_VP9_WASM_ARCHIVE` names, and refuses
+  an archive that is not the pinned one. Its threads share a memory as the
+  compositor's do. Keep it a pinned release: do not vendor its files, build it
+  here, or take an archive the pin does not name. Do not fold one module into
+  another, or add a fourth without a stream that needs it.
 - The only versioned client asset read at run time is the BETA software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
@@ -301,8 +310,8 @@ selects one is not added as a side effect of other work.
 #### The browser's four answers
 
 The browser is asked four questions, each once at page load and stated on the
-session socket: which VP9 profile its decoder takes (for
-`render_chroma = "auto"`), whether it decodes a High Performance Mac's HEVC,
+session socket: which VP9 profile it decodes, in its own decoder or where the
+gateway allows in the page's (for `render_chroma = "auto"`), whether it decodes a High Performance Mac's HEVC,
 whether it composes an RDP host's graphics pipeline, and whether it decodes the
 H.264 such a pipeline may carry. The
 gateway *selects* a chroma on the first and never refuses a client for it. The
@@ -457,8 +466,8 @@ to present on (`frontend/src/rdpGraphics.ts`). The page
 composes with the gateway's own compositor, `crates/remotex-rdp-graphics`,
 bound to WebAssembly by `frontend/wasm/egfx`: keep that crate building for
 `wasm32-unknown-unknown`. One decoder and compositor is the gateway's rule; do
-not write a second one there. The page, which already carries a software HEVC
-decoder of its own, may decode, compose or present the pipeline its own way
+not write a second one there. The page, which already carries software
+decoders of its own, may decode, compose or present the pipeline its own way
 (on the GPU, say) where that brings a measured gain. The host answers a
 repaint out of its caches, so a reattach starts such a session over; do not
 resume one on a repaint. Over two virtual displays the host draws one span
@@ -516,6 +525,10 @@ wire format, no record and no second stream. See
 | `vp9.rs` | the VP9 stream over the mirror, coded by the `screen-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
 | `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding by the `sound-opus` crate wlshare codes its own sound with, resampling, the FLAC coding of a lossless target's PCM, and the passing of a remote's own stream |
 | `frontend/wasm/flac/` | the page's FLAC decoder for a session's lossless sound, a WebAssembly module of its own |
+| `frontend/wasm/vp9/` | the pin of the page's software VP9 decoder, a release of vp9-wasm, and the script that unpacks it for the bundle |
+| `frontend/src/softwareDecoder.ts`, `softwareDecoder.worker.ts`, `softwareDecoderPool.worker.ts`, `softwareDecoderModule.ts` | the page's software decoders, HEVC and VP9 at 4:4:4: the `VideoDecoder` shape, a module's decode worker and its pool's threads, and where each module is loaded from |
+| `frontend/src/planesPicture.ts`, `glPicture.ts` | a software decoder's planes, uploaded from the module's memory and converted on the WebGL canvas over the desktop's |
+| `frontend/src/softwareSupport.ts` | whether the page can run a software decoder and present its pictures |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
@@ -852,13 +865,15 @@ Three controls with similar names therefore remain separate:
   the picture with it in a worker of its own. That browser answers yes when its
   `AudioDecoder` decodes the sound, so Chrome on a GPU without HEVC Range
   Extensions is passed the whole stream: its own decoder for the sound, the page's
-  for the picture. The software decoder is shaped as a `VideoDecoder`, so the paint
+  for the picture. The software decoder is shaped as a `VideoDecoder`
+  (`frontend/src/softwareDecoder.ts`, which the page's software VP9 decoder
+  shares: [Choosing a chroma](#choosing-a-chroma)), so the paint
   worker's stream runs it as it runs the browser's (`frontend/src/videoDecoder.ts`).
   What it outputs is not a `VideoFrame` but the picture's three planes where the
   decoder left them, in the module's shared memory: the paint worker uploads each
   as a texture from there and one draw converts them, on the WebGL canvas the
   page lays over the desktop's, the one a passed graphics pipeline is shown on
-  (`frontend/src/hevcPicture.ts`, `glPicture.ts`). The canvas is given the
+  (`frontend/src/planesPicture.ts`, `glPicture.ts`). The canvas is given the
   stream's primaries, Display P3, so the browser takes the picture to the display
   as it takes a video frame. A session sent gateway-encoded VP9 paints the desktop's
   own canvas instead; a media-stream session never switches between the two. The
@@ -1167,9 +1182,55 @@ decoder's refusal by name. One question at page load, no round trip in front of 
 session, and no path where the gateway turns a client away on the strength of a
 probe.
 
+**BETA: 4:4:4 decoded in the page.** A gateway whose config sets
+`[vp9_wasm].enabled` lets the page decode profile 1 itself, in
+[vp9-wasm](https://github.com/andrewtheguy/vp9-wasm): a decoder written for the
+one shape of VP9 the gateway and wlshare send, compiled to WebAssembly with
+SIMD128 and threads, and part of the bundle (`frontend/wasm/vp9`), so there is
+no archive to place and nothing for the gateway to serve but the page. The
+gateway says so in `GET /api/config` (`vp9Wasm`), which the page has read by the
+time it chooses, and the choice is then:
+
+| The browser's `VideoDecoder` | The page can run the module | Asks for | Decoded by |
+|---|---|---|---|
+| takes profile 1 | either | 4:4:4 | the browser |
+| refuses profile 1 | yes | 4:4:4 | the module |
+| refuses profile 1 | no | 4:2:0 | the browser |
+
+The middle row is what the key is for: iOS and iPadOS Safari, which decode VP9
+in hardware alone. Running the module takes what the software HEVC decoder
+takes, shared-memory SIMD WebAssembly on the cross-origin isolated page and a
+WebGL 2 canvas to present on (`frontend/src/softwareSupport.ts`), short of that
+decoder's need to give the canvas other primaries than sRGB's.
+`?vp9_decoder=software` in the page's URL takes the module on such a gateway
+even where the browser's own decoder would do, where the page can run it, to try
+it and compare. With the key off, which it is unless set, none of this happens:
+the browser's answer is the whole choice, the URL switch does nothing, and the
+module is never loaded. The key is a switch and not the default while the
+operator compares, in use, 4:4:4 decoded in the page with the 4:2:0 a browser
+without profile 1 gets otherwise, which is what decides whether the encoder goes
+on making both.
+
+The gateway is told nothing of which decoder it is: the page asks for a chroma
+as it always did, and a stream is the module's by its announced configuration,
+profile 1 (`vp09.01.`), on a page that chose it. Profile 0, which a
+`render_chroma = "420"` target sends such a page all the same, is the browser's
+own decoder's. The module runs as the software HEVC decoder does and through the
+same code (`frontend/src/softwareDecoder.ts`): a decode worker of its own with a
+pool of threads, shaped as a `VideoDecoder` under the same keyframe gate, FIFO
+and stall backstop, its pictures left as three planes in the module's shared
+memory and drawn from there on the WebGL canvas over the desktop's
+(`frontend/src/planesPicture.ts`). The stream states BT.601 for its matrix,
+primaries and transfer alike, VP9 having one field for the three, and only the
+matrix describes it: the encoder's conversion applies BT.601's coefficients at
+studio swing to the desktop's own R'G'B' and converts nothing else. So the
+shader inverts that matrix and the canvas is left in sRGB, which hands the
+display the pixels the desktop had.
+
 **`"444"` — profile 1 for every browser, refusals included.** Set it to hold a
 fleet to one bitstream, or to pin one side of a measurement; an iPhone or iPad
-watching the target is sent a stream it rejects by name. Losing the hardware
+watching the target is sent a stream its own decoder rejects by name, which the
+page decodes where `[vp9_wasm]` allows and it can. Losing the hardware
 decoder on the browsers that do take it is a smaller loss than it reads: the
 GPU-process decoder is the one that goes quiet under stream churn, and software
 libvpx is what answers every chunk (`frontend/src/videoDecoder.ts`). What it costs
@@ -1307,7 +1368,9 @@ and the close goes out last.
 
 **The client decodes it with WebCodecs** `VideoDecoder`, reached through
 `frontend/src/videoDecoder.ts` and driven from `framePainter.ts` — the batch loop,
-which replaces the decoder when the stream restarts on a different size. **Which decoder is the platform's choice**: the
+which replaces the decoder when the stream restarts on a different size. A page that
+chose to decode 4:4:4 itself ([Choosing a chroma](#choosing-a-chroma)) runs its
+software decoder through the same file, in the same shape. **Which decoder is the platform's choice**: the
 configuration states no `hardwareAcceleration`. A `prefer-software` hint would
 buy one platform's decoder at most — WebKit honours it
 only on macOS (the clause routing it to a local software decoder is compiled
@@ -1396,8 +1459,7 @@ Authentication and desktop ownership are separate:
 3. `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
    attaches to the slot and reports the target picker or the current connected
    target. `chroma`, `apple_media`, `rdp_graphics`
-   and `rdp_h264` are required: the most colour this browser's video decoder
-   takes, whether it decodes a High Performance Mac's HEVC,
+   and `rdp_h264` are required: the most colour this page decodes, whether it decodes a High Performance Mac's HEVC,
    whether it composes an RDP host's graphics pipeline, and whether it decodes
    the H.264 such a pipeline may carry; see
    [Choosing a chroma](#choosing-a-chroma),
@@ -2882,6 +2944,15 @@ there too, so `check-config` refuses an icon the browser would have. A file is
 then read per request, which is what lets an operator swap the image without a
 restart; an inline one is held in the resolved config as `Bytes`, cheap to clone
 with the state around it.
+
+`[vp9_wasm]` is top-level for the same reason and is one switch, `enabled`,
+which a table must carry: whether the page may decode VP9 at 4:4:4 in the
+software decoder its bundle holds, for a browser whose own decoder refuses
+profile 1 ([Choosing a chroma](#choosing-a-chroma)). Absent or false, no page
+does. It is opt-in while the operator compares 4:4:4 decoded in the page with
+the 4:2:0 such a browser is sent without it. `GET /api/config` carries it to the
+page as `vp9Wasm`, beside the branding, since the page chooses its chroma before
+anyone has logged in.
 
 `[meter]` is top-level for the same reason and records the throughput of the
 browser's four WebSockets in an SQLite database, one row per target, socket and

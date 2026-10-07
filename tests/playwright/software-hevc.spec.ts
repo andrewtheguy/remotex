@@ -1,4 +1,4 @@
-// BETA: the software HEVC decoder (frontend/src/hevcWasmDecoder.ts), which
+// BETA: the software HEVC decoder (frontend/src/softwareDecoder.ts), which
 // a gateway that has its release archive serves at /hevc/ and which the page
 // takes, under `?hevc_decoder=software`, for a High Performance Mac's passed stream.
 //
@@ -163,7 +163,7 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
     await expect(page.getByRole("alert")).toHaveCount(0);
     expect(seen.refreshes, "repaints the page asked for").toEqual([]);
     // Its pictures are drawn on the canvas over the desktop's, which the page
-    // shows from the first one (hevcPicture.ts).
+    // shows from the first one (planesPicture.ts).
     await expect(page.locator("canvas.graphics")).toBeVisible();
 
     // Asked for with a HEAD before choosing it, then loaded by the decode worker.

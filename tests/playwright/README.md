@@ -72,6 +72,17 @@ because a failed decoder reports before the paint worker acknowledges. Against a
 gateway without the table it asserts the fallback: the page remains isolated,
 asks for the decoder and gets a 404, then selects VP9.
 
+`software-vp9.spec.ts` is the BETA software VP9 decoder, the vp9-wasm module in
+the bundle, on a gateway whose config sets `[vp9_wasm]`. Chromium decodes VP9
+profile 1 itself, so the page is loaded with `?vp9_decoder=software` to take the
+module. It asserts that the gateway says it allows the module, that the page asks
+for 4:4:4 and is announced profile 1, that the decode worker loads the module's
+file, once, that the first keyframe's batch is acknowledged with no video error
+or repaint request before it, and that the page shows the canvas the module's
+planes are drawn on. Without the switch in the URL it asserts the other decision:
+the same 4:4:4, the module never fetched, and that canvas hidden. Against a
+gateway without the table it asserts that the switch does nothing.
+
 `soft-keyboard.spec.ts` is the soft keyboard, read from the same socket: that a
 key tapped on it is the `key` frames the page sends, down then up; that a tapped
 modifier wraps the next key and is spent, and a twice-tapped one is off again;
@@ -250,6 +261,26 @@ bun run test:hevc
 
 Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`,
 which runs the fallback test instead.
+
+The software VP9 spec needs a gateway whose config sets `[vp9_wasm] enabled =
+true` and has a live target that leaves `render_chroma` unset, named by
+`REMOTEX_PLAYWRIGHT_VP9_TARGET`:
+
+```sh
+cargo run --profile qa -- serve --config tmp/qa_vp9.toml
+```
+
+```sh
+cd tests/playwright
+REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52893/' \
+REMOTEX_PLAYWRIGHT_USERNAME='admin' \
+REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
+REMOTEX_PLAYWRIGHT_VP9_TARGET='desktop' \
+bun run test:vp9
+```
+
+Against a gateway without the table, add `REMOTEX_PLAYWRIGHT_VP9_WASM=0`, which
+runs the test that the switch does nothing instead.
 
 The audio and picker specs use the test-tone gateway instead of a live target:
 

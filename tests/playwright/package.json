@@ -13,6 +13,8 @@
     "test:video": "playwright test '/video-stream\\.spec\\.ts$'",
     "pretest:hevc": "bun run deps",
     "test:hevc": "playwright test '/software-hevc\\.spec\\.ts$'",
+    "pretest:vp9": "bun run deps",
+    "test:vp9": "playwright test '/software-vp9\\.spec\\.ts$'",
     "pretypecheck": "bun run deps",
     "typecheck": "tsc --noEmit"
   },
