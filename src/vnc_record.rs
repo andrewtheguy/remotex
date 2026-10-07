@@ -43,11 +43,13 @@
 //!
 //! ## Framing is per-message going out, a stream coming in
 //!
-//! One record carries exactly one client→server message. That asymmetry is why
-//! the write side is [`RecordWriter::frame`], taking a whole message, while the
-//! read side is an [`AsyncRead`] — a large server payload may span consecutive
-//! records and is reassembled by concatenating their bodies, which is exactly what
-//! a byte stream is.
+//! A large message in either direction spans consecutive records and is
+//! reassembled by concatenating their bodies, which is exactly what a byte stream
+//! is. The write side is still [`RecordWriter::frame`], taking a whole message:
+//! almost every client→server message fits one record, and a message never
+//! shares a record with the next, so framing stays a function of one message. The
+//! read side is an [`AsyncRead`], because a server payload's record boundaries say
+//! nothing about where its messages end.
 
 use std::io;
 use std::pin::Pin;
@@ -70,10 +72,9 @@ pub const REKEY_LEN: usize = 4 + BLOCK + BLOCK;
 /// Largest record the `u16` length prefix can describe, rounded down to a whole
 /// number of blocks.
 const MAX_CIPHERTEXT: usize = (u16::MAX as usize / BLOCK) * BLOCK;
-/// Largest message that fits in one record, which is what caps a single
-/// client→server message. Every message this client sends is a few dozen bytes,
-/// so it is a sanity bound rather than a limit anything runs into.
-pub const MAX_BODY: usize = MAX_CIPHERTEXT - BODY_LEN - TRAILER;
+/// Largest body one record carries. Only a pasteboard archive outgrows it, and
+/// [`RecordWriter::frame`] then spreads the message over several records.
+const MAX_BODY: usize = MAX_CIPHERTEXT - BODY_LEN - TRAILER;
 
 /// The AES-128 key and IV one rekey installed.
 ///
@@ -182,7 +183,7 @@ const fn filler_len(body_len: usize) -> usize {
 /// the length is refused before the decrypt rather than defended against inside it.
 const MIN_CIPHERTEXT: usize = BODY_LEN + filler_len(0) + TRAILER;
 
-/// Frames outgoing messages, one record each.
+/// Frames outgoing messages, each in as many records as it needs.
 ///
 /// [`Self::frame`] hands back bytes instead of writing them, which keeps framing a
 /// pure function of the message and this context — testable straight through a
@@ -202,34 +203,51 @@ impl RecordWriter {
         }
     }
 
-    /// Wrap one complete client→server message in one record.
+    /// Wrap one complete client→server message in as many records as it needs.
+    ///
+    /// Almost every message fits in one. A pasteboard archive can run past the
+    /// `u16` record ceiling, and is then cut into consecutive full records and a
+    /// last one with the rest — the same concatenation the Mac uses for its own
+    /// large messages, and the one [`RecordReader`] undoes. An empty message is
+    /// still one record.
     ///
     /// Filler is zeroed rather than random. The spec allows either, the CBC chain
     /// already makes two identical messages encrypt differently, and determinism
     /// is what lets the framing be asserted byte for byte in a test — worth more
     /// than padding entropy that protects nothing.
-    pub fn frame(&mut self, msg: &[u8]) -> anyhow::Result<&[u8]> {
-        anyhow::ensure!(
-            msg.len() <= MAX_BODY,
-            "a {}-byte message does not fit in one record (at most {MAX_BODY})",
-            msg.len()
-        );
-        let total = BODY_LEN + msg.len() + filler_len(msg.len()) + TRAILER;
+    pub fn frame(&mut self, msg: &[u8]) -> &[u8] {
         self.buf.clear();
-        self.buf.reserve(2 + total);
+        let records = msg.len().div_ceil(MAX_BODY).max(1);
+        // Each record adds its outer length, body length, trailer and at most a
+        // block less one of filler to the bytes of the message it carries.
+        self.buf
+            .reserve(msg.len() + records * (2 + BODY_LEN + TRAILER + BLOCK - 1));
+        let mut rest = msg;
+        loop {
+            let (body, after) = rest.split_at(rest.len().min(MAX_BODY));
+            self.push_record(body);
+            rest = after;
+            if rest.is_empty() {
+                return &self.buf;
+            }
+        }
+    }
+
+    /// Append one record carrying `body` to the staging buffer.
+    fn push_record(&mut self, body: &[u8]) {
+        let total = BODY_LEN + body.len() + filler_len(body.len()) + TRAILER;
         // The outer length prefix, which is *not* encrypted and *not* covered by
         // the trailer.
         self.buf
             .extend_from_slice(&u16::try_from(total).expect("record within u16").to_be_bytes());
         let plaintext = self.buf.len();
         self.buf
-            .extend_from_slice(&u16::try_from(msg.len()).expect("body within u16").to_be_bytes());
-        self.buf.extend_from_slice(msg);
+            .extend_from_slice(&u16::try_from(body.len()).expect("body within u16").to_be_bytes());
+        self.buf.extend_from_slice(body);
         self.buf.resize(plaintext + total - TRAILER, 0);
         let trailer = self.cbc.trailer(&self.buf[plaintext..]);
         self.buf.extend_from_slice(&trailer);
         self.cbc.encrypt(&mut self.buf[plaintext..]);
-        Ok(&self.buf)
     }
 }
 
@@ -528,7 +546,7 @@ mod tests {
     #[test]
     fn a_framed_record_has_the_length_the_spec_computes() {
         let mut writer = RecordWriter::new(keys());
-        let framed = writer.frame(&[0xaa; 10]).unwrap().to_vec();
+        let framed = writer.frame(&[0xaa; 10]).to_vec();
         // 2 body-len + 10 body + 0 filler + 20 trailer = 32, and the outer prefix
         // counts only the ciphertext.
         assert_eq!(u16::from_be_bytes([framed[0], framed[1]]), 32);
@@ -537,7 +555,7 @@ mod tests {
         // An empty message is still a record — and the smallest one there is, which
         // has to be exactly the smallest a reader will accept. Any daylight between
         // the two and legitimate empty records would be refused as too short.
-        let framed = writer.frame(&[]).unwrap();
+        let framed = writer.frame(&[]);
         assert_eq!(u16::from_be_bytes([framed[0], framed[1]]), 32);
         assert_eq!(MIN_CIPHERTEXT, 32);
         assert_eq!(usize::from(u16::from_be_bytes([framed[0], framed[1]])), MIN_CIPHERTEXT);
@@ -587,8 +605,8 @@ mod tests {
     #[tokio::test]
     async fn a_record_only_decrypts_in_sequence() {
         let mut writer = RecordWriter::new(keys());
-        let mut wire = writer.frame(b"first").unwrap().to_vec();
-        let second = writer.frame(b"second").unwrap().to_vec();
+        let mut wire = writer.frame(b"first").to_vec();
+        let second = writer.frame(b"second").to_vec();
         wire.extend_from_slice(&second);
 
         let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
@@ -608,8 +626,8 @@ mod tests {
     async fn a_payload_split_across_records_reads_back_as_one() {
         let blob: Vec<u8> = (0..100u8).collect();
         let mut writer = RecordWriter::new(keys());
-        let mut wire = writer.frame(&blob[..37]).unwrap().to_vec();
-        let rest = writer.frame(&blob[37..]).unwrap().to_vec();
+        let mut wire = writer.frame(&blob[..37]).to_vec();
+        let rest = writer.frame(&blob[37..]).to_vec();
         wire.extend_from_slice(&rest);
 
         let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
@@ -621,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn a_tampered_record_yields_nothing_at_all() {
         let mut writer = RecordWriter::new(keys());
-        let mut wire = writer.frame(b"payload").unwrap().to_vec();
+        let mut wire = writer.frame(b"payload").to_vec();
         // Flip a byte of ciphertext. CBC will still "decrypt" it, and the trailer
         // is what notices.
         let last = wire.len() - 1;
@@ -647,9 +665,9 @@ mod tests {
     #[tokio::test]
     async fn a_record_counted_twice_is_refused_and_named() {
         let mut writer = RecordWriter::new(keys());
-        let mut wire = writer.frame(b"first").unwrap().to_vec();
+        let mut wire = writer.frame(b"first").to_vec();
         writer.cbc.seq = 0;
-        let second = writer.frame(b"second").unwrap().to_vec();
+        let second = writer.frame(b"second").to_vec();
         wire.extend_from_slice(&second);
 
         let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
@@ -680,7 +698,7 @@ mod tests {
 
         // A body longer than the record that carries it.
         let mut writer = RecordWriter::new(keys());
-        let framed = writer.frame(b"short").unwrap().to_vec();
+        let framed = writer.frame(b"short").to_vec();
         let mut forged = Cbc::new(keys());
         let mut plaintext = vec![0u8; framed.len() - 2];
         plaintext[..2].copy_from_slice(&9000u16.to_be_bytes());
@@ -700,7 +718,7 @@ mod tests {
     #[tokio::test]
     async fn a_clean_hang_up_between_records_is_end_of_stream() {
         let mut writer = RecordWriter::new(keys());
-        let wire = writer.frame(b"hi").unwrap().to_vec();
+        let wire = writer.frame(b"hi").to_vec();
         let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
         let mut got = Vec::new();
         reader.read_to_end(&mut got).await.unwrap();
@@ -708,7 +726,7 @@ mod tests {
 
         // Cut inside a record instead, and it is an error rather than a quiet end.
         let mut writer = RecordWriter::new(keys());
-        let framed = writer.frame(b"hi").unwrap();
+        let framed = writer.frame(b"hi");
         let cut = framed[..framed.len() - 4].to_vec();
         let mut reader = RecordReader::new(std::io::Cursor::new(cut), keys());
         let err = reader.read_to_end(&mut Vec::new()).await.unwrap_err();
@@ -738,9 +756,9 @@ mod tests {
     async fn records_reassemble_a_byte_at_a_time() {
         let blob: Vec<u8> = (0..200u8).collect();
         let mut writer = RecordWriter::new(keys());
-        let mut wire = writer.frame(&blob[..64]).unwrap().to_vec();
-        let a = writer.frame(&blob[64..70]).unwrap().to_vec();
-        let b = writer.frame(&blob[70..]).unwrap().to_vec();
+        let mut wire = writer.frame(&blob[..64]).to_vec();
+        let a = writer.frame(&blob[64..70]).to_vec();
+        let b = writer.frame(&blob[70..]).to_vec();
         wire.extend_from_slice(&a);
         wire.extend_from_slice(&b);
 
@@ -750,11 +768,34 @@ mod tests {
         assert_eq!(got, blob);
     }
 
-    #[test]
-    fn a_message_too_large_for_one_record_is_refused() {
+    /// A pasteboard archive can outgrow the `u16` record ceiling. It goes out as
+    /// full records and then the rest, each with its own trailer and sequence
+    /// number, and reads back as the one message it was.
+    #[tokio::test]
+    async fn a_message_too_large_for_one_record_spans_several() {
+        let blob: Vec<u8> = (0..2 * MAX_BODY + 5).map(|i| (i % 251) as u8).collect();
         let mut writer = RecordWriter::new(keys());
-        assert!(writer.frame(&vec![0u8; MAX_BODY]).is_ok());
-        let err = writer.frame(&vec![0u8; MAX_BODY + 1]).unwrap_err();
-        assert!(format!("{err:#}").contains("does not fit in one record"), "{err:#}");
+        let mut wire = writer.frame(&blob).to_vec();
+
+        let mut lens = Vec::new();
+        let mut at = 0;
+        while at < wire.len() {
+            let len = usize::from(u16::from_be_bytes([wire[at], wire[at + 1]]));
+            lens.push(len);
+            at += 2 + len;
+        }
+        assert_eq!(lens, [MAX_CIPHERTEXT, MAX_CIPHERTEXT, 2 + 5 + filler_len(5) + TRAILER]);
+
+        // The writer's chain and counter carry on past the split.
+        wire.extend_from_slice(writer.frame(b"next"));
+        let mut reader = RecordReader::new(std::io::Cursor::new(wire), keys());
+        let mut got = vec![0u8; blob.len() + 4];
+        reader.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got[..blob.len()], blob);
+        assert_eq!(&got[blob.len()..], b"next");
+
+        // A message of exactly one record's worth stays one record.
+        let framed = writer.frame(&vec![0u8; MAX_BODY]);
+        assert_eq!(framed.len(), 2 + MAX_CIPHERTEXT);
     }
 }

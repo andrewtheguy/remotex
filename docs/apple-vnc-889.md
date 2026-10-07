@@ -306,9 +306,11 @@ AES-128-CBC( u16 body_len || body || filler || 20-byte integrity )
 - **Integrity.** `SHA1(u32_be(seq) || the plaintext before it)`, with an
   independent sequence counter per direction starting at 0.
 
-A server message can span records: a full-screen zlib rectangle is about 400 KB
+A message can span records: a full-screen zlib rectangle is about 400 KB
 against a record ceiling of 65,520 bytes, so records are reassembled by
-concatenation, never read one message per record.
+concatenation, never read one message per record. Remotex frames its own messages
+the same way: a pasteboard archive past one record's 65,498-byte body goes out as
+full records and then the rest.
 
 **The rekey** arrives as a one-rectangle framebuffer update with encoding `0x44f`
 and zero geometry. Its body is a `u32` generation, then a wrapped key and a
