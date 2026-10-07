@@ -25,7 +25,7 @@ use sha2::{Digest as _, Sha256};
 pub const VERSION: &str = "0.0.2";
 
 /// The SHA-256 of that release's archive, as its `SHA256SUMS` publishes it.
-const SHA256: &str = "d6d6ed498fd4af6bf1e55b77d33dcd8423f1b23039b85a2798f79b76f0500960";
+const SHA256: &str = "469d086e00b77c12cd0a735370fd0809ec38ad0415604e6cbb669e3c729d9ddc";
 
 /// The archive's name as released, which is also `[hevc_wasm].archive`'s default.
 pub fn archive_name() -> String {
