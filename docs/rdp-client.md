@@ -342,8 +342,9 @@ declared rather than measured.
 Each monitor of a layout carries its own scale factor ([MS-RDPEDISP] 2.2.2.2.1,
 `DISPLAYCONTROL_MONITOR_LAYOUT`), and a second monitor shown in a browser tab of
 its own states the density of the screen that tab's window is on, with its
-window's points in pixels at it; until the tab reports one, and once it is no
-longer shown, it states the first's.
+window's points in pixels at it. It states the first's until the tab reports one,
+and again once *All Displays* is no longer chosen; a tab closing or reloading
+changes nothing.
 The layout always says a monitor is upright: a window taller than it is wide is not a rotated
 screen, and a server told otherwise turns the desktop on its side.
 
