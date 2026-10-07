@@ -20,8 +20,8 @@
 //!
 //! BETA: a gateway that has the archive also serves the software
 //! HEVC decoder ([`crate::hevc_wasm`]), which it read at start-up, at `/hevc/` under
-//! the names it was built with: the module starts its slice threads as workers of
-//! its own script, found by its own URL. Without it `/hevc/` is a 404 and the
+//! the names it was built with, which the page's decode worker and the decoder's
+//! threads import the glue by. Without it `/hevc/` is a 404 and the
 //! page, which asks for the decoder before choosing it, decodes as it did before.
 
 use std::fmt::Write as _;

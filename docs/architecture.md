@@ -832,12 +832,12 @@ Three controls with similar names therefore remain separate:
   A browser that decodes the sound but not the picture, as that one did, loses
   nothing by being sent both re-encoded.
 - **BETA: the picture in software.** A gateway that has its release
-  archive serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm),
-  libavcodec's HEVC decoder compiled to WebAssembly with SIMD128 and slice threads,
-  at `/hevc/`; its threads share their memory through the cross-origin isolation
-  every gateway serves the page with (`src/assets.rs`). No build holds the
-  decoder, for the licence reason that keeps libavcodec out of every artifact:
-  the operator downloads the
+  archive serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), a
+  decoder written for the Mac's shape of stream and compiled to WebAssembly with
+  SIMD128 and threads, bit-exact with FFmpeg's, at `/hevc/`; its threads share
+  their memory through the cross-origin isolation every gateway serves the page
+  with (`src/assets.rs`). No build holds the decoder while it is BETA: the
+  operator downloads the
   release archive from the private `andrewtheguy/hevc-wasm-archives` into
   `share/remotex` in the gateway's release tree, beside `share/doc/remotex`,
   where the gateway looks for it and, finding it, serves it with nothing

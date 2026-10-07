@@ -1,7 +1,12 @@
-// BETA: the decode worker behind hevcWasmDecoder.ts. It loads libavcodec's
-// HEVC decoder (andrewtheguy/hevc-wasm, which the gateway serves at /hevc/) once,
-// runs one decoder per stream the paint worker opens, and answers every unit with
-// one picture or none.
+// BETA: the decode worker behind hevcWasmDecoder.ts. It loads the HEVC
+// decoder's module (andrewtheguy/hevc-wasm, which the gateway serves at /hevc/)
+// once, with a pool of threads, runs one decoder per stream the paint worker
+// opens, and answers every unit with one picture or none.
+//
+// The module is wasm-bindgen's, shaped as the compositor's (egfxCompositor.ts):
+// one instance here, on a shared memory, and each thread of its pool a worker
+// running an instance of the same module on that memory (hevcPool.worker.ts),
+// which takes a seat in the pool before the pool is started.
 //
 // A picture leaves as where its planes are in the module's memory, which is
 // shared, and the paint worker uploads them to the GPU from there
@@ -9,55 +14,112 @@
 // that unit waits here until the paint worker has released the picture.
 
 import { hevcDecoderUrl } from "./gateway.ts";
+import type { PoolSeat, SharedMemory } from "./hevcPool.worker.ts";
 import type {
   DecodedPlanes,
   HevcCommand,
   HevcEvent,
 } from "./hevcWasmDecoder.ts";
 
-/** The module hevc-wasm's src/decoder.c builds, as its glue exposes it. */
-interface HevcModule {
-  _hevc_create(threads: number): number;
-  _hevc_input(decoder: number, size: number): number;
-  _hevc_decode(decoder: number, keyframe: number): number;
-  _hevc_picture(decoder: number): number;
-  _hevc_destroy(decoder: number): void;
-  /** Shared, as a module with threads has it. */
-  wasmMemory: { readonly buffer: SharedArrayBuffer };
+/** What hevc-wasm's rust/hevc-web exports, as wasm-bindgen's glue presents it. */
+interface HevcGlue {
+  default(options: {
+    module_or_path: string;
+  }): Promise<{ memory: SharedMemory }>;
+  /** The compiled module, for a thread to make its instance of. */
+  module(): WebAssembly.Module;
+  /** The pool, of `threads` workers each in `runPoolThread` already. */
+  startPool(threads: number): void;
+  /** A decoder decoding on `threads` of the pool, or on the caller for one. */
+  Decoder: new (
+    threads: number,
+  ) => HevcDecoder;
 }
 
-type CreateModule = (options: {
-  threads: number;
-  locateFile: (path: string) => string;
-}) => Promise<HevcModule>;
+/** One stream's decoder in the module. */
+interface HevcDecoder {
+  /**
+   * Room for a unit of `size` bytes in the memory, where it is written before
+   * `decode`. The previous picture is released here.
+   */
+  input(size: number): number;
+  /**
+   * Decode the unit written: true when it completed a picture. Throws for a unit
+   * that does not decode.
+   */
+  decode(): boolean;
+  /** Where the picture's sixteen numbers are in the memory. */
+  picture(): number;
+  free(): void;
+}
+
+interface HevcModule {
+  glue: HevcGlue;
+  /** The threads' and the paint worker's too. */
+  memory: SharedMemory;
+}
 
 const scope = self as unknown as {
   postMessage(message: HevcEvent): void;
   onmessage: ((ev: MessageEvent<HevcCommand>) => void) | null;
 };
 
-// The decoder's slice threads, each a worker the module starts before it resolves.
-// Rows of a picture decode in parallel under wavefront parallel processing, and
-// past eight a 3200×2000 picture was measured gaining nothing more.
+// The pool's threads, on which a picture's rows decode in parallel under
+// wavefront parallel processing; past eight a 3200×2000 picture was measured
+// gaining nothing more. On one, the decoder decodes on this worker and starts
+// no pool.
 const THREADS = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8));
 
 let loading: Promise<HevcModule> | null = null;
 
 function load(): Promise<HevcModule> {
   loading ??= (async () => {
-    const { default: create } = (await import(
+    const glue = (await import(
       /* @vite-ignore */ hevcDecoderUrl("hevc.js")
-    )) as { default: CreateModule };
-    return create({
-      threads: THREADS,
-      locateFile: (path) =>
-        path.endsWith(".wasm") ? hevcDecoderUrl("hevc.wasm") : path,
+    )) as HevcGlue;
+    const { memory } = await glue.default({
+      module_or_path: hevcDecoderUrl("hevc.wasm"),
     });
+    if (THREADS > 1) {
+      await seatThreads({ module: glue.module(), memory });
+      glue.startPool(THREADS);
+    }
+    return { glue, memory };
   })();
   return loading;
 }
 
-// FFmpeg's enums (libavutil/pixfmt.h) for what the page's shader presents
+/** The pool's threads started, each with its instance made, before the pool is. */
+function seatThreads(seat: PoolSeat): Promise<unknown> {
+  return Promise.all(
+    Array.from(
+      { length: THREADS },
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const thread = new Worker(
+            new URL("./hevcPool.worker.ts", import.meta.url),
+            { type: "module", name: "hevc-thread" },
+          );
+          thread.onmessage = ({ data }: MessageEvent<string | null>) => {
+            if (data === null) {
+              resolve();
+            } else {
+              reject(new Error(data));
+            }
+          };
+          thread.onerror = (ev) => {
+            ev.preventDefault();
+            reject(
+              new Error(ev.message || "a thread of the decoder did not start"),
+            );
+          };
+          thread.postMessage(seat);
+        }),
+    ),
+  );
+}
+
+// The stream's colour description, in H.265's codes, for what the page's shader presents
 // (hevcPicture.ts): Y'CbCr made with BT.709's coefficients or BT.601's, in sRGB's
 // primaries or Display P3's, the Mac's, and a transfer a display takes as it is.
 // A stream that states nothing is taken as WebCodecs takes one: BT.709.
@@ -77,10 +139,14 @@ const PRIMARIES: Record<number, PredefinedColorSpace> = {
 const TRANSFERS = [1, UNSPECIFIED, 6, 13];
 const FULL_RANGE = 2;
 
-/** The picture `_hevc_decode` just returned, as its planes. */
-function picture(module: HevcModule, decoder: number): DecodedPlanes | string {
-  const memory = module.wasmMemory.buffer;
-  const p = new Int32Array(memory, module._hevc_picture(decoder), 16);
+/** The picture `decode` just completed, as its planes. */
+function picture(
+  module: HevcModule,
+  decoder: HevcDecoder,
+): DecodedPlanes | string {
+  // Read afresh: a memory that grew is a new buffer.
+  const memory = module.memory.buffer;
+  const p = new Int32Array(memory, decoder.picture(), 16);
   const [w, h, layout, range, matrix, primaries, transfer] = p;
   if (layout < 0 || layout > 2) {
     return "the stream's pictures are not 8-bit Y'CbCr, which the page presents";
@@ -109,7 +175,7 @@ function picture(module: HevcModule, decoder: number): DecodedPlanes | string {
   };
 }
 
-const decoders = new Map<number, number>();
+const decoders = new Map<number, HevcDecoder>();
 
 // The pictures the paint worker is reading, by stream: what ends each wait.
 const held = new Map<number, () => void>();
@@ -141,21 +207,14 @@ async function create(id: number): Promise<void> {
     );
     return;
   }
-  const decoder = module._hevc_create(THREADS);
-  if (!decoder) {
-    failed(id, "NotSupportedError", "the HEVC decoder did not open");
-    return;
-  }
-  decoders.set(id, decoder);
+  decoders.set(id, new module.glue.Decoder(THREADS));
 }
 
 async function destroy(id: number): Promise<void> {
   const decoder = decoders.get(id);
   decoders.delete(id);
   ending.delete(id);
-  if (decoder) {
-    (await load())._hevc_destroy(decoder);
-  }
+  decoder?.free();
 }
 
 async function decode(
@@ -175,24 +234,22 @@ async function decode(
   }
   const fail = (name: string, message: string) => {
     decoders.delete(id);
-    module._hevc_destroy(decoder);
+    decoder.free();
     failed(id, name, message);
   };
   const size = command.data.byteLength;
-  const input = module._hevc_input(decoder, size);
-  if (!input) {
-    fail("EncodingError", "the HEVC decoder is out of memory");
-    return;
-  }
-  new Uint8Array(module.wasmMemory.buffer, input, size).set(
+  const input = decoder.input(size);
+  new Uint8Array(module.memory.buffer, input, size).set(
     new Uint8Array(command.data),
   );
-  const ret = module._hevc_decode(decoder, command.keyframe ? 1 : 0);
-  if (ret < 0) {
-    fail("EncodingError", `libavcodec failed to decode a unit (error ${ret})`);
+  let completed: boolean;
+  try {
+    completed = decoder.decode();
+  } catch (e) {
+    fail("EncodingError", `the HEVC decoder failed on a unit (${reason(e)})`);
     return;
   }
-  if (ret === 0) {
+  if (!completed) {
     scope.postMessage({ type: "decoded", id, picture: null });
     return;
   }

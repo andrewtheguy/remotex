@@ -1,10 +1,10 @@
 // BETA: a software decoder for a High Performance Mac's passed HEVC, for a
 // browser whose `VideoDecoder` does not take it (appleMedia.ts decides).
 //
-// libavcodec's HEVC decoder compiled to WebAssembly (andrewtheguy/hevc-wasm), with
-// its SIMD128 kernels and its slice threads, running in a worker of its own beside
-// the paint worker: a picture takes tens of milliseconds of CPU, and the paint
-// worker has to go on answering a `clear` while one does.
+// andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and compiled to
+// WebAssembly with SIMD128 and threads, running in a worker of its own beside
+// the paint worker: a picture takes milliseconds of CPU, and the paint worker
+// has to go on answering a `clear` while one does.
 //
 // It is shaped as a `VideoDecoder` — configure, decode, close, an output and an
 // error callback — so `createVideoStream` (videoDecoder.ts) runs it exactly as it
@@ -28,12 +28,7 @@
 /** What the paint worker sends the decode worker. */
 export type HevcCommand =
   | { type: "create"; id: number }
-  | {
-      type: "decode";
-      id: number;
-      data: ArrayBuffer;
-      keyframe: boolean;
-    }
+  | { type: "decode"; id: number; data: ArrayBuffer }
   /** The paint worker is done reading the picture last answered with. */
   | { type: "release"; id: number }
   | { type: "destroy"; id: number };
@@ -241,12 +236,7 @@ export function createWasmHevcDecoder(
       const data = new ArrayBuffer(chunk.byteLength);
       chunk.copyTo(data);
       decodeWorker().postMessage(
-        {
-          type: "decode",
-          id,
-          data,
-          keyframe: chunk.type === "key",
-        } satisfies HevcCommand,
+        { type: "decode", id, data } satisfies HevcCommand,
         [data],
       );
     },
