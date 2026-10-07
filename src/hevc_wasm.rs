@@ -1,6 +1,6 @@
 //! BETA: the page's software HEVC decoder, for a browser whose own
 //! `VideoDecoder` refuses a High Performance Mac's 4:4:4 picture
-//! (`frontend/src/hevcWasmDecoder.ts`).
+//! (`frontend/src/softwareDecoder.ts`).
 //!
 //! It is andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and
 //! compiled to WebAssembly, a release published to the private
