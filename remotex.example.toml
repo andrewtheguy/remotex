@@ -110,6 +110,24 @@
 #[hevc_wasm]
 #archive = "/srv/remotex/hevc-wasm-v0.0.3.tar.gz"
 
+# BETA: lets the page decode VP9 at 4:4:4 itself, for a browser whose own
+# VideoDecoder refuses VP9 profile 1 — Safari on iOS and iPadOS, for one, which
+# decodes VP9 in hardware alone. Such a browser otherwise asks for 4:2:0 and is
+# sent that. With enabled = true, where the page can run the decoder (shared-memory
+# SIMD WebAssembly on the cross-origin isolated page every gateway serves, and a
+# WebGL 2 canvas to present on), it asks for 4:4:4 and decodes it in
+# andrewtheguy/vp9-wasm's decoder, which is part of the page: there is no archive
+# to place. A browser whose own decoder takes profile 1 goes on using it, and one
+# that can run neither is sent 4:2:0 as before. A page opened with
+# ?vp9_decoder=software in its URL takes the page's decoder even where the
+# browser's own would do, to try it. Off unless set here, and then the page never
+# loads the decoder: the table is for comparing, in use, 4:4:4 decoded in the page
+# with the 4:2:0 such a browser gets without it. A target's render_chroma still
+# overrules what the page asks for.
+#
+#[vp9_wasm]
+#enabled = true
+
 # On Windows, the folder an `ard-high-performance` target's HEVC decoder is
 # loaded from: FFmpeg's avcodec and avutil DLLs. With nothing set here the
 # gateway looks for them when a session needs them, beside remotex.exe and on

@@ -586,6 +586,11 @@ struct ConfigResponse {
     /// Whether `GET /api/throughput` has a database to read, so the page offers the view only
     /// where there is something in it.
     throughput: bool,
+    /// BETA: `[vp9_wasm].enabled`, whether the page may decode VP9 at 4:4:4 in
+    /// the software decoder its bundle holds. The page decides its chroma by it
+    /// before any session (`frontend/src/videoChroma.ts`).
+    #[serde(rename = "vp9Wasm")]
+    vp9_wasm: bool,
 }
 
 /// Public, non-secret client config. Read on load so the login screen and the
@@ -595,6 +600,7 @@ async fn config_handler(State(state): State<AppState>) -> Json<ConfigResponse> {
         branding: state.config.branding.text.clone(),
         logo: state.config.branding.logo.is_some(),
         throughput: state.throughput.store.is_some(),
+        vp9_wasm: state.config.vp9_wasm,
     })
 }
 
@@ -1104,6 +1110,7 @@ mod tests {
             dev_hostname: dev_hostname.map(str::to_owned),
             meter: None,
             hevc_wasm: None,
+            vp9_wasm: false,
             hp_decoders: Default::default(),
         }
     }
@@ -1415,6 +1422,7 @@ mod tests {
             dev_hostname: None,
             meter: None,
             hevc_wasm: None,
+            vp9_wasm: false,
             hp_decoders: Default::default(),
         };
 
@@ -1499,11 +1507,12 @@ mod tests {
             branding: "remotex".to_owned(),
             logo: false,
             throughput: false,
+            vp9_wasm: true,
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"branding":"remotex","logo":false,"throughput":false}"#
+            r#"{"branding":"remotex","logo":false,"throughput":false,"vp9Wasm":true}"#
         );
     }
 

@@ -1529,6 +1529,11 @@ pub struct ConfigFile {
     /// [`Self::branding`]'s reason.
     #[serde(default)]
     pub hevc_wasm: Option<HevcWasmSection>,
+    /// The `[vp9_wasm]` table: BETA, whether the page may decode VP9 at 4:4:4
+    /// itself, in the software decoder its bundle holds. Absent, or present with
+    /// `enabled = false`, it does not. Top-level for [`Self::branding`]'s reason.
+    #[serde(default)]
+    pub vp9_wasm: Option<Vp9WasmSection>,
     /// The `[hp_decoders]` table: on Windows, the folders a High Performance
     /// target's decoders are loaded from, for a gateway that keeps them off
     /// `PATH`. Absent, they are looked for when a session needs them. Top-level
@@ -1575,6 +1580,22 @@ pub struct HevcWasmSection {
     /// gateway's data directory ([`data_dir`]). A gateway told where the archive is
     /// refuses to start without it.
     pub archive: PathBuf,
+}
+
+/// The `[vp9_wasm]` table as written.
+///
+/// The decoder is andrewtheguy/vp9-wasm's, in the page's bundle, so there is no
+/// archive to name: the table is the one switch. It is for a browser whose own
+/// `VideoDecoder` refuses VP9 profile 1, which otherwise asks for 4:2:0
+/// (`frontend/src/videoChroma.ts`): with the switch on, such a page asks for
+/// 4:4:4 and decodes it in the module. Off unless set, while an operator compares
+/// the two in use.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vp9WasmSection {
+    /// Whether the page may. Required, as `[meter].enabled` is: a table says in
+    /// as many words which it is.
+    pub enabled: bool,
 }
 
 /// The `[meter]` table as written. See [`crate::throughput`].
@@ -1634,6 +1655,9 @@ pub struct AppConfig {
     /// `[hevc_wasm]` names, or the one found in the data directory. `None` serves
     /// no decoder.
     pub hevc_wasm: Option<PathBuf>,
+    /// `[vp9_wasm].enabled`: whether the page may decode VP9 at 4:4:4 in its own
+    /// software decoder, which `/api/config` tells it.
+    pub vp9_wasm: bool,
     /// `[hp_decoders]`: the folders the gateway loads the High Performance
     /// decoders from at start-up. Empty looks for them when a session needs them.
     pub hp_decoders: HpDecoders,
@@ -2015,6 +2039,7 @@ impl ConfigFile {
             dev_hostname: None,
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
+            vp9_wasm: self.vp9_wasm.is_some_and(|section| section.enabled),
             hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
@@ -2128,6 +2153,7 @@ impl ConfigFile {
                 .context("invalid [server].dev_subdomain")?,
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
+            vp9_wasm: self.vp9_wasm.is_some_and(|section| section.enabled),
             hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
@@ -2875,6 +2901,26 @@ mod tests {
         ] {
             let err = ConfigFile::parse(&format!("[hevc_wasm]\n{bad}\n{}", minimal()))
                 .expect_err(bad);
+            assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
+        }
+    }
+
+    /// `[vp9_wasm]` is one switch, off unless the table turns it on, and a table
+    /// has to say which.
+    #[test]
+    fn the_page_decodes_vp9_in_software_only_where_the_table_says_so() {
+        let allowed = |table: &str| {
+            ConfigFile::parse(&format!("{table}\n{}", minimal())).unwrap().resolve().unwrap().vp9_wasm
+        };
+        assert!(!allowed(""), "no [vp9_wasm] leaves the browser's own decoder");
+        assert!(!allowed("[vp9_wasm]\nenabled = false"));
+        assert!(allowed("[vp9_wasm]\nenabled = true"));
+        for (bad, says) in [
+            ("", "enabled"),
+            ("enabled = \"yes\"", "enabled"),
+            ("enabled = true\narchive = \"vp9.tar.gz\"", "archive"),
+        ] {
+            let err = ConfigFile::parse(&format!("[vp9_wasm]\n{bad}\n{}", minimal())).expect_err(bad);
             assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
         }
     }
