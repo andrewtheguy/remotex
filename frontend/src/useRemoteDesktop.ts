@@ -67,7 +67,6 @@ import {
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { decodesRdpH264 } from "./rdpH264.ts";
 import { remotePoint } from "./remotePoint.ts";
-import { decodedInSoftware } from "./softwareChoice.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
 import type { Choices } from "./targetChoices.ts";
 import {
@@ -2098,14 +2097,17 @@ export function useRemoteDesktop(
           // string drops a live decoder that queued units still need. A browser
           // that cannot decode what it names finds out from the decoder's own
           // error, which arrives at `onVideoError` naming the configuration.
-          painter?.setVideoFormat({ decode: msg.decode });
+          painter?.setVideoFormat({
+            decode: msg.decode,
+            software: msg.software,
+          });
           // And the same string for the card, which is the only place the exact
           // configuration is written down while the picture is working, with whose
           // stream it is: only the gateway knows whether it encoded it.
           setVideoStream({
             decode: msg.decode,
             passthrough: msg.passthrough,
-            software: decodedInSoftware(msg.decode),
+            software: msg.software,
           });
           break;
         case "graphicsStart":

@@ -105,8 +105,8 @@ export interface VideoStreamInfo {
   // Not a stream at all: an RDP host's graphics pipeline, composed here
   // (`graphicsStart`). No decoder is configured and `decode` names nothing.
   composed?: boolean;
-  // BETA: decoded by one of the page's WebAssembly decoders (softwareChoice.ts)
-  // and not by the browser's own.
+  // BETA: decoded by one of the page's WebAssembly decoders (softwareDecoder.ts)
+  // and not by the browser's own, as the gateway said with the format.
   software?: boolean;
 }
 

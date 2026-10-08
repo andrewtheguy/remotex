@@ -1,8 +1,9 @@
 // BETA: whether this page can run a software decoder (softwareDecoder.ts) and
-// show what it decodes. Asked at load by whoever decides a stream is decoded in
-// one (appleMedia.ts, videoChroma.ts), because a yes that cannot be run or
-// presented is a session with no picture, where a no is one sent what the
-// browser's own decoder takes.
+// show what it decodes. The picker asks before it offers a session decoded in the
+// page (targetChoices.ts), and the paint worker is told, since a page told to
+// decode a stream it cannot says so and decodes nothing (videoDecoder.ts).
+
+import type { SoftwareModule } from "./softwareDecoder.ts";
 
 /** A function returning a SIMD128 value, which only a SIMD engine validates. */
 const SIMD_PROBE = Uint8Array.of(
@@ -58,30 +59,24 @@ export function runsSoftwareDecoder(options: {
   }
 }
 
-const SWITCHES = ["hevc_decoder", "vp9_decoder"] as const;
+/** Which of the page's software decoders this page can run and present. */
+export type RunnableDecoders = Record<SoftwareModule, boolean>;
+
+let runnable: RunnableDecoders | null = null;
 
 /**
- * The software switches of a URL's query, as a query of their own or nothing:
- * what a page opened beside this one carries so that it decodes as this one does.
+ * Which of them this page runs, asked once: a Mac's HEVC needs the canvas given
+ * its primaries, Display P3, and the gateway's VP9 is presented in sRGB's.
  */
-export function softwareSwitches(
-  search: string = globalThis.location?.search ?? "",
-): string {
-  const asked = new URLSearchParams(search);
-  const kept = new URLSearchParams();
-  for (const decoder of SWITCHES) {
-    if (asked.get(decoder) === "software") {
-      kept.set(decoder, "software");
-    }
-  }
-  const query = kept.toString();
-  return query && `?${query}`;
+export function runnableDecoders(): RunnableDecoders {
+  runnable ??= {
+    hevc: runsSoftwareDecoder({ widePrimaries: true }),
+    vp9: runsSoftwareDecoder({ widePrimaries: false }),
+  };
+  return runnable;
 }
 
-/** Whether the page's URL asks for `decoder` in software: `?<decoder>=software`. */
-export function softwareRequested(decoder: (typeof SWITCHES)[number]): boolean {
-  return (
-    new URLSearchParams(globalThis.location?.search ?? "").get(decoder) ===
-    "software"
-  );
+/** Test seam: forget the answer so the question can be asked again. */
+export function resetRunnableDecodersForTests(): void {
+  runnable = null;
 }

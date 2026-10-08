@@ -37,7 +37,7 @@ import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { createPlanesPicture } from "./planesPicture.ts";
 import { binaryFrameKind } from "./protocol.ts";
-import type { SoftwareModule, SoftwareRefusals } from "./softwareDecoder.ts";
+import type { RunnableDecoders } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 /**
@@ -58,12 +58,10 @@ export type PainterCommand =
        */
       graphics: OffscreenCanvas;
       /**
-       * BETA: the streams this page decodes in software: a Mac's passed HEVC
-       * (appleMedia.ts), VP9 at 4:4:4 (videoChroma.ts).
+       * BETA: which of the page's software decoders this page can run, for a
+       * stream its `videoFormat` says is decoded in one (softwareSupport.ts).
        */
-      software: SoftwareModule[];
-      /** BETA: the streams this page refuses, and why (videoChroma.ts). */
-      refused: SoftwareRefusals;
+      runs: RunnableDecoders;
     }
   | {
       type: "frame";
@@ -261,8 +259,7 @@ export function createPainterWorker(
             makePlanesPicture: () => createPlanesPicture(command.graphics),
             onGraphicsShown: (shown) =>
               post({ type: "graphicsShown", shown, epoch }),
-            software: command.software,
-            refused: command.refused,
+            runs: command.runs,
           });
           break;
         case "frame": {

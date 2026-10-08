@@ -1,6 +1,7 @@
 // What a session is started with: how the desktop is sized, whether the remote's
-// sound is taken and as what, whether the target's own stream is passed, and where
-// a second virtual display sits. Chosen under the
+// sound is taken and as what, whether the target's own stream is passed, where
+// a second virtual display sits, and whether the picture is decoded by this page's
+// own decoders. Chosen under the
 // target at the picker, before Start, and held for the life of the session —
 // `connect` carries them and the gateway keeps them beside the target
 // (src/config.rs, `Choices`).
@@ -24,6 +25,8 @@
 //   two and tells it where each is: see `PLACEMENTS`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
+// - BETA: decoding in this page is a choice where the gateway has one of the
+//   page's software decoders for the session: see `softwareRow`.
 
 /** The stream a target can pass untouched, as `/api/targets` names it. */
 export type Passthrough = "rdp-graphics" | "apple-media";
@@ -51,6 +54,12 @@ export interface TargetInfo {
   defaultSize: Points | null;
   /** Whether the remote's sound is a choice. */
   audio: boolean;
+  /**
+   * BETA: the page's software decoders a session on this target can choose to be
+   * decoded with, of those the gateway has: `vp9` for its VP9, which is then
+   * 4:4:4, and `hevc` for a Mac's HEVC while that is passed.
+   */
+  software: { vp9: boolean; hevc: boolean };
   /** The stream this target can pass, null where it has none. */
   passthrough: Passthrough | null;
   /**
@@ -94,13 +103,21 @@ export interface Choices {
   audio: Sound;
   passthrough: boolean;
   placement: Placement;
+  /** BETA: decode the picture in this page's software decoders. */
+  software: boolean;
 }
 
 /** What this browser can do with a target. */
 export interface Abilities {
-  /** What it said it can take, as its session socket states it. */
+  /**
+   * What it said it can take, as its session socket states it. `appleMedia` and
+   * `profile1` are its own decoder's answers: a Mac's HEVC, and VP9 at 4:4:4.
+   */
   appleMedia: boolean;
+  profile1: boolean;
   rdpGraphics: boolean;
+  /** Which of the page's software decoders this page can run. */
+  runs: { vp9: boolean; hevc: boolean };
   /**
    * What of this client a desktop can follow: its window on a desktop browser, its
    * screen, asked for once, on a tablet, and nothing on a phone, whose window is
@@ -142,7 +159,7 @@ export interface PlacementOption {
 
 /** One option under an open target. */
 export interface OptionRow {
-  key: "passthrough";
+  key: "passthrough" | "software";
   label: string;
   /** What ticking it does, or why it cannot be changed here. */
   note: string;
@@ -194,7 +211,8 @@ const PASSTHROUGH: Record<
   "apple-media": {
     label: "Pass the Mac's picture through",
     note: "The Mac's own HEVC, instead of VP9 encoded by the gateway. For a LAN.",
-    cannot: "This browser does not decode the Mac's HEVC.",
+    cannot:
+      "This browser does not decode the Mac's HEVC, and this page cannot decode it here.",
     only: {
       note: "This gateway cannot decode the Mac's picture, so it is always passed.",
       blocked:
@@ -203,10 +221,109 @@ const PASSTHROUGH: Record<
   },
 };
 
-function takes(abilities: Abilities, passthrough: Passthrough): boolean {
-  return passthrough === "apple-media"
-    ? abilities.appleMedia
-    : abilities.rdpGraphics;
+/**
+ * The page's decoders a session on `target` is decoded with when it chooses
+ * that, as the gateway decides it: VP9's where the target has it, and HEVC's
+ * where it has that and the Mac's picture is `passed`.
+ */
+function softwareUsed(
+  target: TargetInfo,
+  passed: boolean,
+): { vp9: boolean; hevc: boolean } {
+  return {
+    vp9: target.software.vp9,
+    hevc:
+      target.software.hevc && passed && target.passthrough === "apple-media",
+  };
+}
+
+/** Whether this page runs every decoder such a session would use, and uses one. */
+function runsSoftware(
+  target: TargetInfo,
+  passed: boolean,
+  abilities: Abilities,
+): boolean {
+  const used = softwareUsed(target, passed);
+  return (
+    (used.vp9 || used.hevc) &&
+    (!used.vp9 || abilities.runs.vp9) &&
+    (!used.hevc || abilities.runs.hevc)
+  );
+}
+
+/**
+ * Whether this browser can be passed `target`'s stream: where its own decoder
+ * takes it, and a Mac's HEVC also where the page decodes it itself. That second
+ * way is a session decoded in this page, which `softwareRow` then holds ticked:
+ * the socket's answer stays the browser's own decoder's, and it is the choice
+ * `connect` carries that tells the gateway the page takes the stream.
+ */
+function takes(
+  target: TargetInfo,
+  abilities: Abilities,
+  passthrough: Passthrough,
+): boolean {
+  if (passthrough === "rdp-graphics") {
+    return abilities.rdpGraphics;
+  }
+  return (
+    abilities.appleMedia ||
+    (softwareUsed(target, true).hevc && runsSoftware(target, true, abilities))
+  );
+}
+
+/**
+ * BETA: the row for decoding the session's picture in this page, in WebAssembly,
+ * instead of in the browser's own decoder.
+ *
+ * - No row where the gateway has no decoder of the page's for the session: its
+ *   VP9 one, or its HEVC one while the Mac's picture is `passed`.
+ * - Greyed where this page cannot run a decoder such a session would use.
+ * - Ticked and held where the Mac's picture is passed and only the page decodes
+ *   it: that is what let the passthrough be ticked.
+ * - Otherwise a choice, ticked until somebody chooses where the browser's own
+ *   decoder refuses the stream the session starts on, which is who it is for,
+ *   and unticked where it takes it.
+ */
+function softwareRow(
+  target: TargetInfo,
+  passed: boolean,
+  remembered: boolean | undefined,
+  abilities: Abilities,
+): OptionRow | null {
+  const used = softwareUsed(target, passed);
+  if (!used.vp9 && !used.hevc) {
+    return null;
+  }
+  const row = { key: "software" as const, label: "Decode in this page (BETA)" };
+  if (!runsSoftware(target, passed, abilities)) {
+    return {
+      ...row,
+      note: "This browser cannot run the page's decoder: that needs WebGL 2 and a cross-origin isolated page.",
+      checked: false,
+      disabled: true,
+    };
+  }
+  const hevc = passed && target.passthrough === "apple-media";
+  if (used.hevc && !abilities.appleMedia) {
+    return {
+      ...row,
+      note: "This browser's own decoder does not take the Mac's HEVC, so this page decodes it, in WebAssembly.",
+      checked: true,
+      disabled: true,
+    };
+  }
+  const own = hevc ? abilities.appleMedia : abilities.profile1;
+  const what = [
+    ...(used.vp9 ? ["VP9, which is then sent at 4:4:4"] : []),
+    ...(used.hevc ? ["the Mac's HEVC"] : []),
+  ].join(" and ");
+  return {
+    ...row,
+    note: `This page's WebAssembly decoder, instead of the browser's own, decodes ${what}.`,
+    checked: remembered ?? !own,
+    disabled: false,
+  };
 }
 
 /**
@@ -215,14 +332,14 @@ function takes(abilities: Abilities, passthrough: Passthrough): boolean {
  * take it.
  */
 function passthroughRow(
+  target: TargetInfo,
   passthrough: Passthrough,
-  passthroughOnly: boolean,
   remembered: boolean | undefined,
   abilities: Abilities,
 ): { row: OptionRow; blocked: string | null } {
   const words = PASSTHROUGH[passthrough];
-  const able = takes(abilities, passthrough);
-  const only = passthroughOnly ? words.only : null;
+  const able = takes(target, abilities, passthrough);
+  const only = target.passthroughOnly ? words.only : null;
   const row = { key: "passthrough" as const, label: words.label };
   if (only) {
     return {
@@ -374,22 +491,33 @@ export function targetOptions(
   let blocked: string | null = null;
   if (target.passthrough) {
     const passed = passthroughRow(
+      target,
       target.passthrough,
-      target.passthroughOnly,
       remembered?.passthrough,
       abilities,
     );
     rows.push(passed.row);
     blocked = passed.blocked;
   }
+  const passthrough = rows.some((row) => row.checked);
+  const software = softwareRow(
+    target,
+    passthrough,
+    remembered?.software,
+    abilities,
+  );
+  if (software) {
+    rows.push(software);
+  }
   const placements = target.placement ? PLACEMENTS : null;
   const choices: Choices = {
     size,
     audio: sound.audio,
-    passthrough: rows.some((row) => row.checked),
+    passthrough,
     placement:
       placements?.find((option) => option.value === remembered?.placement)
         ?.value ?? "right",
+    software: software?.checked ?? false,
   };
   return {
     sizes,

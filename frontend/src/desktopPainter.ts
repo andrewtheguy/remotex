@@ -21,9 +21,7 @@ import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { batchFrameSequence } from "./protocol.ts";
-import { softwareModules } from "./softwareChoice.ts";
-import type { SoftwareRefusals } from "./softwareDecoder.ts";
-import { softwareVp9Refusal } from "./videoChroma.ts";
+import { runnableDecoders } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 export interface PainterHandlers {
@@ -159,20 +157,12 @@ export function desktopPainterFor(
     worker.postMessage(command, transfer);
   const offscreen = canvas.transferControlToOffscreen();
   const offscreenGraphics = graphics.transferControlToOffscreen();
-  // BETA: what this page decodes in software, as it answered at load.
-  const software = softwareModules();
-  const refused: SoftwareRefusals = {};
-  const vp9Refusal = softwareVp9Refusal();
-  if (vp9Refusal !== null) {
-    refused.vp9 = vp9Refusal;
-  }
   post(
     {
       type: "init",
       canvas: offscreen,
       graphics: offscreenGraphics,
-      software,
-      refused,
+      runs: runnableDecoders(),
     },
     [offscreen, offscreenGraphics],
   );

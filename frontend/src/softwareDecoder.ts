@@ -1,10 +1,14 @@
 // BETA: the page's software decoders, for a stream the browser's `VideoDecoder`
 // does not take, or is not given:
-// - `hevc`, a High Performance Mac's passed HEVC (appleMedia.ts decides):
-//   andrewtheguy/hevc-wasm's decoder, which the gateway serves where it has the
-//   release archive.
-// - `vp9`, the gateway's VP9 at 4:4:4, profile 1 (videoChroma.ts decides):
-//   andrewtheguy/vp9-wasm's decoder, which is in the bundle (frontend/wasm/vp9).
+// - `hevc`, a High Performance Mac's passed HEVC: andrewtheguy/hevc-wasm's
+//   decoder, which the gateway serves where it has the release archive.
+// - `vp9`, the gateway's VP9 at 4:4:4, profile 1: andrewtheguy/vp9-wasm's
+//   decoder, which is in the bundle (frontend/wasm/vp9).
+//
+// Which decodes a stream is the session's to say and no page's: it is chosen at
+// the picker (targetChoices.ts), held by the gateway, and stated with each
+// `videoFormat`, so every page attached to a session builds the same kind of
+// decoder for it (videoDecoder.ts).
 //
 // Each is written for the one stream it decodes and compiled to WebAssembly with
 // SIMD128 and threads, and the two modules present one interface, so one worker
@@ -33,9 +37,6 @@
 
 /** The modules: which stream each decodes is `softwareModuleFor`'s to say. */
 export type SoftwareModule = "hevc" | "vp9";
-
-/** Why a page does not decode a module's streams at all, by module. */
-export type SoftwareRefusals = Partial<Record<SoftwareModule, string>>;
 
 /** What a module decodes, as a sentence names it. */
 export const MODULE_CODEC: Record<SoftwareModule, string> = {
@@ -304,4 +305,13 @@ export function createSoftwareDecoder(
     },
     close,
   };
+}
+
+/** Test seam: end every decode worker, so the next stream starts its module's. */
+export function resetSoftwareDecodersForTests(): void {
+  for (const module of ["hevc", "vp9"] as const) {
+    workers[module]?.terminate();
+    workers[module] = null;
+    clients[module].clear();
+  }
 }

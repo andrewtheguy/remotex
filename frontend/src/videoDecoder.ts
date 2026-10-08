@@ -35,8 +35,7 @@
 import {
   createSoftwareDecoder,
   type DecodedPicture,
-  type SoftwareModule,
-  type SoftwareRefusals,
+  MODULE_CODEC,
   softwareModuleFor,
   type VideoDecoderLike,
   type VideoDecoderLikeInit,
@@ -50,6 +49,12 @@ import {
  */
 export interface VideoFormat {
   decode: string;
+  /**
+   * BETA: the stream is decoded in the page's software decoder for it
+   * (softwareDecoder.ts) and not in the browser's `VideoDecoder`: the session was
+   * started so, and the gateway says it to every page attached.
+   */
+  software?: boolean;
 }
 
 /** The desktop's decoder, rebuilt as the stream it decodes starts over. */
@@ -97,19 +102,12 @@ export function createDesktopVideo(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
   /**
-   * BETA: the modules this page decodes in software (softwareDecoder.ts) rather
-   * than with the browser's `VideoDecoder`: a passed HEVC stream where
-   * appleMedia.ts said so, VP9 profile 1 where videoChroma.ts did. A stream is a
-   * module's by its configuration string, so VP9 profile 0 is the browser's
-   * whatever is listed.
+   * BETA: which of the page's software decoders this page can run
+   * (softwareSupport.ts). A stream the gateway says is decoded in one this page
+   * cannot run is not decoded: the session chose that decoder, and the browser's
+   * own does not stand in for it.
    */
-  software: readonly SoftwareModule[] = [],
-  /**
-   * BETA: the modules whose streams this page does not decode at all, and what
-   * it says of each: a module the page's URL asked for where it is not to be
-   * had (videoChroma.ts), which another decoder does not stand in for.
-   */
-  refused: SoftwareRefusals = {},
+  runs: Readonly<Record<"hevc" | "vp9", boolean>> = { hevc: false, vp9: false },
 ): DesktopVideo {
   interface Live {
     stream: VideoStream;
@@ -137,13 +135,33 @@ export function createDesktopVideo(
     live = null;
   };
 
-  // What builds the decoder of a stream this page decodes in software, or
-  // undefined for the browser's own.
-  const softwareDecoderFor = (decode: string) => {
-    const module = softwareModuleFor(decode);
-    return module !== null && software.includes(module)
-      ? (init: VideoDecoderLikeInit) => createSoftwareDecoder(module, init)
-      : undefined;
+  // Whether the format in force has been said to be one this page cannot decode
+  // as told, so that is one sentence and not one a unit.
+  let said = false;
+
+  // What builds the decoder of a stream the gateway says is the page's own to
+  // decode, or undefined for the browser's own. Null for a stream this page was
+  // told to decode and cannot, which is said and not decoded.
+  const softwareDecoderFor = (format: VideoFormat) => {
+    if (!format.software) {
+      return undefined;
+    }
+    const module = softwareModuleFor(format.decode);
+    if (module !== null && runs[module]) {
+      return (init: VideoDecoderLikeInit) =>
+        createSoftwareDecoder(module, init);
+    }
+    if (!said) {
+      said = true;
+      handlers.onError(
+        module === null
+          ? `This session's picture is decoded by this page, which has no decoder for ${format.decode}.`
+          : `This session's picture is decoded by this page's ${MODULE_CODEC[module]} decoder, which this browser cannot run: it needs WebGL 2 and a cross-origin isolated page. End the session and start it without "Decode in this page".`,
+        false,
+        format.decode,
+      );
+    }
+    return null;
   };
 
   // The decoder, built on demand and replaced when its picture changes.
@@ -175,10 +193,8 @@ export function createDesktopVideo(
         handlers.onNeedsKeyframe(reason);
       }
     };
-    const module = softwareModuleFor(format.decode);
-    const refusal = module === null ? undefined : refused[module];
-    if (refusal !== undefined) {
-      handlers.onError(refusal, false, format.decode);
+    const makeDecoder = softwareDecoderFor(format);
+    if (makeDecoder === null) {
       return null;
     }
     let stream: VideoStream;
@@ -198,7 +214,7 @@ export function createDesktopVideo(
           },
         },
         stallMs,
-        softwareDecoderFor(format.decode),
+        makeDecoder,
       );
     } catch (e) {
       // A throw from here would escape into the paint loop and drop the batch.
@@ -219,7 +235,12 @@ export function createDesktopVideo(
     setFormat(next) {
       format = next;
       warned = false;
-      if (live && live.format.decode !== next.decode) {
+      said = false;
+      if (
+        live &&
+        (live.format.decode !== next.decode ||
+          live.format.software !== next.software)
+      ) {
         // A stream that came back configured differently — a resize is the way this
         // happens — is a new chain, and its old decoder cannot decode it.
         dropDecoder();

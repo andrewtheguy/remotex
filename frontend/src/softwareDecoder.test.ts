@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import {
   createSoftwareDecoder,
+  resetSoftwareDecodersForTests,
   type SoftwareModule,
   type SoftwarePlanes,
   softwareModuleFor,
@@ -165,11 +166,9 @@ test("each module has a decode worker of its own, told which module it is", () =
   const before = globals.Worker;
   globals.Worker = FakeWorker;
   try {
-    // From nothing: a module's worker outlives the streams the tests above
-    // opened, as it does a session's.
-    for (const worker of FakeWorker.made) {
-      worker.onmessage?.({ data: { type: "broken", message: "ended" } });
-    }
+    // From nothing: a module's worker outlives the streams that opened it, as it
+    // does a session's.
+    resetSoftwareDecodersForTests();
     const made = FakeWorker.made.length;
     const init = {
       output: () => assert.fail("no output"),
@@ -201,7 +200,7 @@ test("each module has a decode worker of its own, told which module it is", () =
     assert.equal(vp9.state, "configured");
     vp9.close();
     again.close();
-    workers[0].onmessage?.({ data: { type: "broken", message: "ended" } });
+    resetSoftwareDecodersForTests();
   } finally {
     globals.Worker = before;
   }
