@@ -62,27 +62,35 @@ towards the display beside it is open and every outer edge still clamps the
 pointer, without judging whether a remote window visibly followed the drag.
 
 `software-hevc.spec.ts` is the BETA software HEVC decoder, in a High
-Performance session started with the Mac's stream passed and the page loaded with
-`?hevc_decoder=software`. Against a gateway that has the decoder's archive it
-asserts that the page is cross-origin isolated and says it decodes the Mac's
-stream, that the gateway passes the HEVC, that the page asks for the decoder and
-its worker loads it, and that the first passed keyframe's batch is acknowledged
-with no video error or repaint request before it — an ordering, not a timing,
-because a failed decoder reports before the paint worker acknowledges. Against a
-gateway without the table it asserts the fallback: the page remains isolated,
-asks for the decoder and gets a 404, then selects VP9.
+Performance session started with the Mac's stream passed and *Decode in this
+page* chosen at the picker. Against a gateway that has the decoder's archive it
+asserts that the gateway lists the target as offering the decoder, that Start
+sends both choices, that the gateway passes the HEVC and says with its format
+that this page decodes it, that the decode worker loads the decoder and nothing
+asks for it beforehand, and that the first passed keyframe's batch is
+acknowledged with no video error or repaint request before it — an ordering, not
+a timing, because a failed decoder reports before the paint worker acknowledges.
+Against a gateway without the archive it asserts the other decision, in a
+browser whose own decoder refuses the Mac's HEVC, which Playwright's Chromium
+is: the target offers no such decoder, the session starts without the
+passthrough and is sent VP9, and nothing under `/hevc/` is asked for.
 
 `software-vp9.spec.ts` is the BETA software VP9 decoder, the vp9-wasm module in
-the bundle, on a gateway whose config sets `[vp9_wasm]`. Chromium decodes VP9
-profile 1 itself, so the page is loaded with `?vp9_decoder=software` to take the
-module. It asserts that the gateway says it allows the module, that the page asks
-for 4:4:4 and is announced profile 1, that the decode worker loads the module's
-file, once, that the first keyframe's batch is acknowledged with no video error
-or repaint request before it, and that the page shows the canvas the module's
-planes are drawn on. Without the switch in the URL it asserts the other decision:
-the same 4:4:4, the module never fetched, and that canvas hidden. Against a
-gateway without the table it asserts that the switch fails the stream, with an
-alert naming the table, and the module never fetched.
+the bundle, on a gateway whose config sets `[vp9_wasm]`, in a session started
+with *Decode in this page*. It asserts that the gateway lists the target as
+offering the decoder, that Start sends the choice, that every format announced
+is profile 1 and says this page decodes it, that the decode worker loads the
+module's file, once, that the first keyframe's batch is acknowledged with no
+video error or repaint request before it, and that the page shows the canvas the
+module's planes are drawn on. The page is then reloaded, which sends no
+`connect`: it must be told the same of the stream it is repainted with, since
+the choice is the session's. A second case makes the browser answer no to
+profile 1, as iOS Safari does, by replacing `isConfigSupported` for that one
+question: the row is then found ticked, the socket says `chroma=420`, and the
+session is 4:4:4 decoded in the module all the same. With the row unticked it
+asserts the other decision: the browser's own decoder, the module never fetched,
+and that canvas hidden. Against a gateway without the table it asserts that the
+picker has no such row.
 
 `soft-keyboard.spec.ts` is the soft keyboard, read from the same socket: that a
 key tapped on it is the `key` frames the page sends, down then up; that a tapped
@@ -261,7 +269,7 @@ bun run test:hevc
 ```
 
 Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`,
-which runs the fallback test instead.
+which runs the test that the target offers no such decoder instead.
 
 The software VP9 spec needs a gateway whose config sets `[vp9_wasm] enabled =
 true` and has a live target that leaves `render_chroma` unset, named by
@@ -281,7 +289,7 @@ bun run test:vp9
 ```
 
 Against a gateway without the table, add `REMOTEX_PLAYWRIGHT_VP9_WASM=0`, which
-runs the test that the switch fails the stream by name instead.
+runs the test that the picker has no such row instead.
 
 The audio and picker specs use the test-tone gateway instead of a live target:
 
