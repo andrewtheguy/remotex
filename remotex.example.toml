@@ -91,8 +91,8 @@
 # it out of every remotex build as the native decoder's keeps that out: download
 # the release this gateway pins from the private andrewtheguy/hevc-wasm-archives,
 #
-#   gh release download v0.0.3 --repo andrewtheguy/hevc-wasm-archives \
-#     --pattern hevc-wasm-v0.0.3.tar.gz
+#   gh release download v0.0.6 --repo andrewtheguy/hevc-wasm-archives \
+#     --pattern hevc-wasm-v0.0.6.tar.gz
 #
 # as it is, into share/remotex in the gateway's release tree, beside the
 # share/doc/remotex that holds this file: /usr/share/remotex for the .deb and
@@ -111,7 +111,7 @@
 # compositor's threads; the decoder's threads require that isolation too.
 #
 #[hevc_wasm]
-#archive = "/srv/remotex/hevc-wasm-v0.0.3.tar.gz"
+#archive = "/srv/remotex/hevc-wasm-v0.0.6.tar.gz"
 
 # BETA: lets a session be started with its VP9 decoded by the page, at 4:4:4,
 # for a browser whose own VideoDecoder refuses VP9 profile 1 — Safari on iOS and

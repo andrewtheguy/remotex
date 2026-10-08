@@ -24,10 +24,10 @@ use flate2::read::GzDecoder;
 use sha2::{Digest as _, Sha256};
 
 /// The hevc-wasm release this gateway's page is written against.
-pub const VERSION: &str = "0.0.3";
+pub const VERSION: &str = "0.0.6";
 
 /// The SHA-256 of that release's archive, as its `SHA256SUMS` publishes it.
-const SHA256: &str = "b973fb00a981dd5a81919fe4cad86099a0ea02e83cbc37e571c2773f43a85ab9";
+const SHA256: &str = "6e465902d1696bb2ad4ca8ad9bd1a5d7d378097c285f285621fdfbe9dd22d0ae";
 
 /// The archive's name as released, which is also `[hevc_wasm].archive`'s default.
 pub fn archive_name() -> String {
