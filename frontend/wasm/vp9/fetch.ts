@@ -19,6 +19,8 @@ const url = `https://github.com/andrewtheguy/vp9-wasm/releases/download/v${pin.v
 const pkg = join(import.meta.dir, "pkg");
 /** The digest of the archive `pkg/` was unpacked from. */
 const stamp = join(pkg, ".sha256");
+/** How long the release's download may take, headers and body. */
+const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 async function unpacked(): Promise<boolean> {
   return (
@@ -33,13 +35,27 @@ async function archive(): Promise<{ bytes: Uint8Array; from: string }> {
   if (local) {
     return { bytes: await Bun.file(local).bytes(), from: local };
   }
-  const response = await fetch(url);
-  if (!response.ok) {
+  const instead = `set REMOTEX_VP9_WASM_ARCHIVE to a copy of ${name}`;
+  try {
+    // The headers and the body both: a download that stalls ends the build
+    // with what to do about it, not a hang.
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      throw new Error(`${url} answered ${response.status}: ${instead}`);
+    }
+    return { bytes: await response.bytes(), from: url };
+  } catch (cause) {
+    if (cause instanceof Error && cause.message.endsWith(instead)) {
+      throw cause;
+    }
+    const timedOut = cause instanceof Error && cause.name === "TimeoutError";
     throw new Error(
-      `${url} answered ${response.status}: set REMOTEX_VP9_WASM_ARCHIVE to a copy of ${name}`,
+      `${url} ${timedOut ? `did not arrive in ${DOWNLOAD_TIMEOUT_MS / 1000} s` : "could not be fetched"}: ${instead}`,
+      { cause },
     );
   }
-  return { bytes: await response.bytes(), from: url };
 }
 
 /** The regular files of a tar archive, by name. */
