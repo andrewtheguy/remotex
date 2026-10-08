@@ -50,20 +50,9 @@ test("an unreachable gateway answers with the fallback rather than rejecting", a
     false,
     "no gateway answered, so there is no icon to ask for",
   );
-  assert.equal(config.vp9Wasm, false, "nor leave to decode 4:4:4 in the page");
 
   // And memoized even in failure: one unreachable gateway is one request, not one per
   // caller. Identity, so this says nothing about how many callers there were.
   assert.equal(gatewayConfig(), gatewayConfig());
   assert.equal(fetches, 1, "a failed config request was retried per caller");
-});
-
-test("the page decodes VP9 in software only for a gateway that says so in as many words", async () => {
-  const { parseGatewayConfig } = await import("./gatewayConfig.ts");
-  assert.equal(parseGatewayConfig({ vp9Wasm: true }).vp9Wasm, true);
-  assert.equal(parseGatewayConfig({}).vp9Wasm, false);
-  assert.equal(
-    parseGatewayConfig({ vp9Wasm: "true" as unknown as boolean }).vp9Wasm,
-    false,
-  );
 });

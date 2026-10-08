@@ -3,7 +3,6 @@ import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
 import { chooseAppleMedia } from "./appleMedia.ts";
-import { gatewayConfig } from "./gatewayConfig.ts";
 import { startupPermitted } from "./preflight.ts";
 import { chooseRdpH264 } from "./rdpH264.ts";
 import { chooseVideoChroma } from "./videoChroma.ts";
@@ -20,15 +19,9 @@ if (!root) {
 // Performance Mac's HEVC, and whether it takes the H.264 of an RDP host's pipeline
 // — whose answers every session socket this page opens carries (videoChroma.ts,
 // appleMedia.ts, rdpH264.ts). Awaited here so that nothing downstream has to wait
-// on it or carry a path for its absence. The chroma's question is answered with
-// the gateway's public config, which says whether the page may decode 4:4:4
-// itself: it is waited for there, and is the request `App` shares.
+// on it or carry a path for its absence.
 if (startupPermitted(root)) {
-  await Promise.all([
-    chooseVideoChroma(gatewayConfig().then((config) => config.vp9Wasm)),
-    chooseAppleMedia(),
-    chooseRdpH264(),
-  ]);
+  await Promise.all([chooseVideoChroma(), chooseAppleMedia(), chooseRdpH264()]);
   createRoot(root).render(
     <StrictMode>
       <App />

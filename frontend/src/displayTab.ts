@@ -12,16 +12,10 @@
 // (`standAlone`): it claims nothing and is let in by the login cookie alone. The
 // reference is made again each time the tab is found, and dropped here then.
 import { GATEWAY_ORIGIN, gatewayUrl } from "./gateway.ts";
-import { softwareSwitches } from "./softwareSupport.ts";
 
-/**
- * The page of the display shown in tab `tab`, with this page's software decoder
- * switches: the answers a page gives at load are the browser's and the
- * gateway's, which the two pages share, and the URL's, which they share by this.
- * So a display's tab decodes with the kind of decoder its session's page does.
- */
+/** The page of the display shown in tab `tab`. */
 export function displayTabUrl(tab: number): string {
-  return gatewayUrl(`/display/${tab}`) + softwareSwitches();
+  return gatewayUrl(`/display/${tab}`);
 }
 
 /** The window name the tab showing display `tab` is opened under. */
@@ -31,12 +25,7 @@ export function displayTabName(tab: number): string {
 
 /** As much of a window as finding a display's tab takes. */
 export interface TabWindow {
-  location: {
-    origin: string;
-    pathname: string;
-    search: string;
-    replace(url: string): void;
-  };
+  location: { origin: string; pathname: string; replace(url: string): void };
   opener: unknown;
   focus(): void;
 }
@@ -61,9 +50,7 @@ export function showDisplayTab(
   try {
     there =
       shown.location.origin === GATEWAY_ORIGIN &&
-      shown.location.pathname.replace(/\/$/, "") === `/display/${tab}` &&
-      // One opened under other switches decodes otherwise, and is loaded again.
-      softwareSwitches(shown.location.search) === softwareSwitches();
+      shown.location.pathname.replace(/\/$/, "") === `/display/${tab}`;
   } catch {
     // The tab was since taken to another site, whose address is not ours to read.
   }

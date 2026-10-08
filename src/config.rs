@@ -329,6 +329,10 @@ pub struct RenderPlan {
     /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
     /// [`Self::rdp_graphics`].
     pub rdp_h264: bool,
+    /// BETA: the streams of this session every attached page decodes in its own
+    /// software decoders, as each `videoFormat` then says ([`Choices::software`]).
+    /// With its VP9 among them, [`Self::chroma`] is 4:4:4.
+    pub software: PageDecoders,
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
@@ -383,6 +387,38 @@ impl Passthrough {
     }
 }
 
+/// BETA: the page's software decoders, by the stream each decodes: VP9 at 4:4:4
+/// (andrewtheguy/vp9-wasm, in the page's bundle) and a High Performance Mac's
+/// HEVC (andrewtheguy/hevc-wasm, which a gateway that has its archive serves).
+///
+/// As a gateway's, which of them it has for a page: `[vp9_wasm].enabled`, and the
+/// archive it read ([`crate::hevc_wasm`]). As a target's, which a session on it can
+/// be decoded with ([`TargetConfig::software`]), which `/api/targets` states. As a
+/// plan's, which a session started with [`Choices::software`] is: every page
+/// attached to it is told so, format by format ([`Self::decodes`]), so no two of
+/// them decode one session differently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PageDecoders {
+    pub vp9: bool,
+    pub hevc: bool,
+}
+
+impl PageDecoders {
+    /// Neither: a session decoded by the browser's own decoder.
+    pub const NONE: Self = Self { vp9: false, hevc: false };
+
+    pub fn any(self) -> bool {
+        self.vp9 || self.hevc
+    }
+
+    /// Whether a stream announced as `decode`, a WebCodecs configuration string,
+    /// is one of these decoders': VP9 profile 1, which is 4:4:4, or HEVC.
+    pub fn decodes(self, decode: &str) -> bool {
+        (self.vp9 && decode.starts_with("vp09.01."))
+            || (self.hevc && (decode.starts_with("hev1.") || decode.starts_with("hvc1.")))
+    }
+}
+
 /// Which choices the picker shows under a target: what its type has to offer, from
 /// [`TargetConfig::offers`]. One that is not offered has no row there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -427,6 +463,13 @@ pub struct Choices {
     /// Where the second virtual display sits.
     #[serde(default)]
     pub placement: Placement,
+    /// BETA: decode the session's picture in the page's software decoders
+    /// ([`PageDecoders`]) and not in the browser's own: its VP9, which is then
+    /// 4:4:4 whatever the browser's decoder takes, and a Mac's HEVC where that is
+    /// passed. Refused where the gateway and the target have neither decoder for
+    /// the session ([`TargetConfig::accepts_software`]).
+    #[serde(default)]
+    pub software: bool,
 }
 
 impl Choices {
@@ -591,6 +634,14 @@ impl From<Chroma> for Decoders {
 }
 
 impl RenderPlan {
+    /// This plan for a session whose pages decode `software` themselves: the VP9
+    /// module decodes 4:4:4 alone, so that is the chroma, whatever the browser's
+    /// own decoder said it takes.
+    pub fn decoded_by_page(self, software: PageDecoders) -> Self {
+        let chroma = if software.vp9 { Chroma::Full } else { self.chroma };
+        Self { chroma, software, ..self }
+    }
+
     /// The stream this plan passes untouched, if any.
     pub fn passthrough(&self) -> Option<Passthrough> {
         if self.apple_media {
@@ -1006,7 +1057,49 @@ impl TargetConfig {
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
         let rdp_h264 = rdp_graphics && self.egfx_h264 && decoders.rdp_h264;
-        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics, rdp_h264 }
+        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics, rdp_h264, software: PageDecoders::default() }
+    }
+
+    /// BETA: which of the page's software decoders a session on this target can
+    /// be decoded with, of those the `gateway` has: VP9's unless the target holds
+    /// every browser to 4:2:0, which that decoder does not take, and HEVC's on a
+    /// target with a Mac's picture to pass.
+    pub fn software(&self, gateway: PageDecoders) -> PageDecoders {
+        PageDecoders {
+            vp9: gateway.vp9 && self.render_chroma.unwrap_or_default() != ChromaChoice::Subsampled,
+            hevc: gateway.hevc && self.offers().passthrough == Some(Passthrough::AppleMedia),
+        }
+    }
+
+    /// Which of them a session started with `choices` is decoded with: none
+    /// unless it chose so, and HEVC's only while the Mac's picture is passed.
+    pub fn software_chosen(&self, choices: Choices, gateway: PageDecoders) -> PageDecoders {
+        if !choices.software {
+            return PageDecoders::default();
+        }
+        let offered = self.software(gateway);
+        PageDecoders {
+            vp9: offered.vp9,
+            hevc: offered.hevc && self.passthrough(choices) == Some(Passthrough::AppleMedia),
+        }
+    }
+
+    /// Whether `choices`' software decoding is something this target and the
+    /// `gateway` have for the session. One that asks where neither decoder would
+    /// decode anything is refused, not started on the browser's own decoder.
+    pub fn accepts_software(&self, choices: Choices, gateway: PageDecoders) -> Result<(), NotOffered> {
+        if choices.software && !self.software_chosen(choices, gateway).any() {
+            return Err(NotOffered { target: self.name.clone(), choice: "decoding in the page" });
+        }
+        Ok(())
+    }
+
+    /// The passthrough a session started with `choices` runs on that `decoders`'
+    /// browser cannot take, given the page's own decoders the session has
+    /// (`software`): the Mac's HEVC is taken by a page that decodes it itself.
+    pub fn beyond_page(&self, choices: Choices, decoders: Decoders, software: PageDecoders) -> Option<Passthrough> {
+        self.beyond(choices, decoders)
+            .filter(|passthrough| !(software.hevc && *passthrough == Passthrough::AppleMedia))
     }
 
     /// The choices the picker shows under this target.
@@ -2925,6 +3018,65 @@ mod tests {
         }
     }
 
+    /// A session is decoded by its pages' own decoders where it chose that and
+    /// the gateway and the target have one for it: VP9's unless the target holds
+    /// every browser to 4:2:0, and HEVC's while a Mac's picture is passed. The VP9
+    /// is then 4:4:4 whatever the browser's decoder said, and a choice that
+    /// would decode nothing is refused by name.
+    #[test]
+    fn a_session_is_decoded_by_the_page_where_the_gateway_and_the_target_have_the_decoder() {
+        let both = PageDecoders { vp9: true, hevc: true };
+        let vp9 = PageDecoders { vp9: true, hevc: false };
+        let hevc = PageDecoders { vp9: false, hevc: true };
+        let target = |keys: &str| parse_target(keys).unwrap().targets.remove(0);
+        let auto = target("");
+        let subsampled = target("render_chroma = \"420\"");
+        let mac = ConfigFile::parse(&vnc_toml(
+            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n",
+        ))
+        .unwrap()
+        .targets
+        .remove(0);
+
+        assert_eq!(auto.software(both), vp9, "an RDP host has no HEVC to pass");
+        assert_eq!(auto.software(hevc), PageDecoders::NONE);
+        assert_eq!(subsampled.software(both), PageDecoders::NONE, "the module takes no 4:2:0");
+        assert_eq!(mac.software(both), both);
+
+        let chosen = Choices { software: true, ..Choices::default() };
+        let passed = Choices { passthrough: true, ..chosen };
+        assert_eq!(auto.software_chosen(Choices::default(), both), PageDecoders::NONE, "only where chosen");
+        assert_eq!(mac.software_chosen(chosen, both), vp9, "its HEVC is not passed");
+        assert_eq!(mac.software_chosen(passed, both), both);
+        assert_eq!(mac.software_chosen(passed, hevc), hevc);
+
+        assert_eq!(auto.accepts_software(Choices::default(), PageDecoders::NONE), Ok(()));
+        assert_eq!(auto.accepts_software(chosen, vp9), Ok(()));
+        for (target, choices, gateway) in
+            [(&auto, chosen, PageDecoders::NONE), (&auto, chosen, hevc), (&subsampled, chosen, both), (&mac, chosen, hevc)]
+        {
+            let refused = target.accepts_software(choices, gateway).unwrap_err();
+            assert_eq!(refused.choice, "decoding in the page");
+            assert!(refused.to_string().contains("does not offer decoding in the page"), "{refused}");
+        }
+
+        // The browser's own answer selects nothing in such a session.
+        let declines = Decoders { chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
+        let plan = auto.render_plan(chosen, declines).decoded_by_page(auto.software_chosen(chosen, vp9));
+        assert_eq!((plan.chroma, plan.software), (Chroma::Full, vp9));
+        let plan = mac.render_plan(passed, declines).decoded_by_page(mac.software_chosen(passed, hevc));
+        assert_eq!((plan.chroma, plan.software), (Chroma::Subsampled, hevc), "its VP9 stays the browser's");
+        // And a Mac's passed picture is not beyond a page that decodes it itself.
+        assert_eq!(mac.beyond_page(passed, declines, PageDecoders::NONE), Some(Passthrough::AppleMedia));
+        assert_eq!(mac.beyond_page(passed, declines, hevc), None);
+
+        assert!(vp9.decodes("vp09.01.40.08.03.06.06.06.00"));
+        assert!(!vp9.decodes("vp09.00.40.08.01.06.06.06.00"), "profile 0 is the browser's");
+        assert!(!vp9.decodes("hev1.4.10.L150.BE.8"));
+        assert!(hevc.decodes("hev1.4.10.L150.BE.8"));
+        assert!(!PageDecoders::NONE.decodes("vp09.01.40.08.03.06.06.06.00"));
+    }
+
     /// `[hp_decoders]` is Windows': a gateway there names the folder its decoder
     /// is loaded from, a whole path. Every other gateway refuses the table, its
     /// loader having a search of its own.
@@ -3233,6 +3385,7 @@ mod tests {
                     apple_media: false,
                     rdp_graphics: false,
                     rdp_h264: false,
+                    software: Default::default(),
                 }
             );
         }
@@ -3250,6 +3403,7 @@ mod tests {
                 apple_media: false,
                 rdp_graphics: false,
                 rdp_h264: false,
+                software: Default::default(),
             }
         );
     }
@@ -3279,6 +3433,7 @@ mod tests {
             apple_media: false,
             rdp_graphics: false,
             rdp_h264: false,
+            software: Default::default(),
         };
         assert_eq!(video("", Chroma::Full), stream(Chroma::Full));
         assert_eq!(video("", Chroma::Subsampled), stream(Chroma::Subsampled));
@@ -4367,7 +4522,7 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() });
         assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive");
     }
 
@@ -4379,7 +4534,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() });
         assert_eq!(plan.describe(), "video q80 4:2:0");
     }
 
