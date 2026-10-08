@@ -1780,6 +1780,8 @@ impl BesidePlan {
     ) -> Beside {
         let (input, input_rx) = mpsc::unbounded_channel();
         let BesidePlan { config, choices, display: screen } = self.clone();
+        // `--vp9-capture` keeps the first display alone.
+        let plan = plan.captured(None);
         let oversize = if choices.resize() { Oversize::Refuse } else { Oversize::Hold };
         // On a thread and a runtime of its own, as the session's engine is on
         // its: a session's future is not one a runtime may move between threads.
@@ -6508,7 +6510,8 @@ async fn hp_tab_shown(
     info!("vnc: showing display {display} in a tab of its own");
     *shared.tab.lock().unwrap() = Some(TabFeed {
         display,
-        sink: VideoSink::new("vnc", feed.frames, plan, feed.feedback, Oversize::Refuse),
+        // `--vp9-capture` keeps the first display alone.
+        sink: VideoSink::new("vnc", feed.frames, plan.captured(None), feed.feedback, Oversize::Refuse),
         shadow: Arc::new(std::sync::Mutex::new(Shadow::new("vnc", shown.size.0, shown.size.1))),
         live: false,
         covered: true,

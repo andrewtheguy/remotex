@@ -1,6 +1,6 @@
-//! `remotex serve --vp9-capture <DIR>`: every VP9 stream this gateway encodes, kept on disk
-//! for analysis. Only the command line turns it on, so a config file copied between
-//! gateways can never start filling a disk.
+//! `remotex serve --vp9-capture <DIR>`: the VP9 streams this gateway encodes for a
+//! session's first display, kept on disk for analysis. Only the command line turns it
+//! on, so a config file copied between gateways can never start filling a disk.
 //!
 //! One file per stream ([`crate::vp9::Stream`]), which is one picture size from a
 //! keyframe on: a resize, or a stream rebuilt for any other reason, starts the next
@@ -9,7 +9,8 @@
 //! frame's time, bytes, whether it was a keyframe and the dial it was coded at. The
 //! timestamps count from the stream's first frame.
 //!
-//! Only what is encoded here is kept. A passed stream is the remote's, and a frame
+//! Only the session's first display is kept: a display shown in a tab of its own
+//! is a stream of its own, and is not written. Only what is encoded here is kept. A passed stream is the remote's, and a frame
 //! the encoder produced no bitstream for is not a frame.
 //!
 //! The frame count in the header is rewritten after every frame, so a file is whole
@@ -36,7 +37,7 @@ const FRAME_COUNT_AT: u64 = 24;
 /// directory it cannot make is a refused start.
 pub fn prepare(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("cannot make the VP9 capture directory {}", dir.display()))?;
-    log::info!("capturing every VP9 stream this gateway encodes to {}", dir.display());
+    log::info!("capturing the VP9 streams of each session's first display to {}", dir.display());
     Ok(())
 }
 

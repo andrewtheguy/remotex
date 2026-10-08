@@ -57,8 +57,9 @@ pub enum Commands {
         #[arg(short, long, env = "REMOTEX_LISTEN")]
         listen: Option<String>,
 
-        /// Also write every VP9 stream this gateway encodes to DIR, for analysis:
-        /// one IVF file per stream, with a CSV of its frames beside it. Made if
+        /// Also write every VP9 stream this gateway encodes for a session's first
+        /// display to DIR, for analysis: one IVF file per stream, with a CSV of its
+        /// frames beside it. A display shown in a tab of its own is not written. Made if
         /// missing; nothing in it is ever removed. Only this option turns it on —
         /// no config key or environment variable does
         #[arg(long, value_name = "DIR")]

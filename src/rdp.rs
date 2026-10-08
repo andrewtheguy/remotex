@@ -1863,7 +1863,8 @@ async fn active_loop(
                                 sink: Arc::new(VideoSink::new(
                                     "rdp",
                                     feed.frames,
-                                    plan.clone(),
+                                    // `--vp9-capture` keeps the first display alone.
+                                    plan.clone().captured(None),
                                     feed.feedback,
                                     Oversize::Refuse,
                                 )),
