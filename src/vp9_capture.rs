@@ -106,17 +106,45 @@ impl StreamCapture {
             Chroma::Subsampled => "420",
             Chroma::Full => "444",
         };
-        let name = format!("{}-{}-{w}x{h}-{chroma}.ivf", file_safe(&self.capture.target), utc_stamp(SystemTime::now()));
-        let ivf_path = self.capture.dir.join(name);
-        let mut csv_path = ivf_path.clone().into_os_string();
-        csv_path.push(".csv");
-        let mut ivf = File::create_new(&ivf_path).with_context(|| format!("creating {}", ivf_path.display()))?;
+        let stem = format!("{}-{}-{w}x{h}-{chroma}", file_safe(&self.capture.target), utc_stamp(SystemTime::now()));
+        let (ivf_path, mut ivf, mut csv) = create_pair(&self.capture.dir, &stem)?;
         ivf.write_all(&header(w, h)).with_context(|| format!("writing {}", ivf_path.display()))?;
-        let mut csv = File::create_new(&csv_path).with_context(|| format!("creating {}", Path::new(&csv_path).display()))?;
         csv.write_all(b"frame,ms,bytes,keyframe,quality\n").with_context(|| format!("writing {}.csv", ivf_path.display()))?;
         log::info!("video: capturing the stream to {}", ivf_path.display());
         Ok(Files { ivf, csv, ivf_path, started: Instant::now(), frames: 0 })
     }
+}
+
+/// Most names [`create_pair`] tries for one stem before giving up.
+const NAME_ATTEMPTS: u32 = 1000;
+
+/// Create `<stem>.ivf` and its `.csv` in `dir`, both new, taking `<stem>-2`, `-3`
+/// and on where either is taken: two streams of one target, size and chroma can
+/// start within a millisecond, and a wall clock can step back onto an old name.
+fn create_pair(dir: &Path, stem: &str) -> anyhow::Result<(PathBuf, File, File)> {
+    for attempt in 1..=NAME_ATTEMPTS {
+        let name = if attempt == 1 { format!("{stem}.ivf") } else { format!("{stem}-{attempt}.ivf") };
+        let ivf_path = dir.join(name);
+        let mut csv_path = ivf_path.clone().into_os_string();
+        csv_path.push(".csv");
+        let csv_path = PathBuf::from(csv_path);
+        let ivf = match File::create_new(&ivf_path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", ivf_path.display())),
+        };
+        match File::create_new(&csv_path) {
+            Ok(csv) => return Ok((ivf_path, ivf, csv)),
+            Err(e) => {
+                drop(ivf);
+                std::fs::remove_file(&ivf_path).with_context(|| format!("removing {}", ivf_path.display()))?;
+                if e.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(e).with_context(|| format!("creating {}", csv_path.display()));
+                }
+            }
+        }
+    }
+    anyhow::bail!("{NAME_ATTEMPTS} capture files named {stem} already exist in {}", dir.display())
 }
 
 /// An IVF header for a VP9 stream of a `w`×`h` picture in milliseconds, its frame
@@ -175,6 +203,21 @@ mod tests {
         // 2024-02-29 is a leap day, and 23:59:59.999 the last instant of it.
         assert_eq!(utc_stamp(UNIX_EPOCH + Duration::from_millis(1_709_251_199_999)), "20240229-235959.999");
         assert_eq!(utc_stamp(UNIX_EPOCH + Duration::from_secs(1_791_331_200)), "20261007-000000.000");
+    }
+
+    /// A name already taken, by either file of a pair, moves the stream to the next
+    /// suffix rather than losing it.
+    #[test]
+    fn a_name_already_taken_takes_the_next_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, ..) = create_pair(dir.path(), "t").unwrap();
+        // An orphaned `.csv` holds `t-2` without its `.ivf`.
+        std::fs::write(dir.path().join("t-2.ivf.csv"), "").unwrap();
+        let (third, ..) = create_pair(dir.path(), "t").unwrap();
+        assert_eq!(first, dir.path().join("t.ivf"));
+        assert_eq!(third, dir.path().join("t-3.ivf"));
+        assert!(!dir.path().join("t-2.ivf").exists(), "the half-made pair was left behind");
+        assert!(dir.path().join("t-3.ivf.csv").exists());
     }
 
     #[test]
