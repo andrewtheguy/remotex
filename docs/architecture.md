@@ -1206,8 +1206,8 @@ A page builds its decoder from that flag and from nothing of its own
 (`frontend/src/videoDecoder.ts`): no URL switch, no answer of the page's. So
 the session's page, the same page reloaded and a second display's tab, however
 that was opened, decode one session with the same kind of decoder. The Info
-card's Video row, and a display tab's menu, end with which it is: the browser,
-or this page in WebAssembly.
+card's Video row, and a display tab's menu, end with which it is: the browser's
+native decoder, or this page's WebAssembly decoder.
 
 **Nothing stands in for a decoder that was chosen.** A `connect` that asks
 where the gateway and the target have no decoder for the session's picture,

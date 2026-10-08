@@ -310,7 +310,7 @@ test.describe("a VP9 target and the page's software decoder", () => {
     }
     await firstKeyframeAcknowledged(page, seen);
     await expect(page.locator("canvas.graphics")).toBeVisible();
-    await expectInfo(page, "decoded in WebAssembly by this page");
+    await expectInfo(page, "decoded by this page's WebAssembly decoder");
 
     await returnToPicker(page);
     const formats = () => seen.sockets.flat();
@@ -330,7 +330,7 @@ test.describe("a VP9 target and the page's software decoder", () => {
       expect(format.software, "the second session's format").toBe(false);
     }
     await expect(page.locator("canvas.graphics")).toBeHidden();
-    await expectInfo(page, "decoded by the browser");
+    await expectInfo(page, "decoded by the browser's native decoder");
   });
 
   test("on a gateway that does not enable it, the picker has no such row", async ({

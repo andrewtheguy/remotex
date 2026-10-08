@@ -94,18 +94,18 @@ test("the video row waits for the format, then names it and whose stream it is",
   assert.equal(videoLabel(null, null), "Waiting for the video format");
   assert.equal(
     videoLabel({ decode: "vp09.00.40.08", passthrough: false }, null),
-    "vp09.00.40.08 · encoded by the gateway · decoded by the browser",
+    "vp09.00.40.08 · encoded by the gateway · decoded by the browser's native decoder",
   );
   assert.equal(
     videoLabel({ decode: "hev1.4.10.L150.BE.8", passthrough: true }, null),
-    "hev1.4.10.L150.BE.8 · passthrough from the remote · decoded by the browser",
+    "hev1.4.10.L150.BE.8 · passthrough from the remote · decoded by the browser's native decoder",
   );
   assert.equal(
     videoLabel(
       { decode: "vp09.01.40.08", passthrough: false, software: true },
       null,
     ),
-    "vp09.01.40.08 · encoded by the gateway · decoded in WebAssembly by this page",
+    "vp09.01.40.08 · encoded by the gateway · decoded by this page's WebAssembly decoder",
   );
   assert.equal(
     videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "size"),
