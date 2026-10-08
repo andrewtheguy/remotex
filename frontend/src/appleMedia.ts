@@ -5,8 +5,8 @@
 // The two halves are separate questions with separate consequences:
 // - The picture. A session started with the Mac's picture passed sends its HEVC as
 //   it came, instead of VP9 encoded from decoded pictures. The picker offers that
-//   choice only to a browser that says yes here, and greys it for one that says no,
-//   which starts the target with VP9 as from any other. The answer rides every
+//   choice to a browser that says yes here, or whose page can decode the picture
+//   itself, and greys it for any other, which starts the target with VP9. The answer rides every
 //   session socket this page opens (`gateway.ts`), for the same reason the chroma
 //   does: a page that comes back to its session saying no is returned to the
 //   picker instead of being sent what it cannot decode.
@@ -28,22 +28,15 @@
 //   yes to both forms, so a yes only narrows the forms worth decoding and decoding
 //   picks one.
 //
-// BETA: a picture the browser's `VideoDecoder` refuses can still be decoded
-// in software — andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and
-// compiled to WebAssembly with SIMD128 and threads (hevcWasmDecoder.ts) — where the gateway has the decoder's
-// archive, and so serves it, and the browser runs shared-memory SIMD
-// WebAssembly on the cross-origin isolated page every gateway serves, and presents
-// its pictures on a WebGL 2 canvas (hevcPicture.ts). The page asks the
-// gateway for the decoder rather than assuming it. Chrome on a GPU without HEVC
-// Range Extensions then says yes, decoding the picture here. `?hevc_decoder=software` in the page's URL takes the
-// software decoder even where the browser's own would do, to try it.
+// The picture's answer is the browser's own decoder's and nothing else's. A
+// picture it refuses can still be decoded by the page, in a session started so
+// at the picker (targetChoices.ts): that is the session's choice, which the
+// gateway holds and tells every page of, and not this page's answer.
 //
 // The other way round from the chroma on a doubt. VP9 is what every browser here
 // decodes, so only a definite "yes" offers the Mac's picture, and anything that
 // throws reads as "no". The one target it can leave unstartable is a Mac on a gateway
 // whose host lacks the HEVC decoder's library, which has no other picture to send.
-
-import { hevcDecoderUrl } from "./gateway.ts";
 
 /**
  * The picture asked about: macwork's stream, 1600×1000, as its sequence parameter
@@ -66,7 +59,7 @@ const ELD_UNIT =
   "if////wdb7QoEQX5+fPnj64ZercOrmZxlTXLPDnPQjO35Hiu7IH2xLp/sEn0L1kRq36BpEhJqdBEZM6DJHKTXVI365CnaJYPFk4l8jSwxA6CS5OQ1EZkuzIRKTMJvjkbMshPhkiyicnFkaWdoRpJ9cmq2RhYuxDEgUSYbxHJ5m7K1pYbBcQR0eWrDBEhVMh4cjpcSRrkJDiSbbI3rBFo/21Q1yNuZYoO0smxyMtsuhr4ie+RwsuzT7UIpvEb0miQPBEc0jOZ8y4SIoxGMfkmGkRQyMYnYMgkSRyMg/dOIkRxiMY36XukiuuRqv/O/MkV1SNRujcukQOItBiuac6tItBpHNOdW49ZiOK51Zj1eI4rnVePV4jiuTVYCrEcJuklikp2K3SOxR07FbpHYo6dhtuisUdOw3feFak77wrUnfeFak77wrUnMeFak5jwrUnMeFak5jtrUm5xWTXOKyaxxWTWOKyaTNZNJmsmkzWTSZrJs8OeHPDnhkQ95AA=";
 
 /**
- * How long one decode attempt, or the gateway asked for the software decoder, may
+ * How long one decode attempt may
  * take to answer before it counts as a no: the page mounts only once every answer is
  * in.
  */
@@ -105,10 +98,7 @@ type Description = (config: Uint8Array) => Uint8Array;
 
 const FORMS: Description[] = [(config) => config, esDescriptor];
 
-/** Who decodes the Mac's picture: the browser's `VideoDecoder`, or hevc-wasm. */
-export type HevcDecoder = "native" | "software";
-
-let answer: { picture: HevcDecoder | null } | null = null;
+let answer: boolean | null = null;
 
 /**
  * The form the sound decoded in, null for neither, and undefined until the
@@ -117,115 +107,15 @@ let answer: { picture: HevcDecoder | null } | null = null;
 let soundForm: Description | null | undefined;
 let soundProbe: Promise<void> | null = null;
 
-/** A function returning a SIMD128 value, which only a SIMD engine validates. */
-const SIMD_PROBE = Uint8Array.of(
-  0,
-  97,
-  115,
-  109,
-  1,
-  0,
-  0,
-  0,
-  1,
-  5,
-  1,
-  96,
-  0,
-  1,
-  123,
-  3,
-  2,
-  1,
-  0,
-  10,
-  10,
-  1,
-  8,
-  0,
-  65,
-  0,
-  253,
-  15,
-  253,
-  98,
-  11,
-);
-
-/**
- * Whether this browser presents the software decoder's pictures (hevcPicture.ts): on
- * a WebGL 2 canvas off the page, as the paint worker's is, that can be given the
- * Mac's primaries. Asked here because a yes that cannot be presented is a session
- * with no picture, where a no is one sent VP9.
- */
-function presentsSoftwarePictures(): boolean {
-  const gl = new OffscreenCanvas(1, 1).getContext("webgl2");
-  if (!gl || gl.isContextLost()) {
-    return false;
-  }
-  const takesPrimaries = "drawingBufferColorSpace" in gl;
-  gl.getExtension("WEBGL_lose_context")?.loseContext();
-  return takesPrimaries;
-}
-
-/**
- * Whether the gateway serves the software decoder, this page can run it, and it can
- * present its pictures.
- */
-async function decodesPictureInSoftware(): Promise<boolean> {
-  try {
-    // Every gateway isolates the page; a proxy that drops the headers does not,
-    // and says so first.
-    if (globalThis.crossOriginIsolated !== true) {
-      return false;
-    }
-    if (!WebAssembly.validate(SIMD_PROBE)) {
-      return false;
-    }
-    const memory = new WebAssembly.Memory({
-      initial: 1,
-      maximum: 1,
-      shared: true,
-    });
-    if (!(memory.buffer instanceof SharedArrayBuffer)) {
-      return false;
-    }
-    if (!presentsSoftwarePictures()) {
-      return false;
-    }
-    const served = await fetch(hevcDecoderUrl("hevc.wasm"), {
-      method: "HEAD",
-      signal: AbortSignal.timeout(attemptTimeoutMs),
-    });
-    return served.ok;
-  } catch {
-    return false;
-  }
-}
-
-function softwareRequested(): boolean {
-  return (
-    new URLSearchParams(globalThis.location?.search ?? "").get(
-      "hevc_decoder",
-    ) === "software"
-  );
-}
-
-async function decodesPicture(): Promise<HevcDecoder | null> {
-  if (softwareRequested()) {
-    return (await decodesPictureInSoftware()) ? "software" : null;
-  }
+async function decodesPicture(): Promise<boolean> {
   try {
     const support = await VideoDecoder.isConfigSupported({
       codec: APPLE_HEVC_PROBE,
     });
-    if (support.supported === true) {
-      return "native";
-    }
+    return support.supported === true;
   } catch {
-    // Read as a no, and the software decoder asked.
+    return false;
   }
-  return (await decodesPictureInSoftware()) ? "software" : null;
 }
 
 /**
@@ -302,12 +192,11 @@ async function probeSound(): Promise<void> {
  */
 export async function chooseAppleMedia(): Promise<boolean> {
   if (answer !== null) {
-    return answer.picture !== null;
+    return answer;
   }
   soundProbe ??= probeSound();
-  const picture = await decodesPicture();
-  answer = { picture };
-  return picture !== null;
+  answer = await decodesPicture();
+  return answer;
 }
 
 /**
@@ -323,22 +212,14 @@ export function appleSoundProbed(): Promise<void> | null {
 }
 
 /**
- * Whether this browser takes the Mac's picture passed. Only valid after
+ * Whether this browser's own decoder takes the Mac's picture. Only valid after
  * `chooseAppleMedia` has resolved, which `main.tsx` awaits before mounting.
  */
 export function decodesAppleMedia(): boolean {
   if (answer === null) {
     throw new Error("decodesAppleMedia() before chooseAppleMedia() resolved");
   }
-  return answer.picture !== null;
-}
-
-/**
- * Who decodes a passed picture, or null when this page is not passed one. Read by
- * the paint worker's `init`, which follows `chooseAppleMedia`.
- */
-export function appleHevcDecoder(): HevcDecoder | null {
-  return answer?.picture ?? null;
+  return answer;
 }
 
 /**

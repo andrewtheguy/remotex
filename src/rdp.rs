@@ -2822,6 +2822,7 @@ mod tests {
             apple_media: false,
             rdp_graphics: false,
             rdp_h264: false,
+            software: Default::default(),
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse);

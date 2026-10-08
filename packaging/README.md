@@ -84,7 +84,14 @@ build compiles two WebAssembly modules: one from the gateway's graphics crate
 (`frontend/wasm/egfx` around
 `crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline),
 and the page's FLAC decoder for a session's lossless sound (`frontend/wasm/flac`),
-which the stable toolchain builds. So wherever the frontend is built — `bun run build`, or a
+which the stable toolchain builds. It also takes a third module it does not
+build, the page's software VP9 decoder: the release of
+[vp9-wasm](https://github.com/andrewtheguy/vp9-wasm) that
+`frontend/wasm/vp9/pin.json` names by version and SHA-256, downloaded from that
+repository's public releases and unpacked into `frontend/wasm/vp9/pkg`. A build
+with no network sets `REMOTEX_VP9_WASM_ARCHIVE` to the whole path of a copy of
+that archive; either way an archive that is not the pinned one is refused. The
+pin is the one place a release is changed. So wherever the frontend is built — `bun run build`, or a
 Cargo build without `REMOTEX_PREBUILT_FRONTEND` — the compositor's module is built by the nightly
 toolchain `frontend/wasm/egfx/rust-toolchain.toml` pins, which its threads need and
 nothing else is built with. rustup installs it on the first build, unless

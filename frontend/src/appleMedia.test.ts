@@ -23,7 +23,6 @@ const globals = globalThis as unknown as {
 
 const {
   appleEldConfig,
-  appleHevcDecoder,
   appleSoundProbed,
   chooseAppleMedia,
   decodesAppleMedia,
@@ -253,59 +252,34 @@ test("the question is asked once, and the answer is not available before it", as
   assert.equal(asked.tried.length, 1);
 });
 
-/**
- * BETA: a page that can run the software HEVC decoder — cross-origin
- * isolated, with a WebGL 2 canvas that takes the Mac's primaries to present its
- * pictures on — or, with `isolated` false, one that cannot. `webgl` is that
- * canvas's context: whole, without a color space to set, or none. Returns the undo.
- */
-function softwareDecoderPage(
-  isolated: boolean,
-  search = "",
-  served: boolean | "never" = true,
-  webgl: "whole" | "srgb only" | "none" = "whole",
-): () => void {
+const no = async () => ({ supported: false });
+
+test("the picture's answer is the browser's own decoder's, whatever the page could decode itself", async () => {
+  // A page that could run the software decoder: isolated, with a WebGL 2 canvas.
   const scope = globalThis as unknown as Record<string, unknown>;
-  const saved = [
-    "crossOriginIsolated",
-    "OffscreenCanvas",
-    "location",
-    "fetch",
-  ].map((key) => [key, Object.getOwnPropertyDescriptor(scope, key)] as const);
+  const saved = ["crossOriginIsolated", "OffscreenCanvas"].map(
+    (key) => [key, Object.getOwnPropertyDescriptor(scope, key)] as const,
+  );
   Object.defineProperty(scope, "crossOriginIsolated", {
-    value: isolated,
+    value: true,
     configurable: true,
   });
-  // The gateway, asked for the decoder: holding its archive or not.
-  scope.fetch = async (url: string, init?: RequestInit) => {
-    assert.equal(url, "/hevc/hevc.wasm");
-    assert.equal(init?.method, "HEAD");
-    if (served === "never") {
-      const signal = init?.signal;
-      return new Promise((_, reject) => {
-        signal?.addEventListener("abort", () => reject(signal.reason));
-      });
-    }
-    return { ok: served };
-  };
   scope.OffscreenCanvas = class {
-    getContext(kind: string) {
-      assert.equal(kind, "webgl2");
-      if (webgl === "none") {
-        return null;
-      }
+    getContext() {
       return {
         isContextLost: () => false,
         getExtension: () => null,
-        ...(webgl === "whole" ? { drawingBufferColorSpace: "srgb" } : {}),
+        drawingBufferColorSpace: "srgb",
       };
     }
   };
-  Object.defineProperty(scope, "location", {
-    value: { search },
-    configurable: true,
-  });
-  return () => {
+  try {
+    browser(no, () => "sound");
+    assert.equal(await choose(), false);
+    assert.equal(decodesAppleMedia(), false);
+    browser(yes, () => "sound");
+    assert.equal(await choose(), true);
+  } finally {
     for (const [key, descriptor] of saved) {
       if (descriptor) {
         Object.defineProperty(scope, key, descriptor);
@@ -313,96 +287,5 @@ function softwareDecoderPage(
         delete scope[key];
       }
     }
-  };
-}
-
-const no = async () => ({ supported: false });
-
-test("a picture the browser's decoder refuses is decoded in software on an isolated page", async () => {
-  const undo = softwareDecoderPage(true);
-  try {
-    browser(no, () => "sound");
-    assert.equal(await choose(), true);
-    assert.equal(appleHevcDecoder(), "software");
-
-    browser(yes, () => "sound");
-    assert.equal(await choose(), true);
-    assert.equal(appleHevcDecoder(), "native", "the browser's own comes first");
-
-    browser(no, () => "error");
-    assert.equal(await choose(), true);
-    assert.equal(appleHevcDecoder(), "software", "whatever the sound's answer");
-  } finally {
-    undo();
-  }
-});
-
-test("a page that is not cross-origin isolated has no software decoder", async () => {
-  const undo = softwareDecoderPage(false);
-  try {
-    browser(no, () => "sound");
-    assert.equal(await choose(), false);
-    assert.equal(appleHevcDecoder(), null);
-  } finally {
-    undo();
-  }
-});
-
-test("an isolated page whose gateway serves no decoder has no software decoder", async () => {
-  const undo = softwareDecoderPage(true, "", false);
-  try {
-    browser(no, () => "sound");
-    assert.equal(await choose(), false);
-    assert.equal(appleHevcDecoder(), null);
-  } finally {
-    undo();
-  }
-});
-
-test("a page that cannot present the software decoder's pictures has no software decoder", async () => {
-  // Said yes, it would be passed a stream whose first picture it could not show.
-  for (const webgl of ["none", "srgb only"] as const) {
-    const undo = softwareDecoderPage(true, "", true, webgl);
-    try {
-      browser(no, () => "sound");
-      assert.equal(await choose(), false, webgl);
-      assert.equal(appleHevcDecoder(), null, webgl);
-    } finally {
-      undo();
-    }
-  }
-});
-
-test("a gateway that never answers for the decoder is read as serving none", async () => {
-  const undo = softwareDecoderPage(true, "", "never");
-  try {
-    browser(no, () => "sound", 20);
-    assert.equal(await choose(), false);
-    assert.equal(appleHevcDecoder(), null);
-  } finally {
-    undo();
-  }
-});
-
-test("?hevc_decoder=software takes the software decoder without asking the browser's", async () => {
-  const undo = softwareDecoderPage(true, "?hevc_decoder=software");
-  try {
-    const asked = browser(yes, () => "sound");
-    assert.equal(await choose(), true);
-    assert.equal(appleHevcDecoder(), "software");
-    assert.deepEqual(asked.probes, []);
-  } finally {
-    undo();
-  }
-  const refused = softwareDecoderPage(false, "?hevc_decoder=software");
-  try {
-    browser(yes, () => "sound");
-    assert.equal(
-      await choose(),
-      false,
-      "asked for software where it cannot run: VP9 and Opus, not the browser's own",
-    );
-  } finally {
-    refused();
   }
 });

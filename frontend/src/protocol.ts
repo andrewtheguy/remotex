@@ -287,7 +287,17 @@ export type ControlMsg =
   // `passthrough` says whose stream it is: the remote's own, passed through
   // untouched (wlshare's VP9, a High Performance Mac's HEVC), or one the gateway
   // encoded.
-  | { type: "videoFormat"; decode: string; passthrough: boolean }
+  //
+  // `software` says what decodes it: BETA, the page's own software decoder for the
+  // stream (softwareDecoder.ts) and not the browser's `VideoDecoder`, in a session
+  // started so at the picker. It is the session's, so every page attached to it is
+  // told the same.
+  | {
+      type: "videoFormat";
+      decode: string;
+      passthrough: boolean;
+      software: boolean;
+    }
   // An RDP host's graphics pipeline starts here, from nothing, and the GRAPHICS
   // records after it are the picture: this page composes them. Whatever it held of
   // a pipeline or a video stream before is done with.

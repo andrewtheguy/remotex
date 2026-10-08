@@ -1,87 +1,69 @@
-// BETA: the decode worker behind hevcWasmDecoder.ts. It loads the HEVC
-// decoder's module (andrewtheguy/hevc-wasm, which the gateway serves at /hevc/)
-// once, with a pool of threads, runs one decoder per stream the paint worker
+// BETA: the decode worker behind softwareDecoder.ts. It loads one software
+// decoder's module once (softwareDecoderModule.ts), the one its first stream
+// names, with a pool of threads, runs one decoder per stream the paint worker
 // opens, and answers every unit with one picture or none.
 //
 // The module is wasm-bindgen's, shaped as the compositor's (egfxCompositor.ts):
 // one instance here, on a shared memory, and each thread of its pool a worker
-// running an instance of the same module on that memory (hevcPool.worker.ts),
-// which takes a seat in the pool before the pool is started.
+// running an instance of the same module on that memory
+// (softwareDecoderPool.worker.ts), which takes a seat in the pool before the pool
+// is started.
 //
 // A picture leaves as where its planes are in the module's memory, which is
 // shared, and the paint worker uploads them to the GPU from there
-// (hevcPicture.ts). The decoder holds a picture until its next unit is put in, so
-// that unit waits here until the paint worker has released the picture.
+// (planesPicture.ts). The decoder holds a picture until its next unit is put in,
+// so that unit waits here until the paint worker has released the picture.
 
-import { hevcDecoderUrl } from "./gateway.ts";
-import type { PoolSeat, SharedMemory } from "./hevcPool.worker.ts";
-import type {
-  DecodedPlanes,
-  HevcCommand,
-  HevcEvent,
-} from "./hevcWasmDecoder.ts";
+import {
+  type DecodedPlanes,
+  type DecoderCommand,
+  type DecoderEvent,
+  MODULE_CODEC,
+  type SoftwareModule,
+} from "./softwareDecoder.ts";
+import {
+  type DecoderGlue,
+  decoderGlue,
+  type ModuleDecoder,
+  type PoolSeat,
+  type SharedMemory,
+} from "./softwareDecoderModule.ts";
 
-/** What hevc-wasm's rust/hevc-web exports, as wasm-bindgen's glue presents it. */
-interface HevcGlue {
-  default(options: {
-    module_or_path: string;
-  }): Promise<{ memory: SharedMemory }>;
-  /** The compiled module, for a thread to make its instance of. */
-  module(): WebAssembly.Module;
-  /** The pool, of `threads` workers each in `runPoolThread` already. */
-  startPool(threads: number): void;
-  /** A decoder decoding on `threads` of the pool, or on the caller for one. */
-  Decoder: new (
-    threads: number,
-  ) => HevcDecoder;
-}
-
-/** One stream's decoder in the module. */
-interface HevcDecoder {
-  /**
-   * Room for a unit of `size` bytes in the memory, where it is written before
-   * `decode`. The previous picture is released here.
-   */
-  input(size: number): number;
-  /**
-   * Decode the unit written: true when it completed a picture. Throws for a unit
-   * that does not decode.
-   */
-  decode(): boolean;
-  /** Where the picture's sixteen numbers are in the memory. */
-  picture(): number;
-  free(): void;
-}
-
-interface HevcModule {
-  glue: HevcGlue;
+interface LoadedModule {
+  glue: DecoderGlue;
   /** The threads' and the paint worker's too. */
   memory: SharedMemory;
 }
 
 const scope = self as unknown as {
-  postMessage(message: HevcEvent): void;
-  onmessage: ((ev: MessageEvent<HevcCommand>) => void) | null;
+  postMessage(message: DecoderEvent): void;
+  onmessage: ((ev: MessageEvent<DecoderCommand>) => void) | null;
 };
 
-// The pool's threads, on which a picture's rows decode in parallel under
-// wavefront parallel processing; past eight a 3200×2000 picture was measured
-// gaining nothing more. On one, the decoder decodes on this worker and starts
-// no pool.
+// The pool's threads, on which a picture decodes in parallel: an HEVC picture's
+// rows under wavefront parallel processing, a VP9 frame's stages. Past eight a
+// 3200×2000 HEVC picture was measured gaining nothing more. On one, a decoder
+// decodes on this worker and starts no pool.
 const THREADS = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8));
 
-let loading: Promise<HevcModule> | null = null;
+// The module this worker is for, which its first stream names, and its name in
+// a sentence.
+let loaded: SoftwareModule | null = null;
+let loading: Promise<LoadedModule> | null = null;
+const codec = () => (loaded ? MODULE_CODEC[loaded] : "software");
 
-function load(): Promise<HevcModule> {
+function load(decoder: SoftwareModule): Promise<LoadedModule> {
+  loaded ??= decoder;
   loading ??= (async () => {
-    const glue = (await import(
-      /* @vite-ignore */ hevcDecoderUrl("hevc.js")
-    )) as HevcGlue;
-    const { memory } = await glue.default({
-      module_or_path: hevcDecoderUrl("hevc.wasm"),
-    });
+    if (decoder !== loaded) {
+      throw new Error(`this worker is the ${codec()} decoder's`);
+    }
+    const { glue, wasm } = await decoderGlue(decoder);
+    const { memory } = await glue.default(
+      wasm === undefined ? undefined : { module_or_path: wasm },
+    );
     if (THREADS > 1) {
-      await seatThreads({ module: glue.module(), memory });
+      await seatThreads({ decoder, module: glue.module(), memory });
       glue.startPool(THREADS);
     }
     return { glue, memory };
@@ -97,8 +79,8 @@ function seatThreads(seat: PoolSeat): Promise<unknown> {
       () =>
         new Promise<void>((resolve, reject) => {
           const thread = new Worker(
-            new URL("./hevcPool.worker.ts", import.meta.url),
-            { type: "module", name: "hevc-thread" },
+            new URL("./softwareDecoderPool.worker.ts", import.meta.url),
+            { type: "module", name: `${seat.decoder}-thread` },
           );
           thread.onmessage = ({ data }: MessageEvent<string | null>) => {
             if (data === null) {
@@ -119,10 +101,19 @@ function seatThreads(seat: PoolSeat): Promise<unknown> {
   );
 }
 
-// The stream's colour description, in H.265's codes, for what the page's shader presents
-// (hevcPicture.ts): Y'CbCr made with BT.709's coefficients or BT.601's, in sRGB's
-// primaries or Display P3's, the Mac's, and a transfer a display takes as it is.
-// A stream that states nothing is taken as WebCodecs takes one: BT.709.
+// The stream's colour description, in ITU-T H.273's codes, for what the page's
+// shader presents (planesPicture.ts): Y'CbCr made with BT.709's coefficients or
+// BT.601's, in sRGB's primaries or Display P3's, the Mac's, and a transfer a
+// display takes as it is. A stream that states nothing is taken as WebCodecs
+// takes one: BT.709.
+//
+// The gateway's VP9 states BT.601 for all three, VP9 having one field for them
+// (`color_space`), and of the three only the matrix is a fact about it: the
+// encoder's conversion (the screen-vp9 crate's `Picture`) makes its Y'CbCr from
+// the desktop's own R'G'B' with BT.601's coefficients at studio swing, and
+// converts neither primaries nor transfer. So SMPTE 170M's primaries are
+// presented as sRGB's, which gives the display the desktop's pixels as they
+// were.
 const UNSPECIFIED = 2;
 const MATRIX: Record<number, DecodedPlanes["matrix"]> = {
   1: "bt709",
@@ -133,6 +124,7 @@ const MATRIX: Record<number, DecodedPlanes["matrix"]> = {
 const PRIMARIES: Record<number, PredefinedColorSpace> = {
   1: "srgb",
   [UNSPECIFIED]: "srgb",
+  6: "srgb",
   12: "display-p3",
 };
 // BT.709's, BT.601's and sRGB's.
@@ -141,8 +133,8 @@ const FULL_RANGE = 2;
 
 /** The picture `decode` just completed, as its planes. */
 function picture(
-  module: HevcModule,
-  decoder: HevcDecoder,
+  module: LoadedModule,
+  decoder: ModuleDecoder,
 ): DecodedPlanes | string {
   // Read afresh: a memory that grew is a new buffer.
   const memory = module.memory.buffer;
@@ -175,7 +167,7 @@ function picture(
   };
 }
 
-const decoders = new Map<number, HevcDecoder>();
+const decoders = new Map<number, ModuleDecoder>();
 
 // The pictures the paint worker is reading, by stream: what ends each wait.
 const held = new Map<number, () => void>();
@@ -195,17 +187,17 @@ function failed(id: number, name: string, message: string) {
   scope.postMessage({ type: "failed", id, name, message });
 }
 
-async function create(id: number): Promise<void> {
-  let module: HevcModule;
+async function create(id: number, decoder: SoftwareModule): Promise<void> {
+  let module: LoadedModule;
   try {
-    module = await load();
+    module = await load(decoder);
   } catch (e) {
     // Not to be tried again here: a thread that took its seat holds the seats
     // for good, in a memory this worker's module stays on. The paint worker
     // ends this worker, and its threads with it, and the next stream has a new one.
     scope.postMessage({
       type: "broken",
-      message: `the HEVC decoder did not load (${reason(e)})`,
+      message: `the ${codec()} decoder did not load (${reason(e)})`,
     });
     return;
   }
@@ -220,18 +212,19 @@ async function destroy(id: number): Promise<void> {
 }
 
 async function decode(
-  command: Extract<HevcCommand, { type: "decode" }>,
+  command: Extract<DecoderCommand, { type: "decode" }>,
 ): Promise<void> {
   const { id } = command;
   const decoder = decoders.get(id);
   if (!decoder) {
     // Its create failed, and said so; or this worker is not the one it was
     // created in.
-    failed(id, "EncodingError", "no HEVC decoder for this stream");
+    failed(id, "EncodingError", `no ${codec()} decoder for this stream`);
     return;
   }
-  const module = await load();
-  if (ending.has(id)) {
+  // Loaded: the stream's `create` waited for it.
+  const module = await loading;
+  if (!module || ending.has(id)) {
     return;
   }
   const fail = (name: string, message: string) => {
@@ -248,7 +241,10 @@ async function decode(
   try {
     completed = decoder.decode();
   } catch (e) {
-    fail("EncodingError", `the HEVC decoder failed on a unit (${reason(e)})`);
+    fail(
+      "EncodingError",
+      `the ${codec()} decoder failed on a unit (${reason(e)})`,
+    );
     return;
   }
   if (!completed) {
@@ -267,10 +263,10 @@ async function decode(
   await released;
 }
 
-function handle(command: HevcCommand): Promise<void> {
+function handle(command: DecoderCommand): Promise<void> {
   switch (command.type) {
     case "create":
-      return create(command.id);
+      return create(command.id, command.module);
     case "destroy":
       return destroy(command.id);
     case "decode":
@@ -302,7 +298,7 @@ scope.onmessage = (ev) => {
         failed(
           command.id,
           "EncodingError",
-          `the HEVC decoder failed (${reason(e)})`,
+          `the ${codec()} decoder failed (${reason(e)})`,
         );
       }
     }),

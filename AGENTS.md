@@ -56,9 +56,10 @@ The rules live in [Constraints](docs/architecture.md#constraints). Read an
 area's section before changing what it covers:
 
 - [The client and its bundle](docs/architecture.md#the-client-and-its-bundle):
-  one client, the browser SPA; one frontend build compiled into the gateway; one
-  WebAssembly module; the pinned HEVC decoder archive as the one file read at run
-  time; no fallback browser paths.
+  one client, the browser SPA; one frontend build compiled into the gateway; its
+  WebAssembly modules, two built here and the software VP9 decoder a pinned
+  release; the pinned HEVC decoder archive as the one file read at run time; no
+  fallback browser paths.
 - [Sessions](docs/architecture.md#sessions): one active session per gateway,
   with takeover, and a fresh engine for every `connect`; size, sound and
   passthrough chosen at the picker, not in the config, and held for the

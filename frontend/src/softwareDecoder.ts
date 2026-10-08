@@ -1,23 +1,33 @@
-// BETA: a software decoder for a High Performance Mac's passed HEVC, for a
-// browser whose `VideoDecoder` does not take it (appleMedia.ts decides).
+// BETA: the page's software decoders, for a stream the browser's `VideoDecoder`
+// does not take, or is not given:
+// - `hevc`, a High Performance Mac's passed HEVC: andrewtheguy/hevc-wasm's
+//   decoder, which the gateway serves where it has the release archive.
+// - `vp9`, the gateway's VP9 at 4:4:4, profile 1: andrewtheguy/vp9-wasm's
+//   decoder, which is in the bundle (frontend/wasm/vp9).
 //
-// andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and compiled to
-// WebAssembly with SIMD128 and threads, running in a worker of its own beside
-// the paint worker: a picture takes milliseconds of CPU, and the paint worker
-// has to go on answering a `clear` while one does.
+// Which decodes a stream is the session's to say and no page's: it is chosen at
+// the picker (targetChoices.ts), held by the gateway, and stated with each
+// `videoFormat`, so every page attached to a session builds the same kind of
+// decoder for it (videoDecoder.ts).
 //
-// It is shaped as a `VideoDecoder` — configure, decode, close, an output and an
-// error callback — so `createVideoStream` (videoDecoder.ts) runs it exactly as it
-// runs the browser's: the same keyframe gate, the same FIFO of promises, the same
-// stall backstop. Unlike a `VideoDecoder`, it keeps the pairing that stream only
-// hopes for: the decode worker answers every unit with one picture or with none,
-// and a none is `noPicture`, which settles that unit's entry to null rather than
-// leaving it for the next picture to resolve.
+// Each is written for the one stream it decodes and compiled to WebAssembly with
+// SIMD128 and threads, and the two modules present one interface, so one worker
+// implementation runs either (softwareDecoder.worker.ts). A module runs in a
+// decode worker of its own beside the paint worker: a picture takes milliseconds
+// of CPU, and the paint worker has to go on answering a `clear` while one does.
+//
+// A decoder here is shaped as a `VideoDecoder` — configure, decode, close, an
+// output and an error callback — so `createVideoStream` (videoDecoder.ts) runs it
+// exactly as it runs the browser's: the same keyframe gate, the same FIFO of
+// promises, the same stall backstop. Unlike a `VideoDecoder`, it keeps the pairing
+// that stream only hopes for: the decode worker answers every unit with one
+// picture or with none, and a none is `noPicture`, which settles that unit's entry
+// to null rather than leaving it for the next picture to resolve.
 //
 // What it outputs is not a `VideoFrame` but the picture's planes where the decoder
-// left them (`HevcPlanes`): the module's memory is one its threads share, so the
-// paint worker reads it too, and uploads the planes to the GPU from there
-// (hevcPicture.ts). A `VideoFrame` over them was a copy of the picture, and
+// left them (`SoftwarePlanes`): the module's memory is one its threads share, so
+// the paint worker reads it too, and uploads the planes to the GPU from there
+// (planesPicture.ts). A `VideoFrame` over them was a copy of the picture, and
 // drawing it on the desktop's canvas had the GPU convert and copy it again: on an
 // Intel UHD 630 that was well over twice the GPU's time and three times the
 // workers'. Copying the planes out here instead is no way around it: a copy out
@@ -25,16 +35,38 @@
 // is that the decoder waits: it reuses a picture's memory from its next unit on,
 // so it starts that unit only once the picture is closed.
 
+/** The modules: which stream each decodes is `softwareModuleFor`'s to say. */
+export type SoftwareModule = "hevc" | "vp9";
+
+/** What a module decodes, as a sentence names it. */
+export const MODULE_CODEC: Record<SoftwareModule, string> = {
+  hevc: "HEVC",
+  vp9: "VP9",
+};
+
+/**
+ * The module that decodes a configuration string, or null for one neither does:
+ * HEVC, and VP9 profile 1, which is the gateway's 4:4:4 (`codec_string` in
+ * src/vp9.rs). Profile 0 is every browser's own decoder's.
+ */
+export function softwareModuleFor(codec: string): SoftwareModule | null {
+  if (codec.startsWith("hev1.") || codec.startsWith("hvc1.")) {
+    return "hevc";
+  }
+  return codec.startsWith("vp09.01.") ? "vp9" : null;
+}
+
 /** What the paint worker sends the decode worker. */
-export type HevcCommand =
-  | { type: "create"; id: number }
+export type DecoderCommand =
+  /** A stream's decoder, in `module`: the one module a decode worker ever loads. */
+  | { type: "create"; id: number; module: SoftwareModule }
   | { type: "decode"; id: number; data: ArrayBuffer }
   /** The paint worker is done reading the picture last answered with. */
   | { type: "release"; id: number }
   | { type: "destroy"; id: number };
 
 /** One plane of a picture: where its first row is in the memory, and its size. */
-export interface HevcPlane {
+export interface PicturePlane {
   offset: number;
   stride: number;
   width: number;
@@ -48,7 +80,7 @@ export interface DecodedPlanes {
   width: number;
   height: number;
   /** Luma, then the two chroma planes, which may be half its size either way. */
-  planes: HevcPlane[];
+  planes: PicturePlane[];
   fullRange: boolean;
   /** Which coefficients made the luma: BT.709's, or BT.601's. */
   matrix: "bt709" | "smpte170m";
@@ -57,20 +89,22 @@ export interface DecodedPlanes {
 }
 
 /** A decoded picture the paint worker holds: read until closed, and closed once. */
-export interface HevcPlanes extends DecodedPlanes {
+export interface SoftwarePlanes extends DecodedPlanes {
   /** Done with the planes; the decoder may go on to its next unit. */
   close(): void;
 }
 
-/** What a stream's decoder outputs: the browser's frame, or this decoder's planes. */
-export type DecodedPicture = VideoFrame | HevcPlanes;
+/** What a stream's decoder outputs: the browser's frame, or a software decoder's planes. */
+export type DecodedPicture = VideoFrame | SoftwarePlanes;
 
-export function isHevcPlanes(picture: DecodedPicture): picture is HevcPlanes {
+export function isSoftwarePlanes(
+  picture: DecodedPicture,
+): picture is SoftwarePlanes {
   return "planes" in picture;
 }
 
 /** What the decode worker answers: one `decoded` or `failed` per `decode`. */
-export type HevcEvent =
+export type DecoderEvent =
   | { type: "decoded"; id: number; picture: DecodedPlanes | null }
   /**
    * The decoder is over. `name` follows WebCodecs: `NotSupportedError` for a
@@ -104,31 +138,39 @@ export interface VideoDecoderLike {
 }
 
 interface Client {
-  onEvent: (event: Exclude<HevcEvent, { type: "broken" }>) => void;
+  onEvent: (event: Exclude<DecoderEvent, { type: "broken" }>) => void;
 }
 
-// One decode worker for the paint worker's lifetime, started by the first HEVC
-// stream: loading the module compiles it and starts its threads, which a resize
-// should not pay for again. Each stream is a decoder of its own inside it.
-let worker: Worker | null = null;
-const clients = new Map<number, Client>();
+// One decode worker for each module, for the paint worker's lifetime, started by
+// the first stream the module decodes: loading a module compiles it and starts
+// its threads, which a resize should not pay for again. Each stream is a decoder
+// of its own inside it.
+const workers: Record<SoftwareModule, Worker | null> = {
+  hevc: null,
+  vp9: null,
+};
+const clients: Record<SoftwareModule, Map<number, Client>> = {
+  hevc: new Map(),
+  vp9: new Map(),
+};
 let nextId = 1;
 
-function decodeWorker(): Worker {
-  if (worker) {
-    return worker;
+function decodeWorker(module: SoftwareModule): Worker {
+  const running = workers[module];
+  if (running) {
+    return running;
   }
-  const started = new Worker(new URL("./hevcWasm.worker.ts", import.meta.url), {
-    type: "module",
-    name: "hevc-decoder",
-  });
+  const started = new Worker(
+    new URL("./softwareDecoder.worker.ts", import.meta.url),
+    { type: "module", name: `${module}-decoder` },
+  );
   // The worker is over, and every decoder in it: the next stream starts another.
   const over = (message: string) => {
-    if (worker !== started) {
+    if (workers[module] !== started) {
       return;
     }
-    worker = null;
-    for (const [id, client] of clients) {
+    workers[module] = null;
+    for (const [id, client] of clients[module]) {
       client.onEvent({
         type: "failed",
         id,
@@ -138,13 +180,13 @@ function decodeWorker(): Worker {
     }
     started.terminate();
   };
-  started.onmessage = (ev: MessageEvent<HevcEvent>) => {
+  started.onmessage = (ev: MessageEvent<DecoderEvent>) => {
     const event = ev.data;
     if (event.type === "broken") {
       over(event.message);
       return;
     }
-    const client = clients.get(event.id);
+    const client = clients[module].get(event.id);
     if (client) {
       client.onEvent(event);
     }
@@ -154,19 +196,17 @@ function decodeWorker(): Worker {
   started.onerror = (ev) => {
     // A worker that failed to start takes every decoder in it down.
     ev.preventDefault();
-    over(`the HEVC decoder's worker failed (${ev.message || "no message"})`);
+    over(
+      `the ${MODULE_CODEC[module]} decoder's worker failed (${ev.message || "no message"})`,
+    );
   };
-  worker = started;
+  workers[module] = started;
   return started;
 }
 
-/** Whether a configuration string names HEVC. */
-export function isHevc(codec: string): boolean {
-  return codec.startsWith("hev1.") || codec.startsWith("hvc1.");
-}
-
-/** A `VideoDecoder` for HEVC, decoding in the decode worker. */
-export function createWasmHevcDecoder(
+/** A `VideoDecoder` for the stream `module` decodes, decoding in its decode worker. */
+export function createSoftwareDecoder(
+  module: SoftwareModule,
   init: VideoDecoderLikeInit,
 ): VideoDecoderLike {
   const id = nextId++;
@@ -188,9 +228,12 @@ export function createWasmHevcDecoder(
     }
     const configured = state === "configured";
     state = "closed";
-    clients.delete(id);
+    clients[module].delete(id);
     if (configured) {
-      worker?.postMessage({ type: "destroy", id } satisfies HevcCommand);
+      workers[module]?.postMessage({
+        type: "destroy",
+        id,
+      } satisfies DecoderCommand);
     }
   };
 
@@ -205,18 +248,18 @@ export function createWasmHevcDecoder(
           "InvalidStateError",
         );
       }
-      if (!isHevc(config.codec)) {
+      if (softwareModuleFor(config.codec) !== module) {
         // Asynchronously, as `VideoDecoder` reports a refused configuration.
         queueMicrotask(() =>
           fail(
             "NotSupportedError",
-            `not an HEVC configuration: ${config.codec}`,
+            `not a configuration the ${MODULE_CODEC[module]} decoder takes: ${config.codec}`,
           ),
         );
         return;
       }
       state = "configured";
-      clients.set(id, {
+      clients[module].set(id, {
         onEvent: (event) => {
           if (event.type === "failed") {
             fail(event.name, event.message);
@@ -227,10 +270,10 @@ export function createWasmHevcDecoder(
               close() {
                 // Once, and only to a decoder still there: `destroy` releases too.
                 if (open && state === "configured") {
-                  worker?.postMessage({
+                  workers[module]?.postMessage({
                     type: "release",
                     id,
-                  } satisfies HevcCommand);
+                  } satisfies DecoderCommand);
                 }
                 open = false;
               },
@@ -240,7 +283,11 @@ export function createWasmHevcDecoder(
           }
         },
       });
-      decodeWorker().postMessage({ type: "create", id } satisfies HevcCommand);
+      decodeWorker(module).postMessage({
+        type: "create",
+        id,
+        module,
+      } satisfies DecoderCommand);
     },
     decode(chunk) {
       if (state !== "configured") {
@@ -251,11 +298,20 @@ export function createWasmHevcDecoder(
       }
       const data = new ArrayBuffer(chunk.byteLength);
       chunk.copyTo(data);
-      decodeWorker().postMessage(
-        { type: "decode", id, data } satisfies HevcCommand,
+      decodeWorker(module).postMessage(
+        { type: "decode", id, data } satisfies DecoderCommand,
         [data],
       );
     },
     close,
   };
+}
+
+/** Test seam: end every decode worker, so the next stream starts its module's. */
+export function resetSoftwareDecodersForTests(): void {
+  for (const module of ["hevc", "vp9"] as const) {
+    workers[module]?.terminate();
+    workers[module] = null;
+    clients[module].clear();
+  }
 }

@@ -78,6 +78,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
+        vp9_wasm: false,
         hp_decoders: Default::default(),
         targets: vec![wlshare, plain],
     };

@@ -10,10 +10,11 @@
 // Run with `bun test src/videoDecoder.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import type {
-  VideoDecoderLike,
-  VideoDecoderLikeInit,
-} from "./hevcWasmDecoder.ts";
+import {
+  resetSoftwareDecodersForTests,
+  type VideoDecoderLike,
+  type VideoDecoderLikeInit,
+} from "./softwareDecoder.ts";
 import { createDesktopVideo, createVideoStream } from "./videoDecoder.ts";
 
 /** A frame the fake decoder emitted, so a test can see it was handed over and closed. */
@@ -178,7 +179,7 @@ test("the stalled stream waits for its keyframe rather than erroring per frame",
 });
 
 test("a unit that completes no picture settles to null, and the next picture is its own unit's", async () => {
-  // The software HEVC decoder answers every unit, a none included.
+  // A software decoder answers every unit, a none included.
   let init: VideoDecoderLikeInit | undefined;
   const stalls: string[] = [];
   const stream = createVideoStream(
@@ -241,4 +242,100 @@ test("a new picture size replaces the decoder", async () => {
   assert.equal(decoder.closes, 1);
   s.decoder().emit(0xb2);
   assert.equal(tagOf(await resized), 0xb2);
+});
+
+test("a stream is decoded by the page where the gateway says so, by the module that decodes it", async () => {
+  // The decode workers made, by name: a software decoder starts its module's.
+  const workers: string[] = [];
+  const globals = globalThis as unknown as { Worker: unknown };
+  const before = globals.Worker;
+  globals.Worker = class {
+    onmessage = null;
+    onerror = null;
+    constructor(_url: URL, options: { name: string }) {
+      workers.push(options.name);
+    }
+    postMessage() {}
+    terminate() {}
+  };
+  const VP9_444 = "vp09.01.40.08.03.06.06.06.00";
+  const VP9_420 = "vp09.00.40.08.01.06.06.06.00";
+  const HEVC = "hev1.4.10.L150.BE.8";
+  const BOTH = { hevc: true, vp9: true };
+  try {
+    // The format, what the page runs, then the worker started, or "browser" for
+    // its own decoder, or null for a stream said and not decoded.
+    const cases: [
+      { decode: string; software?: boolean },
+      { hevc: boolean; vp9: boolean },
+      string | null,
+    ][] = [
+      [{ decode: VP9_444, software: true }, BOTH, "vp9-decoder"],
+      [{ decode: HEVC, software: true }, BOTH, "hevc-decoder"],
+      // Not said: the browser's own, whatever the page could run.
+      [{ decode: VP9_444, software: false }, BOTH, "browser"],
+      [{ decode: VP9_444 }, BOTH, "browser"],
+      [{ decode: HEVC, software: false }, BOTH, "browser"],
+      // Said of a stream the page cannot run the decoder of: no other stands in.
+      [{ decode: VP9_444, software: true }, { hevc: true, vp9: false }, null],
+      [{ decode: HEVC, software: true }, { hevc: false, vp9: true }, null],
+      // Said of a stream no module decodes.
+      [{ decode: VP9_420, software: true }, BOTH, null],
+    ];
+    for (const [format, runs, expected] of cases) {
+      resetSoftwareDecodersForTests();
+      const browsers = built.length;
+      workers.length = 0;
+      const errors: [string, boolean][] = [];
+      const table = createDesktopVideo(
+        {
+          onError: (reason, recoverable) => errors.push([reason, recoverable]),
+          onNeedsKeyframe: () => {},
+        },
+        STALL_MS,
+        runs,
+      );
+      table.setFormat(format);
+      void table.decode(size, unit(1), true);
+      void table.decode(size, unit(2), false);
+      const which = JSON.stringify([format, runs]);
+      const software = expected !== null && expected !== "browser";
+      assert.deepEqual(workers, software ? [expected] : [], which);
+      assert.equal(
+        built.length - browsers,
+        expected === "browser" ? 1 : 0,
+        which,
+      );
+      // Said once for the format, and as a refusal no keyframe repairs.
+      // (This file's chunks are not ones a decode worker could be posted, so what
+      // a software decoder then does with one is softwareDecoder.test.ts's.)
+      if (!software) {
+        assert.equal(errors.length, expected === null ? 1 : 0, which);
+      }
+      if (expected === null) {
+        assert.equal(errors[0][1], false, which);
+        assert.match(errors[0][0], /decoded by this page/, which);
+      }
+      table.close();
+      resetSoftwareDecodersForTests();
+    }
+  } finally {
+    globals.Worker = before;
+  }
+});
+
+test("a format that says otherwise of the same stream replaces the decoder", async () => {
+  const table = createDesktopVideo(
+    { onError: () => {}, onNeedsKeyframe: () => {} },
+    STALL_MS,
+  );
+  const decode = "vp09.01.40.08.03.06.06.06.00";
+  table.setFormat({ decode, software: false });
+  void table.decode(size, unit(1), true);
+  const first = built[built.length - 1];
+  table.setFormat({ decode, software: false });
+  assert.equal(first.closes, 0, "the same format cost a decoder");
+  table.setFormat({ decode, software: true });
+  assert.equal(first.closes, 1);
+  table.close();
 });

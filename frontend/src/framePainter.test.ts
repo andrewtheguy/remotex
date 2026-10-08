@@ -100,7 +100,7 @@ let refused: number | null = null;
 let rejected: number | null = null;
 /** The configurations the decoders were built with. */
 let configured: string[] = [];
-/** Whether a decoder outputs planes, as the software HEVC decoder does. */
+/** Whether a decoder outputs planes, as a software decoder does. */
 let planar = false;
 
 class FakeVideoDecoder {
@@ -143,7 +143,7 @@ class FakeVideoDecoder {
     const frame: FakeFrame = { closed: false };
     decoded.push(frame);
     this.output({
-      // What marks the software HEVC decoder's picture from a `VideoFrame`.
+      // What marks a software decoder's picture from a `VideoFrame`.
       ...(planar ? { planes: [] } : {}),
       close() {
         frame.closed = true;
@@ -181,7 +181,7 @@ beforeEach(() => {
   rejected = null;
   configured = [];
   planar = false;
-  hevc = { made: 0, closed: 0, drawn: [] };
+  planes = { made: 0, closed: 0, drawn: [] };
   globals.VideoDecoder = FakeVideoDecoder;
   globals.EncodedVideoChunk = class {
     type: string;
@@ -1182,8 +1182,8 @@ test("a pipeline that starts after one ended is composed", async () => {
   assert.equal(videoErrors.at(-1), null, "the next pipeline retracts it");
 });
 
-/** The software HEVC decoder's picture: how many were made and closed, and the sizes drawn. */
-let hevc: { made: number; closed: number; drawn: number[][] } = {
+/** A software decoder's picture: how many were made and closed, and the sizes drawn. */
+let planes: { made: number; closed: number; drawn: number[][] } = {
   made: 0,
   closed: 0,
   drawn: [],
@@ -1191,7 +1191,7 @@ let hevc: { made: number; closed: number; drawn: number[][] } = {
 
 const HEVC = { decode: "hev1.4.10.L150.BE.8" };
 
-function hevcPainter(options: { refuses?: boolean } = {}) {
+function planesPainter(options: { refuses?: boolean } = {}) {
   planar = true;
   const p = createFramePainter({
     context: () => context,
@@ -1201,17 +1201,17 @@ function hevcPainter(options: { refuses?: boolean } = {}) {
     onVideoNeedsKeyframe: (reason) => {
       videoKeyframeAsks.push(reason);
     },
-    makeHevcPicture: () => {
-      hevc.made += 1;
+    makePlanesPicture: () => {
+      planes.made += 1;
       return {
         draw(_planes, w, h) {
           if (options.refuses) {
             throw new Error("the GPU refused the picture");
           }
-          hevc.drawn.push([w, h]);
+          planes.drawn.push([w, h]);
         },
         close() {
-          hevc.closed += 1;
+          planes.closed += 1;
         },
       };
     },
@@ -1224,14 +1224,14 @@ function hevcPainter(options: { refuses?: boolean } = {}) {
 }
 
 test("the software decoder's pictures are drawn over the desktop's canvas, and closed", async () => {
-  const p = hevcPainter();
+  const p = planesPainter();
   await p.draw(batchFrame([{ w: 640, h: 480, payload: KEYFRAME }]));
   await p.draw(batchFrame([{ w: 640, h: 480, payload: [1], keyframe: false }]));
-  assert.deepEqual(hevc.drawn, [
+  assert.deepEqual(planes.drawn, [
     [640, 480],
     [640, 480],
   ]);
-  assert.equal(hevc.made, 1, "one picture follows the stream");
+  assert.equal(planes.made, 1, "one picture follows the stream");
   assert.deepEqual(cropped, [], "nothing of it goes onto the desktop's canvas");
   assert.deepEqual(shown, [true], "shown once, at the first picture");
   // The decoder starts its next unit only once a picture is closed.
@@ -1242,7 +1242,7 @@ test("the software decoder's pictures are drawn over the desktop's canvas, and c
 });
 
 test("a stream encoded here takes the picture back from the software decoder's", async () => {
-  const p = hevcPainter();
+  const p = planesPainter();
   await p.draw(batchFrame([{ w: 640, h: 480, payload: KEYFRAME }]));
   // The Mac's stream gives way across a display change, and comes back.
   planar = false;
@@ -1254,15 +1254,19 @@ test("a stream encoded here takes the picture back from the software decoder's",
   p.setVideoFormat(HEVC);
   await p.draw(batchFrame([{ w: 800, h: 600, payload: KEYFRAME }]));
   assert.deepEqual(shown, [true, false, true]);
-  assert.deepEqual(hevc.drawn, [
+  assert.deepEqual(planes.drawn, [
     [640, 480],
     [800, 600],
   ]);
-  assert.deepEqual([hevc.made, hevc.closed], [1, 0], "kept across the change");
+  assert.deepEqual(
+    [planes.made, planes.closed],
+    [1, 0],
+    "kept across the change",
+  );
 });
 
 test("a resize hides the software decoder's picture until its next one", async () => {
-  const p = hevcPainter();
+  const p = planesPainter();
   await p.draw(batchFrame([{ w: 640, h: 480, payload: KEYFRAME }]));
   p.blank(800, 600);
   assert.deepEqual(shown, [true, false]);
@@ -1271,14 +1275,14 @@ test("a resize hides the software decoder's picture until its next one", async (
 });
 
 test("a picture the GPU refuses is said once, and the pictures after it dropped", async () => {
-  const p = hevcPainter({ refuses: true });
+  const p = planesPainter({ refuses: true });
   await p.draw(batchFrame([{ w: 640, h: 480, payload: KEYFRAME }]));
   await p.draw(batchFrame([{ w: 640, h: 480, payload: [1], keyframe: false }]));
   const said = videoErrors.filter((error) => error !== null);
   assert.equal(said.length, 1);
   assert.match(said[0] ?? "", /the GPU refused the picture/);
   assert.deepEqual(shown, [], "nothing was drawn to show");
-  assert.deepEqual([hevc.made, hevc.closed], [1, 1]);
+  assert.deepEqual([planes.made, planes.closed], [1, 1]);
   assert.deepEqual(
     decoded.map((frame) => frame.closed),
     [true, true],
@@ -1292,9 +1296,9 @@ test("a picture the GPU refuses is said once, and the pictures after it dropped"
 });
 
 test("the attachment's end gives the software decoder's picture back", async () => {
-  const p = hevcPainter();
+  const p = planesPainter();
   await p.draw(batchFrame([{ w: 640, h: 480, payload: KEYFRAME }]));
   p.clear();
   assert.deepEqual(shown, [true, false]);
-  assert.deepEqual([hevc.made, hevc.closed], [1, 1]);
+  assert.deepEqual([planes.made, planes.closed], [1, 1]);
 });

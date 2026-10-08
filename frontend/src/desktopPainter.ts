@@ -17,11 +17,11 @@
 // handlers, and only a *new* canvas element (a full remount) replaces the
 // worker — at which point the old one holds the bitmap of an element that is
 // gone, and is terminated rather than left decoding for it.
-import { appleHevcDecoder } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { batchFrameSequence } from "./protocol.ts";
+import { runnableDecoders } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 export interface PainterHandlers {
@@ -96,7 +96,7 @@ let current: {
 /**
  * The painter for the page's one desktop canvas, built on first ask. `graphics`
  * is the canvas laid over it for what is drawn on the GPU, an RDP host's graphics
- * pipeline and the software HEVC decoder's pictures: the worker draws them there,
+ * pipeline and a software decoder's pictures: the worker draws them there,
  * and says when it is to be shown.
  */
 export function desktopPainterFor(
@@ -162,7 +162,7 @@ export function desktopPainterFor(
       type: "init",
       canvas: offscreen,
       graphics: offscreenGraphics,
-      softwareHevc: appleHevcDecoder() === "software",
+      runs: runnableDecoders(),
     },
     [offscreen, offscreenGraphics],
   );

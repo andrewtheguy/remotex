@@ -105,11 +105,15 @@ export interface VideoStreamInfo {
   // Not a stream at all: an RDP host's graphics pipeline, composed here
   // (`graphicsStart`). No decoder is configured and `decode` names nothing.
   composed?: boolean;
+  // BETA: decoded by one of the page's WebAssembly decoders (softwareDecoder.ts)
+  // and not by the browser's own, as the gateway said with the format.
+  software?: boolean;
 }
 
 /**
- * The Video row: the exact configuration the decoder was built with and whose
- * stream it decodes, or what the row is waiting for before the stream's format has
+ * The Video row: the exact configuration the decoder was built with, whose
+ * stream it decodes and which decoder that is, the browser's own or one of the
+ * page's in WebAssembly, or what the row is waiting for before the stream's format has
  * arrived. While the desktop is held — past what a video stream encodes, or All
  * Displays over too many screens — there is no picture, whatever decoder was
  * built before.
@@ -130,5 +134,11 @@ export function videoLabel(
   if (stream.composed) {
     return "Not in use: the host's graphics pipeline is composed by this browser";
   }
-  return `${stream.decode} · ${stream.passthrough ? "passthrough from the remote" : "encoded by the gateway"}`;
+  const whose = stream.passthrough
+    ? "passthrough from the remote"
+    : "encoded by the gateway";
+  const decoder = stream.software
+    ? "decoded in WebAssembly by this page"
+    : "decoded by the browser";
+  return `${stream.decode} · ${whose} · ${decoder}`;
 }

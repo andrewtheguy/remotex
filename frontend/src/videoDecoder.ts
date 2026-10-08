@@ -2,7 +2,9 @@
 //
 // This decodes the whole desktop as one inter-frame stream: normally VP9, or the
 // HEVC a High Performance Mac made when that stream is passed through (see
-// `VideoUnit` in src/protocol.rs). The units arrive as VIDEO records in the batches
+// `VideoUnit` in src/protocol.rs). The decoder is the browser's `VideoDecoder`,
+// or for a stream the page was told to decode in software, a decoder of the same
+// shape over a WebAssembly module (softwareDecoder.ts). The units arrive as VIDEO records in the batches
 // and are painted onto the canvas. What is not ordinary is that the stream is a
 // *chain* — every frame means "what changed since the one before it" — so none of
 // them may be dropped, reordered, or decoded twice.
@@ -31,12 +33,13 @@
 // this file hands out a promise rather than a hope.
 
 import {
-  createWasmHevcDecoder,
+  createSoftwareDecoder,
   type DecodedPicture,
-  isHevc,
+  MODULE_CODEC,
+  softwareModuleFor,
   type VideoDecoderLike,
   type VideoDecoderLikeInit,
-} from "./hevcWasmDecoder.ts";
+} from "./softwareDecoder.ts";
 
 /**
  * How to decode the stream, from the gateway's `videoFormat` message.
@@ -46,6 +49,12 @@ import {
  */
 export interface VideoFormat {
   decode: string;
+  /**
+   * BETA: the stream is decoded in the page's software decoder for it
+   * (softwareDecoder.ts) and not in the browser's `VideoDecoder`: the session was
+   * started so, and the gateway says it to every page attached.
+   */
+  software?: boolean;
 }
 
 /** The desktop's decoder, rebuilt as the stream it decodes starts over. */
@@ -93,11 +102,12 @@ export function createDesktopVideo(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
   /**
-   * BETA: decode a passed HEVC stream in software (hevcWasmDecoder.ts)
-   * rather than with the browser's `VideoDecoder`, which appleMedia.ts found does
-   * not take it.
+   * BETA: which of the page's software decoders this page can run
+   * (softwareSupport.ts). A stream the gateway says is decoded in one this page
+   * cannot run is not decoded: the session chose that decoder, and the browser's
+   * own does not stand in for it.
    */
-  softwareHevc = false,
+  runs: Readonly<Record<"hevc" | "vp9", boolean>> = { hevc: false, vp9: false },
 ): DesktopVideo {
   interface Live {
     stream: VideoStream;
@@ -123,6 +133,35 @@ export function createDesktopVideo(
   const dropDecoder = () => {
     live?.stream.close();
     live = null;
+  };
+
+  // Whether the format in force has been said to be one this page cannot decode
+  // as told, so that is one sentence and not one a unit.
+  let said = false;
+
+  // What builds the decoder of a stream the gateway says is the page's own to
+  // decode, or undefined for the browser's own. Null for a stream this page was
+  // told to decode and cannot, which is said and not decoded.
+  const softwareDecoderFor = (format: VideoFormat) => {
+    if (!format.software) {
+      return undefined;
+    }
+    const module = softwareModuleFor(format.decode);
+    if (module !== null && runs[module]) {
+      return (init: VideoDecoderLikeInit) =>
+        createSoftwareDecoder(module, init);
+    }
+    if (!said) {
+      said = true;
+      handlers.onError(
+        module === null
+          ? `This session's picture is decoded by this page, which has no decoder for ${format.decode}.`
+          : `This session's picture is decoded by this page's ${MODULE_CODEC[module]} decoder, which this browser cannot run: it needs WebGL 2 and a cross-origin isolated page. End the session and start it without "Decode in this page".`,
+        false,
+        format.decode,
+      );
+    }
+    return null;
   };
 
   // The decoder, built on demand and replaced when its picture changes.
@@ -154,6 +193,10 @@ export function createDesktopVideo(
         handlers.onNeedsKeyframe(reason);
       }
     };
+    const makeDecoder = softwareDecoderFor(format);
+    if (makeDecoder === null) {
+      return null;
+    }
     let stream: VideoStream;
     try {
       stream = createVideoStream(
@@ -171,9 +214,7 @@ export function createDesktopVideo(
           },
         },
         stallMs,
-        softwareHevc && isHevc(format.decode)
-          ? createWasmHevcDecoder
-          : undefined,
+        makeDecoder,
       );
     } catch (e) {
       // A throw from here would escape into the paint loop and drop the batch.
@@ -194,7 +235,12 @@ export function createDesktopVideo(
     setFormat(next) {
       format = next;
       warned = false;
-      if (live && live.format.decode !== next.decode) {
+      said = false;
+      if (
+        live &&
+        (live.format.decode !== next.decode ||
+          live.format.software !== next.software)
+      ) {
         // A stream that came back configured differently — a resize is the way this
         // happens — is a new chain, and its old decoder cannot decode it.
         dropDecoder();
@@ -410,7 +456,7 @@ export function createVideoStream(
 
   const decoder = makeDecoder({
     output: (frame) => settle(frame),
-    // A decoder that says a unit completed no picture (hevcWasmDecoder.ts): that
+    // A decoder that says a unit completed no picture (softwareDecoder.ts): that
     // unit is settled, so the next picture resolves its own unit and not this one.
     noPicture: () => settle(null),
     error: (e) => {

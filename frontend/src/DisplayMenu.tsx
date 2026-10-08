@@ -5,6 +5,7 @@ import {
   ViewOnlyCover,
 } from "./FloatingMenu.tsx";
 import { FloatingButton, useFloatingButton } from "./floatingButton.tsx";
+import { type VideoStreamInfo, videoLabel } from "./mediaLabel.ts";
 import type { RemoteSize } from "./useRemoteDesktop.ts";
 
 // The menu on a second display's tab: the session page's button and drawer
@@ -20,6 +21,7 @@ export default function DisplayMenu({
   display,
   connected,
   size,
+  videoStream,
   isMacHost,
   onLocalShortcut,
   onFocusDesktop,
@@ -33,6 +35,8 @@ export default function DisplayMenu({
   // What this display is drawn at, which arrives on this tab's socket and nowhere
   // else: the session page's Info has its own display's and not this one's.
   size: RemoteSize | null;
+  // This tab's stream and what decodes it, which is a decoder of this tab's own.
+  videoStream: VideoStreamInfo | null;
   isMacHost: boolean;
   // The three FloatingMenu takes, for the same reasons: the chord that hides the
   // button, the keyboard going back to the desktop surface, and the desktop being
@@ -80,6 +84,9 @@ export default function DisplayMenu({
           <div className="toolbar-section">
             <span className="toolbar-label">Display {display}</span>
             {size && <p className="toolbar-note">{remoteSizeLabel(size)}</p>}
+            {videoStream && (
+              <p className="toolbar-note">{videoLabel(videoStream, null)}</p>
+            )}
             <button
               type="button"
               className="toolbar-btn"

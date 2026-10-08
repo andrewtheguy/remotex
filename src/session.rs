@@ -14,7 +14,7 @@ use crate::audio::AudioBridge;
 use crate::camera::{CameraBridge, CameraFormat, CameraSignal};
 use crate::mic::{MicBridge, MicSignal};
 use crate::config::{
-    AudioPlan, Choices, Decoders, NotOffered, Passthrough, Protocol, RenderPlan, Subtype, TargetConfig,
+    AudioPlan, Choices, Decoders, NotOffered, PageDecoders, Passthrough, Protocol, RenderPlan, Subtype, TargetConfig,
 };
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ClientMsg, HostDisplay, MouseButton, ServerMsg, TouchPhase};
@@ -783,6 +783,9 @@ impl State {
 pub struct SessionManager {
     /// Every target profile the browser may pick from the picker.
     targets: Vec<TargetConfig>,
+    /// BETA: the page's software decoders this gateway has for a session to
+    /// choose ([`Choices::software`]).
+    page_decoders: PageDecoders,
     spawn_engine: EngineSpawner,
     /// The slot's one link-feedback handle, shared between whichever ws bridge is
     /// attached (writer) and whichever engine is running (reader). One rather than
@@ -801,8 +804,29 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub fn new(targets: Vec<TargetConfig>) -> Self {
-        Self::with_spawner(targets, Box::new(spawn_engine))
+    pub fn new(targets: Vec<TargetConfig>, page_decoders: PageDecoders) -> Self {
+        Self { page_decoders, ..Self::with_spawner(targets, Box::new(spawn_engine)) }
+    }
+
+    /// Test seam: the manager with these software decoders for its pages.
+    #[cfg(test)]
+    pub(crate) fn with_page_decoders(self, page_decoders: PageDecoders) -> Self {
+        Self { page_decoders, ..self }
+    }
+
+    /// The plan a session of `selected` runs for a browser that said `decoders`:
+    /// the target's, and decoded by the page where the session chose that.
+    fn plan(&self, selected: &Selected, decoders: Decoders) -> RenderPlan {
+        let Selected { target, choices } = selected;
+        target
+            .render_plan(*choices, decoders)
+            .decoded_by_page(target.software_chosen(*choices, self.page_decoders))
+    }
+
+    /// The passthrough of a session of `target` started with `choices` that a
+    /// browser saying `decoders` cannot take, its own decoder and the page's both.
+    fn beyond(&self, target: &TargetConfig, choices: Choices, decoders: Decoders) -> Option<Passthrough> {
+        target.beyond_page(choices, decoders, target.software_chosen(choices, self.page_decoders))
     }
 
     /// The selected target's position in the `[[targets]]` list, `None` on the picker.
@@ -816,6 +840,7 @@ impl SessionManager {
         let state = State::default();
         Self {
             targets,
+            page_decoders: PageDecoders::default(),
             spawn_engine,
             feedback: Arc::new(LinkFeedback::new()),
             selected_index: Arc::clone(&state.selected_index),
@@ -989,7 +1014,7 @@ impl SessionManager {
         // The session's passthrough, where this browser said it cannot take it:
         // nothing the engine sends could be shown here, and what to start
         // instead is a choice, which is made at the picker.
-        let beyond = st.selected.as_ref().and_then(|s| s.target.beyond(s.choices, decoders));
+        let beyond = st.selected.as_ref().and_then(|s| self.beyond(&s.target, s.choices, decoders));
         if beyond.is_some() {
             info!("session: this browser cannot take the session's passthrough; the session ends");
             st.take_engine();
@@ -1005,7 +1030,7 @@ impl SessionManager {
         // browser can actually decode. Every other reattach compares equal and
         // resumes exactly as before.
         if let (Some(selected), Some(engine)) = (&st.selected, &st.engine)
-            && selected.target.render_plan(selected.choices, decoders) != engine.plan
+            && self.plan(selected, decoders) != engine.plan
         {
             info!("session: the browser takes a different stream; rebuilding it");
             st.take_engine();
@@ -1664,9 +1689,11 @@ impl SessionManager {
                     return Err(ConnectError::UnknownTarget(target_name.to_owned()));
                 }
             };
-            let refused = match target.accepts(choices) {
+            let offered =
+                target.accepts(choices).and_then(|()| target.accepts_software(choices, self.page_decoders));
+            let refused = match offered {
                 Err(not_offered) => Some(ConnectError::NotOffered(not_offered)),
-                Ok(()) => target.beyond(choices, decoders).map(ConnectError::Beyond),
+                Ok(()) => self.beyond(&target, choices, decoders).map(ConnectError::Beyond),
             };
             if let Some(refused) = refused {
                 Self::notify(st.client.as_ref(), ServerMsg::Error { message: refused.to_string() });
@@ -1748,7 +1775,7 @@ impl SessionManager {
         // Resolved once, here, and handed to the engine rather than resolved again
         // there: the card and the encoder are then the same plan by construction,
         // and cannot disagree about the colour a browser is being sent.
-        let plan = target.render_plan(*choices, decoders);
+        let plan = self.plan(&selected, decoders);
         let render = plan.describe();
         info!("session: connecting to target {:?} ({render})", target.name);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -2138,11 +2165,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false, placement: Placement::Right };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false, placement: Placement::Right, software: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false, placement: Placement::Right };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false, placement: Placement::Right, software: false };
     /// A session started with nothing but the target's passthrough.
-    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true, placement: Placement::Right };
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true, placement: Placement::Right, software: false };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -2172,7 +2199,7 @@ mod tests {
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
             let size = if self.resize { Sizing::Window } else { Sizing::Target };
-            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false, placement: Placement::Right }
+            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false, placement: Placement::Right, software: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -2577,6 +2604,48 @@ mod tests {
         }
     }
 
+    /// A session started to be decoded by its pages is 4:4:4 for a browser whose
+    /// own decoder takes only 4:2:0, and the engine is told which of the page's
+    /// decoders it has. One that comes back answering otherwise resumes the same
+    /// engine: its answer selects nothing here. On a gateway with no decoder for
+    /// it the same `connect` is refused by name and starts nothing.
+    #[tokio::test]
+    async fn a_session_decoded_by_the_page_is_444_whatever_the_browser_takes() {
+        let chosen = Choices { software: true, ..Choices::default() };
+        let vp9 = PageDecoders { vp9: true, hevc: false };
+        let manager = |page_decoders| {
+            let (hook_tx, hook_rx) = std_mpsc::channel();
+            let spawner: EngineSpawner = Box::new(
+                move |_target, _choices, plan, _display, _input_rx, _frame_tx, _audio, _camera, _feedback| {
+                    hook_tx.send(plan).unwrap();
+                },
+            );
+            let targets = vec![TargetConfig { render_chroma: Some(ChromaChoice::Auto), ..video_target("auto") }];
+            (Arc::new(SessionManager::with_spawner(targets, spawner).with_page_decoders(page_decoders)), hook_rx)
+        };
+
+        let (mgr, plans) = manager(vp9);
+        let token = mgr.claim(false, None, "login").unwrap();
+        let mut att = mgr.attach(&token, None, Chroma::Subsampled.into()).await.unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "auto", None, chosen).await.unwrap();
+        let plan = plans.try_recv().unwrap();
+        assert_eq!((plan.chroma, plan.software), (Chroma::Full, vp9));
+        drop(att);
+        let _back = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        assert!(plans.try_recv().is_err(), "the same session was rebuilt for a browser's answer");
+
+        let (mgr, plans) = manager(PageDecoders::NONE);
+        let token = mgr.claim(false, None, "login").unwrap();
+        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        expect_picker(&mut att.events).await;
+        match mgr.connect(att.id, "auto", None, chosen).await {
+            Err(ConnectError::NotOffered(refused)) => assert_eq!(refused.choice, "decoding in the page"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(plans.try_recv().is_err(), "a refused connect started an engine");
+    }
+
     /// `render_chroma = "auto"` is resolved from the attachment, which is where the
     /// browser's one answer lives — so the same target streams 4:4:4 to a decoder
     /// that takes profile 1 and 4:2:0 to one that does not, and the engine and the
@@ -2615,7 +2684,7 @@ mod tests {
 
             assert_eq!(
                 hook_rx.try_recv().expect("connect spawns the engine"),
-                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false, rdp_graphics: false, rdp_h264: false },
+                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() },
                 "the engine must be built for what the browser said it takes"
             );
             match recv(&mut att.events).await {
@@ -2680,7 +2749,7 @@ mod tests {
         let mut changed = mgr.attach(&token, Some(screen), Chroma::Subsampled.into()).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false },
+            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() },
             "the rebuilt stream must follow the browser that came back"
         );
         assert_eq!(display_rx.try_iter().last(), Some(Some(screen)));
@@ -2773,7 +2842,7 @@ mod tests {
                 },
             );
             let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true, placement: Placement::Right };
+            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true, placement: Placement::Right, software: false };
 
             let token_a = mgr.claim(false, None, "login").unwrap();
             let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();

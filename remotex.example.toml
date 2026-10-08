@@ -83,7 +83,10 @@
 
 # BETA: the page's software HEVC decoder, for a browser whose own
 # VideoDecoder refuses a High Performance Mac's 4:4:4 picture passed through
-# — Chrome on a GPU without HEVC Range Extensions, for one. It is
+# — Chrome on a GPU without HEVC Range Extensions, for one. A gateway that
+# serves it shows "Decode in this page" at the picker under such a target whose
+# picture is ticked to pass, and a session started so has its pages decode the
+# picture with it. It is
 # andrewtheguy/hevc-wasm's decoder compiled to WebAssembly, whose licence keeps
 # it out of every remotex build as the native decoder's keeps that out: download
 # the release this gateway pins from the private andrewtheguy/hevc-wasm-archives,
@@ -109,6 +112,24 @@
 #
 #[hevc_wasm]
 #archive = "/srv/remotex/hevc-wasm-v0.0.3.tar.gz"
+
+# BETA: lets a session be started with its VP9 decoded by the page, at 4:4:4,
+# for a browser whose own VideoDecoder refuses VP9 profile 1 — Safari on iOS and
+# iPadOS, for one, which decodes VP9 in hardware alone. Such a browser otherwise
+# asks for 4:2:0 and is sent that. With enabled = true the picker shows "Decode
+# in this page" under every target whose render_chroma is not "420", ticked to
+# begin with in a browser whose own decoder refuses profile 1 and unticked in one
+# that takes it. A session started with it is sent 4:4:4 whatever the browser
+# answered, and every page attached to it decodes that in andrewtheguy/vp9-wasm's
+# decoder, which is part of the page: there is no archive to place. The page
+# needs shared-memory SIMD WebAssembly on the cross-origin isolated page every
+# gateway serves and a WebGL 2 canvas to present on; the row is greyed where it
+# has not. Off unless set here, and then no target offers the choice and the
+# page never loads the decoder: the table is for comparing, in use, 4:4:4
+# decoded in the page with the 4:2:0 such a browser gets without it.
+#
+#[vp9_wasm]
+#enabled = true
 
 # On Windows, the folder an `ard-high-performance` target's HEVC decoder is
 # loaded from: FFmpeg's avcodec and avutil DLLs. With nothing set here the
@@ -564,7 +585,8 @@ password = "change-me"
 # Safari's native decoders, desktop and mobile, were measured taking it where the
 # GPU decodes HEVC 4:4:4; Firefox's native decoder does not. Where the native
 # decoder refuses it, the optional software decoder above may supply the picture
-# path. Without either, the choice is greyed and the browser is sent VP9.
+# path, in a session started with "Decode in this page". Without either, the
+# choice is greyed and the browser is sent VP9.
 # [[targets]]
 # name = "mac-high-performance"
 # protocol = "vnc"

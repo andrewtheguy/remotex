@@ -361,8 +361,8 @@ export default function RemoteDesktop({
             mounted in both modes so the hook's canvas ref stays stable. */}
         <canvas ref={canvasRef} className="framebuffer" width={0} height={0} />
         {/* What is drawn on the GPU is drawn here and not on the canvas above:
-            an RDP host's graphics pipeline, passed through, and the software
-            HEVC decoder's pictures (glPicture.ts). The paint worker shows it
+            an RDP host's graphics pipeline, passed through, and a software
+            decoder's pictures (glPicture.ts). The paint worker shows it
             while it holds one of them. It takes the canvas above's box, and
             lies under the input overlay like it. */}
         <canvas
@@ -398,6 +398,7 @@ export default function RemoteDesktop({
             display={tabDisplay}
             connected={status === "connected"}
             size={size}
+            videoStream={videoStream}
             isMacHost={isMacHost}
             onLocalShortcut={onLocalShortcut}
             onFocusDesktop={focusDesktop}
