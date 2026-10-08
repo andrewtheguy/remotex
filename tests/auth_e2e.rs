@@ -23,6 +23,7 @@ async fn spawn_app() -> SocketAddr {
         meter: None,
         hevc_wasm: None,
         vp9_wasm: false,
+        vp9_capture: None,
         hp_decoders: Default::default(),
         targets: vec![TargetConfig {
             name: "unreachable".to_owned(),

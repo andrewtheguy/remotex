@@ -4,6 +4,7 @@
 //! the previous session ends with its claim, and the new attachment starts at
 //! the picker.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use log::{debug, info, warn};
@@ -18,6 +19,7 @@ use crate::config::{
 };
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ClientMsg, HostDisplay, MouseButton, ServerMsg, TouchPhase};
+use crate::vp9_capture::Capture;
 use crate::{rdp, vnc};
 
 /// Capacity of the engine→client frame channels. Bounded so a slow browser
@@ -786,6 +788,8 @@ pub struct SessionManager {
     /// BETA: the page's software decoders this gateway has for a session to
     /// choose ([`Choices::software`]).
     page_decoders: PageDecoders,
+    /// Where every VP9 stream encoded here is written (`serve --vp9-capture`), if anywhere.
+    vp9_capture: Option<Arc<Path>>,
     spawn_engine: EngineSpawner,
     /// The slot's one link-feedback handle, shared between whichever ws bridge is
     /// attached (writer) and whichever engine is running (reader). One rather than
@@ -804,8 +808,10 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub fn new(targets: Vec<TargetConfig>, page_decoders: PageDecoders) -> Self {
-        Self { page_decoders, ..Self::with_spawner(targets, Box::new(spawn_engine)) }
+    /// `vp9_capture` is the directory every VP9 stream encoded here is written to
+    /// (`serve --vp9-capture`), if any.
+    pub fn new(targets: Vec<TargetConfig>, page_decoders: PageDecoders, vp9_capture: Option<Arc<Path>>) -> Self {
+        Self { page_decoders, vp9_capture, ..Self::with_spawner(targets, Box::new(spawn_engine)) }
     }
 
     /// Test seam: the manager with these software decoders for its pages.
@@ -821,6 +827,7 @@ impl SessionManager {
         target
             .render_plan(*choices, decoders)
             .decoded_by_page(target.software_chosen(*choices, self.page_decoders))
+            .captured(self.vp9_capture.as_ref().map(|dir| Capture::new(Arc::clone(dir), &target.name)))
     }
 
     /// The passthrough of a session of `target` started with `choices` that a
@@ -841,6 +848,7 @@ impl SessionManager {
         Self {
             targets,
             page_decoders: PageDecoders::default(),
+            vp9_capture: None,
             spawn_engine,
             feedback: Arc::new(LinkFeedback::new()),
             selected_index: Arc::clone(&state.selected_index),
@@ -1803,7 +1811,7 @@ impl SessionManager {
         st.engine = Some(EngineSlot {
             input_tx,
             generation,
-            plan,
+            plan: plan.clone(),
             audio: audio.clone(),
             camera: uplinks.camera.clone(),
             microphone: uplinks.microphone.clone(),
@@ -1814,7 +1822,7 @@ impl SessionManager {
         (self.spawn_engine)(
             target.clone(),
             *choices,
-            plan,
+            plan.clone(),
             display,
             input_rx,
             frame_tx,
@@ -2684,7 +2692,7 @@ mod tests {
 
             assert_eq!(
                 hook_rx.try_recv().expect("connect spawns the engine"),
-                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() },
+                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default(), capture: None },
                 "the engine must be built for what the browser said it takes"
             );
             match recv(&mut att.events).await {
@@ -2749,7 +2757,7 @@ mod tests {
         let mut changed = mgr.attach(&token, Some(screen), Chroma::Subsampled.into()).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() },
+            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default(), capture: None },
             "the rebuilt stream must follow the browser that came back"
         );
         assert_eq!(display_rx.try_iter().last(), Some(Some(screen)));

@@ -56,6 +56,13 @@ pub enum Commands {
         /// connects to. A browser needs the host:port form
         #[arg(short, long, env = "REMOTEX_LISTEN")]
         listen: Option<String>,
+
+        /// Also write every VP9 stream this gateway encodes to DIR, for analysis:
+        /// one IVF file per stream, with a CSV of its frames beside it. Made if
+        /// missing; nothing in it is ever removed. Only this option turns it on —
+        /// no config key or environment variable does
+        #[arg(long, value_name = "DIR")]
+        vp9_capture: Option<PathBuf>,
     },
 
     /// Run the local multi-instance control plane. The TUI supervises one gateway
@@ -149,11 +156,23 @@ mod tests {
     #[test]
     fn serve_config_is_optional() {
         let cli = Cli::try_parse_from(["remotex", "serve"]).unwrap();
-        let Commands::Serve { config, listen } = cli.command else {
+        let Commands::Serve { config, listen, vp9_capture } = cli.command else {
             panic!("expected the serve subcommand");
         };
         assert!(config.is_none());
         assert!(listen.is_none(), "unset means the config file decides");
+        assert!(vp9_capture.is_none(), "nothing is captured unless asked for");
+    }
+
+    /// The capture is asked for by a directory, on `serve` and nowhere else.
+    #[test]
+    fn serve_captures_vp9_only_when_given_a_directory() {
+        let cli = Cli::try_parse_from(["remotex", "serve", "--vp9-capture", "tmp/vp9"]).unwrap();
+        let Commands::Serve { vp9_capture, .. } = cli.command else {
+            panic!("expected the serve subcommand");
+        };
+        assert_eq!(vp9_capture.as_deref(), Some(std::path::Path::new("tmp/vp9")));
+        assert!(Cli::try_parse_from(["remotex", "serve", "--vp9-capture"]).is_err(), "a switch with no directory");
     }
 
     /// The listen address is one value on the command line as it is one key in

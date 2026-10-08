@@ -18,6 +18,7 @@ use crate::audio::PcmFormat;
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::HostDisplay;
+use crate::vp9_capture::Capture;
 use crate::throughput::MeterConfig;
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
@@ -302,7 +303,7 @@ impl Default for AudioPlan {
 
 /// The render choices an engine sees: the target's resolved VP9 plan and the
 /// passthrough the session was started with, from [`TargetConfig::render_plan`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderPlan {
     /// The 1–100 dial the stream holds on a link that can carry it, rather than a
     /// quantizer: turning that into one is [`crate::vp9`]'s business, and it is the
@@ -333,6 +334,9 @@ pub struct RenderPlan {
     /// software decoders, as each `videoFormat` then says ([`Choices::software`]).
     /// With its VP9 among them, [`Self::chroma`] is 4:4:4.
     pub software: PageDecoders,
+    /// Where each stream encoded here is kept, under `serve --vp9-capture`
+    /// ([`Self::captured`]). Not the target's to say, so never on its card.
+    pub capture: Option<Capture>,
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
@@ -640,6 +644,11 @@ impl RenderPlan {
     pub fn decoded_by_page(self, software: PageDecoders) -> Self {
         let chroma = if software.vp9 { Chroma::Full } else { self.chroma };
         Self { chroma, software, ..self }
+    }
+
+    /// The plan with each stream it encodes kept by `capture`.
+    pub fn captured(self, capture: Option<Capture>) -> Self {
+        Self { capture, ..self }
     }
 
     /// The stream this plan passes untouched, if any.
@@ -1057,7 +1066,7 @@ impl TargetConfig {
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
         let rdp_h264 = rdp_graphics && self.egfx_h264 && decoders.rdp_h264;
-        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics, rdp_h264, software: PageDecoders::default() }
+        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics, rdp_h264, software: PageDecoders::default(), capture: None }
     }
 
     /// BETA: which of the page's software decoders a session on this target can
@@ -1755,6 +1764,11 @@ pub struct AppConfig {
     /// `[vp9_wasm].enabled`: whether the page may decode VP9 at 4:4:4 in its own
     /// software decoder, which `/api/config` tells it.
     pub vp9_wasm: bool,
+    /// `serve --vp9-capture`: the directory every VP9 stream encoded here is written
+    /// to. `None` writes none. Never the file's to set, so an analysis aid that
+    /// fills a disk is only ever on because somebody typed it: resolution leaves it
+    /// `None`, and only `serve` sets it.
+    pub vp9_capture: Option<PathBuf>,
     /// `[hp_decoders]`: the folders the gateway loads the High Performance
     /// decoders from at start-up. Empty looks for them when a session needs them.
     pub hp_decoders: HpDecoders,
@@ -2137,6 +2151,7 @@ impl ConfigFile {
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
             vp9_wasm: self.vp9_wasm.is_some_and(|section| section.enabled),
+            vp9_capture: None,
             hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
@@ -2251,6 +2266,7 @@ impl ConfigFile {
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
             vp9_wasm: self.vp9_wasm.is_some_and(|section| section.enabled),
+            vp9_capture: None,
             hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
@@ -3138,6 +3154,15 @@ mod tests {
         }
     }
 
+    /// The capture is the command line's alone: a config file cannot turn it on.
+    #[test]
+    fn a_config_file_cannot_capture_vp9() {
+        let toml = format!("[vp9_capture]\nenabled = true\n{}", minimal());
+        let err = ConfigFile::parse(&toml).expect_err("the capture is not the file's to turn on");
+        assert!(format!("{err:#}").contains("vp9_capture"), "{err:#}");
+        assert_eq!(ConfigFile::parse(&minimal()).unwrap().resolve().unwrap().vp9_capture, None);
+    }
+
     /// The logo's content type is decided at resolution, so a file no browser
     /// would take as an icon is refused before a gateway ever serves it —
     /// including by `check-config`, which resolves on the way through.
@@ -3393,6 +3418,7 @@ mod tests {
                     rdp_graphics: false,
                     rdp_h264: false,
                     software: Default::default(),
+                    capture: None,
                 }
             );
         }
@@ -3411,6 +3437,7 @@ mod tests {
                 rdp_graphics: false,
                 rdp_h264: false,
                 software: Default::default(),
+                capture: None,
             }
         );
     }
@@ -3441,6 +3468,7 @@ mod tests {
             rdp_graphics: false,
             rdp_h264: false,
             software: Default::default(),
+            capture: None,
         };
         assert_eq!(video("", Chroma::Full), stream(Chroma::Full));
         assert_eq!(video("", Chroma::Subsampled), stream(Chroma::Subsampled));
@@ -4529,7 +4557,7 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default(), capture: None });
         assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive");
     }
 
@@ -4541,7 +4569,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default(), capture: None });
         assert_eq!(plan.describe(), "video q80 4:2:0");
     }
 

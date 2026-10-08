@@ -3154,6 +3154,21 @@ for an average where it is given no seconds, and shows every rate in decimal bit
 per second, as a network meter does. What an
 engine exchanges with its remote is a different link and is not counted.
 
+`remotex serve --vp9-capture <DIR>` is on the command line alone, with no key
+in the file, and on purpose: it writes every VP9 stream the gateway encodes to disk
+for analysis and never removes any, so it is on only where somebody typed it,
+never because a config or an environment was copied from elsewhere. No table or
+variable turns it on, and `serve-embedded` has no such option. Each stream is one
+IVF file ([`src/vp9_capture.rs`](../src/vp9_capture.rs)), one picture size from a
+keyframe on, beside a CSV of each frame's time, bytes, keyframe and the dial it
+was coded at. The file is opened at the stream's first frame and written on the
+encode's own blocking worker, after the unit is coded and before it is queued, so
+the engine's read loop never waits on the disk; the header's frame count is
+rewritten after each frame, so a file is whole however the gateway stops. The
+directory is made at start-up, and a capture that later fails to write is logged
+and dropped rather than ending a session it only observes. A passed stream is the
+remote's, and is not written.
+
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
 flow and protocol engines. Containerized dummy servers cover plain VNC and

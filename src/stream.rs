@@ -12,6 +12,7 @@ use crate::protocol::{Held, VideoUnit};
 use crate::shadow::Rect;
 use crate::video::Mirror;
 use crate::vp9::Stream;
+use crate::vp9_capture::{Capture, StreamCapture};
 
 /// Most rectangles the staged-damage list holds before collapsing to a bounding
 /// box — see [`DesktopStream::stage`].
@@ -36,6 +37,8 @@ struct Live {
     /// re-announce: the browser that just arrived never saw the original text frame,
     /// and its decoder cannot be configured from the units alone.
     announced: Option<String>,
+    /// This stream kept on disk, under `serve --vp9-capture`. Dropped once a write fails.
+    capture: Option<StreamCapture>,
 }
 
 /// The mirror, the encoder, and the double buffer between them.
@@ -47,6 +50,8 @@ pub struct DesktopStream {
     /// The chroma sampling the encoder is built with — the target's, for its whole
     /// session; nothing moves it.
     chroma: Chroma,
+    /// Where each stream is kept, under `serve --vp9-capture`.
+    capture: Option<Capture>,
     /// The desktop, learned from [`crate::protocol::ServerMsg::Resize`]. `None` until
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
@@ -77,10 +82,11 @@ pub struct DesktopStream {
 }
 
 impl DesktopStream {
-    pub fn new(quality: u8, chroma: Chroma) -> Self {
+    pub fn new(quality: u8, chroma: Chroma, capture: Option<Capture>) -> Self {
         Self {
             quality,
             chroma,
+            capture,
             size: None,
             mirror: None,
             spare: None,
@@ -226,6 +232,7 @@ impl DesktopStream {
                     dirty: true,
                     keyframe_owed: true,
                     announced: None,
+                    capture: self.capture.as_ref().map(|capture| capture.stream(coded, self.chroma)),
                 }
             }
         };
@@ -386,6 +393,12 @@ impl Round {
         };
         live.dirty = false;
         live.keyframe_owed = false;
+        if let Some(capture) = &mut live.capture
+            && let Err(e) = capture.write(&unit, live.quality)
+        {
+            log::warn!("video: the stream's capture stops here: {e:#}");
+            live.capture = None;
+        }
         // The announcement goes out ahead of the unit, which is the contract
         // `ServerMsg::VideoFormat` states.
         if let Some(decode) = live.stream.decode_string()
@@ -503,7 +516,7 @@ mod tests {
     }
 
     fn stream(w: u16, h: u16) -> DesktopStream {
-        let mut stream = DesktopStream::new(60, Chroma::Subsampled);
+        let mut stream = DesktopStream::new(60, Chroma::Subsampled, None);
         stream.want(w, h);
         stream
     }
@@ -514,6 +527,44 @@ mod tests {
 
     fn placed(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
+    }
+
+    /// Under `serve --vp9-capture` each stream is its own file, holding exactly the units
+    /// the client is sent, and a resize starts the next.
+    #[test]
+    fn a_captured_stream_keeps_what_it_sends_and_a_resize_starts_another_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stream = DesktopStream::new(60, Chroma::Subsampled, Some(Capture::new(dir.path().into(), "t")));
+        let mut sent = Vec::new();
+        for (w, h) in [(320, 256), (320, 256), (640, 480)] {
+            stream.want(w, h);
+            stream.blit(placed(0, 0, w, h), &flat(w, h, sent.len() as u8 * 40)).expect("a blit");
+            let mut round = stream.take_round().expect("a round").expect("dirty");
+            sent.push(round.encode().expect("an encode").unit.expect("a unit").data);
+            stream.put_back(round);
+        }
+        drop(stream);
+        let mut files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "ivf"))
+            .collect();
+        files.sort();
+        let frames = |path: &std::path::Path| {
+            let ivf = std::fs::read(path).unwrap();
+            let mut at = 32;
+            let mut frames = Vec::new();
+            while at < ivf.len() {
+                let len = u32::from_le_bytes(ivf[at..at + 4].try_into().unwrap()) as usize;
+                frames.push(ivf[at + 12..at + 12 + len].to_vec());
+                at += 12 + len;
+            }
+            frames
+        };
+        assert_eq!(files.len(), 2, "{files:?}");
+        let (small, large): (Vec<_>, Vec<_>) = files.iter().partition(|path| path.to_string_lossy().contains("320x256"));
+        assert_eq!(frames(small[0]), sent[..2]);
+        assert_eq!(frames(large[0]), sent[2..]);
     }
 
     /// Rows reported one under another stage as the one rectangle they make, so how
