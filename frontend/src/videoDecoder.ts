@@ -36,6 +36,7 @@ import {
   createSoftwareDecoder,
   type DecodedPicture,
   type SoftwareModule,
+  type SoftwareRefusals,
   softwareModuleFor,
   type VideoDecoderLike,
   type VideoDecoderLikeInit,
@@ -103,6 +104,12 @@ export function createDesktopVideo(
    * whatever is listed.
    */
   software: readonly SoftwareModule[] = [],
+  /**
+   * BETA: the modules whose streams this page does not decode at all, and what
+   * it says of each: a module the page's URL asked for where it is not to be
+   * had (videoChroma.ts), which another decoder does not stand in for.
+   */
+  refused: SoftwareRefusals = {},
 ): DesktopVideo {
   interface Live {
     stream: VideoStream;
@@ -168,6 +175,12 @@ export function createDesktopVideo(
         handlers.onNeedsKeyframe(reason);
       }
     };
+    const module = softwareModuleFor(format.decode);
+    const refusal = module === null ? undefined : refused[module];
+    if (refusal !== undefined) {
+      handlers.onError(refusal, false, format.decode);
+      return null;
+    }
     let stream: VideoStream;
     try {
       stream = createVideoStream(

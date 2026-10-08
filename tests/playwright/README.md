@@ -81,7 +81,8 @@ file, once, that the first keyframe's batch is acknowledged with no video error
 or repaint request before it, and that the page shows the canvas the module's
 planes are drawn on. Without the switch in the URL it asserts the other decision:
 the same 4:4:4, the module never fetched, and that canvas hidden. Against a
-gateway without the table it asserts that the switch does nothing.
+gateway without the table it asserts that the switch fails the stream, with an
+alert naming the table, and the module never fetched.
 
 `soft-keyboard.spec.ts` is the soft keyboard, read from the same socket: that a
 key tapped on it is the `key` frames the page sends, down then up; that a tapped
@@ -280,7 +281,7 @@ bun run test:vp9
 ```
 
 Against a gateway without the table, add `REMOTEX_PLAYWRIGHT_VP9_WASM=0`, which
-runs the test that the switch does nothing instead.
+runs the test that the switch fails the stream by name instead.
 
 The audio and picker specs use the test-tone gateway instead of a live target:
 

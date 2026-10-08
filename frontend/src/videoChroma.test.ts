@@ -17,6 +17,7 @@ const globals = globalThis as unknown as {
 const {
   chooseVideoChroma,
   resetVideoChromaForTests,
+  softwareVp9Refusal,
   videoChroma,
   videoDecoder,
 } = await import("./videoChroma.ts");
@@ -117,11 +118,13 @@ test("what the gateway's key, the browser's answer, the page and its URL select"
   // The gateway allows it, the browser takes profile 1, the page runs the module,
   // the URL: then the chroma asked for and what decodes it.
   const table: [boolean, boolean, boolean, string, string, string][] = [
-    // A gateway that does not allow it: the browser's answer alone, whatever else.
+    // A gateway that does not allow it: the browser's answer alone,
     [false, true, true, "", "444", "native"],
     [false, false, true, "", "420", "native"],
-    [false, true, true, SWITCH, "444", "native"],
-    [false, false, true, SWITCH, "420", "native"],
+    // and a URL that asks is refused, not given the browser's own.
+    [false, true, true, SWITCH, "444", "not-enabled"],
+    [false, false, true, SWITCH, "444", "not-enabled"],
+    [false, true, false, SWITCH, "444", "not-enabled"],
     // One that does: the browser's own decoder where it takes profile 1,
     [true, true, true, "", "444", "native"],
     // the module where it does not, which is what the key is for,
@@ -132,8 +135,8 @@ test("what the gateway's key, the browser's answer, the page and its URL select"
     // and the module over the browser's own for a URL that asks, where it runs.
     [true, true, true, SWITCH, "444", "software"],
     [true, false, true, SWITCH, "444", "software"],
-    [true, true, false, SWITCH, "444", "native"],
-    [true, false, false, SWITCH, "420", "native"],
+    [true, true, false, SWITCH, "444", "cannot-run"],
+    [true, false, false, SWITCH, "444", "cannot-run"],
   ];
   for (const [allowed, takes, runs, search, chroma, decoder] of table) {
     const undo = page(runs, search);
@@ -145,6 +148,15 @@ test("what the gateway's key, the browser's answer, the page and its URL select"
         { chroma, decoder },
         JSON.stringify({ allowed, takes, runs, search }),
       );
+      // A refusal has a sentence, and only a refusal has.
+      const refusal = softwareVp9Refusal();
+      if (decoder === "not-enabled") {
+        assert.match(refusal ?? "", /gateway does not enable/);
+      } else if (decoder === "cannot-run") {
+        assert.match(refusal ?? "", /browser cannot run/);
+      } else {
+        assert.equal(refusal, null);
+      }
     } finally {
       undo();
     }

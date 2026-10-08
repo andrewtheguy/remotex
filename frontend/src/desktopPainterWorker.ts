@@ -37,7 +37,7 @@ import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { createPlanesPicture } from "./planesPicture.ts";
 import { binaryFrameKind } from "./protocol.ts";
-import type { SoftwareModule } from "./softwareDecoder.ts";
+import type { SoftwareModule, SoftwareRefusals } from "./softwareDecoder.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 /**
@@ -62,6 +62,8 @@ export type PainterCommand =
        * (appleMedia.ts), VP9 at 4:4:4 (videoChroma.ts).
        */
       software: SoftwareModule[];
+      /** BETA: the streams this page refuses, and why (videoChroma.ts). */
+      refused: SoftwareRefusals;
     }
   | {
       type: "frame";
@@ -260,6 +262,7 @@ export function createPainterWorker(
             onGraphicsShown: (shown) =>
               post({ type: "graphicsShown", shown, epoch }),
             software: command.software,
+            refused: command.refused,
           });
           break;
         case "frame": {

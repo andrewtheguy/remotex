@@ -184,14 +184,20 @@ test.describe("a VP9 target and the page's software decoder", () => {
     expect(seen.moduleLoads).toEqual([]);
   });
 
-  test("not allowed, the switch in the URL does nothing", async ({ page }) => {
+  test("not allowed, the switch in the URL fails the stream by name", async ({
+    page,
+  }) => {
     test.skip(ALLOWED, "the gateway sets [vp9_wasm]");
     expect(await gatewayAllows(page)).toBe(false);
     const seen = watchSession(page);
     await logInAndConnectTo(page, VP9_TARGET ?? "", SOFTWARE);
 
+    // Not the browser's own decoder in the module's place: the page says what
+    // was asked for and that the gateway does not enable it.
+    await expect(page.getByRole("alert")).toContainText(
+      "this gateway does not enable ([vp9_wasm])",
+    );
     expect(seen.chroma).toBe("444");
-    await firstKeyframeAcknowledged(page, seen);
     await expect(page.locator("canvas.graphics")).toBeHidden();
     expect(seen.moduleLoads).toEqual([]);
   });

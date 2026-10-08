@@ -34,6 +34,9 @@
 /** The modules: which stream each decodes is `softwareModuleFor`'s to say. */
 export type SoftwareModule = "hevc" | "vp9";
 
+/** Why a page does not decode a module's streams at all, by module. */
+export type SoftwareRefusals = Partial<Record<SoftwareModule, string>>;
+
 /** What a module decodes, as a sentence names it. */
 export const MODULE_CODEC: Record<SoftwareModule, string> = {
   hevc: "HEVC",

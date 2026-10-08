@@ -1203,10 +1203,12 @@ takes, shared-memory SIMD WebAssembly on the cross-origin isolated page and a
 WebGL 2 canvas to present on (`frontend/src/softwareSupport.ts`), short of that
 decoder's need to give the canvas other primaries than sRGB's.
 `?vp9_decoder=software` in the page's URL takes the module on such a gateway
-even where the browser's own decoder would do, where the page can run it, to try
-it and compare. With the key off, which it is unless set, none of this happens:
-the browser's answer is the whole choice, the URL switch does nothing, and the
-module is never loaded. The key is a switch and not the default while the
+even where the browser's own decoder would do, to try it and compare. With the
+key off, which it is unless set, none of this happens: the browser's answer is
+the whole choice and the module is never loaded. A URL that asks for the module
+is never answered with another decoder: where the key is off, or the page cannot
+run the module, a 4:4:4 stream fails on that page saying which, so that a
+picture is not taken for the module's when it is the browser's. The key is a switch and not the default while the
 operator compares, in use, 4:4:4 decoded in the page with the 4:2:0 a browser
 without profile 1 gets otherwise, which is what decides whether the encoder goes
 on making both.

@@ -120,7 +120,9 @@
 # to place. A browser whose own decoder takes profile 1 goes on using it, and one
 # that can run neither is sent 4:2:0 as before. A page opened with
 # ?vp9_decoder=software in its URL takes the page's decoder even where the
-# browser's own would do, to try it. Off unless set here, and then the page never
+# browser's own would do, to try it; where this table does not enable it, or the
+# page cannot run it, such a page shows no 4:4:4 stream and says why, rather than
+# decode it with something else. Off unless set here, and then the page never
 # loads the decoder: the table is for comparing, in use, 4:4:4 decoded in the page
 # with the 4:2:0 such a browser gets without it. A target's render_chroma still
 # overrules what the page asks for.

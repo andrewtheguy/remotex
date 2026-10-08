@@ -243,6 +243,32 @@ test("a new picture size replaces the decoder", async () => {
   assert.equal(tagOf(await resized), 0xb2);
 });
 
+test("a module's stream on a page that refuses it fails by the page's sentence, with no decoder made", async () => {
+  const refusal = "the software VP9 decoder is not enabled";
+  for (const [decode, refused] of [
+    ["vp09.01.40.08.03.06.06.06.00", true],
+    // Profile 0 is no module's, so nothing refuses it.
+    ["vp09.00.40.08.01.06.06.06.00", false],
+  ] as const) {
+    const errors: [string, boolean][] = [];
+    const browsers = built.length;
+    const table = createDesktopVideo(
+      {
+        onError: (reason, recoverable) => errors.push([reason, recoverable]),
+        onNeedsKeyframe: () => {},
+      },
+      STALL_MS,
+      [],
+      { vp9: refusal },
+    );
+    table.setFormat({ decode });
+    void table.decode(size, unit(1), true);
+    assert.deepEqual(errors, refused ? [[refusal, false]] : [], decode);
+    assert.equal(built.length - browsers, refused ? 0 : 1, decode);
+    table.close();
+  }
+});
+
 test("a stream is decoded in software only where the page said so and a module decodes it", async () => {
   // The decode workers made, by name: a software decoder starts its module's.
   const workers: string[] = [];

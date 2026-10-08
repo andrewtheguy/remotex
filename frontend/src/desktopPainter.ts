@@ -22,8 +22,8 @@ import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { batchFrameSequence } from "./protocol.ts";
-import type { SoftwareModule } from "./softwareDecoder.ts";
-import { videoDecoder } from "./videoChroma.ts";
+import type { SoftwareModule, SoftwareRefusals } from "./softwareDecoder.ts";
+import { softwareVp9Refusal, videoDecoder } from "./videoChroma.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 export interface PainterHandlers {
@@ -167,12 +167,18 @@ export function desktopPainterFor(
   if (videoDecoder() === "software") {
     software.push("vp9");
   }
+  const refused: SoftwareRefusals = {};
+  const vp9Refusal = softwareVp9Refusal();
+  if (vp9Refusal !== null) {
+    refused.vp9 = vp9Refusal;
+  }
   post(
     {
       type: "init",
       canvas: offscreen,
       graphics: offscreenGraphics,
       software,
+      refused,
     },
     [offscreen, offscreenGraphics],
   );

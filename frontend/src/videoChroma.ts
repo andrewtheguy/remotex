@@ -22,8 +22,11 @@
 // module. The key is off unless set, and the module is then never loaded: it is
 // there for an operator to compare, in use, 4:4:4 decoded in the page with the
 // 4:2:0 such a browser gets otherwise. `?vp9_decoder=software` in the page's URL
-// takes the module on such a gateway even where the browser's own decoder would
-// do, to try it; on any other gateway it does nothing.
+// takes the module even where the browser's own decoder would do, to try it. A
+// URL that asks is not answered with another decoder: where the gateway does not
+// allow the module, or the page cannot run it, a 4:4:4 stream fails saying which
+// (`softwareVp9Refusal`), so that what is on the screen is never mistaken for the
+// module's.
 //
 // A target that sets `render_chroma` overrules all of this and streams what it names;
 // the answer resolves the targets that name nothing, which is what lets one target
@@ -59,8 +62,12 @@ export type VideoChroma = "444" | "420";
  */
 const VP9_444_PROBE = "vp09.01.40.08.03.06.06.06.00";
 
-/** What decodes a 4:4:4 stream: the browser's `VideoDecoder`, or vp9-wasm. */
-export type Vp9Decoder = "native" | "software";
+/**
+ * What decodes a 4:4:4 stream: the browser's `VideoDecoder`, or vp9-wasm, or
+ * nothing, where the page's URL asked for vp9-wasm and the gateway does not allow
+ * it or the page cannot run it.
+ */
+export type Vp9Decoder = "native" | "software" | "not-enabled" | "cannot-run";
 
 /** What the page asks for, and what it decodes a 4:4:4 stream with. */
 export interface VideoChoice {
@@ -95,7 +102,8 @@ async function browserTakesProfile1(): Promise<boolean> {
  * it (gatewayConfig.ts). Without it the browser's answer is the whole of it:
  * 4:4:4 unless it says no, and its own decoder either way. With it, a page that
  * can run the module decodes 4:4:4 there when the browser says no, or when the
- * page's URL asks; a page that cannot is as if the gateway had not allowed it.
+ * page's URL asks; a page that cannot is as if the gateway had not allowed it,
+ * unless its URL asked, which is refused rather than given another decoder.
  */
 export async function chooseVideoChroma(
   softwareAllowed: boolean | Promise<boolean>,
@@ -103,10 +111,13 @@ export async function chooseVideoChroma(
   if (chosen) {
     return chosen;
   }
-  const software =
-    (await softwareAllowed) && runsSoftwareDecoder({ widePrimaries: false });
-  if (software && softwareRequested("vp9_decoder")) {
-    chosen = { chroma: "444", decoder: "software" };
+  const allowed = await softwareAllowed;
+  const software = allowed && runsSoftwareDecoder({ widePrimaries: false });
+  if (softwareRequested("vp9_decoder")) {
+    chosen = {
+      chroma: "444",
+      decoder: software ? "software" : allowed ? "cannot-run" : "not-enabled",
+    };
   } else if (await browserTakesProfile1()) {
     chosen = { chroma: "444", decoder: "native" };
   } else if (software) {
@@ -139,6 +150,21 @@ export function videoChroma(): VideoChroma {
  */
 export function videoDecoder(): Vp9Decoder {
   return choice("videoDecoder()").decoder;
+}
+
+/**
+ * Why a 4:4:4 stream is not decoded on this page, for one whose URL asked for
+ * the module where it is not to be had; null on every other page.
+ */
+export function softwareVp9Refusal(): string | null {
+  switch (choice("softwareVp9Refusal()").decoder) {
+    case "not-enabled":
+      return "This page's URL asks for the software VP9 decoder (?vp9_decoder=software), which this gateway does not enable ([vp9_wasm]).";
+    case "cannot-run":
+      return "This page's URL asks for the software VP9 decoder (?vp9_decoder=software), which this browser cannot run.";
+    default:
+      return null;
+  }
 }
 
 /** Test seam: forget the answer so the question can be asked again. */

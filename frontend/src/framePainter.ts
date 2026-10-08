@@ -24,6 +24,7 @@ import {
   type DecodedPicture,
   isSoftwarePlanes,
   type SoftwareModule,
+  type SoftwareRefusals,
 } from "./softwareDecoder.ts";
 import {
   createDesktopVideo,
@@ -145,6 +146,8 @@ export function createFramePainter(options: {
   onGraphicsShown?: (shown: boolean) => void;
   /** BETA: the streams decoded in software (see `createDesktopVideo`). */
   software?: readonly SoftwareModule[];
+  /** BETA: the streams refused, and why (see `createDesktopVideo`). */
+  refused?: SoftwareRefusals;
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and
   // is not queued behind draws — an eviction closes the socket from under whatever
@@ -327,6 +330,7 @@ export function createFramePainter(options: {
       },
       undefined,
       options.software,
+      options.refused,
     );
     videoComplained = false;
     options.onVideoError(null);
