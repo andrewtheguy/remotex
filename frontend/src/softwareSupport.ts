@@ -58,10 +58,28 @@ export function runsSoftwareDecoder(options: {
   }
 }
 
+const SWITCHES = ["hevc_decoder", "vp9_decoder"] as const;
+
+/**
+ * The software switches of a URL's query, as a query of their own or nothing:
+ * what a page opened beside this one carries so that it decodes as this one does.
+ */
+export function softwareSwitches(
+  search: string = globalThis.location?.search ?? "",
+): string {
+  const asked = new URLSearchParams(search);
+  const kept = new URLSearchParams();
+  for (const decoder of SWITCHES) {
+    if (asked.get(decoder) === "software") {
+      kept.set(decoder, "software");
+    }
+  }
+  const query = kept.toString();
+  return query && `?${query}`;
+}
+
 /** Whether the page's URL asks for `decoder` in software: `?<decoder>=software`. */
-export function softwareRequested(
-  decoder: "hevc_decoder" | "vp9_decoder",
-): boolean {
+export function softwareRequested(decoder: (typeof SWITCHES)[number]): boolean {
   return (
     new URLSearchParams(globalThis.location?.search ?? "").get(decoder) ===
     "software"

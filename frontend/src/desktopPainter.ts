@@ -17,13 +17,13 @@
 // handlers, and only a *new* canvas element (a full remount) replaces the
 // worker — at which point the old one holds the bitmap of an element that is
 // gone, and is terminated rather than left decoding for it.
-import { appleHevcDecoder } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { batchFrameSequence } from "./protocol.ts";
-import type { SoftwareModule, SoftwareRefusals } from "./softwareDecoder.ts";
-import { softwareVp9Refusal, videoDecoder } from "./videoChroma.ts";
+import { softwareModules } from "./softwareChoice.ts";
+import type { SoftwareRefusals } from "./softwareDecoder.ts";
+import { softwareVp9Refusal } from "./videoChroma.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 export interface PainterHandlers {
@@ -160,13 +160,7 @@ export function desktopPainterFor(
   const offscreen = canvas.transferControlToOffscreen();
   const offscreenGraphics = graphics.transferControlToOffscreen();
   // BETA: what this page decodes in software, as it answered at load.
-  const software: SoftwareModule[] = [];
-  if (appleHevcDecoder() === "software") {
-    software.push("hevc");
-  }
-  if (videoDecoder() === "software") {
-    software.push("vp9");
-  }
+  const software = softwareModules();
   const refused: SoftwareRefusals = {};
   const vp9Refusal = softwareVp9Refusal();
   if (vp9Refusal !== null) {

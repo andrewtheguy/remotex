@@ -398,6 +398,7 @@ export default function RemoteDesktop({
             display={tabDisplay}
             connected={status === "connected"}
             size={size}
+            videoStream={videoStream}
             isMacHost={isMacHost}
             onLocalShortcut={onLocalShortcut}
             onFocusDesktop={focusDesktop}

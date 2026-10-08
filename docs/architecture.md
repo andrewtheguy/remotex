@@ -1208,7 +1208,12 @@ key off, which it is unless set, none of this happens: the browser's answer is
 the whole choice and the module is never loaded. A URL that asks for the module
 is never answered with another decoder: where the key is off, or the page cannot
 run the module, a 4:4:4 stream fails on that page saying which, so that a
-picture is not taken for the module's when it is the browser's. The key is a switch and not the default while the
+picture is not taken for the module's when it is the browser's. The Info
+card's Video row says which decoded the stream, the browser or the page in
+WebAssembly, as it does of a Mac's passed HEVC. A second display's tab is opened
+with the session page's switches, `hevc_decoder` as well, so that both pages,
+which ask the same browser and the same gateway, decode with the same kind of
+decoder; its menu names its own stream's. The key is a switch and not the default while the
 operator compares, in use, 4:4:4 decoded in the page with the 4:2:0 a browser
 without profile 1 gets otherwise, which is what decides whether the encoder goes
 on making both.
