@@ -156,7 +156,7 @@ export function createDesktopVideo(
       handlers.onError(
         module === null
           ? `This session's picture is decoded by this page, which has no decoder for ${format.decode}.`
-          : `This session's picture is decoded by this page's ${MODULE_CODEC[module]} decoder, which this browser cannot run: it needs WebGL 2 and a cross-origin isolated page. End the session and start it without "Decode in this page".`,
+          : `This session's picture is decoded by this page's ${MODULE_CODEC[module]} decoder, which this browser cannot run: it needs WebGL 2 and a cross-origin isolated page. End the session and start it without "Decode ${MODULE_CODEC[module]} in this page".`,
         false,
         format.decode,
       );
