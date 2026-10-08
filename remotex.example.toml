@@ -84,7 +84,7 @@
 # BETA: the page's software HEVC decoder, for a browser whose own
 # VideoDecoder refuses a High Performance Mac's 4:4:4 picture passed through
 # — Chrome on a GPU without HEVC Range Extensions, for one. A gateway that
-# serves it shows "Decode in this page" at the picker under such a target whose
+# serves it shows "Decode HEVC in this page" at the picker under such a target whose
 # picture is ticked to pass, and a session started so has its pages decode the
 # picture with it. It is
 # andrewtheguy/hevc-wasm's decoder compiled to WebAssembly, whose licence keeps
@@ -585,7 +585,7 @@ password = "change-me"
 # Safari's native decoders, desktop and mobile, were measured taking it where the
 # GPU decodes HEVC 4:4:4; Firefox's native decoder does not. Where the native
 # decoder refuses it, the optional software decoder above may supply the picture
-# path, in a session started with "Decode in this page". Without either, the
+# path, in a session started with "Decode HEVC in this page". Without either, the
 # choice is greyed and the browser is sent VP9.
 # [[targets]]
 # name = "mac-high-performance"

@@ -394,7 +394,7 @@ impl Passthrough {
 /// As a gateway's, which of them it has for a page: `[vp9_wasm].enabled`, and the
 /// archive it read ([`crate::hevc_wasm`]). As a target's, which a session on it can
 /// be decoded with ([`TargetConfig::software`]), which `/api/targets` states. As a
-/// plan's, which a session started with [`Choices::software`] is: every page
+/// plan's, which a session started with [`Choices::software`] is, one at most: every page
 /// attached to it is told so, format by format ([`Self::decodes`]), so no two of
 /// them decode one session differently.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -463,11 +463,11 @@ pub struct Choices {
     /// Where the second virtual display sits.
     #[serde(default)]
     pub placement: Placement,
-    /// BETA: decode the session's picture in the page's software decoders
+    /// BETA: decode the session's picture in one of the page's software decoders
     /// ([`PageDecoders`]) and not in the browser's own: its VP9, which is then
-    /// 4:4:4 whatever the browser's decoder takes, and a Mac's HEVC where that is
-    /// passed. Refused where the gateway and the target have neither decoder for
-    /// the session ([`TargetConfig::accepts_software`]).
+    /// 4:4:4 whatever the browser's decoder takes, or a Mac's HEVC where that is
+    /// passed. Refused where the gateway and the target have no decoder for the
+    /// session's picture ([`TargetConfig::accepts_software`]).
     #[serde(default)]
     pub software: bool,
 }
@@ -1072,21 +1072,25 @@ impl TargetConfig {
     }
 
     /// Which of them a session started with `choices` is decoded with: none
-    /// unless it chose so, and HEVC's only while the Mac's picture is passed.
+    /// unless it chose so, and then the one its picture is: HEVC's while the
+    /// Mac's picture is passed, VP9's while nothing is, and neither while an RDP
+    /// host's pipeline is, which is no video.
     pub fn software_chosen(&self, choices: Choices, gateway: PageDecoders) -> PageDecoders {
         if !choices.software {
             return PageDecoders::default();
         }
         let offered = self.software(gateway);
-        PageDecoders {
-            vp9: offered.vp9,
-            hevc: offered.hevc && self.passthrough(choices) == Some(Passthrough::AppleMedia),
+        match self.passthrough(choices) {
+            Some(Passthrough::AppleMedia) => PageDecoders { vp9: false, hevc: offered.hevc },
+            Some(Passthrough::RdpGraphics) => PageDecoders::NONE,
+            None => PageDecoders { vp9: offered.vp9, hevc: false },
         }
     }
 
     /// Whether `choices`' software decoding is something this target and the
     /// `gateway` have for the session. One that asks where neither decoder would
-    /// decode anything is refused, not started on the browser's own decoder.
+    /// decode anything, beside a passthrough of another stream included, is
+    /// refused, not started on the browser's own decoder.
     pub fn accepts_software(&self, choices: Choices, gateway: PageDecoders) -> Result<(), NotOffered> {
         if choices.software && !self.software_chosen(choices, gateway).any() {
             return Err(NotOffered { target: self.name.clone(), choice: "decoding in the page" });
@@ -3018,10 +3022,11 @@ mod tests {
         }
     }
 
-    /// A session is decoded by its pages' own decoders where it chose that and
-    /// the gateway and the target have one for it: VP9's unless the target holds
-    /// every browser to 4:2:0, and HEVC's while a Mac's picture is passed. The VP9
-    /// is then 4:4:4 whatever the browser's decoder said, and a choice that
+    /// A session is decoded by one of its pages' own decoders where it chose
+    /// that and the gateway and the target have the one for its picture: VP9's
+    /// unless the target holds every browser to 4:2:0, HEVC's while a Mac's
+    /// picture is passed, and neither beside an RDP host's passed pipeline. The
+    /// VP9 is then 4:4:4 whatever the browser's decoder said, and a choice that
     /// would decode nothing is refused by name.
     #[test]
     fn a_session_is_decoded_by_the_page_where_the_gateway_and_the_target_have_the_decoder() {
@@ -3047,13 +3052,15 @@ mod tests {
         let passed = Choices { passthrough: true, ..chosen };
         assert_eq!(auto.software_chosen(Choices::default(), both), PageDecoders::NONE, "only where chosen");
         assert_eq!(mac.software_chosen(chosen, both), vp9, "its HEVC is not passed");
-        assert_eq!(mac.software_chosen(passed, both), both);
+        assert_eq!(mac.software_chosen(passed, both), hevc, "one decoder a session");
         assert_eq!(mac.software_chosen(passed, hevc), hevc);
+        assert_eq!(mac.software_chosen(passed, vp9), PageDecoders::NONE);
+        assert_eq!(auto.software_chosen(passed, both), PageDecoders::NONE, "a passed pipeline is no video");
 
         assert_eq!(auto.accepts_software(Choices::default(), PageDecoders::NONE), Ok(()));
         assert_eq!(auto.accepts_software(chosen, vp9), Ok(()));
         for (target, choices, gateway) in
-            [(&auto, chosen, PageDecoders::NONE), (&auto, chosen, hevc), (&subsampled, chosen, both), (&mac, chosen, hevc)]
+            [(&auto, chosen, PageDecoders::NONE), (&auto, chosen, hevc), (&subsampled, chosen, both), (&mac, chosen, hevc), (&auto, passed, both), (&mac, passed, vp9)]
         {
             let refused = target.accepts_software(choices, gateway).unwrap_err();
             assert_eq!(refused.choice, "decoding in the page");

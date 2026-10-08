@@ -353,7 +353,13 @@ const MAC_HEVC_PAGE = {
 const NEEDS_PAGE: Abilities = { ...ABLE, appleMedia: false, profile1: false };
 
 function softwareRow(options: {
-  rows: { key: string; checked: boolean; disabled: boolean; note: string }[];
+  rows: {
+    key: string;
+    label: string;
+    checked: boolean;
+    disabled: boolean;
+    note: string;
+  }[];
 }) {
   return options.rows.find((row) => row.key === "software") ?? null;
 }
@@ -370,7 +376,50 @@ test("decoding in this page has no row where the gateway has no decoder for the 
   assert.equal(softwareRow(encoded), null);
   assert.equal(encoded.choices.software, false);
   const passed = targetOptions(MAC_HEVC_PAGE, { passthrough: true }, ABLE);
-  assert.ok(softwareRow(passed));
+  assert.match(softwareRow(passed)?.label ?? "", /^Decode HEVC in this page/);
+});
+
+test("decoding in this page names the one decoder the session would use, and is not had with another passthrough", () => {
+  // A Mac: VP9 encoded here, or its HEVC passed, never both.
+  const encoded = softwareRow(
+    targetOptions(MAC_PAGE, { passthrough: false, software: true }, ABLE),
+  );
+  assert.match(encoded?.label ?? "", /^Decode VP9 in this page/);
+  const passed = softwareRow(
+    targetOptions(MAC_PAGE, { passthrough: true, software: true }, ABLE),
+  );
+  assert.match(passed?.label ?? "", /^Decode HEVC in this page/);
+  assert.doesNotMatch(passed?.note ?? "", /VP9/);
+
+  // A passed stream the page has no decoder for: the row is held unticked.
+  for (const offered of [
+    { ...RDP, passthrough: "rdp-graphics" as const, ...VP9_PAGE },
+    { ...MAC_PAGE, software: { vp9: true, hevc: false } },
+  ]) {
+    const both = targetOptions(
+      offered,
+      { passthrough: true, software: true },
+      ABLE,
+    );
+    const row = softwareRow(both);
+    assert.match(row?.label ?? "", /^Decode VP9 in this page/);
+    assert.deepEqual([row?.checked, row?.disabled], [false, true]);
+    assert.match(row?.note ?? "", /Not with the passthrough/);
+    assert.deepEqual(
+      [both.choices.passthrough, both.choices.software],
+      [true, false],
+    );
+    // Without the passthrough it is the choice it was.
+    const alone = targetOptions(
+      offered,
+      { passthrough: false, software: true },
+      ABLE,
+    );
+    assert.deepEqual(
+      [softwareRow(alone)?.disabled, alone.choices.software],
+      [false, true],
+    );
+  }
 });
 
 test("decoding in this page is ticked for a browser whose own decoder refuses the stream, until somebody chooses", () => {
@@ -436,14 +485,20 @@ test("a Mac's picture only this page decodes can be passed, and is then decoded 
   for (const [offered, abilities] of [
     [{ ...MAC_PAGE, software: { vp9: true, hevc: false } }, NEEDS_PAGE],
     [MAC_PAGE, { ...NEEDS_PAGE, runs: { vp9: true, hevc: false } }],
-    // And where the session's VP9 would be the page's too, that decoder as well.
-    [MAC_PAGE, { ...NEEDS_PAGE, runs: { vp9: false, hevc: true } }],
   ] as const) {
     const greyed = targetOptions(offered, { passthrough: true }, abilities);
     const passthrough = greyed.rows.find((r) => r.key === "passthrough");
     assert.equal(passthrough?.disabled, true);
     assert.equal(greyed.choices.passthrough, false);
   }
+
+  // The page's VP9 decoder is no part of such a session.
+  const hevcAlone = { ...NEEDS_PAGE, runs: { vp9: false, hevc: true } };
+  const taken = targetOptions(MAC_PAGE, { passthrough: true }, hevcAlone);
+  assert.deepEqual(
+    [taken.choices.passthrough, taken.choices.software],
+    [true, true],
+  );
 
   // A gateway that can only pass the picture starts for such a browser too.
   const only = { ...MAC_PAGE, passthroughOnly: true };

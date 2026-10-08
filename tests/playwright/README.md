@@ -77,7 +77,7 @@ passthrough and is sent VP9, and nothing under `/hevc/` is asked for.
 
 `software-vp9.spec.ts` is the BETA software VP9 decoder, the vp9-wasm module in
 the bundle, on a gateway whose config sets `[vp9_wasm]`, in a session started
-with *Decode in this page*. It asserts that the gateway lists the target as
+with *Decode VP9 in this page*. It asserts that the gateway lists the target as
 offering the decoder, that Start sends the choice, that every format announced
 is profile 1 and says this page decodes it, that the decode worker loads the
 module's file, once, that the first keyframe's batch is acknowledged with no

@@ -223,7 +223,7 @@ export const FOLLOWS_WINDOW = /This window's size/;
 // option the target does not show is left alone when it is not asked for; one that
 // is asked for and is absent or greyed fails here, by name, rather than as a
 // session that started without it.
-async function startTarget(
+export async function startTarget(
   page: Page,
   target: string,
   choices: StartChoices,
@@ -263,7 +263,7 @@ async function startTarget(
   }
   if (choices.software !== undefined) {
     await item
-      .getByRole("checkbox", { name: /^Decode in this page/ })
+      .getByRole("checkbox", { name: /^Decode (VP9|HEVC) in this page/ })
       .setChecked(choices.software, { timeout: LEAVE_TIMEOUT_MS });
   }
   await item.getByRole("button", { name: "Start", exact: true }).click();
