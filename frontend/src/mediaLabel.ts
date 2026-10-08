@@ -138,7 +138,7 @@ export function videoLabel(
     ? "passthrough from the remote"
     : "encoded by the gateway";
   const decoder = stream.software
-    ? "decoded in WebAssembly by this page"
-    : "decoded by the browser";
+    ? "decoded by this page's WebAssembly decoder"
+    : "decoded by the browser's native decoder";
   return `${stream.decode} · ${whose} · ${decoder}`;
 }

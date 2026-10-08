@@ -25,8 +25,9 @@
 //   two and tells it where each is: see `PLACEMENTS`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
-// - BETA: decoding in this page is a choice where the gateway has one of the
-//   page's software decoders for the session: see `softwareRow`.
+// - BETA: decoding in this page is a choice where the gateway has the page's
+//   software decoder of the session's one stream, VP9 or a Mac's HEVC, and it
+//   cannot be had with a passthrough of anything else: see `softwareRow`.
 
 /** The stream a target can pass untouched, as `/api/targets` names it. */
 export type Passthrough = "rdp-graphics" | "apple-media";
@@ -57,7 +58,8 @@ export interface TargetInfo {
   /**
    * BETA: the page's software decoders a session on this target can choose to be
    * decoded with, of those the gateway has: `vp9` for its VP9, which is then
-   * 4:4:4, and `hevc` for a Mac's HEVC while that is passed.
+   * 4:4:4, and `hevc` for a Mac's HEVC while that is passed. A session is
+   * decoded with one of them at most.
    */
   software: { vp9: boolean; hevc: boolean };
   /** The stream this target can pass, null where it has none. */
@@ -221,34 +223,22 @@ const PASSTHROUGH: Record<
   },
 };
 
-/**
- * The page's decoders a session on `target` is decoded with when it chooses
- * that, as the gateway decides it: VP9's where the target has it, and HEVC's
- * where it has that and the Mac's picture is `passed`.
- */
-function softwareUsed(
-  target: TargetInfo,
-  passed: boolean,
-): { vp9: boolean; hevc: boolean } {
-  return {
-    vp9: target.software.vp9,
-    hevc:
-      target.software.hevc && passed && target.passthrough === "apple-media",
-  };
-}
+/** One of the page's software decoders, by the stream it decodes. */
+type PageDecoder = "vp9" | "hevc";
 
-/** Whether this page runs every decoder such a session would use, and uses one. */
-function runsSoftware(
-  target: TargetInfo,
-  passed: boolean,
-  abilities: Abilities,
-): boolean {
-  const used = softwareUsed(target, passed);
-  return (
-    (used.vp9 || used.hevc) &&
-    (!used.vp9 || abilities.runs.vp9) &&
-    (!used.hevc || abilities.runs.hevc)
-  );
+/**
+ * The one decoder of the page's a session on `target` is decoded with when it
+ * chooses that, as the gateway decides it: HEVC's while the Mac's picture is
+ * `passed`, VP9's while nothing is, and none while an RDP host's pipeline is,
+ * which is no video. Null where the gateway has no such decoder for the target.
+ */
+function softwareUsed(target: TargetInfo, passed: boolean): PageDecoder | null {
+  if (!passed) {
+    return target.software.vp9 ? "vp9" : null;
+  }
+  return target.passthrough === "apple-media" && target.software.hevc
+    ? "hevc"
+    : null;
 }
 
 /**
@@ -268,22 +258,36 @@ function takes(
   }
   return (
     abilities.appleMedia ||
-    (softwareUsed(target, true).hevc && runsSoftware(target, true, abilities))
+    (softwareUsed(target, true) === "hevc" && abilities.runs.hevc)
   );
 }
 
+const SOFTWARE: Record<PageDecoder, { label: string; note: string }> = {
+  vp9: {
+    label: "Decode VP9 in this page (BETA)",
+    note: "This page's WebAssembly decoder, instead of the browser's own. The VP9 is then sent at 4:4:4.",
+  },
+  hevc: {
+    label: "Decode HEVC in this page (BETA)",
+    note: "This page's WebAssembly decoder, instead of the browser's own, decodes the Mac's picture.",
+  },
+};
+
 /**
  * BETA: the row for decoding the session's picture in this page, in WebAssembly,
- * instead of in the browser's own decoder.
+ * instead of in the browser's own decoder. A session has one stream, so the row
+ * names the one decoder it is about.
  *
- * - No row where the gateway has no decoder of the page's for the session: its
- *   VP9 one, or its HEVC one while the Mac's picture is `passed`.
- * - Greyed where this page cannot run a decoder such a session would use.
+ * - No row where the gateway has no decoder of the page's for the target, passed
+ *   or not.
+ * - Greyed and unticked where the passthrough is ticked and what is passed is
+ *   not a stream the page has a decoder for: the two cannot be had together.
+ * - Greyed where this page cannot run the decoder.
  * - Ticked and held where the Mac's picture is passed and only the page decodes
  *   it: that is what let the passthrough be ticked.
  * - Otherwise a choice, ticked until somebody chooses where the browser's own
- *   decoder refuses the stream the session starts on, which is who it is for,
- *   and unticked where it takes it.
+ *   decoder refuses the stream, which is who it is for, and unticked where it
+ *   takes it.
  */
 function softwareRow(
   target: TargetInfo,
@@ -292,11 +296,20 @@ function softwareRow(
   abilities: Abilities,
 ): OptionRow | null {
   const used = softwareUsed(target, passed);
-  if (!used.vp9 && !used.hevc) {
-    return null;
+  if (used === null) {
+    if (!passed || !target.software.vp9) {
+      return null;
+    }
+    return {
+      key: "software",
+      label: SOFTWARE.vp9.label,
+      note: "Not with the passthrough: a session's picture is passed or it is VP9, and what is passed is not this decoder's.",
+      checked: false,
+      disabled: true,
+    };
   }
-  const row = { key: "software" as const, label: "Decode in this page (BETA)" };
-  if (!runsSoftware(target, passed, abilities)) {
+  const row = { key: "software" as const, label: SOFTWARE[used].label };
+  if (!abilities.runs[used]) {
     return {
       ...row,
       note: "This browser cannot run the page's decoder: that needs WebGL 2 and a cross-origin isolated page.",
@@ -304,8 +317,7 @@ function softwareRow(
       disabled: true,
     };
   }
-  const hevc = passed && target.passthrough === "apple-media";
-  if (used.hevc && !abilities.appleMedia) {
+  if (used === "hevc" && !abilities.appleMedia) {
     return {
       ...row,
       note: "This browser's own decoder does not take the Mac's HEVC, so this page decodes it, in WebAssembly.",
@@ -313,14 +325,10 @@ function softwareRow(
       disabled: true,
     };
   }
-  const own = hevc ? abilities.appleMedia : abilities.profile1;
-  const what = [
-    ...(used.vp9 ? ["VP9, which is then sent at 4:4:4"] : []),
-    ...(used.hevc ? ["the Mac's HEVC"] : []),
-  ].join(" and ");
+  const own = used === "hevc" ? abilities.appleMedia : abilities.profile1;
   return {
     ...row,
-    note: `This page's WebAssembly decoder, instead of the browser's own, decodes ${what}.`,
+    note: SOFTWARE[used].note,
     checked: remembered ?? !own,
     disabled: false,
   };

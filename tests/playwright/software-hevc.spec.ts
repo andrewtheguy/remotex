@@ -1,6 +1,6 @@
 // BETA: the software HEVC decoder (frontend/src/softwareDecoder.ts), which a
 // gateway that has its release archive serves at /hevc/ and which decodes a High
-// Performance Mac's passed stream in a session started with "Decode in this page"
+// Performance Mac's passed stream in a session started with "Decode HEVC in this page"
 // at the picker.
 //
 // What is asserted is what the system decides: what the gateway lists the target

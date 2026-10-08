@@ -864,7 +864,7 @@ Three controls with similar names therefore remain separate:
   gateway reads it once at start-up and refuses to start unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
   worker calls that build's exports. A gateway that serves
   it says so of each High Performance target in `GET /api/targets`
-  (`software.hevc`), and the picker then shows *Decode in this page* under a
+  (`software.hevc`), and the picker then shows *Decode HEVC in this page* under a
   target whose picture is ticked to pass
   ([Decoded in the page](#decoded-in-the-page)). A session started with it has
   the page decode the picture with the decoder, in a worker of its own, on a page
@@ -1163,15 +1163,23 @@ the pipeline.
 
 BETA. A session can be started with its picture decoded by the page's own
 software decoders, in WebAssembly, and not by the browser's `VideoDecoder`. It
-is a choice made under the target at the picker, *Decode in this page*, beside
-the size, the sound and the passthrough
-([What a session is started with](#what-a-session-is-started-with)), and it
-covers two streams with one decoder each:
+is a choice made under the target at the picker, beside the size, the sound and
+the passthrough
+([What a session is started with](#what-a-session-is-started-with)). There are
+two such decoders, one for each of two streams, and a session is decoded with
+one of them at most, since its picture is one stream. So the picker's row names
+the decoder: *Decode VP9 in this page* or *Decode HEVC in this page*.
 
 | Stream | Decoder | The gateway has it where | A target offers it where |
 |---|---|---|---|
 | VP9 at 4:4:4, profile 1 | [vp9-wasm](https://github.com/andrewtheguy/vp9-wasm), in the bundle (`frontend/wasm/vp9`) | `[vp9_wasm].enabled` is set | its `render_chroma` is not `"420"` |
 | A High Performance Mac's passed HEVC | [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), served at `/hevc/` | it read the release archive ([Apple's media stream, passed through](#apples-media-stream-passed-through)) | it is `ard-high-performance`, and while the Mac's picture is passed |
+
+Which of the two a session has follows from its passthrough
+(`TargetConfig::software_chosen`): the HEVC decoder while a Mac's picture is
+passed, the VP9 decoder while nothing is passed, and neither while an RDP
+host's graphics pipeline is, which is no video. Whatever VP9 a session with a
+Mac's picture passed also sends stays the browser's own decoder's.
 
 Both are written for the one shape of stream they decode and compiled with
 SIMD128 and threads. `[vp9_wasm]` is a switch, off unless set, while the
@@ -1198,12 +1206,12 @@ A page builds its decoder from that flag and from nothing of its own
 (`frontend/src/videoDecoder.ts`): no URL switch, no answer of the page's. So
 the session's page, the same page reloaded and a second display's tab, however
 that was opened, decode one session with the same kind of decoder. The Info
-card's Video row, and a display tab's menu, end with which it is: the browser,
-or this page in WebAssembly.
+card's Video row, and a display tab's menu, end with which it is: the browser's
+native decoder, or this page's WebAssembly decoder.
 
 **Nothing stands in for a decoder that was chosen.** A `connect` that asks
-where the gateway and the target have neither decoder for the session is
-refused by name, `target "…" does not offer decoding in the page`, and starts
+where the gateway and the target have no decoder for the session's picture,
+beside a passed pipeline included, is refused by name, `target "…" does not offer decoding in the page`, and starts
 nothing. A page told to decode a stream in a decoder it cannot run says so in
 the video banner and decodes nothing: the browser's own decoder is not tried in
 its place, since the picture would then pass for the page's.
@@ -1211,10 +1219,14 @@ its place, since the picture would then pass for the page's.
 **The picker's row** (`softwareRow` in `frontend/src/targetChoices.ts`):
 
 - `GET /api/targets` says of each target which decoders a session on it can
-  use (`software: { vp9, hevc }`). The row is there where the session would use
-  one: the VP9 decoder, or the HEVC decoder with the Mac's picture ticked to
-  pass.
-- It is greyed, with the reason, where this page cannot run a decoder the
+  use (`software: { vp9, hevc }`). The row is there, under that decoder's
+  name, where the session would use one: the VP9 decoder with nothing ticked to
+  pass, or the HEVC decoder with the Mac's picture ticked to pass.
+- It cannot be ticked together with a passthrough of a stream the page has no
+  decoder for, an RDP host's pipeline or a Mac's picture on a gateway without
+  the HEVC decoder: while that is ticked the VP9 row is greyed and unticked,
+  saying so, and Start sends the passthrough alone.
+- It is greyed, with the reason, where this page cannot run the decoder the
   session would use: shared-memory SIMD WebAssembly on the cross-origin
   isolated page and a WebGL 2 canvas to present on, and for the Mac's HEVC a
   canvas that can be given its primaries (`frontend/src/softwareSupport.ts`).

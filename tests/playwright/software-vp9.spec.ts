@@ -1,6 +1,6 @@
 // BETA: the page's software VP9 decoder (frontend/src/softwareDecoder.ts), the
 // bundled vp9-wasm module, which decodes the gateway's 4:4:4 stream in a session
-// started with "Decode in this page" at the picker, on a gateway whose
+// started with "Decode VP9 in this page" at the picker, on a gateway whose
 // `[vp9_wasm]` enables it.
 //
 // What is asserted is what the system decides: what the gateway lists the target
@@ -36,6 +36,7 @@ import {
   logIn,
   logInAndConnectTo,
   returnToPicker,
+  startTarget,
   targetNamePattern,
 } from "./support";
 
@@ -50,7 +51,7 @@ const ENABLED = process.env.REMOTEX_PLAYWRIGHT_VP9_WASM !== "0";
 const MODULE = /^\/assets\/vp9_bg-[\w-]+\.wasm$/;
 
 /// The picker's row, by its label.
-const ROW = /^Decode in this page/;
+const ROW = /^Decode (VP9|HEVC) in this page/;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
@@ -188,6 +189,20 @@ async function announced(seen: Session, sockets: number): Promise<Format[]> {
   return seen.sockets.at(-1) ?? [];
 }
 
+/// The Info card's Video row ends with which decoder the session's picture has.
+async function expectInfo(page: Page, decoder: string): Promise<void> {
+  await page.getByRole("button", { name: "Open menu" }).click();
+  await page.getByRole("button", { name: "Info", exact: true }).click();
+  const card = page.getByRole("dialog", { name: "Info" });
+  await expect(card).toContainText(decoder);
+  await page.keyboard.press("Escape");
+  await expect(card).toHaveCount(0);
+  const close = page.getByRole("button", { name: "Close menu" });
+  if (await close.isVisible()) {
+    await close.click();
+  }
+}
+
 test.describe("a VP9 target and the page's software decoder", () => {
   test.skip(
     !VP9_TARGET,
@@ -282,6 +297,40 @@ test.describe("a VP9 target and the page's software decoder", () => {
     await firstKeyframeAcknowledged(page, seen);
     await expect(page.locator("canvas.graphics")).toBeHidden();
     expect(seen.moduleLoads).toEqual([]);
+  });
+
+  test("the choice is each session's: unticked for the next one, the browser decodes that one", async ({
+    page,
+  }) => {
+    test.skip(!ENABLED, "the gateway does not set [vp9_wasm]");
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, VP9_TARGET ?? "", "", { software: true });
+    for (const format of await announced(seen, 1)) {
+      expect(format.software).toBe(true);
+    }
+    await firstKeyframeAcknowledged(page, seen);
+    await expect(page.locator("canvas.graphics")).toBeVisible();
+    await expectInfo(page, "decoded by this page's WebAssembly decoder");
+
+    await returnToPicker(page);
+    const formats = () => seen.sockets.flat();
+    const before = formats().length;
+    await startTarget(page, VP9_TARGET ?? "", { software: false });
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    expect(seen.connects.map((connect) => connect.software)).toEqual([
+      true,
+      false,
+    ]);
+    await expect
+      .poll(() => formats().length, { timeout: 20_000 })
+      .toBeGreaterThan(before);
+    for (const format of formats().slice(before)) {
+      expect(format.software, "the second session's format").toBe(false);
+    }
+    await expect(page.locator("canvas.graphics")).toBeHidden();
+    await expectInfo(page, "decoded by the browser's native decoder");
   });
 
   test("on a gateway that does not enable it, the picker has no such row", async ({
