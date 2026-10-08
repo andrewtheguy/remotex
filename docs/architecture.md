@@ -305,7 +305,11 @@ A session's picture reaches the browser one of two ways, both ordinary:
 
 The gateway keeps to one encoder: whatever it transcodes goes to VP9, and a
 second encoder (H.264, AV1 or any other), a codec probe, or a codec key that
-selects one is not added as a side effect of other work.
+selects one is not added as a side effect of other work. The rule is about the
+stream that has to follow the browser's link, and VP9 holds the place because it
+is the only candidate for that today, not because another codec is ruled out: a
+second encoder is a decision of its own, weighed as
+[The codec](#the-codec) weighs HEVC.
 
 #### The browser's four answers
 
@@ -1481,6 +1485,34 @@ encodes a frame in **4.7 ms** at **18 KB** — measure with
 reports nonsense, because the RGB→YUV conversion it also times is Rust — the `yuv`
 crate's, on the AVX2 or NEON path the machine has — and runs an order of magnitude
 slower unoptimised.
+
+**VP9 is the one encoder because nothing else qualifies yet.** What the encoder is
+for is the stream that adapts: the quality walk, and the frame rate after it, set
+between frames with no keyframe
+([Choosing a chroma](#choosing-a-chroma) for what the walk moves). A second encoder
+has to do that at 4:4:4 before it is worth maintaining. HEVC is the one with a
+reason behind it: Apple's devices decode it in hardware, where VP9 at 4:4:4 is
+decoded in software by every browser, and a High Performance Mac's picture
+arrives as HEVC already. It is not taken further for now, for want of an encoder
+with a clear way to adapt at 4:4:4:
+
+- **The Mac's own stream cannot be thinned in place.** Its pictures predict each
+  from the last, so a smaller one means decoding and encoding again
+  ([Apple's media stream, passed through](#apples-media-stream-passed-through)).
+- **VideoToolbox's 4:4:4 is undocumented.** A compression session lists
+  `kVTProfileLevel_HEVC_Main444_AutoLevel`, which is in the framework's symbols
+  and in no header, and Apple says nothing of relying on it.
+- **Its quantizer bounds belong to another mode.** `MaxAllowedFrameQP` and
+  `MinAllowedFrameQP` take effect only under low-latency rate control, which
+  Apple documents for H.264, and a bound the bitrate cannot meet drops frames.
+  What is left is the average bitrate, a target the encoder is free to miss,
+  where the walk sets a quantizer.
+- **It would encode on a Mac only.** A gateway on Linux or Windows would need a
+  different HEVC encoder for the same stream.
+
+These are read from developers' reports and FFmpeg's VideoToolbox patches, not
+measured here.
+An encoder that shows the walk's two knobs at 4:4:4 reopens the question.
 
 Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,
 `stream.rs` and the wire carry access units, a keyframe bit and a configuration
