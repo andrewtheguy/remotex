@@ -2569,9 +2569,11 @@ pub const STREAM_START: std::time::Duration = std::time::Duration::from_secs(10)
 /// change, which stops the stream, owes nothing until its offer.
 pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(48);
 
-/// Frames in strips the HEVC decoder thread may be behind by, each [`STRIPS`]
-/// access units. Reaching it drops the unit, which costs a keyframe: every later
-/// picture predicts from it.
+/// Frames the HEVC decoder thread may be behind by: ones queued that it has not
+/// begun, a frame being the access units of one timestamp, one for a picture
+/// sent whole and up to [`STRIPS`] for one in strips. A unit that would begin
+/// one more is dropped, which costs a keyframe: every later picture predicts
+/// from it.
 const DECODE_QUEUE: usize = 8;
 
 /// The least time between two keyframe requests. The Mac answers one in tens of
@@ -2901,7 +2903,7 @@ impl VideoLeg {
                         self.behind += 1;
                         if self.behind <= 3 {
                             log::warn!(
-                                "vnc: {} fell {depth} pictures behind the Mac's {}; dropping to \
+                                "vnc: {} fell {depth} frames behind the Mac's {}; dropping to \
                                  its next keyframe",
                                 self.onward.name(),
                                 self.name(alone)
@@ -3025,15 +3027,13 @@ impl Receiver {
                 let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let onward = match &shared.pictures {
                     Outlet::Decoded(pictures) => {
-                        let depth = DECODE_QUEUE * STRIPS;
                         let (units, decoder) = spawn_decoder(
                             pictures.clone(),
                             std::sync::Arc::clone(&keyframe),
                             std::sync::Arc::clone(&media.failed),
                             std::sync::Arc::clone(&shared.offered),
-                            depth,
                         );
-                        Onward::Decoder(units, decoder, depth)
+                        Onward::Decoder(units, decoder)
                     }
                     Outlet::Passed(units) => Onward::Browser(Passer::default(), units.clone()),
                 };
@@ -3220,7 +3220,7 @@ impl Receiver {
         fail(&self.failed, failure);
         for leg in self.videos {
             match leg.onward {
-                Onward::Decoder(units, decoder, _) => {
+                Onward::Decoder(units, decoder) => {
                     drop(units);
                     let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
                     if let Outlet::Decoded(pictures) = &leg.shared.pictures {
@@ -3244,11 +3244,55 @@ struct Coded {
     timestamp: u32,
 }
 
+/// The decoder thread's queue, as the receive task fills it.
+struct DecodeQueue {
+    /// Deep enough for [`DECODE_QUEUE`] frames in strips behind the one the
+    /// decoder is in the middle of.
+    units: std::sync::mpsc::SyncSender<Coded>,
+    /// The frames queued that the decoder has not begun: counted up here at
+    /// each unit of a new timestamp, and down by the decoder as it takes one.
+    frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// The timestamp of the last unit queued.
+    last: Option<u32>,
+}
+
+impl DecodeQueue {
+    /// Queue `coded`, unless it would begin a frame past [`DECODE_QUEUE`].
+    fn send(&mut self, coded: Coded) -> Sent {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let timestamp = coded.timestamp;
+        let begins = self.last != Some(timestamp);
+        if begins {
+            // Counted before the unit is queued, so the decoder never counts
+            // down a frame that has not been counted up.
+            if self.frames.fetch_add(1, Relaxed) >= DECODE_QUEUE {
+                self.frames.fetch_sub(1, Relaxed);
+                return Sent::Full(DECODE_QUEUE);
+            }
+        }
+        match self.units.try_send(coded) {
+            Ok(()) => {
+                self.last = Some(timestamp);
+                Sent::Queued
+            }
+            Err(e) => {
+                if begins {
+                    self.frames.fetch_sub(1, Relaxed);
+                }
+                match e {
+                    std::sync::mpsc::TrySendError::Full(_) => Sent::Full(DECODE_QUEUE),
+                    std::sync::mpsc::TrySendError::Disconnected(_) => Sent::Stopped,
+                }
+            }
+        }
+    }
+}
+
 /// Where the receiver sends each access unit it reassembles.
 enum Onward {
     /// The decoder thread, whose pictures the session encodes as VP9.
-    /// Its queue is as many units deep.
-    Decoder(std::sync::mpsc::SyncSender<Coded>, std::thread::JoinHandle<()>, usize),
+    Decoder(DecodeQueue, std::thread::JoinHandle<()>),
     /// The read loop, which passes each unit to the browser as it came.
     Browser(Passer, tokio::sync::mpsc::Sender<Option<PassedUnit>>),
 }
@@ -3256,8 +3300,8 @@ enum Onward {
 /// What became of one access unit sent [`Onward`].
 enum Sent {
     Queued,
-    /// Its queue, this deep, is full: dropped, and the stream is dropped to its next
-    /// keyframe.
+    /// Its queue is full, this many frames behind: dropped, and the stream is
+    /// dropped to its next keyframe.
     Full(usize),
     /// No parameter set has come to describe it yet: dropped, and a keyframe, which
     /// carries them, asked for.
@@ -3268,11 +3312,7 @@ enum Sent {
 impl Onward {
     fn send(&mut self, coded: Coded) -> Sent {
         match self {
-            Self::Decoder(units, _, depth) => match units.try_send(coded) {
-                Ok(()) => Sent::Queued,
-                Err(std::sync::mpsc::TrySendError::Full(_)) => Sent::Full(*depth),
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Sent::Stopped,
-            },
+            Self::Decoder(queue, _) => queue.send(coded),
             Self::Browser(passer, units) => {
                 let Some(passed) = passer.pass(&coded.unit) else {
                     return Sent::Unready;
@@ -3380,11 +3420,12 @@ fn spawn_decoder(
     keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
     failed: Failure,
     offered: std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>,
-    queue: usize,
-) -> (std::sync::mpsc::SyncSender<Coded>, std::thread::JoinHandle<()>) {
+) -> (DecodeQueue, std::thread::JoinHandle<()>) {
     use std::sync::mpsc::RecvTimeoutError;
 
-    let (units, inbox) = std::sync::mpsc::sync_channel::<Coded>(queue);
+    let (units, inbox) = std::sync::mpsc::sync_channel::<Coded>((DECODE_QUEUE + 1) * STRIPS);
+    let frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let queue = DecodeQueue { units, frames: std::sync::Arc::clone(&frames), last: None };
     let thread = std::thread::spawn(move || {
         let mut decoder = match Hevc::new(true) {
             Ok(decoder) => decoder,
@@ -3394,6 +3435,8 @@ fn spawn_decoder(
         let mut canvas: Option<Canvas> = None;
         // The timestamp of the frame whose strips are placed and not yet shown.
         let mut waiting: Option<u32> = None;
+        // The timestamp of the last unit taken off the queue.
+        let mut begun: Option<u32> = None;
         let show = |canvas: &mut Option<Canvas>| {
             if let Some(picture) = canvas.as_mut().and_then(Canvas::show) {
                 pictures.send_replace(Some(picture));
@@ -3413,6 +3456,9 @@ fn spawn_decoder(
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
             };
+            if begun.replace(coded.timestamp) != Some(coded.timestamp) {
+                frames.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if waiting.is_some_and(|timestamp| timestamp != coded.timestamp) {
                 waiting = None;
                 show(&mut canvas);
@@ -3446,7 +3492,7 @@ fn spawn_decoder(
             }
         }
     });
-    (units, thread)
+    (queue, thread)
 }
 
 /// The sound leg on the receive task's side: authenticated, decrypted access units
@@ -4127,6 +4173,31 @@ mod tests {
         assert_eq!(srtp.guess_roc(1, 0x0002), 1);
         assert_eq!(srtp.guess_roc(2, 0x0006), 3);
         assert_eq!(srtp.guess_roc(3, 0x0006), 0, "a strip not heard from yet");
+    }
+
+    /// The decoder's queue is bounded in frames, however many strips each came
+    /// in, and a frame the decoder has begun is no longer one it is behind by.
+    #[test]
+    fn the_decoder_may_be_behind_by_frames_not_by_units() {
+        let (units, inbox) = std::sync::mpsc::sync_channel((DECODE_QUEUE + 1) * STRIPS);
+        let frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut queue = DecodeQueue { units, frames: std::sync::Arc::clone(&frames), last: None };
+        let coded = |timestamp, strip| Coded { unit: vec![TRAIL.to_vec()], strip: Some(strip), timestamp };
+        for frame in 0..DECODE_QUEUE as u32 {
+            for strip in 0..STRIPS {
+                assert!(matches!(queue.send(coded(frame, strip)), Sent::Queued), "frame {frame} strip {strip}");
+            }
+        }
+        assert!(matches!(queue.send(coded(100, 0)), Sent::Full(DECODE_QUEUE)));
+        assert_eq!(frames.load(std::sync::atomic::Ordering::Relaxed), DECODE_QUEUE);
+        // The decoder takes the first frame's first strip, as its thread counts it.
+        assert_eq!(inbox.recv().unwrap().timestamp, 0);
+        frames.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(queue.send(coded(100, 0)), Sent::Queued));
+        assert!(matches!(queue.send(coded(100, 1)), Sent::Queued), "a strip of a frame already queued");
+        assert!(matches!(queue.send(coded(101, 0)), Sent::Full(DECODE_QUEUE)));
+        drop(inbox);
+        assert!(matches!(queue.send(coded(100, 2)), Sent::Stopped));
     }
 
     /// Strips are placed a strip's height apart, the last one's rows past the
