@@ -115,6 +115,30 @@ before, so none can be dropped alone, and a full queue drops to the next IDR and
 asks the Mac for one, which brings the picture back as one fresh frame rather than
 a replay of the backlog.
 
+### Strips for the browser's own decoder
+
+A passed High Performance stream comes in four strips only to the page's
+software decoder, a session started with the passthrough and that decoder. One
+started with the passthrough alone, for the browser's own `VideoDecoder`, is
+still offered one tile, each picture the whole display
+(`Receive::Pass { strips: false }` in `src/vnc.rs`):
+
+| What decodes in the page | The session is started with | The Mac sends |
+|---|---|---|
+| The page's software decoder | passthrough and software | four strips |
+| The browser's own `VideoDecoder` | passthrough | one tile, to become four strips |
+
+The strips are Apple's own viewer's offer, a frame carries only the strips that
+changed, and they are one HEVC stream in one decoding order
+([In strips](apple-vnc-889.md#in-strips)), so one `VideoDecoder` can take them
+as the software decoder does. What is missing is on the page: a `VideoDecoder`
+shows each picture it decodes as the display, so the page has to place each
+decoded strip by the strip's number, which the gateway already sends beside a
+strip for the software decoder, and show the display at a frame's last strip.
+Whether Chrome's and Safari's decoders take a stream whose pictures are a
+quarter of the display, and what it costs or saves against one tile, has not
+been measured.
+
 ### H.264 in the RDP graphics pipeline
 
 A host draws with H.264 only on a passed pipeline, for the page to decode, behind
