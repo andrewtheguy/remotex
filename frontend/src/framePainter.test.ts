@@ -306,6 +306,24 @@ test("strips held of an attachment that ended are closed, and never drawn", asyn
   assert.equal(cropped.length, 1, "only the strip of the attachment that is");
 });
 
+test("strips held give way to a whole picture, and to a stream announced", async () => {
+  const p = announced();
+  const first = {
+    w: 64,
+    h: 64,
+    payload: [0],
+    strip: { index: 0, ends: false },
+  };
+  await p.draw(batchFrame([first]));
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  assert.ok(decoded.every((frame) => frame.closed));
+  assert.equal(cropped.length, 1, "the whole picture alone");
+
+  await p.draw(batchFrame([first]));
+  p.setVideoFormat({ decode: "vp09.00.40.08" });
+  assert.ok(decoded.every((frame) => frame.closed));
+});
+
 test("a record's keyframe flag decides the chunk type, both ways", async () => {
   // The flag comes from the encoder, and VP9 — which has no parameter sets — offers a
   // client nothing to work it out from.

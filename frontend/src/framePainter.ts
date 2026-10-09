@@ -588,6 +588,10 @@ export function createFramePainter(options: {
     if (!image || held) {
       return;
     }
+    if (!record.strip) {
+      // A whole picture: strips still held are of a stream it replaced.
+      releaseStrips();
+    }
     try {
       paint(record, image);
     } finally {
@@ -758,6 +762,8 @@ export function createFramePainter(options: {
         refused = null;
         videoComplained = true;
       }
+      // A stream announced starts at a keyframe: strips held are the one before's.
+      releaseStrips();
       desktopVideo().setFormat(format);
     },
   };

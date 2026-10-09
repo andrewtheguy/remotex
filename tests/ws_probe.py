@@ -330,7 +330,8 @@ async def main() -> int:
         "--software",
         action="store_true",
         help="start the session decoded in the page's own software decoder; the "
-        "gateway must have the decoder ([hevc_wasm])",
+        "gateway must have the decoder for the session's picture ([vp9_wasm], or "
+        "[hevc_wasm] for a High Performance Mac's passed with --passthrough)",
     )
     parser.add_argument(
         "--whole",
