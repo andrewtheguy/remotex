@@ -394,6 +394,14 @@ impl Round {
         }
     }
 
+    /// The coarsest quality any of the client's picture is at, as the encoder stands:
+    /// once the round has been encoded, what it left, where [`Self::coarsest`] could
+    /// only say the worst it might. A round at the dial over the last blocks a coarse
+    /// one left has sharpened the whole picture, and owes no settle.
+    pub fn left(&self) -> u8 {
+        self.live.stream.coarsest()
+    }
+
     /// Encode the mirror. Blocking: call it on a worker.
     ///
     /// A stream the encoder produced no bitstream for keeps its dirty flag and its
@@ -554,16 +562,16 @@ mod tests {
     fn a_round_encodes_where_the_mirror_changed_and_a_settle_the_whole_picture() {
         let (w, h) = (319u16, 239u16);
         let mut stream = stream(w, h);
-        let mut decoder = screen_vp9::Decoder::new(1).expect("a decoder");
+        let decoder = std::cell::RefCell::new(screen_vp9::Decoder::new(1).expect("a decoder"));
         let mut picture = vec![0u8; 320 * 240 * 4];
         // One round: what it was to encode, how coarse it left the picture, and the
         // picture a client then holds.
-        let mut round = |stream: &mut DesktopStream, picture: &mut [u8]| {
+        let round = |stream: &mut DesktopStream, picture: &mut [u8]| {
             let mut round = stream.take_round().expect("a round").expect("something to encode");
             let (changed, coarsest) = (round.changed.clone(), round.coarsest());
             let unit = round.encode().expect("an encode").unit.expect("a unit");
             stream.put_back(round);
-            decoder.decode(&unit.data).expect("a decode").write_bgrx(picture, 320 * 4).expect("a picture that fits");
+            decoder.borrow_mut().decode(&unit.data).expect("a decode").write_bgrx(picture, 320 * 4).expect("a picture that fits");
             (changed, coarsest, unit.keyframe)
         };
         let at = |picture: &[u8], x: usize, y: usize| picture[(y * 320 + x) * 4 + 1];
@@ -596,6 +604,20 @@ mod tests {
         stream.blit(second, &flat(32, 32, 200)).expect("a blit");
         let (changed, coarsest, _) = round(&mut stream, &mut picture);
         assert_eq!((changed, coarsest), (Some(vec![second]), 20), "a round over part of a coarse picture did not leave the rest coarse");
+
+        // A round at the dial over the very blocks the coarse one encoded can only
+        // be called coarse beforehand, and has left nothing coarse once encoded.
+        stream.blit(first, &flat(32, 32, 130)).expect("a blit");
+        let mut over = stream.take_round().expect("a round").expect("something to encode");
+        assert_eq!(over.coarsest(), 20);
+        let unit = over.encode().expect("an encode").unit.expect("a unit");
+        assert_eq!(over.left(), 60, "every coarse block was encoded again at the dial");
+        stream.put_back(over);
+        decoder.borrow_mut().decode(&unit.data).expect("a decode").write_bgrx(&mut picture, 320 * 4).expect("a picture that fits");
+        stream.set_quality(20).expect("a retune");
+        stream.blit(first, &flat(32, 32, 120)).expect("a blit");
+        assert_eq!(round(&mut stream, &mut picture).1, 20);
+        stream.set_quality(60).expect("a retune");
 
         // The settle: nothing changed, and the whole picture is encoded at the dial.
         stream.refresh();

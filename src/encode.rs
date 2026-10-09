@@ -1011,6 +1011,12 @@ async fn order_loop(
         }
         let dirty = {
             let mut video = shared.video.lock().await;
+            // The settle was judged owed before the round was encoded, by the worst
+            // it could leave. What it did leave is known now: a round at the dial
+            // over the last coarse blocks owes none.
+            if !video.congestion.coarse(round.left()) {
+                video.coarse_at = None;
+            }
             video.stream.put_back(round);
             video.stream.dirty()
         };
@@ -1887,6 +1893,25 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
         assert!(frame_rx.try_recv().is_err(), "a settled stream kept sending");
+    }
+
+    /// A round back at the dial over the very blocks a coarse round encoded leaves
+    /// nothing coarse, and a stream that then goes quiet is not settled: the settle
+    /// is the whole picture, for a client that already holds it sharp.
+    #[tokio::test(start_paused = true)]
+    async fn a_coarse_band_encoded_again_at_the_dial_owes_no_settle() {
+        let (sink, mut frame_rx) = video_sink(320, 240).await;
+        coarse_round(&sink, &mut frame_rx, 1).await;
+        coarsen(&sink, 20).await;
+        coarse_round(&sink, &mut frame_rx, 2).await;
+        coarsen(&sink, 60).await;
+        coarse_round(&sink, &mut frame_rx, 3).await;
+
+        tokio::time::sleep(SETTLE_IDLE * 4).await;
+        assert!(sink.due_at().await.is_none(), "a picture sharp everywhere was owed a settle");
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        assert!(frame_rx.try_recv().is_err(), "a picture sharp everywhere was settled");
     }
 
     /// A stream that went out at the dial owes nothing when it goes quiet: a still
