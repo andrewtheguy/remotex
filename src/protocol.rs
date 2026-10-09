@@ -1670,6 +1670,7 @@ mod tests {
                     passthrough: true,
                     placement: crate::config::Placement::Right,
                     software: false,
+                    whole: false,
                 }
             ),
             other => panic!("unexpected: {other:?}"),

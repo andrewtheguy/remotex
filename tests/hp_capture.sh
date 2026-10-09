@@ -13,13 +13,12 @@
 # Serve OUT to try them: `cd OUT && uv run python -m http.server 8000`, then open
 # http://localhost:8000/ (localhost is a secure context, which WebCodecs needs).
 #
-# With --strips the session is started as the page's software decoder takes it, passed
-# and in four strips where the display's height allows, each picture of video.h265 one
-# strip: CONFIG must name the decoder ([hevc_wasm]). tests/hp_strips_video.py makes a
-# video of the display from such a capture, and tests/hp_motion/ holds scripts to run on
-# the Mac for something to capture. With --whole it is started as a browser's own decoder
-# takes it, passed and each picture the whole display. With neither the gateway decodes
-# the picture itself, from strips.
+# With --strips the session is started as a browser takes it, passed and in four strips
+# where the display's height allows, each picture of video.h265 one strip.
+# tests/hp_strips_video.py makes a video of the display from such a capture, and
+# tests/hp_motion/ holds scripts to run on the Mac for something to capture. With --whole
+# the probe asks for one tile instead (ws_probe.py --whole), passed and each picture the
+# whole display. With neither the gateway decodes the picture itself, from strips.
 #
 # The probe asks for no resize: the stream is offered only once the display has
 # settled, and a resize in flight on a slow Mac can outlast the session. Play
@@ -51,8 +50,8 @@ while [[ $# -gt 0 ]]; do
     --seconds) seconds=$2 ;;
     --display) display=$2 ;;
     --out) out=$2 ;;
-    --strips) passed=(--passthrough --software); shift; continue ;;
-    --whole) passed=(--passthrough --apple-media); shift; continue ;;
+    --strips) passed=(--passthrough --apple-media); shift; continue ;;
+    --whole) passed=(--passthrough --apple-media --whole); shift; continue ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift 2

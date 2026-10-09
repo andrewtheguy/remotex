@@ -18,6 +18,7 @@ import {
   type BatchRecord,
   decodeBatchFrame,
   type GraphicsMsg,
+  stripRows,
   type VideoMsg,
 } from "./protocol.ts";
 import {
@@ -303,6 +304,7 @@ export function createFramePainter(options: {
     releasePipeline();
     releaseMirror();
     releasePlanes();
+    releaseStrips();
     video?.close();
     video = null;
     videoComplained = false;
@@ -485,6 +487,47 @@ export function createFramePainter(options: {
     return true;
   };
 
+  // The strips the browser's decoder has decoded of the frame still arriving, a
+  // `VideoFrame` each, with the desktop they are strips of. A `VideoDecoder`
+  // outputs each strip as a picture of its own, so the page places them, and all
+  // at the frame's last strip: one drawn as it decoded would show the desktop
+  // between two frames. The software decoder puts its picture together itself
+  // and none of its strips come here.
+  let strips: { frame: VideoFrame; index: number; w: number; h: number }[] = [];
+
+  const releaseStrips = () => {
+    for (const strip of strips) {
+      strip.frame.close();
+    }
+    strips = [];
+  };
+
+  // The frame `record` is the last strip of, onto the desktop's canvas: every
+  // strip held of a desktop of the record's size, each a strip's rows below the
+  // one before, the last cut at the desktop's last row. A strip of a desktop of
+  // another size is of a stream since replaced, and is dropped.
+  const paintStrips = (record: VideoMsg) => {
+    const { w, h } = record;
+    const pitch = stripRows(h);
+    const context = options.context();
+    let drawn = false;
+    for (const strip of strips) {
+      const top = strip.index * pitch;
+      const rows = Math.min(pitch, h - top);
+      if (strip.w !== w || strip.h !== h || rows <= 0) {
+        continue;
+      }
+      context?.drawImage(strip.frame, 0, 0, w, rows, 0, top, w, rows);
+      drawn = true;
+    }
+    releaseStrips();
+    if (drawn) {
+      // The desktop's own canvas is the picture again.
+      hidePlanes();
+      painted();
+    }
+  };
+
   const paint = (record: VideoMsg, image: DecodedPicture) => {
     const context = options.context();
     if (isSoftwarePlanes(image)) {
@@ -500,6 +543,11 @@ export function createFramePainter(options: {
       // The desktop's own canvas is the picture again.
       hidePlanes();
     }
+    painted();
+  };
+
+  // A picture was painted, on the desktop's own canvas or the one over it.
+  const painted = () => {
     if (videoComplained) {
       // Video is painting again, so whatever was said about it has stopped being
       // true. Said here rather than on a timer or behind a dismiss button: the
@@ -507,6 +555,44 @@ export function createFramePainter(options: {
       // present changed.
       videoComplained = false;
       options.onVideoError(null);
+    }
+  };
+
+  // One unit's picture, shown or held: null where its decoder gave none.
+  const show = (
+    record: VideoMsg,
+    image: DecodedPicture | null,
+    born: number,
+  ) => {
+    if (generation !== born) {
+      // `clear()` ran while this decode was in flight: the previous desktop must
+      // not show through on the next attachment's canvas.
+      image?.close();
+      return;
+    }
+    // The browser's decoder's picture of a strip is held for its frame.
+    const held = image && record.strip && !isSoftwarePlanes(image);
+    if (held) {
+      strips.push({
+        frame: image,
+        index: record.strip?.index ?? 0,
+        w: record.w,
+        h: record.h,
+      });
+    }
+    if (strips.length > 0 && record.strip?.ends) {
+      // Whatever became of this strip: the frame is over, and the strips of
+      // it that did decode are its picture.
+      paintStrips(record);
+    }
+    if (!image || held) {
+      return;
+    }
+    try {
+      paint(record, image);
+    } finally {
+      // Whatever became of it: the software decoder waits on this.
+      image.close();
     }
   };
 
@@ -529,22 +615,7 @@ export function createFramePainter(options: {
           await compose(record, born);
           continue;
         }
-        const image = await decodes[i];
-        if (!image) {
-          continue;
-        }
-        if (generation !== born) {
-          // `clear()` ran while this decode was in flight: the previous desktop must
-          // not show through on the next attachment's canvas.
-          image.close();
-          continue;
-        }
-        try {
-          paint(record, image);
-        } finally {
-          // Whatever became of it: the software decoder waits on this.
-          image.close();
-        }
+        show(record, await decodes[i], born);
       }
     },
     clear() {

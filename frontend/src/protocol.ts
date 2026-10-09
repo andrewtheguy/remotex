@@ -416,6 +416,11 @@ export interface VideoStrip {
   ends: boolean;
 }
 
+/** The rows of each strip of a picture `h` rows high: `strip_rows` in src/vnc_apple_media.rs. */
+export function stripRows(h: number): number {
+  return Math.ceil(Math.ceil(h / 4) / 16) * 16;
+}
+
 // A run of an RDP host's graphics pipeline, as the host sent it: whole commands, out
 // of their bulk compression, for this page to compose (egfxCompositor.ts). It means
 // something only after every run before it, from the `graphicsStart` that began the
