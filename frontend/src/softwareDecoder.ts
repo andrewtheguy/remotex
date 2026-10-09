@@ -60,10 +60,20 @@ export function softwareModuleFor(codec: string): SoftwareModule | null {
 export type DecoderCommand =
   /** A stream's decoder, in `module`: the one module a decode worker ever loads. */
   | { type: "create"; id: number; module: SoftwareModule }
-  | { type: "decode"; id: number; data: ArrayBuffer }
+  | { type: "decode"; id: number; data: ArrayBuffer; strip?: PictureStrip }
   /** The paint worker is done reading the picture last answered with. */
   | { type: "release"; id: number }
   | { type: "destroy"; id: number };
+
+/**
+ * A unit that is one strip of a picture of `rows` rows and not the whole of it
+ * (`VideoStrip` in protocol.ts): the HEVC module puts the picture together.
+ */
+export interface PictureStrip {
+  index: number;
+  begins: boolean;
+  rows: number;
+}
 
 /** One plane of a picture: where its first row is in the memory, and its size. */
 export interface PicturePlane {
@@ -103,7 +113,11 @@ export function isSoftwarePlanes(
   return "planes" in picture;
 }
 
-/** What the decode worker answers: one `decoded` or `failed` per `decode`. */
+/**
+ * What the decode worker answers: one `decoded` or `failed` per `decode`, in
+ * order. A strip's answer is its frame's picture where it is the last of the
+ * frame, and none otherwise.
+ */
 export type DecoderEvent =
   | { type: "decoded"; id: number; picture: DecodedPlanes | null }
   /**
@@ -133,7 +147,11 @@ export interface VideoDecoderLikeInit {
 export interface VideoDecoderLike {
   readonly state: CodecState;
   configure(config: VideoDecoderConfig): void;
-  decode(chunk: EncodedVideoChunk): void;
+  /**
+   * `strip` is for a software decoder that puts a picture together from its
+   * strips; `VideoDecoder` has no such argument and is sent none.
+   */
+  decode(chunk: EncodedVideoChunk, strip?: PictureStrip): void;
   close(): void;
 }
 
@@ -289,7 +307,7 @@ export function createSoftwareDecoder(
         module,
       } satisfies DecoderCommand);
     },
-    decode(chunk) {
+    decode(chunk, strip) {
       if (state !== "configured") {
         throw new DOMException(
           "decode on a decoder not configured",
@@ -299,7 +317,7 @@ export function createSoftwareDecoder(
       const data = new ArrayBuffer(chunk.byteLength);
       chunk.copyTo(data);
       decodeWorker(module).postMessage(
-        { type: "decode", id, data } satisfies DecoderCommand,
+        { type: "decode", id, data, strip } satisfies DecoderCommand,
         [data],
       );
     },

@@ -1110,7 +1110,7 @@ one field, and a second in a session that passes the picture:
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
-| `tilesPerFrame` (video stream field 6) | 4 | 4 decoded here, 1 passed or for a display under 144 rows that four tiles fail on | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together. One tile is one picture of the whole display on the one SSRC, which is what a browser's decoder is passed. |
+| `tilesPerFrame` (video stream field 6) | 4 | 4 decoded here or passed to the page's own decoder, 1 passed to the browser's or for a display under 144 rows that four tiles fail on | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together, or the page's. One tile is one picture of the whole display on the one SSRC, which is what a browser's decoder is passed. |
 
 The video offer names two codecs by their RTP payload numbers, 123 for H.264
 and 100 for HEVC, each with its own feature string. Offered both, the Mac sends
@@ -1335,9 +1335,14 @@ the offer's, whatever the display's size.
   strips until it has all four for one timestamp, a strip of the next frame
   arrives, or 8 ms pass with no strip: the Mac codes a frame's strips one after
   another, and they arrived up to 7 ms apart.
-- **A passed stream is not offered strips.** A browser's `VideoDecoder` shows
-  each picture it decodes as the display, so the passthrough still offers one
-  tile.
+- **A passed stream is in strips for the page's own decoder alone.** A
+  browser's `VideoDecoder` shows each picture it decodes as the display, so a
+  session passed to it is offered one tile. One started with *Decode HEVC in
+  this page* is offered four: each strip goes out as a unit of its own, in the
+  decoding order, under the display's size, with its number and whether it is
+  the first sent of its frame, and the page's decoder puts the display
+  together and shows it a frame at a time, as the gateway does
+  ([Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through)).
 
 ### Rate control
 
@@ -1551,7 +1556,7 @@ is 10 s overdue.
   20 Mbit/s floor ([Rate control](#rate-control)).
 - **Four-tile frames**: what Apple's viewer acknowledges a tile picture with,
   and whether anything short of a keyframe mends a loss; a stream of them
-  under loss, on a physical Mac, at 4K, and passed to a browser
+  under loss, on a physical Mac and at 4K
   ([In strips](#in-strips)).
 - **Cases the test Mac could not show:**
   - a non-console user;

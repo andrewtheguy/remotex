@@ -2322,9 +2322,15 @@ async fn connect(
             read_apple_security_result(&mut reader).await?;
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
-            let pass_media = plan.apple_media;
+            // A passed picture goes in strips to the page's own decoder, which
+            // puts the display together, and whole to the browser's.
+            let receive = if plan.apple_media {
+                vnc_apple_media::Receive::Pass { strips: plan.software.hevc }
+            } else {
+                vnc_apple_media::Receive::Decode
+            };
             let opening = opening_mode(config, choices.size, display);
-            apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, pass_media).await
+            apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, receive).await
         }
     }
 }
@@ -2738,7 +2744,7 @@ async fn apple_preface(
     config: &TargetConfig,
     opening: vnc_apple::VirtualMode,
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
-    pass_media: bool,
+    receive: vnc_apple_media::Receive,
 ) -> anyhow::Result<Connected> {
     let virtual_display = config.has_virtual_display();
     let media_stream = config.media_stream();
@@ -2833,7 +2839,7 @@ async fn apple_preface(
         macos,
         apple: true,
         poll: true,
-        media: media_stream.then(|| MediaStream::new(peer, local, pass_media, displays)),
+        media: media_stream.then(|| MediaStream::new(peer, local, receive, displays)),
         passthrough: None,
     })
 }
@@ -4069,7 +4075,7 @@ async fn pass_unit(
     stream_carries(shared).await?;
     uncover(shared, sink);
     let (w, h) = unit.size;
-    let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
+    let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
     if !sink.pass_hevc(w, h, unit.data, passed).await? {
         media.lock().unwrap().want_keyframe(leg);
     }
@@ -4115,7 +4121,7 @@ async fn tab_unit(shared: &Shared, leg: usize, unit: PassedUnit, media: &SharedM
     tab_live(&shared.tab);
     tab_uncover(&shared.tab, &shared.desktop);
     let (w, h) = unit.size;
-    let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
+    let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
     match sink.pass_hevc(w, h, unit.data, passed).await {
         Ok(true) => {}
         Ok(false) => media.lock().unwrap().want_keyframe(leg),
@@ -11401,8 +11407,8 @@ mod tests {
         let shared = test_shared(uplink, Arc::clone(&desktop), Arc::clone(&shadow));
 
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true, 1).0));
-        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: false }, 1).0));
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         assert!(sink.passing());
         sink.flush().await;
@@ -11447,16 +11453,16 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true, 1).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: false }, 1).0));
 
         // Not a keyframe: dropped for one, and the notice stays up.
-        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: false, data: vec![0; 16] };
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: false, strip: None, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(!out.iter().any(|m| matches!(m, ServerMsg::ScreenUnavailable { .. })), "{out:?}");
 
-        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -11501,8 +11507,8 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true, 1).0));
-        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: false }, 1).0));
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();

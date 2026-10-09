@@ -37,6 +37,12 @@ export interface ModuleDecoder {
    * Throws for a unit that does not decode.
    */
   decode(): boolean;
+  /**
+   * The HEVC module's alone: decode the unit written as strip `strip`, from 0
+   * at the top, of a picture of `rows` rows sent in four. True when the picture
+   * has every strip since its keyframe, and `picture` then describes it whole.
+   */
+  decodeStrip?(strip: number, rows: number): boolean;
   /** Where the picture's sixteen numbers are in the memory. */
   picture(): number;
   free(): void;

@@ -2480,6 +2480,7 @@ mod tests {
                 ServerMsg::Video(crate::protocol::VideoUnit {
                     w: 64,
                     h: 64,
+                    strip: None,
                     keyframe: seed == 1,
                     data: vec![seed; 10_000],
                     held: Held::take(&budget, 10_000, 100_000).await,

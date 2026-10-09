@@ -496,9 +496,9 @@ struct Offers {
     /// Each display's video leg, in the Mac's order: its first virtual display,
     /// then its second.
     videos: Vec<VideoOffer>,
-    /// Whether the picture is decoded here, and so offered in strips where the
-    /// display's height allows ([`in_strips`]).
-    decoded: bool,
+    /// Whether what takes the picture takes it in strips, and so is offered
+    /// them where the display's height allows ([`in_strips`]).
+    strips: bool,
 }
 
 /// One video leg's keys, and this side's SSRC on it.
@@ -508,9 +508,9 @@ struct VideoOffer {
 }
 
 impl Offers {
-    /// For `displays` virtual displays, a video leg each, whose picture is
-    /// `decoded` here or passed.
-    fn new(displays: usize, decoded: bool) -> Self {
+    /// For `displays` virtual displays, a video leg each, whose picture may
+    /// come in `strips` or must come whole.
+    fn new(displays: usize, strips: bool) -> Self {
         let key = || {
             let mut k = [0u8; 46];
             rand::fill(&mut k[..]);
@@ -527,13 +527,13 @@ impl Offers {
             audio_keys,
             audio_ssrc: rand::random(),
             videos,
-            decoded,
+            strips,
         }
     }
 
     /// Whether the leg of a display of `size` is offered in strips.
     fn strips(&self, size: (u16, u16)) -> bool {
-        self.decoded && in_strips(size.1)
+        self.strips && in_strips(size.1)
     }
 
     /// The `0x1c` message for displays of `sizes` backing pixels, one per video
@@ -1516,11 +1516,15 @@ impl Assembly {
 const NAL_SPS: u8 = 33;
 
 /// An access unit passed to the browser as the Mac sent it: one picture, as the
-/// Annex B stream a `VideoDecoder` configured with [`Self::decode`] takes.
+/// Annex B stream a `VideoDecoder` configured with [`Self::decode`] takes, or
+/// one strip of the display, which the page's own decoder puts together.
 #[derive(Debug, PartialEq, Eq)]
 pub struct PassedUnit {
-    /// The display's size, from the stream's parameter sets.
+    /// The display's size: from the stream's parameter sets, or of a display
+    /// in strips, whose parameter sets give a strip's, the size offered.
     pub size: (u16, u16),
+    /// Which strip of the display the unit is, of a stream in strips.
+    pub strip: Option<crate::protocol::Strip>,
     /// The configuration string, from the same.
     pub decode: String,
     /// An IRAP picture, which a decoder can start at.
@@ -1544,6 +1548,16 @@ pub struct StreamParams {
 #[derive(Default)]
 pub struct Passer {
     params: Option<StreamParams>,
+    /// The timestamp of the last strip passed, which its frame's others share.
+    frame: Option<u32>,
+}
+
+impl PassedUnit {
+    /// Whether the unit is the first of its frame: a whole picture, or the
+    /// first strip sent of one.
+    fn begins(&self) -> bool {
+        self.strip.is_none_or(|strip| strip.begins)
+    }
 }
 
 impl Passer {
@@ -1562,10 +1576,33 @@ impl Passer {
         }
         Some(PassedUnit {
             size: params.size,
+            strip: None,
             decode: params.decode.clone(),
             keyframe: unit.iter().any(|nal| (16..=23).contains(&nal_type(nal[0]))),
             data,
         })
+    }
+}
+
+impl Passer {
+    /// [`Self::pass`] for a unit that is strip `strip` of a display of
+    /// `display`, in the frame of `timestamp`. A picture that is not a strip of
+    /// such a display is one from before the display was offered, and is not
+    /// passed.
+    fn pass_strip(&mut self, unit: &AccessUnit, strip: usize, timestamp: u32, display: (u16, u16)) -> Option<PassedUnit> {
+        let passed = self.pass(unit)?;
+        if passed.size != (display.0, strip_rows(display.1) as u16) {
+            log::debug!(
+                "vnc: a {}\u{d7}{} picture is not a strip of the {}\u{d7}{} display offered",
+                passed.size.0,
+                passed.size.1,
+                display.0,
+                display.1
+            );
+            return None;
+        }
+        let begins = self.frame.replace(timestamp) != Some(timestamp);
+        Some(PassedUnit { size: display, strip: Some(crate::protocol::Strip { index: strip as u8, begins }), ..passed })
     }
 }
 
@@ -2020,22 +2057,94 @@ pub enum Pictures {
     Decoded(tokio::sync::watch::Receiver<Option<std::sync::Arc<Picture>>>),
     /// Every access unit, in order, to pass to the browser: a unit depends on the
     /// ones before it, so none is replaced. `None` means the receiver has stopped.
-    Passed(tokio::sync::mpsc::Receiver<Option<PassedUnit>>),
+    Passed(PassedUnits),
 }
 
 /// The sending half of [`Pictures`], which each receiver the stream binds is handed.
 #[derive(Clone)]
 enum Outlet {
     Decoded(tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>),
-    Passed(tokio::sync::mpsc::Sender<Option<PassedUnit>>),
+    Passed(PassQueue),
 }
 
-/// Access units the read loop may be behind by in passing them to the browser.
+/// Frames the read loop may be behind by in passing them to the browser, a
+/// frame being a picture sent whole or the strips of one timestamp.
 /// Reaching it drops to the next keyframe, as the decoder's queue does: the loop
 /// waits on the browser's link ([`crate::encode::VideoSink::pass_hevc`]), so this is
 /// where a link that cannot carry the stream sheds it. Half a second of the virtual
 /// display's 30 Hz ([`vnc_apple::DISPLAY_HZ`]).
 const PASS_QUEUE: usize = 15;
+
+/// The read loop's queue of units to pass, as the receive task fills it.
+#[derive(Clone)]
+struct PassQueue {
+    /// Deep enough for [`PASS_QUEUE`] frames in strips behind the one the read
+    /// loop is in the middle of.
+    units: tokio::sync::mpsc::Sender<Option<PassedUnit>>,
+    /// The frames queued: counted up here at each unit that begins one, and
+    /// down by the read loop as it takes that unit.
+    frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// The read loop's end of that queue.
+pub struct PassedUnits {
+    units: tokio::sync::mpsc::Receiver<Option<PassedUnit>>,
+    frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+fn pass_queue() -> (PassQueue, PassedUnits) {
+    let (tx, rx) = tokio::sync::mpsc::channel((PASS_QUEUE + 1) * STRIPS);
+    let frames = std::sync::Arc::<std::sync::atomic::AtomicUsize>::default();
+    (PassQueue { units: tx, frames: std::sync::Arc::clone(&frames) }, PassedUnits { units: rx, frames })
+}
+
+impl PassedUnits {
+    /// The next unit to pass, `Some(None)` once the receiver has stopped, and
+    /// `None` when the stream is gone.
+    pub async fn recv(&mut self) -> Option<Option<PassedUnit>> {
+        let unit = self.units.recv().await;
+        if unit.as_ref().is_some_and(|unit| unit.as_ref().is_some_and(PassedUnit::begins)) {
+            self.frames.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        unit
+    }
+}
+
+impl PassQueue {
+    /// Queue `passed`, unless the read loop is [`PASS_QUEUE`] frames behind.
+    fn send(&self, passed: PassedUnit) -> Sent {
+        use std::sync::atomic::Ordering::Relaxed;
+        let begins = passed.begins();
+        if begins && self.frames.fetch_add(1, Relaxed) >= PASS_QUEUE {
+            self.frames.fetch_sub(1, Relaxed);
+            return Sent::Full(PASS_QUEUE);
+        }
+        match self.units.try_send(Some(passed)) {
+            Ok(()) => Sent::Queued,
+            Err(e) => {
+                if begins {
+                    self.frames.fetch_sub(1, Relaxed);
+                }
+                match e {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => Sent::Full(PASS_QUEUE),
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => Sent::Stopped,
+                }
+            }
+        }
+    }
+}
+
+/// What becomes of the pictures a stream receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Receive {
+    /// Decoded here, from strips where the display's height allows.
+    Decode,
+    /// Passed to the browser as the Mac's access units, in `strips` where what
+    /// decodes them there puts a display together from them, the page's own
+    /// decoder, and whole for a `VideoDecoder`, which shows each picture it
+    /// decodes as the display.
+    Pass { strips: bool },
+}
 
 /// What [`MediaStream::offer`] has the session send.
 #[derive(Debug, PartialEq, Eq)]
@@ -2176,20 +2285,20 @@ fn leg_due(offered: std::time::Instant, last: Option<std::time::Instant>) -> std
 
 impl MediaStream {
     /// A stream for `displays` virtual displays, with a [`Pictures`] for each in
-    /// the Mac's order. `pass` hands the read loop the Mac's access units rather
-    /// than pictures decoded from them — see [`Pictures`]. The first display is
+    /// the Mac's order. `receive` says whether the read loop is handed pictures
+    /// decoded here or the Mac's access units — see [`Pictures`]. The first display is
     /// shown from the start, and any other once [`Self::show`] says so.
     pub fn new(
         peer: std::net::SocketAddr,
         local: std::net::SocketAddr,
-        pass: bool,
+        receive: Receive,
         displays: usize,
     ) -> (Self, Vec<Pictures>) {
-        let offers = Offers::new(displays, !pass);
+        let offers = Offers::new(displays, receive != Receive::Pass { strips: false });
         let (legs, pictures) = (0..offers.videos.len())
             .map(|index| {
-                let (pictures, rx) = if pass {
-                    let (tx, rx) = tokio::sync::mpsc::channel(PASS_QUEUE);
+                let (pictures, rx) = if matches!(receive, Receive::Pass { .. }) {
+                    let (tx, rx) = pass_queue();
                     (Outlet::Passed(tx), Pictures::Passed(rx))
                 } else {
                     let (tx, rx) = tokio::sync::watch::channel(None);
@@ -3077,7 +3186,9 @@ impl Receiver {
                         );
                         Onward::Decoder(units, decoder)
                     }
-                    Outlet::Passed(units) => Onward::Browser(Passer::default(), units.clone()),
+                    Outlet::Passed(units) => {
+                        Onward::Browser(Passer::default(), units.clone(), std::sync::Arc::clone(&shared.offered))
+                    }
                 };
                 Ok(VideoLeg {
                     display: index + 1,
@@ -3269,8 +3380,8 @@ impl Receiver {
                         pictures.send_replace(None);
                     }
                 }
-                Onward::Browser(_, units) => {
-                    let _ = units.send(None).await;
+                Onward::Browser(_, units, _) => {
+                    let _ = units.units.send(None).await;
                 }
             }
         }
@@ -3336,7 +3447,8 @@ enum Onward {
     /// The decoder thread, whose pictures the session encodes as VP9.
     Decoder(DecodeQueue, std::thread::JoinHandle<()>),
     /// The read loop, which passes each unit to the browser as it came.
-    Browser(Passer, tokio::sync::mpsc::Sender<Option<PassedUnit>>),
+    /// A strip is described by the size its display was offered at.
+    Browser(Passer, PassQueue, std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>),
 }
 
 /// What became of one access unit sent [`Onward`].
@@ -3355,15 +3467,13 @@ impl Onward {
     fn send(&mut self, coded: Coded) -> Sent {
         match self {
             Self::Decoder(queue, _) => queue.send(coded),
-            Self::Browser(passer, units) => {
-                let Some(passed) = passer.pass(&coded.unit) else {
-                    return Sent::Unready;
+            Self::Browser(passer, units, offered) => {
+                let passed = match coded.strip {
+                    None => passer.pass(&coded.unit),
+                    Some(strip) => (*offered.lock().unwrap())
+                        .and_then(|display| passer.pass_strip(&coded.unit, strip, coded.timestamp, display)),
                 };
-                match units.try_send(Some(passed)) {
-                    Ok(()) => Sent::Queued,
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Sent::Full(PASS_QUEUE),
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Sent::Stopped,
-                }
+                passed.map_or(Sent::Unready, |passed| units.send(passed))
             }
         }
     }
@@ -4454,10 +4564,48 @@ mod tests {
         assert_eq!(Passer::default().pass(&units[1]), None);
     }
 
+    /// A strip goes out under its display's size, with its number and whether it
+    /// is the first sent of its frame, which the strips of one timestamp are.
+    #[test]
+    fn a_strip_passes_as_its_displays_with_its_number_and_where_its_frame_begins() {
+        use crate::protocol::Strip;
+        let units = fixture_units();
+        let display = (64, 180);
+        let mut passer = Passer::default();
+        let first = passer.pass_strip(&units[0], 0, 900, display).unwrap();
+        assert_eq!((first.size, first.strip, first.keyframe), (display, Some(Strip { index: 0, begins: true }), true));
+        assert_eq!(first.data, passer.pass(&units[0]).unwrap().data);
+        let same = passer.pass_strip(&units[1], 2, 900, display).unwrap();
+        assert_eq!((same.strip, same.keyframe), (Some(Strip { index: 2, begins: false }), false));
+        let next = passer.pass_strip(&units[2], 2, 3900, display).unwrap();
+        assert_eq!(next.strip, Some(Strip { index: 2, begins: true }));
+        // A 48-row picture is no strip of a display of 400 rows.
+        assert_eq!(passer.pass_strip(&units[1], 1, 6900, (64, 400)), None);
+    }
+
+    /// The read loop's queue is as deep in frames whether a frame is one unit or
+    /// four, and a frame is off it once its first unit is taken.
+    #[tokio::test]
+    async fn the_read_loop_may_be_behind_by_frames_not_by_units() {
+        use crate::protocol::Strip;
+        let unit = |strip| PassedUnit { size: (64, 180), strip, decode: String::new(), keyframe: false, data: Vec::new() };
+        let (queue, mut units) = pass_queue();
+        for _ in 0..PASS_QUEUE {
+            for index in 0..STRIPS as u8 {
+                assert!(matches!(queue.send(unit(Some(Strip { index, begins: index == 0 }))), Sent::Queued));
+            }
+        }
+        assert!(matches!(queue.send(unit(Some(Strip { index: 0, begins: true }))), Sent::Full(PASS_QUEUE)));
+        assert!(matches!(queue.send(unit(None)), Sent::Full(PASS_QUEUE)));
+        units.recv().await.unwrap().unwrap();
+        assert!(matches!(queue.send(unit(None)), Sent::Queued));
+        assert!(matches!(queue.send(unit(None)), Sent::Full(PASS_QUEUE)));
+    }
+
     fn media() -> MediaStream {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
-        MediaStream::new(peer, local, false, 1).0
+        MediaStream::new(peer, local, Receive::Decode, 1).0
     }
 
     /// Offer the stream for `size` as the session does once the Mac has named its
@@ -4605,7 +4753,7 @@ mod tests {
     fn two_displays_are_offered_named_and_answered_together() {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
-        let (mut m, pictures) = MediaStream::new(peer, local, true, 2);
+        let (mut m, pictures) = MediaStream::new(peer, local, Receive::Pass { strips: false }, 2);
         assert_eq!((m.displays(), pictures.len()), (2, 2));
 
         let sizes = [(1600, 1000), (1280, 800)];
@@ -4645,7 +4793,7 @@ mod tests {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
         let relaxed = std::sync::atomic::Ordering::Relaxed;
-        let (mut m, _pictures) = MediaStream::new(peer, local, false, 2);
+        let (mut m, _pictures) = MediaStream::new(peer, local, Receive::Decode, 2);
         m.asked = true;
         m.invited = true;
         assert_eq!((m.leg_of(0), m.leg_of(1)), (0, 1));
@@ -4682,7 +4830,7 @@ mod tests {
     fn a_display_nobody_is_shown_owes_its_packets_and_one_coming_into_view_its_next() {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
-        let (mut m, _pictures) = MediaStream::new(peer, local, false, 2);
+        let (mut m, _pictures) = MediaStream::new(peer, local, Receive::Decode, 2);
         m.asked = true;
         m.invited = true;
         let offered = std::time::Instant::now();

@@ -450,6 +450,7 @@ export function createFramePainter(options: {
       { w: record.w, h: record.h },
       record.data,
       record.keyframe,
+      record.strip,
     );
   };
 
