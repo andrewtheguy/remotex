@@ -1,0 +1,4 @@
+# SIMD, which every browser that has the page's WebCodecs decoders also has: a
+# block's samples are made floats, and its channels told apart, four at a step.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

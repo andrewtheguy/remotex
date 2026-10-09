@@ -75,6 +75,7 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         // (frontend/wasm/flac), named file by file for the same reason.
         "frontend/wasm/flac/Cargo.toml",
         "frontend/wasm/flac/Cargo.lock",
+        "frontend/wasm/flac/.cargo/config.toml",
         "frontend/wasm/flac/rust-toolchain.toml",
         "frontend/wasm/flac/src",
         // The page's software VP9 decoder, which is not built here: the release
