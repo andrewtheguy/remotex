@@ -17,7 +17,9 @@
 # and in four strips where the display's height allows, each picture of video.h265 one
 # strip: CONFIG must name the decoder ([hevc_wasm]). tests/hp_strips_video.py makes a
 # video of the display from such a capture, and tests/hp_motion/ holds scripts to run on
-# the Mac for something to capture.
+# the Mac for something to capture. With --whole it is started as a browser's own decoder
+# takes it, passed and each picture the whole display. With neither the gateway decodes
+# the picture itself, from strips.
 #
 # The probe asks for no resize: the stream is offered only once the display has
 # settled, and a resize in flight on a slow Mac can outlast the session. Play
@@ -26,7 +28,7 @@
 #   REMOTEX_PROBE_PASSWORD=... tests/hp_capture.sh \
 #       [--config tmp/test_uat_hp.toml] [--port 52888] [--target macvmhighperf] \
 #       [--user admin] [--seconds 45] [--display 1440x900@200] [--out tmp/hp-capture] \
-#       [--strips]
+#       [--strips | --whole]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -38,7 +40,7 @@ user=admin
 seconds=45
 display=1440x900@200
 out=tmp/hp-capture
-strips=()
+passed=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,7 +51,8 @@ while [[ $# -gt 0 ]]; do
     --seconds) seconds=$2 ;;
     --display) display=$2 ;;
     --out) out=$2 ;;
-    --strips) strips=(--passthrough --software); shift; continue ;;
+    --strips) passed=(--passthrough --software); shift; continue ;;
+    --whole) passed=(--passthrough --apple-media); shift; continue ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift 2
@@ -81,7 +84,7 @@ for _ in $(seq 60); do
 done
 
 uv run tests/ws_probe.py --port "$port" --target "$target" --user "$user" \
-  --display "$display" --audio --seconds "$seconds" ${strips[@]+"${strips[@]}"}
+  --display "$display" --audio --seconds "$seconds" ${passed[@]+"${passed[@]}"}
 
 kill "$gateway"
 wait "$gateway" 2>/dev/null || true
