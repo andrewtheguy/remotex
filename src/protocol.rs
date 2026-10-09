@@ -716,6 +716,11 @@ pub struct Strip {
     pub ends: bool,
 }
 
+impl Strip {
+    /// How many strips a picture sent in strips is in.
+    pub const COUNT: u8 = 4;
+}
+
 /// One video access unit, carried as a `VIDEO` record inside a [`batch`] frame.
 ///
 /// The contract every client implements:
@@ -1239,7 +1244,11 @@ pub enum ServerMsg {
     /// ([`crate::config::RenderPlan::software`]). It is the session's and not a
     /// page's, so every page attached builds the same kind of decoder: the
     /// session's page, one that reattaches, a second display's tab.
-    VideoFormat { decode: String, passthrough: bool, software: bool },
+    ///
+    /// `strips` says how many strips each picture of the stream comes in, a unit
+    /// each ([`Strip`]): [`Strip::COUNT`] for a High Performance Mac's passed in
+    /// strips, and 1 for every stream whose units are whole pictures.
+    VideoFormat { decode: String, passthrough: bool, software: bool, strips: u8 },
     /// The remote started consuming the camera — an application on it opened
     /// the device — and the browser should encode and send from now on,
     /// starting at a keyframe. Camera-socket traffic only, like the two below:
@@ -1362,6 +1371,7 @@ enum ControlMsg<'a> {
         decode: &'a str,
         passthrough: bool,
         software: bool,
+        strips: u8,
     },
     CameraStart {
         width: u32,
@@ -1490,8 +1500,8 @@ impl ServerMsg {
             ServerMsg::CameraKeyframe => control(&ControlMsg::CameraKeyframe),
             ServerMsg::MicOpen => control(&ControlMsg::MicOpen),
             ServerMsg::MicClose => control(&ControlMsg::MicClose),
-            ServerMsg::VideoFormat { decode, passthrough, software } => {
-                control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough, software: *software })
+            ServerMsg::VideoFormat { decode, passthrough, software, strips } => {
+                control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough, software: *software, strips: *strips })
             }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
@@ -1670,6 +1680,7 @@ mod tests {
                     passthrough: true,
                     placement: crate::config::Placement::Right,
                     software: false,
+                    whole: false,
                 }
             ),
             other => panic!("unexpected: {other:?}"),
@@ -1929,12 +1940,12 @@ mod tests {
         // How to decode the stream, which is the message a client cannot work out for
         // itself: VP9 carries no parameter sets, so every field here is the gateway's
         // answer and a renamed one is a decoder that never gets configured.
-        match (ServerMsg::VideoFormat { decode: "vp09.00.40.08".to_owned(), passthrough: true, software: false })
+        match (ServerMsg::VideoFormat { decode: "vp09.00.40.08".to_owned(), passthrough: true, software: false, strips: 1 })
             .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"videoFormat","decode":"vp09.00.40.08","passthrough":true,"software":false}"#
+                r#"{"type":"videoFormat","decode":"vp09.00.40.08","passthrough":true,"software":false,"strips":1}"#
             ),
             None => panic!("videoFormat must be a text frame"),
         }

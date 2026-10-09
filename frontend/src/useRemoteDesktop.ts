@@ -2108,6 +2108,7 @@ export function useRemoteDesktop(
             decode: msg.decode,
             passthrough: msg.passthrough,
             software: msg.software,
+            strips: msg.strips,
           });
           break;
         case "graphicsStart":

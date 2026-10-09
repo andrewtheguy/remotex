@@ -23,6 +23,8 @@ interface Unit {
   payload: number[];
   /** Defaults to true: most fixtures below are a stream's first unit. */
   keyframe?: boolean;
+  /** Which strip of the picture the unit is, and whether its frame's last. */
+  strip?: { index: number; ends: boolean };
 }
 
 function batchFrame(units: Unit[]): ArrayBuffer {
@@ -34,7 +36,11 @@ function batchFrame(units: Unit[]): ArrayBuffer {
   u16(units.length);
   u32(1); // attachment-local batch sequence
   for (const unit of units) {
-    bytes.push(OP_VIDEO, unit.keyframe === false ? 0 : 0x01);
+    // A strip in the flags: 0x02, its number in 0x0C, and 0x10 on a frame's last.
+    const strip = unit.strip
+      ? 0x02 | (unit.strip.index << 2) | (unit.strip.ends ? 0x10 : 0)
+      : 0;
+    bytes.push(OP_VIDEO, (unit.keyframe === false ? 0 : 0x01) | strip);
     u16(unit.w);
     u16(unit.h);
     u32(unit.payload.length);
@@ -242,6 +248,109 @@ test("a frame is cropped to the desktop, drawn at the origin", async () => {
     decoded.every((frame) => frame.closed),
     "a VideoFrame holds decoder memory until it is closed",
   );
+});
+
+test("the browser's decoder's strips are placed by number, at their frame's last", async () => {
+  // A display of 900 rows is in strips of 240, the last cut at its last row. A
+  // frame is the strips that changed, and nothing of it is drawn before its last.
+  const p = announced();
+  const strip = (index: number, ends: boolean, keyframe = false) => ({
+    w: 1440,
+    h: 900,
+    payload: [index],
+    keyframe,
+    strip: { index, ends },
+  });
+  await p.draw(batchFrame([strip(0, false, true), strip(1, false)]));
+  assert.deepEqual(cropped, []);
+  assert.ok(decoded.every((frame) => !frame.closed));
+  await p.draw(batchFrame([strip(2, false), strip(3, true)]));
+  const at = (dy: number, rows: number) => ({
+    sx: 0,
+    sy: 0,
+    sw: 1440,
+    sh: rows,
+    dx: 0,
+    dy,
+    dw: 1440,
+    dh: rows,
+  });
+  assert.deepEqual(cropped, [
+    at(0, 240),
+    at(240, 240),
+    at(480, 240),
+    at(720, 180),
+  ]);
+  assert.ok(decoded.every((frame) => frame.closed));
+
+  cropped = [];
+  await p.draw(batchFrame([strip(2, true)]));
+  assert.deepEqual(cropped, [at(480, 240)]);
+  assert.deepEqual(chunkTypes, ["key", "delta", "delta", "delta", "delta"]);
+  assert.equal(decoders, 1);
+});
+
+test("strips held of an attachment that ended are closed, and never drawn", async () => {
+  const p = announced();
+  const first = {
+    w: 64,
+    h: 64,
+    payload: [0],
+    strip: { index: 0, ends: false },
+  };
+  await p.draw(batchFrame([first]));
+  p.clear();
+  assert.ok(decoded.every((frame) => frame.closed));
+  p.setVideoFormat({ decode: "vp09.00.40.08" });
+  await p.draw(batchFrame([{ ...first, strip: { index: 1, ends: true } }]));
+  assert.equal(cropped.length, 1, "only the strip of the attachment that is");
+});
+
+test("a frame whose last strip the decoder gave no picture for is not painted", async () => {
+  // The decoder gave up on the frame's last strip: the strips before it are of
+  // a frame that will not be finished, and painting them would say video is back.
+  poison = 0x66;
+  const p = announced();
+  const strip = (index: number, ends: boolean, payload: number[]) => ({
+    w: 64,
+    h: 64,
+    payload,
+    strip: { index, ends },
+  });
+  await p.draw(batchFrame([strip(0, false, [0]), strip(1, true, [0x66])]));
+  assert.deepEqual(cropped, []);
+  assert.ok(decoded.every((frame) => frame.closed));
+  assert.equal(videoErrors.at(-1) === null, false, "the complaint stands");
+});
+
+test("strips are closed when drawing them throws", async () => {
+  const throwing = {
+    drawImage() {
+      throw new Error("the canvas is gone");
+    },
+  } as unknown as CanvasRenderingContext2D;
+  const p = announced(throwing);
+  const last = { w: 64, h: 64, payload: [0], strip: { index: 0, ends: true } };
+  await assert.rejects(p.draw(batchFrame([last])));
+  assert.ok(decoded.every((frame) => frame.closed));
+});
+
+test("strips held give way to a whole picture, and to a stream announced", async () => {
+  const p = announced();
+  const first = {
+    w: 64,
+    h: 64,
+    payload: [0],
+    strip: { index: 0, ends: false },
+  };
+  await p.draw(batchFrame([first]));
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  assert.ok(decoded.every((frame) => frame.closed));
+  assert.equal(cropped.length, 1, "the whole picture alone");
+
+  await p.draw(batchFrame([first]));
+  p.setVideoFormat({ decode: "vp09.00.40.08" });
+  assert.ok(decoded.every((frame) => frame.closed));
 });
 
 test("a record's keyframe flag decides the chunk type, both ways", async () => {

@@ -149,7 +149,8 @@ export interface VideoDecoderLike {
   configure(config: VideoDecoderConfig): void;
   /**
    * `strip` is for a software decoder that puts a picture together from its
-   * strips; `VideoDecoder` has no such argument and is sent none.
+   * strips. `VideoDecoder` has no such argument: it outputs each strip as a
+   * picture of its own, which the painter places (framePainter.ts).
    */
   decode(chunk: EncodedVideoChunk, strip?: PictureStrip): void;
   close(): void;

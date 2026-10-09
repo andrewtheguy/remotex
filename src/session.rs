@@ -2165,11 +2165,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false, placement: Placement::Right, software: false };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false, placement: Placement::Right, software: false, whole: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false, placement: Placement::Right, software: false };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false, placement: Placement::Right, software: false, whole: false };
     /// A session started with nothing but the target's passthrough.
-    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true, placement: Placement::Right, software: false };
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true, placement: Placement::Right, software: false, whole: false };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -2199,7 +2199,7 @@ mod tests {
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
             let size = if self.resize { Sizing::Window } else { Sizing::Target };
-            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false, placement: Placement::Right, software: false }
+            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false, placement: Placement::Right, software: false, whole: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -2842,7 +2842,7 @@ mod tests {
                 },
             );
             let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true, placement: Placement::Right, software: false };
+            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true, placement: Placement::Right, software: false, whole: false };
 
             let token_a = mgr.claim(false, None, "login").unwrap();
             let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();

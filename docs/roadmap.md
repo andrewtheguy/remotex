@@ -115,6 +115,15 @@ before, so none can be dropped alone, and a full queue drops to the next IDR and
 asks the Mac for one, which brings the picture back as one fresh frame rather than
 a replay of the backlog.
 
+### Strips in Safari's decoder
+
+A passed High Performance stream comes in four strips, to the browser's own
+`VideoDecoder` as to the page's software decoder, and the page places each
+picture that decoder outputs by its strip's number
+([Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through)).
+Chrome's decoder on a Mac takes such a stream, whose pictures are a quarter of
+the display. Safari's has not been tried with one, on a Mac or an iPhone.
+
 ### H.264 in the RDP graphics pipeline
 
 A host draws with H.264 only on a passed pipeline, for the page to decode, behind

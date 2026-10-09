@@ -49,9 +49,10 @@
 //! - the flags word carries [`FLAG_NO_CURSOR`], which makes the agent capture the
 //!   screen without the pointer (`send cursor with video 0`) — the pointer keeps
 //!   arriving as its own shape over RFB;
-//! - `tilesPerFrame` is 1 for a stream passed to the browser, so each picture is
-//!   one HEVC picture of the whole display. A stream decoded here is offered
-//!   Apple's 4, which codes the display as four strips ([`Strips`]).
+//! - `tilesPerFrame` is Apple's 4, which codes the display as four strips
+//!   ([`Strips`]), for a stream decoded here and for one passed to the browser
+//!   alike. It is 1, each picture one HEVC picture of the whole display, for a
+//!   display too low for strips and for a passed session that asked for it.
 //!
 //! Its bitrate entries are Apple's, and so is what bounds them: the Mac's rate
 //! controller walks the picture between 20 and 60 Mbit/s by the one-way delay this
@@ -2197,10 +2198,11 @@ impl PassQueue {
 pub enum Receive {
     /// Decoded here, from strips where the display's height allows.
     Decode,
-    /// Passed to the browser as the Mac's access units, in `strips` where what
-    /// decodes them there puts a display together from them, the page's own
-    /// decoder, and whole for a `VideoDecoder`, which shows each picture it
-    /// decodes as the display.
+    /// Passed to the browser as the Mac's access units, in `strips` where the
+    /// display's height allows: the page puts the display together from them,
+    /// in its own decoder or from what the browser's decodes of each. Whole, each
+    /// picture the display, only for a session that asked for it so
+    /// ([`crate::config::Choices::whole`]).
     Pass { strips: bool },
 }
 

@@ -426,9 +426,8 @@ that selects the stream. See
   chosen, and a session started without it all the same ends before it dials
   the Mac.
   A session that decodes the picture is offered it as Apple's viewer is, in
-  four strips the one decoder puts together, and so is one passed to the page's
-  own decoder; one passed to the browser's is offered a single picture, which
-  is what that decoder shows.
+  four strips the one decoder puts together, and so is one passed, which the
+  page puts together.
   The media stream alone is the picture: ZRLE is stepped over unread and never
   encoded, and the page says the screen is not available until the stream sends
   the display's first picture.
@@ -916,18 +915,22 @@ Three controls with similar names therefore remain separate:
   take their share of `QUEUE_BUDGET` like any access unit. Every picture the Mac
   sends goes out, up to the virtual display's 30 a second. The offer and the rate
   reports are a decoded session's: the quality is what that session receives.
-- **In strips, to the page's own decoder.** A session started with *Decode HEVC
-  in this page* is offered the display in Apple's four strips
+- **In strips.** A passed session is offered the display in Apple's four strips
   ([In strips](apple-vnc-889.md#in-strips)), as a session decoded here is, where
-  its height allows; one passed to the browser's decoder is offered it whole,
-  since a `VideoDecoder` shows each picture it decodes as the display. The
+  its height allows, whichever decoder the page takes it in. The one that is
+  offered it whole, each picture the display, is a session whose `connect` asks
+  for that (`Choices::whole`), which no picker does: `tests/ws_probe.py --whole`
+  does, for a capture or a comparison of the two on one gateway. The
   strips are one HEVC stream in one decoding order, and the receiver hands each
   strip's access unit on in that order as a unit of its own: under the
   display's size, not the strip's, with the strip's number and whether it is
   the last of its frame in the record's flags
-  ([Image batches](#image-batches)). A keyframe is strip 0's IDR; the other
+  ([Image batches](#image-batches)). The stream's `videoFormat` says how many
+  strips its pictures come in (`strips`: 4, and 1 for whole pictures), which
+  the Info panel's video row repeats. A keyframe is strip 0's IDR; the other
   strips' intra pictures follow it as ordinary units, so a restart drops to
-  that IDR as it drops to any. The decode worker has the module decode each
+  that IDR as it drops to any. For the page's software decoder, the decode
+  worker has the module decode each
   unit as its strip (`decodeStrip`), which copies it to its place in a picture
   of the display's size, and answers a frame's last strip with the picture and
   every other strip with none. Which strip is a frame's last is the gateway's to
@@ -937,7 +940,11 @@ Three controls with similar names therefore remain separate:
   cannot make that wait itself: its paint worker draws one batch at a time, so
   an answer that waited for the next strip would hold that strip back, and each
   strip would be shown alone. The paint worker is handed the whole display each
-  time and uploads it as it uploads a picture sent whole.
+  time and uploads it as it uploads a picture sent whole. The browser's own
+  `VideoDecoder` has no such call and outputs each strip as a picture of its
+  own, so there the paint worker holds a frame's pictures and draws them at the
+  frame's last strip, each a strip's rows below the one before and the last cut
+  at the display's last row (`paintStrips` in `frontend/src/framePainter.ts`).
 - **A restart is an IDR from the Mac.** A reattach and the browser's
   own decoder failing each reset the render, and the gateway asks the Mac for an
   IDR with a PLI, which it answers within tens of milliseconds; until the IDR

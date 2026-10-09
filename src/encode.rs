@@ -213,7 +213,7 @@ struct Shared {
     /// resize each begin where a decoder can.
     pass_restart: AtomicBool,
     /// The configuration string last announced for the passed stream.
-    pass_announced: Mutex<Option<String>>,
+    pass_announced: Mutex<Option<(String, u8)>>,
     /// The browser's notice that the screen is not available is to come down
     /// behind the next unit queued — see [`VideoSink::uncover`].
     uncover_owed: AtomicBool,
@@ -643,11 +643,14 @@ impl VideoSink {
         } else {
             false
         };
+        // A stream that comes in strips says so with its format.
+        let strips = if passed.strip.is_some() { crate::protocol::Strip::COUNT } else { 1 };
         let announce = {
             let mut announced = self.shared.pass_announced.lock().unwrap();
-            (restart || announced.as_deref() != Some(passed.decode.as_str())).then(|| {
-                *announced = Some(passed.decode.clone());
-                passed.decode
+            let format = (passed.decode, strips);
+            (restart || announced.as_ref() != Some(&format)).then(|| {
+                *announced = Some(format.clone());
+                format.0
             })
         };
         let bytes = frame.len();
@@ -663,7 +666,7 @@ impl VideoSink {
         }
         if let Some(decode) = announce {
             let software = self.shared.software.decodes(&decode);
-            self.push(Pending::Msg(ServerMsg::VideoFormat { decode, passthrough: true, software })).await?;
+            self.push(Pending::Msg(ServerMsg::VideoFormat { decode, passthrough: true, software, strips })).await?;
         }
         let unit = VideoUnit { w, h, strip: passed.strip, keyframe: passed.keyframe, data: frame, held };
         self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
@@ -1031,7 +1034,7 @@ async fn order_loop(
         // ordered task: nothing queued behind this round can overtake it.
         if let Some(decode) = produced.format {
             let software = shared.software.decodes(&decode);
-            let msg = ServerMsg::VideoFormat { decode, passthrough: false, software };
+            let msg = ServerMsg::VideoFormat { decode, passthrough: false, software, strips: 1 };
             if frame_tx.send(msg).await.is_err() {
                 break;
             }

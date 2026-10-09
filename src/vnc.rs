@@ -2322,10 +2322,10 @@ async fn connect(
             read_apple_security_result(&mut reader).await?;
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
-            // A passed picture goes in strips to the page's own decoder, which
-            // puts the display together, and whole to the browser's.
+            // A passed picture goes in strips, to the page's own decoder and
+            // to the browser's alike, unless the session asked for it whole.
             let receive = if plan.apple_media {
-                vnc_apple_media::Receive::Pass { strips: plan.software.hevc }
+                vnc_apple_media::Receive::Pass { strips: !choices.whole }
             } else {
                 vnc_apple_media::Receive::Decode
             };

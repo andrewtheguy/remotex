@@ -470,6 +470,13 @@ pub struct Choices {
     /// session's picture ([`TargetConfig::accepts_software`]).
     #[serde(default)]
     pub software: bool,
+    /// Ask a High Performance Mac whose picture is passed for one tile, each
+    /// picture the whole display, and not the four strips such a session is
+    /// offered ([`crate::vnc_apple_media::Receive::Pass`]). No picker names it:
+    /// it is a probe's, for a capture or a comparison of the two on one gateway.
+    /// Refused where no Mac's picture is passed.
+    #[serde(default)]
+    pub whole: bool,
 }
 
 impl Choices {
@@ -1161,6 +1168,7 @@ impl TargetConfig {
             ),
             ("sound", choices.audio != Sound::Off && !offers.audio),
             ("a passthrough", choices.passthrough && offers.passthrough.is_none()),
+            ("a picture in one tile", choices.whole && self.passthrough(choices) != Some(Passthrough::AppleMedia)),
             (
                 "a place for the second display",
                 choices.placement != Placement::default() && !offers.placement,
@@ -3785,6 +3793,13 @@ mod tests {
         assert_eq!(
             hp.accepts(Choices { audio: Sound::Opus, ..Choices::default() }),
             Err(NotOffered { target: "mac".to_owned(), choice: "sound" })
+        );
+
+        // One tile is asked of a Mac whose picture is passed, and of no other.
+        assert_eq!(hp.accepts(Choices { whole: true, ..passed }), Ok(()));
+        assert_eq!(
+            hp.accepts(Choices { whole: true, ..Choices::default() }),
+            Err(NotOffered { target: "mac".to_owned(), choice: "a picture in one tile" })
         );
 
         let standard = mac("ard");

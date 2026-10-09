@@ -297,6 +297,9 @@ export type ControlMsg =
       decode: string;
       passthrough: boolean;
       software: boolean;
+      // How many strips each picture comes in, a unit each (`VideoStrip`): 4 for
+      // a High Performance Mac's passed in strips, 1 for whole pictures.
+      strips: number;
     }
   // An RDP host's graphics pipeline starts here, from nothing, and the GRAPHICS
   // records after it are the picture: this page composes them. Whatever it held of
@@ -414,6 +417,11 @@ export interface VideoStrip {
   index: number;
   /** The last strip of its frame: the picture, with this strip in it, is one to show. */
   ends: boolean;
+}
+
+/** The rows of each strip of a picture `h` rows high: `strip_rows` in src/vnc_apple_media.rs. */
+export function stripRows(h: number): number {
+  return Math.ceil(Math.ceil(h / 4) / 16) * 16;
 }
 
 // A run of an RDP host's graphics pipeline, as the host sent it: whole commands, out
