@@ -2634,8 +2634,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screen-vp9"
-version = "0.0.10"
-source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.10#39c37a904229cdd917a0b01ecd95caa3e9634aa1"
+version = "0.0.12"
+source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.12#13001f893f15e53a7a638af4516c2472f983d308"
 dependencies = [
  "libvpx-prebuilt-sys",
  "log",
