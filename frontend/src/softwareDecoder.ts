@@ -71,7 +71,7 @@ export type DecoderCommand =
  */
 export interface PictureStrip {
   index: number;
-  begins: boolean;
+  ends: boolean;
   rows: number;
 }
 

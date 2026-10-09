@@ -924,17 +924,20 @@ Three controls with similar names therefore remain separate:
   strips are one HEVC stream in one decoding order, and the receiver hands each
   strip's access unit on in that order as a unit of its own: under the
   display's size, not the strip's, with the strip's number and whether it is
-  the first sent of its frame in the record's flags
+  the last of its frame in the record's flags
   ([Image batches](#image-batches)). A keyframe is strip 0's IDR; the other
   strips' intra pictures follow it as ordinary units, so a restart drops to
   that IDR as it drops to any. The decode worker has the module decode each
   unit as its strip (`decodeStrip`), which copies it to its place in a picture
-  of the display's size, and answers a frame at a time
-  (`frontend/src/stripFrames.ts`): a frame's fourth strip with the picture at
-  once, and a frame of fewer when the next frame's first strip comes or 8 ms
-  pass with none, the wait the gateway's own decoder gives a frame. The paint
-  worker is handed the whole display each time and uploads it as it uploads a
-  picture sent whole.
+  of the display's size, and answers a frame's last strip with the picture and
+  every other strip with none. Which strip is a frame's last is the gateway's to
+  say, and nothing in a strip says it: the read loop's queue holds a strip until
+  the next unit comes, the frame's fourth strip being its last at once, or 8 ms
+  pass with none, the wait the gateway's own decoder gives a frame. The page
+  cannot make that wait itself: its paint worker draws one batch at a time, so
+  an answer that waited for the next strip would hold that strip back, and each
+  strip would be shown alone. The paint worker is handed the whole display each
+  time and uploads it as it uploads a picture sent whole.
 - **A restart is an IDR from the Mac.** A reattach and the browser's
   own decoder failing each reset the render, and the gateway asks the Mac for an
   IDR with a PLI, which it answers within tens of milliseconds; until the IDR
@@ -1802,7 +1805,7 @@ its batch, since a batch is shown once. Receivers reject unknown operations and 
 records, and reject a nonzero frame flags byte. A `VIDEO` record's own flags byte
 is `0x01` for a keyframe, and for a unit that is one strip of the picture
 ([in strips](#apples-media-stream-passed-through)) `0x02`, with the strip's
-number from the top in `0x0C` and `0x10` on the first strip sent of its frame —
+number from the top in `0x0C` and `0x10` on the last strip of its frame —
 any other bit is rejected the same way, as is a number or a frame bit without
 `0x02`. A session's records are `VIDEO` unless its target passes an RDP host's
 [graphics pipeline](#rdps-graphics-pipeline-passed-through): a `GRAPHICS` record

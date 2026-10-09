@@ -1340,8 +1340,9 @@ the offer's, whatever the display's size.
   session passed to it is offered one tile. One started with *Decode HEVC in
   this page* is offered four: each strip goes out as a unit of its own, in the
   decoding order, under the display's size, with its number and whether it is
-  the first sent of its frame, and the page's decoder puts the display
-  together and shows it a frame at a time, as the gateway does
+  the last of its frame, which the gateway knows as it knows when to show a
+  frame it decodes, and the page's decoder puts the display together and shows
+  it at each frame's last strip
   ([Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through)).
 
 ### Rate control

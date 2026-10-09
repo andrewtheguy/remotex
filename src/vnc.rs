@@ -11408,7 +11408,7 @@ mod tests {
 
         let addr = "127.0.0.1:5900".parse().unwrap();
         let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: false }, 1).0));
-        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, data: vec![0; 16] };
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, begins: true, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         assert!(sink.passing());
         sink.flush().await;
@@ -11456,13 +11456,13 @@ mod tests {
         let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: false }, 1).0));
 
         // Not a keyframe: dropped for one, and the notice stays up.
-        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: false, strip: None, data: vec![0; 16] };
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: false, strip: None, begins: true, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(!out.iter().any(|m| matches!(m, ServerMsg::ScreenUnavailable { .. })), "{out:?}");
 
-        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, data: vec![0; 16] };
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, begins: true, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -11508,7 +11508,7 @@ mod tests {
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
         let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: false }, 1).0));
-        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, data: vec![0; 16] };
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, begins: true, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();

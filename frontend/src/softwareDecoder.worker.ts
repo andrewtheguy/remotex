@@ -16,8 +16,10 @@
 //
 // A High Performance Mac's picture may come in four strips, each a unit, a frame
 // being the strips that changed. The HEVC module puts the picture together, and
-// it is shown a frame at a time, not a strip at a time: a strip's answer waits
-// for what follows it (stripFrames.ts).
+// it is shown a frame at a time, not a strip at a time: a strip is answered with
+// the picture where the gateway says it is its frame's last, and with none
+// otherwise. No answer waits for the unit after it, which the paint worker sends
+// only once this one is answered.
 
 import {
   type DecodedPlanes,
@@ -34,7 +36,6 @@ import {
   type PoolSeat,
   type SharedMemory,
 } from "./softwareDecoderModule.ts";
-import { createStripFrames } from "./stripFrames.ts";
 
 interface LoadedModule {
   glue: DecoderGlue;
@@ -215,7 +216,6 @@ async function destroy(id: number): Promise<void> {
   const decoder = decoders.get(id);
   decoders.delete(id);
   ending.delete(id);
-  frames.forget(id);
   decoder?.free();
 }
 
@@ -229,17 +229,6 @@ async function show(id: number, picture: DecodedPlanes): Promise<void> {
   scope.postMessage({ type: "decoded", id, picture });
   await released;
 }
-
-// The answers a picture in strips waits for (stripFrames.ts).
-const frames = createStripFrames<DecodedPlanes>({
-  show,
-  none: (id) => scope.postMessage({ type: "decoded", id, picture: null }),
-  ending: (id) => ending.has(id),
-  queue: (task) => {
-    // A task that threw would end the queue for every stream.
-    queue = queue.then(() => task().catch(() => {}));
-  },
-});
 
 async function decode(
   command: Extract<DecoderCommand, { type: "decode" }>,
@@ -263,10 +252,6 @@ async function decode(
     failed(id, name, message);
   };
   const { strip } = command;
-  const before = await frames.before(id, strip);
-  if (ending.has(id)) {
-    return;
-  }
   const size = command.data.byteLength;
   const input = decoder.input(size);
   new Uint8Array(module.memory.buffer, input, size).set(
@@ -282,13 +267,11 @@ async function decode(
     );
     return;
   }
-  const planes = completed ? picture(module, decoder) : null;
+  // A strip that is not its frame's last leaves the picture between two frames.
+  const planes =
+    completed && (!strip || strip.ends) ? picture(module, decoder) : null;
   if (typeof planes === "string") {
     fail("NotSupportedError", planes);
-    return;
-  }
-  if (strip && frames.after(id, strip, planes, before)) {
-    // Answered by the next unit, or by the wait for one running out.
     return;
   }
   if (!planes) {

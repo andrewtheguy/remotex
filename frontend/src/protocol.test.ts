@@ -98,9 +98,9 @@ test("a video record's flags say a keyframe, and which strip of its picture it i
     const unit = record(flags);
     return unit?.kind === "video" ? [unit.keyframe, unit.strip] : unit;
   };
-  assert.deepEqual(strip(0x13), [true, { index: 0, begins: true }]);
-  assert.deepEqual(strip(0x0e), [false, { index: 3, begins: false }]);
-  assert.deepEqual(strip(0x1a), [false, { index: 2, begins: true }]);
+  assert.deepEqual(strip(0x13), [true, { index: 0, ends: true }]);
+  assert.deepEqual(strip(0x0e), [false, { index: 3, ends: false }]);
+  assert.deepEqual(strip(0x1a), [false, { index: 2, ends: true }]);
   // A strip's number or frame on a unit that is no strip, and a bit not known.
   assert.equal(record(0x04), undefined);
   assert.equal(record(0x10), undefined);

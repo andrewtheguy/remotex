@@ -1523,8 +1523,13 @@ pub struct PassedUnit {
     /// The display's size: from the stream's parameter sets, or of a display
     /// in strips, whose parameter sets give a strip's, the size offered.
     pub size: (u16, u16),
-    /// Which strip of the display the unit is, of a stream in strips.
+    /// Which strip of the display the unit is, of a stream in strips. Whether
+    /// it ends its frame is known once the read loop takes it
+    /// ([`PassedUnits::recv`]).
     pub strip: Option<crate::protocol::Strip>,
+    /// The first unit of its frame: a whole picture, or the first strip sent of
+    /// one.
+    pub begins: bool,
     /// The configuration string, from the same.
     pub decode: String,
     /// An IRAP picture, which a decoder can start at.
@@ -1552,14 +1557,6 @@ pub struct Passer {
     frame: Option<u32>,
 }
 
-impl PassedUnit {
-    /// Whether the unit is the first of its frame: a whole picture, or the
-    /// first strip sent of one.
-    fn begins(&self) -> bool {
-        self.strip.is_none_or(|strip| strip.begins)
-    }
-}
-
 impl Passer {
     pub fn pass(&mut self, unit: &AccessUnit) -> Option<PassedUnit> {
         for nal in unit.iter().filter(|nal| nal_type(nal[0]) == NAL_SPS) {
@@ -1577,6 +1574,7 @@ impl Passer {
         Some(PassedUnit {
             size: params.size,
             strip: None,
+            begins: true,
             decode: params.decode.clone(),
             keyframe: unit.iter().any(|nal| (16..=23).contains(&nal_type(nal[0]))),
             data,
@@ -1602,7 +1600,7 @@ impl Passer {
             return None;
         }
         let begins = self.frame.replace(timestamp) != Some(timestamp);
-        Some(PassedUnit { size: display, strip: Some(crate::protocol::Strip { index: strip as u8, begins }), ..passed })
+        Some(PassedUnit { size: display, strip: Some(crate::protocol::Strip { index: strip as u8, ends: false }), begins, ..passed })
     }
 }
 
@@ -2087,26 +2085,86 @@ struct PassQueue {
 }
 
 /// The read loop's end of that queue.
+///
+/// A strip is passed on saying whether it is the last of its frame, which the
+/// page shows the display at, and nothing in a strip says so: what follows it
+/// does. So a strip is held here until the next unit comes, or [`STRIP_WAIT`]
+/// has passed, as the decoder holds a frame's picture; a frame's fourth strip
+/// is its last, and is not held.
 pub struct PassedUnits {
     units: tokio::sync::mpsc::Receiver<Option<PassedUnit>>,
     frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// The strip held, and when it is passed on as its frame's last.
+    held: Option<(PassedUnit, tokio::time::Instant)>,
+    /// The strips taken of the frame the last strip taken is of.
+    strips: usize,
+    /// What is next to hand over: the strip that was held, ahead of what ended
+    /// its wait.
+    ready: std::collections::VecDeque<Option<PassedUnit>>,
 }
 
 fn pass_queue() -> (PassQueue, PassedUnits) {
     let (tx, rx) = tokio::sync::mpsc::channel((PASS_QUEUE + 1) * STRIPS);
     let frames = std::sync::Arc::<std::sync::atomic::AtomicUsize>::default();
-    (PassQueue { units: tx, frames: std::sync::Arc::clone(&frames) }, PassedUnits { units: rx, frames })
+    (PassQueue { units: tx, frames: std::sync::Arc::clone(&frames) }, PassedUnits { units: rx, frames, held: None, strips: 0, ready: std::collections::VecDeque::new() })
 }
 
 impl PassedUnits {
     /// The next unit to pass, `Some(None)` once the receiver has stopped, and
     /// `None` when the stream is gone.
     pub async fn recv(&mut self) -> Option<Option<PassedUnit>> {
-        let unit = self.units.recv().await;
-        if unit.as_ref().is_some_and(|unit| unit.as_ref().is_some_and(PassedUnit::begins)) {
-            self.frames.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        loop {
+            if let Some(ready) = self.ready.pop_front() {
+                return Some(ready);
+            }
+            // Either wait may be dropped: what is held stays held.
+            let next = match &self.held {
+                None => self.units.recv().await,
+                Some((_, due)) => match tokio::time::timeout_at(*due, self.units.recv()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        self.release(true);
+                        continue;
+                    }
+                },
+            };
+            let unit = match next {
+                Some(Some(unit)) => unit,
+                // The receiver has stopped, or the stream is gone: after the
+                // strip held, which nothing follows.
+                over => {
+                    self.release(true);
+                    if over.is_some() {
+                        self.ready.push_back(None);
+                        continue;
+                    }
+                    return self.ready.pop_front();
+                }
+            };
+            if unit.begins {
+                self.frames.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.release(unit.begins);
+            if unit.strip.is_none() {
+                self.ready.push_back(Some(unit));
+                continue;
+            }
+            self.strips = if unit.begins { 1 } else { self.strips + 1 };
+            self.held = Some((unit, tokio::time::Instant::now() + STRIP_WAIT));
+            if self.strips >= STRIPS {
+                self.release(true);
+            }
         }
-        unit
+    }
+
+    /// Hand over the strip held, as the last of its frame where `ends`.
+    fn release(&mut self, ends: bool) {
+        if let Some((mut unit, _)) = self.held.take() {
+            if let Some(strip) = unit.strip.as_mut() {
+                strip.ends = ends;
+            }
+            self.ready.push_back(Some(unit));
+        }
     }
 }
 
@@ -2114,7 +2172,7 @@ impl PassQueue {
     /// Queue `passed`, unless the read loop is [`PASS_QUEUE`] frames behind.
     fn send(&self, passed: PassedUnit) -> Sent {
         use std::sync::atomic::Ordering::Relaxed;
-        let begins = passed.begins();
+        let begins = passed.begins;
         if begins && self.frames.fetch_add(1, Relaxed) >= PASS_QUEUE {
             self.frames.fetch_sub(1, Relaxed);
             return Sent::Full(PASS_QUEUE);
@@ -4564,8 +4622,8 @@ mod tests {
         assert_eq!(Passer::default().pass(&units[1]), None);
     }
 
-    /// A strip goes out under its display's size, with its number and whether it
-    /// is the first sent of its frame, which the strips of one timestamp are.
+    /// A strip is passed under its display's size, with its number and whether
+    /// it is the first sent of its frame, which the strips of one timestamp are.
     #[test]
     fn a_strip_passes_as_its_displays_with_its_number_and_where_its_frame_begins() {
         use crate::protocol::Strip;
@@ -4573,12 +4631,12 @@ mod tests {
         let display = (64, 180);
         let mut passer = Passer::default();
         let first = passer.pass_strip(&units[0], 0, 900, display).unwrap();
-        assert_eq!((first.size, first.strip, first.keyframe), (display, Some(Strip { index: 0, begins: true }), true));
+        assert_eq!((first.size, first.strip, first.begins, first.keyframe), (display, Some(Strip { index: 0, ends: false }), true, true));
         assert_eq!(first.data, passer.pass(&units[0]).unwrap().data);
         let same = passer.pass_strip(&units[1], 2, 900, display).unwrap();
-        assert_eq!((same.strip, same.keyframe), (Some(Strip { index: 2, begins: false }), false));
+        assert_eq!((same.strip, same.begins, same.keyframe), (Some(Strip { index: 2, ends: false }), false, false));
         let next = passer.pass_strip(&units[2], 2, 3900, display).unwrap();
-        assert_eq!(next.strip, Some(Strip { index: 2, begins: true }));
+        assert_eq!((next.strip, next.begins), (Some(Strip { index: 2, ends: false }), true));
         // A 48-row picture is no strip of a display of 400 rows.
         assert_eq!(passer.pass_strip(&units[1], 1, 6900, (64, 400)), None);
     }
@@ -4588,18 +4646,66 @@ mod tests {
     #[tokio::test]
     async fn the_read_loop_may_be_behind_by_frames_not_by_units() {
         use crate::protocol::Strip;
-        let unit = |strip| PassedUnit { size: (64, 180), strip, decode: String::new(), keyframe: false, data: Vec::new() };
         let (queue, mut units) = pass_queue();
         for _ in 0..PASS_QUEUE {
             for index in 0..STRIPS as u8 {
-                assert!(matches!(queue.send(unit(Some(Strip { index, begins: index == 0 }))), Sent::Queued));
+                assert!(matches!(queue.send(passed_strip(index, index == 0)), Sent::Queued));
             }
         }
-        assert!(matches!(queue.send(unit(Some(Strip { index: 0, begins: true }))), Sent::Full(PASS_QUEUE)));
-        assert!(matches!(queue.send(unit(None)), Sent::Full(PASS_QUEUE)));
-        units.recv().await.unwrap().unwrap();
-        assert!(matches!(queue.send(unit(None)), Sent::Queued));
-        assert!(matches!(queue.send(unit(None)), Sent::Full(PASS_QUEUE)));
+        assert!(matches!(queue.send(passed_strip(0, true)), Sent::Full(PASS_QUEUE)));
+        assert!(matches!(queue.send(passed_whole()), Sent::Full(PASS_QUEUE)));
+        // Taken once the second strip says the first is not its frame's last.
+        assert_eq!(units.recv().await.unwrap().unwrap().strip, Some(Strip { index: 0, ends: false }));
+        assert!(matches!(queue.send(passed_whole()), Sent::Queued));
+        assert!(matches!(queue.send(passed_whole()), Sent::Full(PASS_QUEUE)));
+    }
+
+    fn passed_whole() -> PassedUnit {
+        PassedUnit { size: (64, 180), strip: None, begins: true, decode: String::new(), keyframe: false, data: Vec::new() }
+    }
+
+    fn passed_strip(index: u8, begins: bool) -> PassedUnit {
+        PassedUnit { strip: Some(crate::protocol::Strip { index, ends: false }), begins, ..passed_whole() }
+    }
+
+    /// A strip is passed on as its frame's last where it is the fourth, where
+    /// the next unit is another frame's or a whole picture, where the receiver
+    /// stops, or where nothing follows it for [`STRIP_WAIT`].
+    #[tokio::test(start_paused = true)]
+    async fn a_strip_is_passed_on_once_it_is_known_whether_it_ends_its_frame() {
+        let (queue, mut units) = pass_queue();
+        let send = |unit| assert!(matches!(queue.send(unit), Sent::Queued));
+        let ends = |unit: Option<Option<PassedUnit>>| {
+            let strip = unit.unwrap().unwrap().strip.unwrap();
+            (strip.index, strip.ends)
+        };
+        // A frame of four: its fourth waits for nothing.
+        for index in 0..STRIPS as u8 {
+            send(passed_strip(index, index == 0));
+        }
+        for index in 0..STRIPS as u8 {
+            assert_eq!(ends(units.recv().await), (index, index == 3));
+        }
+        // A frame of two, ended by the next frame's first strip, and that
+        // frame's one strip by a whole picture.
+        send(passed_strip(1, true));
+        send(passed_strip(2, false));
+        send(passed_strip(0, true));
+        send(passed_whole());
+        assert_eq!(ends(units.recv().await), (1, false));
+        assert_eq!(ends(units.recv().await), (2, true));
+        assert_eq!(ends(units.recv().await), (0, true));
+        assert_eq!(units.recv().await.unwrap().unwrap().strip, None);
+        // A frame nothing follows, ended by the wait and no sooner.
+        send(passed_strip(3, true));
+        let begun = tokio::time::Instant::now();
+        assert_eq!(ends(units.recv().await), (3, true));
+        assert_eq!(begun.elapsed(), STRIP_WAIT);
+        // And one the receiver's stop follows.
+        send(passed_strip(0, true));
+        queue.units.try_send(None).unwrap();
+        assert_eq!(ends(units.recv().await), (0, true));
+        assert_eq!(units.recv().await, Some(None));
     }
 
     fn media() -> MediaStream {

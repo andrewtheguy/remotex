@@ -412,8 +412,8 @@ export interface VideoMsg {
 export interface VideoStrip {
   /** From 0, at the top. */
   index: number;
-  /** The first strip sent of its frame: the strips before it are a frame to show. */
-  begins: boolean;
+  /** The last strip of its frame: the picture, with this strip in it, is one to show. */
+  ends: boolean;
 }
 
 // A run of an RDP host's graphics pipeline, as the host sent it: whole commands, out
@@ -453,8 +453,8 @@ const VIDEO_KEYFRAME = 0x01;
 const VIDEO_STRIP = 0x02;
 const VIDEO_STRIP_INDEX = 0x0c;
 const VIDEO_STRIP_SHIFT = 2;
-const VIDEO_STRIP_BEGINS = 0x10;
-const VIDEO_STRIP_FLAGS = VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_BEGINS;
+const VIDEO_STRIP_ENDS = 0x10;
+const VIDEO_STRIP_FLAGS = VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS;
 
 // Parse a binary batch frame into its records. Layout (little-endian,
 // matching `batch` in `src/protocol.rs`):
@@ -575,7 +575,7 @@ function decodeVideo(
       ...(strip && {
         strip: {
           index: (flags & VIDEO_STRIP_INDEX) >> VIDEO_STRIP_SHIFT,
-          begins: (flags & VIDEO_STRIP_BEGINS) !== 0,
+          ends: (flags & VIDEO_STRIP_ENDS) !== 0,
         },
       }),
       data: new Uint8Array(buf, start, len),

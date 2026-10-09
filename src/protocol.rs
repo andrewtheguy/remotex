@@ -450,8 +450,8 @@ pub mod batch {
     /// The bits of the flags that hold a strip's number, and where they start.
     pub const VIDEO_STRIP_INDEX: u8 = 0x0C;
     pub const VIDEO_STRIP_SHIFT: u8 = 2;
-    /// The strip is the first sent of its frame.
-    pub const VIDEO_STRIP_BEGINS: u8 = 0x10;
+    /// The strip is the last of its frame.
+    pub const VIDEO_STRIP_ENDS: u8 = 0x10;
 }
 
 /// The layout of a server -> client **audio** frame: one outbound audio chunk.
@@ -711,9 +711,9 @@ impl std::fmt::Debug for Painted {
 pub struct Strip {
     /// From 0, at the top.
     pub index: u8,
-    /// The first strip sent of its frame: the strips before it are a frame to
-    /// show.
-    pub begins: bool,
+    /// The last strip of its frame: the picture, with this strip in it, is one
+    /// to show.
+    pub ends: bool,
 }
 
 /// One video access unit, carried as a `VIDEO` record inside a [`batch`] frame.
@@ -768,7 +768,7 @@ impl VideoUnit {
         let strip = self.strip.map_or(0, |strip| {
             batch::VIDEO_STRIP
                 | ((strip.index << batch::VIDEO_STRIP_SHIFT) & batch::VIDEO_STRIP_INDEX)
-                | if strip.begins { batch::VIDEO_STRIP_BEGINS } else { 0 }
+                | if strip.ends { batch::VIDEO_STRIP_ENDS } else { 0 }
         });
         out.push(if self.keyframe { batch::VIDEO_KEYFRAME } else { 0 } | strip);
         out.extend_from_slice(&self.w.to_le_bytes());
@@ -2236,15 +2236,15 @@ mod tests {
             out,
             [batch::OP_VIDEO, batch::VIDEO_KEYFRAME, 0x02, 0x01, 0x04, 0x03, 2, 0, 0, 0, 0xAA, 0xBB]
         );
-        // A strip's number and whether it begins a frame ride in the flags.
+        // A strip's number and whether it ends a frame ride in the flags.
         let flags = |strip, keyframe| {
             let mut out = Vec::new();
             VideoUnit { strip: Some(strip), keyframe, ..unit.clone() }.write_record(&mut out);
             out[1]
         };
-        assert_eq!(flags(Strip { index: 0, begins: true }, true), 0x13);
-        assert_eq!(flags(Strip { index: 3, begins: false }, false), 0x0E);
-        assert_eq!(flags(Strip { index: 2, begins: true }, false), 0x1A);
+        assert_eq!(flags(Strip { index: 0, ends: true }, true), 0x13);
+        assert_eq!(flags(Strip { index: 3, ends: false }, false), 0x0E);
+        assert_eq!(flags(Strip { index: 2, ends: true }, false), 0x1A);
     }
 
     /// What a payload is owed is said once, wherever the payload ends, and a copy of
