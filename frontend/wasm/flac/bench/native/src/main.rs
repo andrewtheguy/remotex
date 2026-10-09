@@ -48,8 +48,11 @@ impl Coloured {
     }
 }
 
-/// A signal's two channels at frame `n`, each in -1 to 1.
-fn signal(name: &str, rate: f64) -> Option<Box<dyn FnMut(usize) -> (f64, f64)>> {
+/// A signal: its two channels at frame `n`, each in -1 to 1.
+type Signal = Box<dyn FnMut(usize) -> (f64, f64)>;
+
+/// The generated signal of a name, if it is one.
+fn signal(name: &str, rate: f64) -> Option<Signal> {
     Some(match name {
         // What a desktop plays most of the time: nothing.
         "silence" => Box::new(|_| (0.0, 0.0)),
@@ -158,7 +161,7 @@ fn main() {
                 // Whole blocks: a recording's last part of one is left out.
                 for samples in pcm.chunks_exact(2 * stream.samples()) {
                     block.clear();
-                    block.extend(samples.chunks_exact(2).map(|s| i32::from(i16::from_le_bytes([s[0], s[1]]))));
+                    block.extend(samples.as_chunks::<2>().0.iter().map(|&s| i32::from(i16::from_le_bytes(s))));
                     frame.clear();
                     encoder.encode(&block, &mut frame).expect("a frame");
                     out.extend_from_slice(&(frame.len() as u32).to_le_bytes());

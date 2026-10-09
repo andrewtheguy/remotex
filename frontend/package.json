@@ -10,7 +10,7 @@
     "test": "bun run build:wasm && cargo test --manifest-path wasm/flac/Cargo.toml && bun test src",
     "lint": "biome lint .",
     "format": "biome format --write .",
-    "check": "bun run build:wasm && biome check . && tsc -b"
+    "check": "bun run build:wasm && cargo clippy --manifest-path wasm/flac/Cargo.toml --all-targets -- -D warnings && cargo clippy --manifest-path wasm/flac/bench/native/Cargo.toml --all-targets -- -D warnings && biome check . && tsc -b"
   },
   "dependencies": {
     "react": "^19.2.0",
