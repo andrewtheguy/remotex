@@ -12,7 +12,7 @@ This is a manual probe for display selection and dynamic-resolution behavior. St
         --port 52675 --target sandbox2highperf --user admin --resize \
         --viewport 1366x768 --viewport 1920x1080
 
-``--resize``, ``--sound``, ``--passthrough`` and ``--placement`` are what the picker's
+``--resize``, ``--sound``, ``--passthrough``, ``--software`` and ``--placement`` are what the picker's
 Start would carry: the session is started with each one named, and with none otherwise. Without
 ``--resize`` the desktop is kept at the target's size: its configured one, or the
 default.
@@ -327,6 +327,13 @@ async def main() -> int:
         "long the desktop is left at each size",
     )
     parser.add_argument(
+        "--software",
+        action="store_true",
+        help="start the session decoded in the page's own software decoder, which a "
+        "High Performance Mac started with --passthrough then sends its picture to in "
+        "strips; the gateway must have the decoder ([hevc_wasm])",
+    )
+    parser.add_argument(
         "--apple-media",
         action="store_true",
         help="state that this client decodes a High Performance Mac's HEVC and AAC-ELD, "
@@ -375,6 +382,7 @@ async def main() -> int:
         "size": "window" if args.resize else "target",
         "audio": args.sound,
         "passthrough": args.passthrough,
+        "software": args.software,
         "placement": args.placement,
     }
     # A display socket carries no token: the login cookie is what lets it in.
