@@ -362,6 +362,7 @@ export function createFramePainter(options: {
       endPipeline(pipeline, "a batch of its commands arrived malformed");
       return;
     }
+    releaseStrips();
     video?.restart();
     options.onVideoNeedsKeyframe("a malformed batch was dropped");
   };
@@ -511,16 +512,20 @@ export function createFramePainter(options: {
     const pitch = stripRows(h);
     const context = options.context();
     let drawn = false;
-    for (const strip of strips) {
-      const top = strip.index * pitch;
-      const rows = Math.min(pitch, h - top);
-      if (strip.w !== w || strip.h !== h || rows <= 0) {
-        continue;
+    try {
+      for (const strip of strips) {
+        const top = strip.index * pitch;
+        const rows = Math.min(pitch, h - top);
+        if (strip.w !== w || strip.h !== h || rows <= 0) {
+          continue;
+        }
+        context?.drawImage(strip.frame, 0, 0, w, rows, 0, top, w, rows);
+        drawn = true;
       }
-      context?.drawImage(strip.frame, 0, 0, w, rows, 0, top, w, rows);
-      drawn = true;
+    } finally {
+      // Whatever became of the drawing: a frame held is decoder memory.
+      releaseStrips();
     }
-    releaseStrips();
     if (drawn) {
       // The desktop's own canvas is the picture again.
       hidePlanes();
@@ -570,25 +575,28 @@ export function createFramePainter(options: {
       image?.close();
       return;
     }
-    // The browser's decoder's picture of a strip is held for its frame.
-    const held = image && record.strip && !isSoftwarePlanes(image);
-    if (held) {
+    if (!image) {
+      // No picture: of a strip, the software decoder's answer to all but a
+      // frame's last, which holds nothing here, or the browser's decoder
+      // gone, whose strips held are of a frame it will not finish.
+      releaseStrips();
+      return;
+    }
+    const { strip } = record;
+    if (strip && !isSoftwarePlanes(image)) {
+      // The browser's decoder's picture of a strip is held for its frame.
       strips.push({
         frame: image,
-        index: record.strip?.index ?? 0,
+        index: strip.index,
         w: record.w,
         h: record.h,
       });
-    }
-    if (strips.length > 0 && record.strip?.ends) {
-      // Whatever became of this strip: the frame is over, and the strips of
-      // it that did decode are its picture.
-      paintStrips(record);
-    }
-    if (!image || held) {
+      if (strip.ends) {
+        paintStrips(record);
+      }
       return;
     }
-    if (!record.strip) {
+    if (!strip) {
       // A whole picture: strips still held are of a stream it replaced.
       releaseStrips();
     }

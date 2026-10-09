@@ -306,6 +306,35 @@ test("strips held of an attachment that ended are closed, and never drawn", asyn
   assert.equal(cropped.length, 1, "only the strip of the attachment that is");
 });
 
+test("a frame whose last strip the decoder gave no picture for is not painted", async () => {
+  // The decoder gave up on the frame's last strip: the strips before it are of
+  // a frame that will not be finished, and painting them would say video is back.
+  poison = 0x66;
+  const p = announced();
+  const strip = (index: number, ends: boolean, payload: number[]) => ({
+    w: 64,
+    h: 64,
+    payload,
+    strip: { index, ends },
+  });
+  await p.draw(batchFrame([strip(0, false, [0]), strip(1, true, [0x66])]));
+  assert.deepEqual(cropped, []);
+  assert.ok(decoded.every((frame) => frame.closed));
+  assert.equal(videoErrors.at(-1) === null, false, "the complaint stands");
+});
+
+test("strips are closed when drawing them throws", async () => {
+  const throwing = {
+    drawImage() {
+      throw new Error("the canvas is gone");
+    },
+  } as unknown as CanvasRenderingContext2D;
+  const p = announced(throwing);
+  const last = { w: 64, h: 64, payload: [0], strip: { index: 0, ends: true } };
+  await assert.rejects(p.draw(batchFrame([last])));
+  assert.ok(decoded.every((frame) => frame.closed));
+});
+
 test("strips held give way to a whole picture, and to a stream announced", async () => {
   const p = announced();
   const first = {
