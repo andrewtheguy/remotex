@@ -411,7 +411,7 @@ mod tests {
                         .expect("a full-screen blit");
                     let started = std::time::Instant::now();
                     let unit = stream
-                        .encode(&mirror)
+                        .encode(&mirror, None)
                         .expect("an encode")
                         .expect("an access unit");
                     encode += started.elapsed();

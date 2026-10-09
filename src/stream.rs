@@ -30,6 +30,9 @@ struct Live {
     dirty: bool,
     /// Whether the next access unit must be one a decoder can start from.
     keyframe_owed: bool,
+    /// Whether the next access unit is owed the whole picture, changed or not, as an
+    /// inter frame: the settle's ([`DesktopStream::refresh`]).
+    whole: bool,
     /// The configuration string already announced to the client, if any.
     ///
     /// Cleared by [`DesktopStream::force_keyframe`], which is what makes a reattach
@@ -225,14 +228,18 @@ impl DesktopStream {
                     // Its whole picture is owed: nothing has carried these pixels yet.
                     dirty: true,
                     keyframe_owed: true,
+                    whole: false,
                     announced: None,
                 }
             }
         };
         let current = self.mirror.take().expect("a live stream means a mirror");
+        // What was blitted since the last round was taken is both what the spare is
+        // behind by and what this round's picture differs from the last one's by.
+        let staged = std::mem::take(&mut self.staged);
         let spare = match self.spare.take() {
             Some(mut spare) => {
-                for rect in &self.staged {
+                for rect in &staged {
                     spare.adopt(&current, *rect);
                 }
                 spare
@@ -241,10 +248,10 @@ impl DesktopStream {
             // whole: there is no spare yet to sync.
             None => current.clone(),
         };
-        self.staged.clear();
         self.mirror = Some(spare);
         self.round_out = true;
-        Ok(Some(Round { mirror: current, live, skipped: 0, epoch: self.epoch }))
+        let changed = (!live.whole).then_some(staged);
+        Ok(Some(Round { mirror: current, live, changed, skipped: 0, epoch: self.epoch }))
     }
 
     /// Put back what [`Self::take_round`] took.
@@ -309,10 +316,12 @@ impl DesktopStream {
     /// The settle ([`crate::encode`]): a screen that stopped changing while the link
     /// had the dial walked down would otherwise keep that coarse picture until it
     /// next changed. An inter frame over the unchanged mirror at a finer quantizer
-    /// sharpens it; no keyframe is needed.
+    /// sharpens it; no keyframe is needed. It is encoded whole: a round otherwise
+    /// encodes where the mirror changed, which here is nowhere.
     pub fn refresh(&mut self) {
         if let Some(live) = &mut self.live {
             live.dirty = true;
+            live.whole = true;
         }
     }
 
@@ -347,6 +356,9 @@ impl DesktopStream {
 pub struct Round {
     mirror: Mirror,
     live: Live,
+    /// Where the mirror differs from the one the round before this took, or `None`
+    /// for a round owed the whole picture.
+    changed: Option<Vec<Rect>>,
     skipped: u64,
     /// The [`DesktopStream::epoch`] this round was taken under, so
     /// [`DesktopStream::put_back`] can tell a round that outlived its desktop from one
@@ -368,6 +380,28 @@ impl Round {
         self.live.quality
     }
 
+    /// The coarsest quality any of the client's picture will be at once this round
+    /// has been encoded, as far as can be said before it is: the round's own for a
+    /// whole picture, and otherwise no better than the picture already was, since a
+    /// round encodes where the mirror changed and leaves the rest as it stands. What a
+    /// settle is owed for, which a round at the dial over part of a coarse picture
+    /// does not pay.
+    pub fn coarsest(&self) -> u8 {
+        if self.live.keyframe_owed || self.changed.is_none() {
+            self.live.quality
+        } else {
+            self.live.quality.min(self.live.stream.coarsest())
+        }
+    }
+
+    /// The coarsest quality any of the client's picture is at, as the encoder stands:
+    /// once the round has been encoded, what it left, where [`Self::coarsest`] could
+    /// only say the worst it might. A round at the dial over the last blocks a coarse
+    /// one left has sharpened the whole picture, and owes no settle.
+    pub fn left(&self) -> u8 {
+        self.live.stream.coarsest()
+    }
+
     /// Encode the mirror. Blocking: call it on a worker.
     ///
     /// A stream the encoder produced no bitstream for keeps its dirty flag and its
@@ -380,12 +414,13 @@ impl Round {
             live.stream.force_keyframe();
         }
         let mut produced = Produced { format: None, unit: None };
-        let Some(unit) = live.stream.encode(&self.mirror)? else {
+        let Some(unit) = live.stream.encode(&self.mirror, self.changed.as_deref())? else {
             self.skipped += 1;
             return Ok(produced);
         };
         live.dirty = false;
         live.keyframe_owed = false;
+        live.whole = false;
         // The announcement goes out ahead of the unit, which is the contract
         // `ServerMsg::VideoFormat` states.
         if let Some(decode) = live.stream.decode_string()
@@ -517,6 +552,82 @@ mod tests {
 
     fn placed(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
+    }
+
+    /// A round encodes where the mirror changed since the round before and leaves
+    /// the rest of the client's picture as it stands, at the quality it stands at; a
+    /// settle's round is the whole picture. Read back through a decoder, on an odd
+    /// desktop, whose padding beside a changed edge is part of the change.
+    #[test]
+    fn a_round_encodes_where_the_mirror_changed_and_a_settle_the_whole_picture() {
+        let (w, h) = (319u16, 239u16);
+        let mut stream = stream(w, h);
+        let decoder = std::cell::RefCell::new(screen_vp9::Decoder::new(1).expect("a decoder"));
+        let mut picture = vec![0u8; 320 * 240 * 4];
+        // One round: what it was to encode, how coarse it left the picture, and the
+        // picture a client then holds.
+        let round = |stream: &mut DesktopStream, picture: &mut [u8]| {
+            let mut round = stream.take_round().expect("a round").expect("something to encode");
+            let (changed, coarsest) = (round.changed.clone(), round.coarsest());
+            let unit = round.encode().expect("an encode").unit.expect("a unit");
+            stream.put_back(round);
+            decoder.borrow_mut().decode(&unit.data).expect("a decode").write_bgrx(picture, 320 * 4).expect("a picture that fits");
+            (changed, coarsest, unit.keyframe)
+        };
+        let at = |picture: &[u8], x: usize, y: usize| picture[(y * 320 + x) * 4 + 1];
+        let near = |got: u8, want: u8| got.abs_diff(want) <= 24;
+
+        stream.blit(placed(0, 0, w, h), &flat(w, h, 40)).expect("a blit");
+        let (_, coarsest, keyframe) = round(&mut stream, &mut picture);
+        assert!(keyframe && coarsest == 60, "a stream starts with the whole picture at its dial");
+
+        let first = placed(16, 16, 32, 32);
+        stream.blit(first, &flat(32, 32, 220)).expect("a blit");
+        let (changed, coarsest, keyframe) = round(&mut stream, &mut picture);
+        assert_eq!(changed, Some(vec![first]), "a round is told what was blitted since the last");
+        assert!(!keyframe && coarsest == 60);
+        assert!(near(at(&picture, 32, 32), 220) && near(at(&picture, 100, 100), 40) && near(at(&picture, 32, 200), 40), "the change is not where it was made");
+
+        // The edge of an odd desktop, with the padding column the mirror repeats it into.
+        let edge = placed(300, 100, 19, 10);
+        stream.blit(edge, &flat(19, 10, 250)).expect("a blit");
+        round(&mut stream, &mut picture);
+        assert!(near(at(&picture, 318, 105), 250) && near(at(&picture, 319, 105), 250), "the padding beside a changed edge was not encoded with it");
+
+        // A link that coarsens the stream coarsens what a round encodes, and a round
+        // back at the dial sharpens only what it encodes.
+        stream.set_quality(20).expect("a retune");
+        stream.blit(first, &flat(32, 32, 120)).expect("a blit");
+        assert_eq!(round(&mut stream, &mut picture).1, 20);
+        stream.set_quality(60).expect("a retune");
+        let second = placed(200, 160, 32, 32);
+        stream.blit(second, &flat(32, 32, 200)).expect("a blit");
+        let (changed, coarsest, _) = round(&mut stream, &mut picture);
+        assert_eq!((changed, coarsest), (Some(vec![second]), 20), "a round over part of a coarse picture did not leave the rest coarse");
+
+        // A round at the dial over the very blocks the coarse one encoded can only
+        // be called coarse beforehand, and has left nothing coarse once encoded.
+        stream.blit(first, &flat(32, 32, 130)).expect("a blit");
+        let mut over = stream.take_round().expect("a round").expect("something to encode");
+        assert_eq!(over.coarsest(), 20);
+        let unit = over.encode().expect("an encode").unit.expect("a unit");
+        assert_eq!(over.left(), 60, "every coarse block was encoded again at the dial");
+        stream.put_back(over);
+        decoder.borrow_mut().decode(&unit.data).expect("a decode").write_bgrx(&mut picture, 320 * 4).expect("a picture that fits");
+        stream.set_quality(20).expect("a retune");
+        stream.blit(first, &flat(32, 32, 120)).expect("a blit");
+        assert_eq!(round(&mut stream, &mut picture).1, 20);
+        stream.set_quality(60).expect("a retune");
+
+        // The settle: nothing changed, and the whole picture is encoded at the dial.
+        stream.refresh();
+        let (changed, coarsest, keyframe) = round(&mut stream, &mut picture);
+        assert_eq!((changed, coarsest, keyframe), (None, 60, false));
+        assert!(near(at(&picture, 32, 32), 120) && near(at(&picture, 216, 176), 200));
+        // And it is the one round's: the next is told where the mirror changed again.
+        stream.blit(first, &flat(32, 32, 90)).expect("a blit");
+        assert_eq!(round(&mut stream, &mut picture), (Some(vec![first]), 60, false));
+        assert!(near(at(&picture, 32, 32), 90) && near(at(&picture, 216, 176), 200));
     }
 
     /// Rows reported one under another stage as the one rectangle they make, so how
