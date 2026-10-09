@@ -108,11 +108,14 @@ export interface VideoStreamInfo {
   // BETA: decoded by one of the page's WebAssembly decoders (softwareDecoder.ts)
   // and not by the browser's own, as the gateway said with the format.
   software?: boolean;
+  // How many strips each picture of the stream comes in, where more than one.
+  strips?: number;
 }
 
 /**
  * The Video row: the exact configuration the decoder was built with, whose
- * stream it decodes and which decoder that is, the browser's own or one of the
+ * stream it decodes, in how many strips where its pictures come in strips, and
+ * which decoder that is, the browser's own or one of the
  * page's in WebAssembly, or what the row is waiting for before the stream's format has
  * arrived. While the desktop is held — past what a video stream encodes, or All
  * Displays over too many screens — there is no picture, whatever decoder was
@@ -137,8 +140,9 @@ export function videoLabel(
   const whose = stream.passthrough
     ? "passthrough from the remote"
     : "encoded by the gateway";
+  const strips = (stream.strips ?? 1) > 1 ? ` in ${stream.strips} strips` : "";
   const decoder = stream.software
     ? "decoded by this page's WebAssembly decoder"
     : "decoded by the browser's native decoder";
-  return `${stream.decode} · ${whose} · ${decoder}`;
+  return `${stream.decode} · ${whose}${strips} · ${decoder}`;
 }

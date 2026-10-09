@@ -925,7 +925,9 @@ Three controls with similar names therefore remain separate:
   strip's access unit on in that order as a unit of its own: under the
   display's size, not the strip's, with the strip's number and whether it is
   the last of its frame in the record's flags
-  ([Image batches](#image-batches)). A keyframe is strip 0's IDR; the other
+  ([Image batches](#image-batches)). The stream's `videoFormat` says how many
+  strips its pictures come in (`strips`: 4, and 1 for whole pictures), which
+  the Info panel's video row repeats. A keyframe is strip 0's IDR; the other
   strips' intra pictures follow it as ordinary units, so a restart drops to
   that IDR as it drops to any. For the page's software decoder, the decode
   worker has the module decode each

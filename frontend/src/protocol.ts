@@ -297,6 +297,9 @@ export type ControlMsg =
       decode: string;
       passthrough: boolean;
       software: boolean;
+      // How many strips each picture comes in, a unit each (`VideoStrip`): 4 for
+      // a High Performance Mac's passed in strips, 1 for whole pictures.
+      strips: number;
     }
   // An RDP host's graphics pipeline starts here, from nothing, and the GRAPHICS
   // records after it are the picture: this page composes them. Whatever it held of

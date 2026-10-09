@@ -100,6 +100,21 @@ test("the video row waits for the format, then names it and whose stream it is",
     videoLabel({ decode: "hev1.4.10.L150.BE.8", passthrough: true }, null),
     "hev1.4.10.L150.BE.8 · passthrough from the remote · decoded by the browser's native decoder",
   );
+  // A High Performance Mac's pictures come in strips, and the row says how many.
+  assert.equal(
+    videoLabel(
+      { decode: "hev1.4.10.L153.BE.8", passthrough: true, strips: 4 },
+      null,
+    ),
+    "hev1.4.10.L153.BE.8 · passthrough from the remote in 4 strips · decoded by the browser's native decoder",
+  );
+  assert.equal(
+    videoLabel(
+      { decode: "hev1.4.10.L153.BE.8", passthrough: true, strips: 1 },
+      null,
+    ),
+    "hev1.4.10.L153.BE.8 · passthrough from the remote · decoded by the browser's native decoder",
+  );
   assert.equal(
     videoLabel(
       { decode: "vp09.01.40.08", passthrough: false, software: true },
