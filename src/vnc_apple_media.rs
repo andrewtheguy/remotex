@@ -1353,12 +1353,20 @@ pub struct Strips {
     /// The decoding order number the next picture carries, while the stream is
     /// decodable.
     next: Option<u16>,
+    /// The strips whose picture of the last keyframe is still to come, a bit
+    /// each: every strip but the first, at its IDR.
+    owed: u8,
 }
 
 impl Default for Strips {
     fn default() -> Self {
-        Self { base: None, strips: std::array::from_fn(|_| Reassembler::numbered()), next: None }
+        Self { base: None, strips: std::array::from_fn(|_| Reassembler::numbered()), next: None, owed: 0 }
     }
+}
+
+/// Whether an access unit is an IRAP picture, which a decoder can start at.
+fn is_keyframe(unit: &AccessUnit) -> bool {
+    unit.iter().any(|nal| (16..=23).contains(&nal_type(nal[0])))
 }
 
 impl Strips {
@@ -1393,10 +1401,14 @@ impl Strips {
         }
         let out = match pushed.whole {
             Some(Whole { unit, don: Some(don), .. })
-                if self.next == Some(don)
-                    || strip == 0 && unit.iter().any(|nal| (16..=23).contains(&nal_type(nal[0]))) =>
+                if self.next == Some(don) || strip == 0 && is_keyframe(&unit) =>
             {
                 self.next = Some(don.wrapping_add(1));
+                if strip == 0 && is_keyframe(&unit) {
+                    self.owed = ALL_STRIPS & !1;
+                } else {
+                    self.owed &= !(1 << strip);
+                }
                 Depacketized::Unit(unit)
             }
             Some(_) => {
@@ -1412,6 +1424,13 @@ impl Strips {
     /// Drop everything up to the next keyframe.
     pub fn resync(&mut self) {
         self.next = None;
+    }
+
+    /// Whether the stream is decodable and every strip of its last keyframe has
+    /// come. Until then a strip has nothing to predict from, and its picture's
+    /// last packet lost on a still screen leaves no gap to show for it.
+    pub fn whole(&self) -> bool {
+        self.next.is_some() && self.owed == 0
     }
 
     /// Pass over a packet nobody is shown ([`Reassembler::skip`]), giving its
@@ -1468,6 +1487,16 @@ impl Assembly {
         match self {
             Self::Whole(whole) => whole.resumes_at_refresh(),
             Self::Strips(_) => false,
+        }
+    }
+
+    /// Whether a unit just handed on leaves the stream with everything to go on
+    /// from: any unit of a picture sent whole, and of one in strips the last of
+    /// its keyframe's ([`Strips::whole`]).
+    fn whole(&self) -> bool {
+        match self {
+            Self::Whole(_) => true,
+            Self::Strips(strips) => strips.whole(),
         }
     }
 
@@ -2782,6 +2811,14 @@ impl KeyframeRequest {
         self.owed = None;
     }
 
+    /// A keyframe has begun at `now` and is not all here: it is owed as if asked
+    /// for then, so the rest has [`PLI_INTERVAL`] to come before it is asked for
+    /// again.
+    fn hold(&mut self, now: tokio::time::Instant) {
+        self.want(Ask::Keyframe);
+        self.asked = Some(now);
+    }
+
     /// What to ask for at `now`, which counts as asking.
     fn due(&mut self, now: tokio::time::Instant) -> Option<Ask> {
         if self.asked.is_some_and(|at| now.duration_since(at) < PLI_INTERVAL) {
@@ -2872,8 +2909,13 @@ impl VideoLeg {
             Depacketized::Lost if self.assembly.resumes_at_refresh() => Ok(Took::Wants(Ask::Refresh)),
             Depacketized::Lost => Ok(Took::Wants(Ask::Keyframe)),
             Depacketized::Unit(unit) => {
-                // Only a stream that has had a picture it can go on from yields one.
-                self.keyframe_request.settle();
+                // Only a stream that has had a picture it can go on from yields
+                // one, and one in strips can go on once it has the whole keyframe.
+                if self.assembly.whole() {
+                    self.keyframe_request.settle();
+                } else {
+                    self.keyframe_request.hold(tokio::time::Instant::now());
+                }
                 if let Some(params) =
                     unit.iter().find(|nal| nal_type(nal[0]) == NAL_SPS).and_then(|sps| parse_sps(sps))
                 {
@@ -3367,8 +3409,17 @@ const ALL_STRIPS: u8 = (1 << STRIPS) - 1;
 
 impl Canvas {
     /// Put the decoded `part` in as strip `strip` of a display of `size`,
-    /// starting `canvas` over where it is laid out for another.
-    fn place(canvas: &mut Option<Self>, size: Option<(u16, u16)>, strip: usize, part: &Picture) -> anyhow::Result<()> {
+    /// starting `canvas` over where it is laid out for another. A `keyframe`,
+    /// the first strip's, starts the display over too: what the other strips
+    /// hold is from before whatever the keyframe mends, a loss or a display out
+    /// of view or a new stream, and is not shown beside it.
+    fn place(
+        canvas: &mut Option<Self>,
+        size: Option<(u16, u16)>,
+        strip: usize,
+        part: &Picture,
+        keyframe: bool,
+    ) -> anyhow::Result<()> {
         let (width, height) = size.context("a strip came for a display no stream was offered for")?;
         let pitch = usize::from(part.size.1);
         let rows = usize::from(height);
@@ -3387,6 +3438,10 @@ impl Canvas {
                 fresh: 0,
             }),
         };
+        if keyframe {
+            canvas.placed = 0;
+            canvas.fresh = 0;
+        }
         let row = usize::from(width) * 3;
         let from = (strip * pitch * row).min(canvas.picture.rgb.len());
         let into = &mut canvas.picture.rgb[from..];
@@ -3469,7 +3524,8 @@ fn spawn_decoder(
                     Ok(())
                 }
                 (Some(part), Some(strip)) => {
-                    Canvas::place(&mut canvas, *offered.lock().unwrap(), strip, &part)?;
+                    let keyframe = strip == 0 && is_keyframe(&coded.unit);
+                    Canvas::place(&mut canvas, *offered.lock().unwrap(), strip, &part, keyframe)?;
                     if canvas.as_ref().is_some_and(|canvas| canvas.fresh == ALL_STRIPS) {
                         waiting = None;
                         show(&mut canvas);
@@ -4138,10 +4194,38 @@ mod tests {
         assert_eq!(s.push(&strip(0, 4, 2400, true), &numbered(13, TRAIL)), (0, Depacketized::Lost));
         assert_eq!(s.push(&strip(0, 5, 2800, true), &numbered(14, IDR)), (0, idr()));
 
+        // The keyframe is whole once every other strip's picture of it has come.
+        assert!(!s.whole(), "three strips of the keyframe are still to come");
+        for (other, sequence) in [(1, 3), (2, 3), (3, 4)] {
+            assert!(!s.whole());
+            let at = 14 + other as u16;
+            assert_eq!(s.push(&strip(other, sequence, 2800, true), &numbered(at, TRAIL)).1, trail());
+        }
+        assert!(s.whole());
+        assert_eq!(s.push(&strip(0, 6, 3200, true), &numbered(18, TRAIL)), (0, trail()));
+        assert!(s.whole());
+        s.resync();
+        assert!(!s.whole());
+
         // A new stream, after an offer, is another display's worth of SSRCs.
         let next = RtpHeader { ssrc: 5000, ..header(77, 0, true) };
         assert_eq!(s.push(&next, &numbered(0, IDR)), (0, idr()));
         assert_eq!(s.stream(5003), 5000);
+    }
+
+    /// A keyframe that has begun is owed its other strips, and asked for again
+    /// only once they have had the interval to come.
+    #[tokio::test(start_paused = true)]
+    async fn a_keyframe_that_has_begun_is_asked_for_again_only_after_the_interval() {
+        let mut request = KeyframeRequest::default();
+        request.hold(tokio::time::Instant::now());
+        assert_eq!(request.due(tokio::time::Instant::now()), None, "its strips are on their way");
+        tokio::time::advance(PLI_INTERVAL).await;
+        assert_eq!(request.due(tokio::time::Instant::now()), Some(Ask::Keyframe));
+        request.hold(tokio::time::Instant::now());
+        request.settle();
+        tokio::time::advance(PLI_INTERVAL).await;
+        assert_eq!(request.due(tokio::time::Instant::now()), None, "the keyframe came whole");
     }
 
     /// The strip heights the Mac sent, and the display heights it sent no picture
@@ -4207,10 +4291,10 @@ mod tests {
         let part = |value: u8| Picture { size: (2, 3), rgb: vec![value; 2 * 3 * 3] };
         let mut canvas = None;
         for strip in [0, 1, 3] {
-            Canvas::place(&mut canvas, Some((2, 10)), strip, &part(strip as u8 + 1)).unwrap();
+            Canvas::place(&mut canvas, Some((2, 10)), strip, &part(strip as u8 + 1), false).unwrap();
         }
         assert!(canvas.as_mut().unwrap().show().is_none(), "a strip is still to come");
-        Canvas::place(&mut canvas, Some((2, 10)), 2, &part(3)).unwrap();
+        Canvas::place(&mut canvas, Some((2, 10)), 2, &part(3), false).unwrap();
         let shown = canvas.as_mut().unwrap().show().unwrap();
         assert_eq!(shown.size, (2, 10));
         let rows: Vec<u8> = shown.rgb.chunks(6).map(|row| row[0]).collect();
@@ -4218,17 +4302,27 @@ mod tests {
         assert!(shown.rgb.chunks(6).all(|row| row.iter().all(|&v| v == row[0])));
 
         // One strip of the next frame, and the display is whole with it.
-        Canvas::place(&mut canvas, Some((2, 10)), 1, &part(9)).unwrap();
+        Canvas::place(&mut canvas, Some((2, 10)), 1, &part(9), false).unwrap();
         assert_eq!(canvas.as_ref().unwrap().fresh, 0b0010);
         assert_eq!(canvas.as_mut().unwrap().show().unwrap().rgb[3 * 6], 9);
 
+        // A keyframe starts the display over: its first strip is not shown
+        // beside the three from before it.
+        Canvas::place(&mut canvas, Some((2, 10)), 0, &part(5), true).unwrap();
+        assert!(canvas.as_mut().unwrap().show().is_none());
+        for strip in 1..STRIPS {
+            assert!(canvas.as_mut().unwrap().show().is_none());
+            Canvas::place(&mut canvas, Some((2, 10)), strip, &part(5), false).unwrap();
+        }
+        assert!(canvas.as_mut().unwrap().show().unwrap().rgb.iter().all(|&v| v == 5));
+
         // A last strip that starts at the display's end has nothing to place.
-        Canvas::place(&mut canvas, Some((2, 9)), 3, &part(7)).unwrap();
+        Canvas::place(&mut canvas, Some((2, 9)), 3, &part(7), false).unwrap();
         assert!(canvas.as_ref().unwrap().picture.rgb.iter().all(|&v| v == 0));
-        assert!(Canvas::place(&mut canvas, Some((2, 13)), 0, &part(1)).is_err(), "not a quarter of 13 rows");
-        assert!(Canvas::place(&mut canvas, Some((2, 8)), 0, &part(1)).is_err(), "the last strip past 8 rows");
-        assert!(Canvas::place(&mut canvas, Some((4, 10)), 0, &part(1)).is_err());
-        assert!(Canvas::place(&mut canvas, None, 0, &part(1)).is_err());
+        assert!(Canvas::place(&mut canvas, Some((2, 13)), 0, &part(1), false).is_err(), "not a quarter of 13 rows");
+        assert!(Canvas::place(&mut canvas, Some((2, 8)), 0, &part(1), false).is_err(), "the last strip past 8 rows");
+        assert!(Canvas::place(&mut canvas, Some((4, 10)), 0, &part(1), false).is_err());
+        assert!(Canvas::place(&mut canvas, None, 0, &part(1), false).is_err());
     }
 
     /// A 64×48 4:4:4 stream from x265, full-range BT.709 as the Mac's is, and six
