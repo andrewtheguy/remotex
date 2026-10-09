@@ -124,6 +124,17 @@ picture that decoder outputs by its strip's number
 Chrome's decoder on a Mac takes such a stream, whose pictures are a quarter of
 the display. Safari's has not been tried with one, on a Mac or an iPhone.
 
+### The page's own FLAC decoder, heard in a browser
+
+A session started with lossless sound is decoded by a decoder written in the
+page's module (`frontend/wasm/flac`), which leaves a frame's samples in the
+module's memory for the page to copy into its `AudioBuffer`
+([Audio frames](architecture.md#audio-frames)). It is
+held to libFLAC's frames sample for sample by its tests and its benchmark, under
+Bun. It has not been played in a browser: a `wlshare` session and an RDP one,
+in Chrome, Safari and Firefox, listened to, with the console read for a frame
+refused.
+
 ### H.264 in the RDP graphics pipeline
 
 A host draws with H.264 only on a passed pipeline, for the page to decode, behind
@@ -230,6 +241,28 @@ can report one. Held contacts must be released when a client goes away, or the
 remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
 xrdp never does, which is the reason this stays an always-offered capability
 rather than a key.
+
+### A cheaper frame of lossless sound
+
+Taken up if a page is ever short of the time. The page's FLAC decoder takes
+some 58 thousand cycles for a frame of music, twenty milliseconds of it, which
+is a thousandth of a core and less than libFLAC takes natively
+([the benchmark](../frontend/wasm/flac/bench/README.md)). What is left is two
+loops in which every sample waits on the one before, so neither is a loop SIMD
+divides:
+
+- **The residual's Rice codes**, half of a frame. Each is a count of zeros and a
+  shift on a 64-bit window, and the window is taken once for two to eight of
+  them. Three more shapes of that loop measured no faster, and are in the
+  benchmark's README so that they are not tried again as they were.
+- **The prediction**, a fifth. It is a function for each order to twelve, with
+  the sample before held in a register, and has been looked at least: the sum
+  over the samples before the last could be taken four at a step, and a
+  predictor of two or three samples, which a quiet passage mostly has, could
+  hold them all in registers.
+
+Those shares are a profile's under Node, and the cycles are counted under Bun,
+so a change is judged by `bench/run.sh` and not by the profile.
 
 ### Not forwarding silence in a passed sound stream
 

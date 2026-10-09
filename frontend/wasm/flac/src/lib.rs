@@ -32,11 +32,15 @@ impl Flac {
         Ok(Flac { decoder, samples: Vec::new() })
     }
 
-    /// Decode one frame to planar floats in -1 to 1: `block` samples of the
-    /// first channel, then of the second. Throws for a frame that is not one of
-    /// the stream's, which costs that frame alone: the next decodes on its own.
-    pub fn decode(&mut self, frame: &[u8]) -> Result<Vec<f32>, JsError> {
+    /// Decode one frame to planar floats in -1 to 1, `block` samples of the
+    /// first channel, then of the second, and say where in the module's memory
+    /// they are: they stay there, for the page to look at or copy from, until
+    /// the next frame is decoded. So a frame's samples are copied once, by
+    /// whoever plays them, and nothing is made for them to be collected later.
+    /// Throws for a frame that is not one of the stream's, which costs that
+    /// frame alone: the next decodes on its own.
+    pub fn decode(&mut self, frame: &[u8]) -> Result<*const f32, JsError> {
         self.decoder.decode(frame, &mut self.samples).map_err(thrown)?;
-        Ok(self.samples.clone())
+        Ok(self.samples.as_ptr())
     }
 }

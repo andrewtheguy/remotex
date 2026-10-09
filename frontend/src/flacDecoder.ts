@@ -19,9 +19,11 @@ export interface FlacStream {
 
 export interface FlacDecoder {
   /**
-   * One frame's samples, a plane for each channel, in -1 to 1. Throws for a
-   * frame that is not one of the stream's: it costs that frame alone, and the
-   * next decodes on its own.
+   * One frame's samples, a plane for each channel, in -1 to 1. The planes are
+   * the decoder's own memory and not a copy of it, good until the next frame is
+   * decoded: play them or copy them before then. Throws for a frame that is not
+   * one of the stream's: it costs that frame alone, and the next decodes on its
+   * own.
    */
   decode(frame: Uint8Array): Float32Array<ArrayBuffer>[];
   /** Give the decoder's memory back. */
@@ -40,7 +42,7 @@ let loaded: Promise<FlacFactory> | null = null;
  */
 export function loadFlac(source?: InitInput): Promise<FlacFactory> {
   loaded ??= init(source === undefined ? undefined : { module_or_path: source })
-    .then(() => (stream: FlacStream) => {
+    .then(({ memory }) => (stream: FlacStream) => {
       const flac = new Flac(
         stream.sampleRate,
         stream.channels,
@@ -48,14 +50,18 @@ export function loadFlac(source?: InitInput): Promise<FlacFactory> {
       );
       return {
         decode(frame: Uint8Array): Float32Array<ArrayBuffer>[] {
-          // A copy the binding made out of the module's memory, which is not
-          // shared: the planes are views on it.
-          const planar = flac.decode(frame) as Float32Array<ArrayBuffer>;
-          return Array.from({ length: stream.channels }, (_, channel) =>
-            planar.subarray(
-              channel * stream.packetFrames,
-              (channel + 1) * stream.packetFrames,
-            ),
+          // Where the samples are in the module's memory, which is not
+          // shared. Its buffer is asked for each time: growing the memory
+          // replaces it.
+          const planar = flac.decode(frame);
+          return Array.from(
+            { length: stream.channels },
+            (_, channel) =>
+              new Float32Array(
+                memory.buffer,
+                planar + channel * stream.packetFrames * 4,
+                stream.packetFrames,
+              ),
           );
         },
         close() {

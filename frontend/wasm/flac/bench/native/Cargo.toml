@@ -1,0 +1,20 @@
+# The benchmark's native half: the samples, made as the gateway makes a
+# session's frames, and libFLAC decoding them, which is what the module is
+# measured against. A package of its own, in no workspace: it links libFLAC
+# through `sound-flac`, which the module beside it never does.
+[package]
+name = "flac-bench"
+version = "0.0.0"
+license = "MIT"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+sound-flac = { git = "https://github.com/andrewtheguy/sound-flac", tag = "v0.0.4" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

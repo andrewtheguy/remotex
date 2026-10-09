@@ -7,10 +7,10 @@
   "scripts": {
     "build:wasm": "wasm-pack build wasm/egfx --release --target web --no-pack && wasm-pack build wasm/flac --release --target web --no-pack && bun wasm/vp9/fetch.ts",
     "build": "bun run build:wasm && tsc -b && vite build",
-    "test": "bun run build:wasm && bun test src",
+    "test": "bun run build:wasm && cargo test --manifest-path wasm/flac/Cargo.toml && bun test src",
     "lint": "biome lint .",
     "format": "biome format --write .",
-    "check": "bun run build:wasm && biome check . && tsc -b"
+    "check": "bun run build:wasm && cargo clippy --manifest-path wasm/flac/Cargo.toml --all-targets -- -D warnings && cargo clippy --manifest-path wasm/flac/bench/native/Cargo.toml --all-targets -- -D warnings && biome check . && tsc -b"
   },
   "dependencies": {
     "react": "^19.2.0",

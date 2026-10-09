@@ -2041,7 +2041,11 @@ nothing in such a session, since there is no rate to set or walk.
   statically, so the host needs none installed.
 - **The page decodes in a module of its own.** `frontend/wasm/flac` is a Rust
   FLAC frame decoder built to WebAssembly, loaded by the first FLAC stream
-  (`frontend/src/flacDecoder.ts`). WebCodecs is not asked: what travels is bare
+  (`frontend/src/flacDecoder.ts`). It is written there, with no FLAC library
+  under it, and leaves a frame's samples in its own memory for the page to
+  copy into the `AudioBuffer`; what a frame costs, against libFLAC, is in
+  [its benchmark](../frontend/wasm/flac/bench/README.md). WebCodecs is not
+  asked: what travels is bare
   frames with no stream header, each numbered zero. The decoder holds every
   frame to what `audioFormat` announced — rate, channels, block, 16 bits — and
   checks its CRCs; a frame it refuses is dropped with a console warning and

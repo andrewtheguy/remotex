@@ -3,8 +3,9 @@
 #
 # It is the page's alone. The gateway's FLAC is libFLAC, native code linked
 # through `sound-flac`, which a page cannot have, and the gateway decodes no
-# frame it sends on, so no crate is shared with it: the decoder is src/decoder.rs
-# and this is the binding around it.
+# frame it sends on, so no crate is shared with it: the decoder is src/decoder.rs,
+# written here, and this is the binding around it. bench/ measures it against
+# libFLAC (bench/README.md).
 #
 # Built by `bun run build:wasm` in frontend/, into pkg/, beside the compositor's
 # module (../egfx) and sharing nothing with it: no threads, so no shared memory,
@@ -22,8 +23,6 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# FLAC frames, in Rust alone.
-claxon = "0.4"
 wasm-bindgen = "0.2"
 
 [profile.release]
@@ -31,3 +30,7 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# SIMD is on (.cargo/config.toml), and wasm-opt is told so.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-simd"]
