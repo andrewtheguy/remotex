@@ -442,9 +442,11 @@ impl VideoSink {
         video.due_at = Some(now + video.congestion.interval());
         // What the round's encoder really runs at, not the table: a stream that
         // refused a retune is still coarse, and the settle it owes must not be
-        // cleared by a table that has already reached the dial.
+        // cleared by a table that has already reached the dial. Nor by a round at
+        // the dial that encodes only where the picture changed, which leaves the
+        // rest as coarse as it was.
         let quality = round.quality();
-        video.coarse_at = video.congestion.coarse(quality).then_some(now);
+        video.coarse_at = video.congestion.coarse(round.coarsest()).then_some(now);
         // A round above what the walk holds is the settle's one frame at the dial
         // ([`settle_stream`]): the rounds after it go back to what the link bears.
         // There is no encoder home to refuse this — the round has it — and

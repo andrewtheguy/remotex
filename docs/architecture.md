@@ -1418,12 +1418,22 @@ case the paint window measured a VP9 attachment falling 222 ms behind at 7
 batches in flight while every queue stayed shallow. Under `render_adaptive =
 false` the walk is pressure-only.
 
+A round costs what changed and not the desktop. The rectangles blitted into the
+mirror since the round before are what the picture differs by, and the encoder is
+handed them: screen-vp9 converts the rows they span and codes the blocks they touch,
+and every other block is skipped as the client holds it, at the quality it holds it.
+With one small change a 4K frame encodes in 11 ms for 26 and a 1080p one in 4 for 9,
+measured in screen-vp9. A keyframe, a stream's first frame and the settle's are the
+whole picture.
+
 The walk only runs when a round is taken, and a round is only taken when something
 changed, so a desktop that stops moving right after the link coarsened it would keep
 that picture until something changed again. The order task's settle tick is what
 comes back for it. Once the stream has been idle `SETTLE_IDLE` since a round that
-went out below the dial, and on a `render_adaptive` target the lag has cleared, it
-puts the encoder at the dial and marks the unchanged mirror dirty. The engine
+left any of the picture below the dial — one encoded below it, or one at the dial
+over part of a picture coarsened before it — and on a `render_adaptive` target the
+lag has cleared, it puts the encoder at the dial and marks the unchanged mirror
+dirty, the whole of it. The engine
 encodes that as one inter frame. libvpx codes the residual of unchanged blocks at
 the finer quantizer, so the frame sharpens the whole desktop without a keyframe; the
 vp9 test `a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe` guards

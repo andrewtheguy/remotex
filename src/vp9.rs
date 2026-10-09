@@ -14,6 +14,7 @@
 use anyhow::Context as _;
 
 use crate::config::Chroma;
+use crate::shadow::Rect;
 use crate::video::{AccessUnit, Mirror, check_picture};
 
 pub use screen_vp9::{FrameHeader, frame_header};
@@ -42,9 +43,9 @@ pub fn codec_string(w: u16, h: u16, chroma: Chroma, fps: u64) -> Option<String> 
 /// stream mean anything: every frame is expressed as a change from the last one. A desktop that
 /// is resized gets a *new* stream.
 pub struct Stream {
-    encoder: screen_vp9::Encoder,
-    /// The conversion in front of the encoder, reused across frames.
-    picture: screen_vp9::Picture,
+    /// The encoder and the conversion in front of it, which reads the mirror whole or
+    /// where it changed.
+    stream: screen_vp9::Stream,
     /// The picture encoded: the mirror's coded size, the desktop grown to even sides.
     coded: (u16, u16),
     /// Whether the next frame must be one a decoder can start from.
@@ -66,15 +67,12 @@ impl Stream {
     /// sides and is held to them anyway — see the note there.
     pub fn new(coded: (u16, u16), quality: u8, chroma: Chroma) -> anyhow::Result<Self> {
         check_picture(coded)?;
-        let sampling = chroma.into();
-        let picture = screen_vp9::Picture::new(coded.0, coded.1, sampling)?;
         // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
-        let encoder = screen_vp9::Encoder::new(coded.0, coded.1, sampling, quality, crate::video::threads())
+        let stream = screen_vp9::Stream::new(coded.0, coded.1, chroma.into(), quality, crate::video::threads())
             .with_context(|| format!("vp9 encoder for a {}x{} picture", coded.0, coded.1))?;
         Ok(Self {
-            encoder,
-            picture,
+            stream,
             coded,
             keyframe_owed: false,
             decode: codec_string(coded.0, coded.1, chroma, ENCODED_FPS),
@@ -85,7 +83,15 @@ impl Stream {
 
     /// The dial this stream is currently encoding at.
     pub fn quality(&self) -> u8 {
-        self.encoder.quality()
+        self.stream.quality()
+    }
+
+    /// The coarsest dial any block of the client's picture was last encoded at: a frame
+    /// encoded where the mirror changed leaves every other block at the dial it had, so
+    /// this trails [`Self::quality`] until a whole frame, or enough changes, have coded
+    /// them all since.
+    pub fn coarsest(&self) -> u8 {
+        self.stream.coarsest()
     }
 
     /// The WebCodecs codec string for this stream, known from construction.
@@ -116,14 +122,21 @@ impl Stream {
     /// the link has run out of room.
     pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
         #[cfg(test)]
-        if quality.clamp(crate::video::QUALITY_MIN, crate::video::QUALITY_MAX) != self.encoder.quality() && self.refusals > 0 {
+        if quality.clamp(crate::video::QUALITY_MIN, crate::video::QUALITY_MAX) != self.stream.quality() && self.refusals > 0 {
             self.refusals -= 1;
             anyhow::bail!("a retune refused on the test's orders");
         }
-        self.encoder.set_quality(quality).context("retuning the VP9 encoder")
+        self.stream.set_quality(quality).context("retuning the VP9 encoder")
     }
 
     /// Encode `mirror` as it stands.
+    ///
+    /// `changed` is where the mirror differs from the one the last access unit carried,
+    /// or `None` for one that may differ anywhere, which is also how a picture that has
+    /// not changed is sharpened: only the rows those rectangles span are converted and
+    /// only the blocks they touch encoded, the rest of the frame being the picture the
+    /// client holds, at the quality it holds it. A keyframe and a stream's first frame
+    /// are the whole mirror whatever `changed` says.
     ///
     /// `None` means the encoder produced no bitstream. The caller must then leave its dirty flag
     /// set, so those pixels ride on the next frame — which is what keeps a frame that produced
@@ -132,7 +145,7 @@ impl Stream {
     /// has to be ready for it anyway.
     ///
     /// The mirror must have been padded ([`Mirror::pad_edges`]), which is the caller's job.
-    pub fn encode(&mut self, mirror: &Mirror) -> anyhow::Result<Option<AccessUnit>> {
+    pub fn encode(&mut self, mirror: &Mirror, changed: Option<&[Rect]>) -> anyhow::Result<Option<AccessUnit>> {
         anyhow::ensure!(
             mirror.coded() == self.coded,
             "a {}x{} vp9 stream was handed a {}x{} mirror",
@@ -141,9 +154,9 @@ impl Stream {
             mirror.coded().0,
             mirror.coded().1
         );
-        self.picture.read_rgb(mirror.picture())?;
+        let changed: Option<Vec<screen_vp9::Rect>> = changed.map(|rects| rects.iter().map(|rect| coded_rect(mirror, *rect)).collect());
         let mut data = Vec::new();
-        let keyframe = self.encoder.encode(&self.picture, self.keyframe_owed, &mut data).context("encoding a VP9 frame")?;
+        let keyframe = self.stream.encode_rgb(mirror.picture(), changed.as_deref(), self.keyframe_owed, &mut data).context("encoding a VP9 frame")?;
         // Cleared only when something came out: a frame that produced no bitstream still
         // owes its keyframe, and the caller's dirty flag is what brings it back.
         Ok(keyframe.map(|keyframe| {
@@ -153,10 +166,23 @@ impl Stream {
     }
 }
 
+/// `rect` of the desktop as the encoder is told of it: with the mirror's padding column
+/// or row beside it where it reaches the desktop's edge, since [`Mirror::pad_edges`]
+/// repeats that edge into the padding and a change to one is a change to the other.
+fn coded_rect(mirror: &Mirror, rect: Rect) -> screen_vp9::Rect {
+    let (size, coded) = (mirror.size(), mirror.coded());
+    let padded = |far: u16, size: u16, coded: u16| u16::from(far + 1 == size && coded != size);
+    screen_vp9::Rect {
+        x: rect.left,
+        y: rect.top,
+        width: rect.w() + padded(rect.right, size.0, coded.0),
+        height: rect.h() + padded(rect.bottom, size.1, coded.1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shadow::Rect;
 
     /// A rectangle from a position and a size, which is what most of these want.
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
@@ -185,7 +211,7 @@ mod tests {
             picture[at..at + 300].fill(230);
         }
         mirror.blit(rect(0, 0, 320, 240), &picture).expect("a full-screen blit");
-        stream.encode(mirror).expect("an encode").expect("an access unit")
+        stream.encode(mirror, None).expect("an encode").expect("an access unit")
     }
 
     /// The keyframe is owed until a frame carries it, and not a frame longer.
@@ -243,8 +269,22 @@ mod tests {
         let (mut mirror, mut stream) = whole(1919, 1079, 60);
         mirror.blit(rect(0, 0, 1919, 1079), &flat(1919, 1079, [90, 90, 90])).expect("a full-screen blit");
         mirror.pad_edges();
-        let unit = stream.encode(&mirror).expect("an encode").expect("a unit");
+        let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
         assert_eq!(frame_header(&unit.data).map(|header| header.profile), Some(0));
+    }
+
+    /// A change that reaches an odd desktop's last column or row takes the mirror's
+    /// padding beside it, and no other change is widened.
+    #[test]
+    fn a_change_at_an_odd_desktops_edge_takes_the_padding_with_it() {
+        let odd = Mirror::new(319, 239).expect("a mirror");
+        let coded = |x, y, width, height| screen_vp9::Rect { x, y, width, height };
+        assert_eq!(coded_rect(&odd, rect(10, 20, 30, 40)), coded(10, 20, 30, 40));
+        assert_eq!(coded_rect(&odd, rect(300, 20, 19, 40)), coded(300, 20, 20, 40));
+        assert_eq!(coded_rect(&odd, rect(10, 230, 30, 9)), coded(10, 230, 30, 10));
+        assert_eq!(coded_rect(&odd, rect(0, 0, 319, 239)), coded(0, 0, 320, 240));
+        let even = Mirror::new(320, 240).expect("a mirror");
+        assert_eq!(coded_rect(&even, rect(0, 0, 320, 240)), coded(0, 0, 320, 240));
     }
 
     #[test]
@@ -264,6 +304,6 @@ mod tests {
     fn a_mirror_of_another_size_is_refused() {
         let (_, mut stream) = whole(320, 240, 60);
         let other = Mirror::new(640, 480).expect("a mirror");
-        assert!(stream.encode(&other).is_err());
+        assert!(stream.encode(&other, None).is_err());
     }
 }
