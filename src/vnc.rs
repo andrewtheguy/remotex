@@ -4050,8 +4050,8 @@ async fn blit_picture(
 
 /// Pass a unit of the Mac's HEVC to the browser, as [`show_picture`] shows a
 /// decoded picture: one of another size, or one that comes while a resize holds
-/// the display, is dropped, and the first one of a display is the browser's first
-/// picture of it, and brings its notice down. A dropped unit is one the next ones predict
+/// the display, is dropped, and the first one the browser shows the display at
+/// ([`shows_display`]) is its first picture of it, and brings its notice down. A dropped unit is one the next ones predict
 /// from, so the browser starts over at a keyframe, which the Mac is asked for as
 /// soon as a unit is held back waiting for one.
 async fn pass_unit(
@@ -4067,19 +4067,28 @@ async fn pass_unit(
             sink.restart_pass();
             return Ok(());
         }
-        !std::mem::replace(&mut d.canvas_live, true)
+        shows_display(&unit) && !std::mem::replace(&mut d.canvas_live, true)
     };
     if first {
         info!("vnc: the picture is now the Mac's HEVC media stream, passed to the browser");
     }
-    stream_carries(shared).await?;
-    uncover(shared, sink);
+    if shows_display(&unit) {
+        stream_carries(shared).await?;
+        uncover(shared, sink);
+    }
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
     if !sink.pass_hevc(w, h, unit.data, passed).await? {
         media.lock().unwrap().want_keyframe(leg);
     }
     Ok(())
+}
+
+/// Whether the browser shows the display at `unit`: a whole picture, or the
+/// last strip of a frame. A strip before it leaves the page's picture between
+/// two frames, so the display is not live at it and its notice stays up.
+fn shows_display(unit: &PassedUnit) -> bool {
+    unit.strip.is_none_or(|strip| strip.ends)
 }
 
 /// Whether a picture or unit of `size` is the second display's as the tab shows
@@ -4118,8 +4127,10 @@ async fn tab_unit(shared: &Shared, leg: usize, unit: PassedUnit, media: &SharedM
         sink.restart_pass();
         return;
     }
-    tab_live(&shared.tab);
-    tab_uncover(&shared.tab, &shared.desktop);
+    if shows_display(&unit) {
+        tab_live(&shared.tab);
+        tab_uncover(&shared.tab, &shared.desktop);
+    }
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
     match sink.pass_hevc(w, h, unit.data, passed).await {
@@ -11478,6 +11489,49 @@ mod tests {
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(matches!(out.as_slice(), [ServerMsg::ScreenUnavailable { active: true }]), "{out:?}");
+    }
+
+    /// A display in strips is the browser's at a frame's last strip, not at the
+    /// strips before it, which the page shows nothing at: the notice stays up
+    /// behind those and comes down behind the last.
+    #[tokio::test]
+    async fn a_display_in_strips_uncovers_the_browser_at_a_frames_last_strip() {
+        use crate::protocol::Strip;
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((2, 2)).await;
+        let desktop = shared_desktop((2, 2), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_stream = true;
+            d.covered = true;
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
+        let addr = "127.0.0.1:5900".parse().unwrap();
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: true }, 1).0));
+        let strip = |index, ends| PassedUnit {
+            size: (2, 2),
+            decode: "hev1.4.10.L150.BE.8".into(),
+            keyframe: index == 0,
+            strip: Some(Strip { index, ends }),
+            begins: index == 0,
+            data: vec![0; 16],
+        };
+
+        pass_unit(&shared, 0, strip(0, false), &sink, &media).await.unwrap();
+        sink.flush().await;
+        let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(out.iter().any(|m| matches!(m, ServerMsg::Video(_))), "{out:?}");
+        assert!(!out.iter().any(|m| matches!(m, ServerMsg::ScreenUnavailable { .. })), "{out:?}");
+        assert!(desktop.lock().unwrap().covered && !desktop.lock().unwrap().canvas_live);
+
+        pass_unit(&shared, 0, strip(1, true), &sink, &media).await.unwrap();
+        sink.flush().await;
+        let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let video = out.iter().position(|m| matches!(m, ServerMsg::Video(_))).expect("the strip");
+        let uncovered =
+            out.iter().position(|m| matches!(m, ServerMsg::ScreenUnavailable { active: false })).expect("uncovered");
+        assert!(uncovered > video, "the notice lifts behind the frame's last strip: {out:?}");
+        assert!(desktop.lock().unwrap().canvas_live);
     }
 
     /// A session with no media stream is never told its screen is not available:
