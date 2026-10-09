@@ -425,6 +425,10 @@ that selects the stream. See
   the picture: `/api/targets` says so, the picker shows the passthrough as
   chosen, and a session started without it all the same ends before it dials
   the Mac.
+  A session that decodes the picture is offered it as Apple's viewer is, in
+  four strips the one decoder puts together, and so is one passed to the page's
+  own decoder; one passed to the browser's is offered a single picture, which
+  is what that decoder shows.
   The media stream alone is the picture: ZRLE is stepped over unread and never
   encoded, and the page says the screen is not available until the stream sends
   the display's first picture.
@@ -912,6 +916,28 @@ Three controls with similar names therefore remain separate:
   take their share of `QUEUE_BUDGET` like any access unit. Every picture the Mac
   sends goes out, up to the virtual display's 30 a second. The offer and the rate
   reports are a decoded session's: the quality is what that session receives.
+- **In strips, to the page's own decoder.** A session started with *Decode HEVC
+  in this page* is offered the display in Apple's four strips
+  ([In strips](apple-vnc-889.md#in-strips)), as a session decoded here is, where
+  its height allows; one passed to the browser's decoder is offered it whole,
+  since a `VideoDecoder` shows each picture it decodes as the display. The
+  strips are one HEVC stream in one decoding order, and the receiver hands each
+  strip's access unit on in that order as a unit of its own: under the
+  display's size, not the strip's, with the strip's number and whether it is
+  the last of its frame in the record's flags
+  ([Image batches](#image-batches)). A keyframe is strip 0's IDR; the other
+  strips' intra pictures follow it as ordinary units, so a restart drops to
+  that IDR as it drops to any. The decode worker has the module decode each
+  unit as its strip (`decodeStrip`), which copies it to its place in a picture
+  of the display's size, and answers a frame's last strip with the picture and
+  every other strip with none. Which strip is a frame's last is the gateway's to
+  say, and nothing in a strip says it: the read loop's queue holds a strip until
+  the next unit comes, the frame's fourth strip being its last at once, or 8 ms
+  pass with none, the wait the gateway's own decoder gives a frame. The page
+  cannot make that wait itself: its paint worker draws one batch at a time, so
+  an answer that waited for the next strip would hold that strip back, and each
+  strip would be shown alone. The paint worker is handed the whole display each
+  time and uploads it as it uploads a picture sent whole.
 - **A restart is an IDR from the Mac.** A reattach and the browser's
   own decoder failing each reset the render, and the gateway asks the Mac for an
   IDR with a PLI, which it answers within tens of milliseconds; until the IDR
@@ -919,8 +945,8 @@ Three controls with similar names therefore remain separate:
   read loop drops — one of another display, or one that comes while a resize
   holds the display — restarts the chain the same way, and a unit held back for a
   keyframe asks the Mac for one, since a still screen would never bring one unasked.
-  A link that cannot carry the stream fills the receiver's queue of 15 units, half
-  a second of the display's refresh; a full queue drops to the next keyframe, as
+  A link that cannot carry the stream fills the receiver's queue of 15 frames, half
+  a second of the display's refresh, a frame in strips counting once; a full queue drops to the next keyframe, as
   the decoder's queue does.
 - **The gaps show nothing.** Before the stream is up, across every display
   change and across a stream the Mac restarts on its own, there is no picture:
@@ -1777,8 +1803,11 @@ One frame carries every record ready at once, so a backlog does not cost one
 WebSocket event per record — save that a `GRAPHICS` record ending a frame ends
 its batch, since a batch is shown once. Receivers reject unknown operations and truncated
 records, and reject a nonzero frame flags byte. A `VIDEO` record's own flags byte
-is `0x01` for a keyframe and nothing else — any other bit is rejected the same
-way. A session's records are `VIDEO` unless its target passes an RDP host's
+is `0x01` for a keyframe, and for a unit that is one strip of the picture
+([in strips](#apples-media-stream-passed-through)) `0x02`, with the strip's
+number from the top in `0x0C` and `0x10` on the last strip of its frame —
+any other bit is rejected the same way, as is a number or a frame bit without
+`0x02`. A session's records are `VIDEO` unless its target passes an RDP host's
 [graphics pipeline](#rdps-graphics-pipeline-passed-through): a `GRAPHICS` record
 is a run of that pipeline's commands, whole, which means something only after
 every run before it from the `graphicsStart` that began the pipeline. One of no

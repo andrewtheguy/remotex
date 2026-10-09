@@ -665,7 +665,7 @@ impl VideoSink {
             let software = self.shared.software.decodes(&decode);
             self.push(Pending::Msg(ServerMsg::VideoFormat { decode, passthrough: true, software })).await?;
         }
-        let unit = VideoUnit { w, h, keyframe: passed.keyframe, data: frame, held };
+        let unit = VideoUnit { w, h, strip: passed.strip, keyframe: passed.keyframe, data: frame, held };
         self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
         self.uncover_behind().await?;
         Ok(true)
@@ -1346,7 +1346,7 @@ mod tests {
 
         // A passed unit dropped for a keyframe brings it no sooner than the one sent.
         sink.uncover();
-        let hevc = |keyframe| crate::stream::Passed { decode: "hev1.4.10.L150.BE.8".to_owned(), keyframe };
+        let hevc = |keyframe| crate::stream::Passed { decode: "hev1.4.10.L150.BE.8".to_owned(), keyframe, strip: None };
         sink.reset_render();
         assert!(!sink.pass_hevc(64, 48, vec![1; 30], hevc(false)).await.unwrap());
         sink.flush().await;
@@ -1376,7 +1376,7 @@ mod tests {
         const HEVC: &str = "hev1.4.10.L150.BE.8";
         let (sink, mut frame_rx) = video_sink(64, 48).await;
         let rect = Rect::from_size(0, 0, 64, 48).unwrap();
-        let hevc = |keyframe| crate::stream::Passed { decode: HEVC.to_owned(), keyframe };
+        let hevc = |keyframe| crate::stream::Passed { decode: HEVC.to_owned(), keyframe, strip: None };
         let is_vp9 = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode, passthrough: false, .. } if decode.starts_with("vp09"));
         let is_hevc = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode, passthrough: true, .. } if decode == HEVC);
 

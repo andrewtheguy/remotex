@@ -391,6 +391,9 @@ export type ControlMsg =
 // means the stream started over on a differently sized picture.
 //
 // `keyframe` comes from the record's flags byte, decided by the source path.
+// `strip` is there when the unit is one strip of the w×h picture and not the whole
+// of it: a High Performance Mac's passed HEVC, for the page's own decoder to put
+// together.
 // `videoFormat` says how to configure the decoder and always arrives first. See
 // `VideoUnit` in src/protocol.rs for the whole contract.
 export interface VideoMsg {
@@ -398,7 +401,19 @@ export interface VideoMsg {
   w: number;
   h: number;
   keyframe: boolean;
+  strip?: VideoStrip;
   data: Uint8Array;
+}
+
+// One strip of a picture sent in four: the picture's whole width and a quarter of
+// its height rounded up to a multiple of 16, the strips lying top to bottom that far
+// apart. A frame is the strips that changed, each a unit of its own. See `Strip` in
+// src/protocol.rs.
+export interface VideoStrip {
+  /** From 0, at the top. */
+  index: number;
+  /** The last strip of its frame: the picture, with this strip in it, is one to show. */
+  ends: boolean;
 }
 
 // A run of an RDP host's graphics pipeline, as the host sent it: whole commands, out
@@ -429,10 +444,17 @@ const OP_VIDEO = 0x03;
 const VIDEO_HEADER_LEN = 10;
 const OP_GRAPHICS = 0x04;
 const GRAPHICS_HEADER_LEN = 5;
-// A VIDEO record's only flag: a decoder that has seen nothing before it can start here.
-// Any other bit means a gateway newer than this client, and the record is dropped rather
-// than guessed at — the same strictness the batch's own flags byte gets.
+// A VIDEO record's flags: a decoder that has seen nothing before it can start here;
+// the unit is one strip of the picture, its number in two bits, and whether it is the
+// first sent of its frame. Any other bit means a gateway newer than this client, and
+// the record is dropped rather than guessed at — the same strictness the batch's own
+// flags byte gets — as is a strip's number or frame bit on a unit that is no strip.
 const VIDEO_KEYFRAME = 0x01;
+const VIDEO_STRIP = 0x02;
+const VIDEO_STRIP_INDEX = 0x0c;
+const VIDEO_STRIP_SHIFT = 2;
+const VIDEO_STRIP_ENDS = 0x10;
+const VIDEO_STRIP_FLAGS = VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS;
 
 // Parse a binary batch frame into its records. Layout (little-endian,
 // matching `batch` in `src/protocol.rs`):
@@ -532,7 +554,11 @@ function decodeVideo(
     return null;
   }
   const flags = view.getUint8(at + 1);
-  if ((flags & ~VIDEO_KEYFRAME) !== 0) {
+  const strip = (flags & VIDEO_STRIP) !== 0;
+  if (
+    (flags & ~(VIDEO_KEYFRAME | VIDEO_STRIP_FLAGS)) !== 0 ||
+    (!strip && (flags & VIDEO_STRIP_FLAGS) !== 0)
+  ) {
     return null;
   }
   const len = view.getUint32(at + 6, true);
@@ -546,6 +572,12 @@ function decodeVideo(
       w: view.getUint16(at + 2, true),
       h: view.getUint16(at + 4, true),
       keyframe: (flags & VIDEO_KEYFRAME) !== 0,
+      ...(strip && {
+        strip: {
+          index: (flags & VIDEO_STRIP_INDEX) >> VIDEO_STRIP_SHIFT,
+          ends: (flags & VIDEO_STRIP_ENDS) !== 0,
+        },
+      }),
       data: new Uint8Array(buf, start, len),
     },
     next: start + len,

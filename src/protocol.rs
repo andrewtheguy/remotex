@@ -442,8 +442,16 @@ pub mod batch {
     /// Bytes a `GRAPHICS` record costs besides its commands.
     pub const GRAPHICS_HEADER_LEN: usize = 5;
 
-    /// A `VIDEO` record's only flag: a decoder that has seen nothing before this can start here.
+    /// A `VIDEO` record's flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
+    /// The unit is one strip of the picture ([`super::Strip`]), which
+    /// [`VIDEO_STRIP_INDEX`] numbers.
+    pub const VIDEO_STRIP: u8 = 0x02;
+    /// The bits of the flags that hold a strip's number, and where they start.
+    pub const VIDEO_STRIP_INDEX: u8 = 0x0C;
+    pub const VIDEO_STRIP_SHIFT: u8 = 2;
+    /// The strip is the last of its frame.
+    pub const VIDEO_STRIP_ENDS: u8 = 0x10;
 }
 
 /// The layout of a server -> client **audio** frame: one outbound audio chunk.
@@ -694,6 +702,20 @@ impl std::fmt::Debug for Painted {
     }
 }
 
+/// One strip of a picture a High Performance Mac sends in four
+/// ([In strips](../docs/apple-vnc-889.md#in-strips)): the picture's whole width
+/// and a quarter of its height rounded up to a multiple of 16, the strips lying
+/// top to bottom that far apart. A frame is the strips that changed, each a
+/// unit of its own, and a decoder takes them all in the order they come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Strip {
+    /// From 0, at the top.
+    pub index: u8,
+    /// The last strip of its frame: the picture, with this strip in it, is one
+    /// to show.
+    pub ends: bool,
+}
+
 /// One video access unit, carried as a `VIDEO` record inside a [`batch`] frame.
 ///
 /// The contract every client implements:
@@ -712,10 +734,15 @@ impl std::fmt::Debug for Painted {
 ///   starting over on a differently sized picture, and a fresh `VideoFormat` precedes it.
 /// - Every access unit matters and their order matters: each is a link in a chain, where
 ///   losing any link decodes wrongly until the next keyframe.
+/// - `strip` is on the wire, in the record's flags, for a unit that is one strip of the `w`×`h`
+///   picture: see [`Strip`].
 #[derive(Debug, Clone)]
 pub struct VideoUnit {
     pub w: u16,
     pub h: u16,
+    /// Where the unit is one strip of the `w`×`h` picture and not the whole of
+    /// it, which strip.
+    pub strip: Option<Strip>,
     /// Whether a decoder that has seen nothing before this can start here.
     ///
     /// On the wire, as [`batch::VIDEO_KEYFRAME`] in the record's flags byte: reported by libvpx
@@ -738,7 +765,12 @@ impl VideoUnit {
     /// Append this unit as a `VIDEO` record.
     pub fn write_record(&self, out: &mut Vec<u8>) {
         out.push(batch::OP_VIDEO);
-        out.push(if self.keyframe { batch::VIDEO_KEYFRAME } else { 0 });
+        let strip = self.strip.map_or(0, |strip| {
+            batch::VIDEO_STRIP
+                | ((strip.index << batch::VIDEO_STRIP_SHIFT) & batch::VIDEO_STRIP_INDEX)
+                | if strip.ends { batch::VIDEO_STRIP_ENDS } else { 0 }
+        });
+        out.push(if self.keyframe { batch::VIDEO_KEYFRAME } else { 0 } | strip);
         out.extend_from_slice(&self.w.to_le_bytes());
         out.extend_from_slice(&self.h.to_le_bytes());
         // A keyframe of a 4K desktop runs to hundreds of kilobytes, and a length field
@@ -2182,7 +2214,7 @@ mod tests {
     // says so, which is what keeps a caller from sending one on its own.
     #[test]
     fn an_access_unit_has_no_text_encoding() {
-        let unit = VideoUnit { w: 1, h: 1, keyframe: true, data: vec![1], held: Held::default() };
+        let unit = VideoUnit { w: 1, h: 1, strip: None, keyframe: true, data: vec![1], held: Held::default() };
         assert!((ServerMsg::Video(unit)).text_frame().is_none());
     }
 
@@ -2192,6 +2224,7 @@ mod tests {
         let unit = VideoUnit {
             w: 0x0102,
             h: 0x0304,
+            strip: None,
             keyframe: true,
             data: vec![0xAA, 0xBB],
             held: Held::default(),
@@ -2203,6 +2236,15 @@ mod tests {
             out,
             [batch::OP_VIDEO, batch::VIDEO_KEYFRAME, 0x02, 0x01, 0x04, 0x03, 2, 0, 0, 0, 0xAA, 0xBB]
         );
+        // A strip's number and whether it ends a frame ride in the flags.
+        let flags = |strip, keyframe| {
+            let mut out = Vec::new();
+            VideoUnit { strip: Some(strip), keyframe, ..unit.clone() }.write_record(&mut out);
+            out[1]
+        };
+        assert_eq!(flags(Strip { index: 0, ends: true }, true), 0x13);
+        assert_eq!(flags(Strip { index: 3, ends: false }, false), 0x0E);
+        assert_eq!(flags(Strip { index: 2, ends: true }, false), 0x1A);
     }
 
     /// What a payload is owed is said once, wherever the payload ends, and a copy of

@@ -263,7 +263,7 @@ mod tests {
         if let Some(first) = data.first_mut() {
             *first = seed;
         }
-        ServerMsg::Video(VideoUnit { w: 1600, h: 1000, keyframe, data, held: Held::default() })
+        ServerMsg::Video(VideoUnit { w: 1600, h: 1000, strip: None, keyframe, data, held: Held::default() })
     }
 
     fn resize() -> ServerMsg {

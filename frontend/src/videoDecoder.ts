@@ -32,10 +32,12 @@
 // time, so there is never a later frame to shake the FIFO loose. Hence the backstop below, which is what makes the promise
 // this file hands out a promise rather than a hope.
 
+import type { VideoStrip } from "./protocol.ts";
 import {
   createSoftwareDecoder,
   type DecodedPicture,
   MODULE_CODEC,
+  type PictureStrip,
   softwareModuleFor,
   type VideoDecoderLike,
   type VideoDecoderLikeInit,
@@ -82,6 +84,8 @@ export interface DesktopVideo {
     size: { w: number; h: number },
     data: Uint8Array,
     keyframe: boolean,
+    /** Which strip of the picture the unit is, where it is not the whole of it. */
+    strip?: VideoStrip,
   ) => Promise<DecodedPicture | null>;
   /**
    * Cut the chain: drop the decoder but keep the format, so the next unit builds a
@@ -246,7 +250,7 @@ export function createDesktopVideo(
         dropDecoder();
       }
     },
-    decode(size, data, keyframe) {
+    decode(size, data, keyframe, strip) {
       if (!format) {
         // **Dropped, and that is correct rather than defensive.** It happens on a
         // reattach: the gateway announces the stream once, to whoever was attached,
@@ -266,7 +270,12 @@ export function createDesktopVideo(
         return Promise.resolve(null);
       }
       held.timestamp += VIDEO_FRAME_US;
-      return held.stream.decode(data, held.timestamp, keyframe);
+      return held.stream.decode(
+        data,
+        held.timestamp,
+        keyframe,
+        strip && { ...strip, rows: size.h },
+      );
     },
     restart() {
       dropDecoder();
@@ -334,6 +343,8 @@ export interface VideoStream {
     data: Uint8Array,
     timestamp: number,
     keyframe: boolean,
+    /** Which strip of a picture of how many rows the unit is, where it is one. */
+    strip?: PictureStrip,
   ) => Promise<DecodedPicture | null>;
   /** Drop the decoder. Everything still pending resolves to null. */
   close: () => void;
@@ -511,7 +522,7 @@ export function createVideoStream(
   });
 
   return {
-    decode(data, timestamp, keyframe) {
+    decode(data, timestamp, keyframe, strip) {
       if (closed || decoder.state !== "configured") {
         return Promise.resolve(null);
       }
@@ -530,6 +541,7 @@ export function createVideoStream(
             type: keyframe ? "key" : "delta",
             data: data as Uint8Array<ArrayBuffer>,
           }),
+          strip,
         );
       } catch (e) {
         // A chunk the decoder refused outright was never consumed, so the chain is cut

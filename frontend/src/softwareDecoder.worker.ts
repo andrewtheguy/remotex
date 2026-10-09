@@ -13,12 +13,20 @@
 // shared, and the paint worker uploads them to the GPU from there
 // (planesPicture.ts). The decoder holds a picture until its next unit is put in,
 // so that unit waits here until the paint worker has released the picture.
+//
+// A High Performance Mac's picture may come in four strips, each a unit, a frame
+// being the strips that changed. The HEVC module puts the picture together, and
+// it is shown a frame at a time, not a strip at a time: a strip is answered with
+// the picture where the gateway says it is its frame's last, and with none
+// otherwise. No answer waits for the unit after it, which the paint worker sends
+// only once this one is answered.
 
 import {
   type DecodedPlanes,
   type DecoderCommand,
   type DecoderEvent,
   MODULE_CODEC,
+  type PictureStrip,
   type SoftwareModule,
 } from "./softwareDecoder.ts";
 import {
@@ -211,6 +219,17 @@ async function destroy(id: number): Promise<void> {
   decoder?.free();
 }
 
+/**
+ * Answer a unit with its picture, and wait for the paint worker to have read
+ * it: the decoder writes over the picture with its next unit, and frees it with
+ * its end.
+ */
+async function show(id: number, picture: DecodedPlanes): Promise<void> {
+  const released = new Promise<void>((resolve) => held.set(id, resolve));
+  scope.postMessage({ type: "decoded", id, picture });
+  await released;
+}
+
 async function decode(
   command: Extract<DecoderCommand, { type: "decode" }>,
 ): Promise<void> {
@@ -232,6 +251,7 @@ async function decode(
     decoder.free();
     failed(id, name, message);
   };
+  const { strip } = command;
   const size = command.data.byteLength;
   const input = decoder.input(size);
   new Uint8Array(module.memory.buffer, input, size).set(
@@ -239,7 +259,7 @@ async function decode(
   );
   let completed: boolean;
   try {
-    completed = decoder.decode();
+    completed = strip ? decodeStrip(decoder, strip) : decoder.decode();
   } catch (e) {
     fail(
       "EncodingError",
@@ -247,20 +267,26 @@ async function decode(
     );
     return;
   }
-  if (!completed) {
-    scope.postMessage({ type: "decoded", id, picture: null });
-    return;
-  }
-  const planes = picture(module, decoder);
+  // A strip that is not its frame's last leaves the picture between two frames.
+  const planes =
+    completed && (!strip || strip.ends) ? picture(module, decoder) : null;
   if (typeof planes === "string") {
     fail("NotSupportedError", planes);
     return;
   }
-  // The decoder frees the picture with its next unit, and with its end: neither
-  // is started until the paint worker has read it.
-  const released = new Promise<void>((resolve) => held.set(id, resolve));
-  scope.postMessage({ type: "decoded", id, picture: planes });
-  await released;
+  if (!planes) {
+    scope.postMessage({ type: "decoded", id, picture: null });
+    return;
+  }
+  await show(id, planes);
+}
+
+/** Decode the unit written as a strip, which only the HEVC module does. */
+function decodeStrip(decoder: ModuleDecoder, strip: PictureStrip): boolean {
+  if (!decoder.decodeStrip) {
+    throw new Error(`the ${codec()} decoder takes no picture in strips`);
+  }
+  return decoder.decodeStrip(strip.index, strip.rows);
 }
 
 function handle(command: DecoderCommand): Promise<void> {

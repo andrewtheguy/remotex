@@ -398,6 +398,7 @@ impl Round {
         produced.unit = Some(VideoUnit {
             w,
             h,
+            strip: None,
             keyframe: unit.keyframe,
             data: unit.data,
             held: Held::default(),
@@ -436,6 +437,8 @@ pub struct Passed {
     /// The configuration string a decoder for it is built with.
     pub decode: String,
     pub keyframe: bool,
+    /// Which strip of the picture it is, where it is not the whole of it.
+    pub strip: Option<crate::protocol::Strip>,
 }
 
 /// The frame rate a passed stream's level is figured at: wlshare's own default ceiling,
@@ -462,7 +465,7 @@ pub fn pass(w: u16, h: u16, frame: &[u8], chroma: Chroma) -> anyhow::Result<Pass
     crate::video::check_picture((w, h))?;
     let decode = crate::vp9::codec_string(w, h, chroma, PASSED_FPS)
         .ok_or_else(|| anyhow::anyhow!("no VP9 level covers a {w}x{h} picture"))?;
-    Ok(Passed { decode, keyframe: header.keyframe })
+    Ok(Passed { decode, keyframe: header.keyframe, strip: None })
 }
 
 #[cfg(test)]

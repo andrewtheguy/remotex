@@ -60,6 +60,53 @@ test("a graphics record is its commands, whole, among the records around it", ()
   assert.equal(decodeBatchFrame(empty), null);
 });
 
+test("a video record's flags say a keyframe, and which strip of its picture it is", () => {
+  // Transcribed from `VideoUnit::write_record` in src/protocol.rs: op 0x03, flags,
+  // the size and the length little-endian, the unit.
+  const record = (flags: number) =>
+    decodeBatchFrame(
+      new Uint8Array([
+        0x02,
+        0x00,
+        0x01,
+        0x00,
+        0x05,
+        0x00,
+        0x00,
+        0x00,
+        0x03,
+        flags,
+        0xa0,
+        0x05,
+        0x84,
+        0x03,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0xee,
+      ]).buffer,
+    )?.[0];
+  assert.deepEqual(record(0x01), {
+    kind: "video",
+    w: 1440,
+    h: 900,
+    keyframe: true,
+    data: new Uint8Array([0xee]),
+  });
+  const strip = (flags: number) => {
+    const unit = record(flags);
+    return unit?.kind === "video" ? [unit.keyframe, unit.strip] : unit;
+  };
+  assert.deepEqual(strip(0x13), [true, { index: 0, ends: true }]);
+  assert.deepEqual(strip(0x0e), [false, { index: 3, ends: false }]);
+  assert.deepEqual(strip(0x1a), [false, { index: 2, ends: true }]);
+  // A strip's number or frame on a unit that is no strip, and a bit not known.
+  assert.equal(record(0x04), undefined);
+  assert.equal(record(0x10), undefined);
+  assert.equal(record(0x22), undefined);
+});
+
 test("an ordinary click run is passed through as the browser counted it", () => {
   assert.equal(clickCount(1), 1);
   assert.equal(clickCount(2), 2);
