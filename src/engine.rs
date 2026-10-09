@@ -278,6 +278,7 @@ mod tests {
             rdp_graphics: false,
             rdp_h264: false,
             software: Default::default(),
+            capture: None,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         (VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse), frame_rx)

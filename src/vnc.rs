@@ -1780,6 +1780,8 @@ impl BesidePlan {
     ) -> Beside {
         let (input, input_rx) = mpsc::unbounded_channel();
         let BesidePlan { config, choices, display: screen } = self.clone();
+        // `--vp9-capture` keeps the first display alone.
+        let plan = plan.captured(None);
         let oversize = if choices.resize() { Oversize::Refuse } else { Oversize::Hold };
         // On a thread and a runtime of its own, as the session's engine is on
         // its: a session's future is not one a runtime may move between threads.
@@ -1787,7 +1789,7 @@ impl BesidePlan {
         let spawned = std::thread::Builder::new().name("vnc-display".into()).spawn(move || {
             match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(runtime) => runtime.block_on(async {
-                    let sink = VideoSink::new("vnc", feed.frames, plan, feed.feedback, oversize);
+                    let sink = VideoSink::new("vnc", feed.frames, plan.clone(), feed.feedback, oversize);
                     session(config, choices, screen, plan, input_rx, None, None, None, true, &sink).await;
                     sink.finish().await;
                 }),
@@ -1994,7 +1996,7 @@ pub async fn run(
     // Every browser is sent wlshare's own VP9 as it comes when the server is wlshare,
     // asked for at the plan's chroma, dial and walk; any other server is encoded here
     // from ZRLE. A session started with the Mac's stream passed is sent its HEVC.
-    let sink = VideoSink::new("vnc", frame_tx, plan, feedback, oversize);
+    let sink = VideoSink::new("vnc", frame_tx, plan.clone(), feedback, oversize);
     session(config, choices, display, plan, input_rx, audio, camera, microphone, false, &sink).await;
     sink.finish().await;
 }
@@ -2051,7 +2053,7 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        |stream| connect(&config, choices, display, plan, beside, stream),
+        |stream| connect(&config, choices, display, plan.clone(), beside, stream),
     )
     .await
     else {
@@ -3194,7 +3196,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         if let (Some(feed), Some(start), true) = (feed, &beside_plan, listed && shown == BESIDE_DISPLAY) {
                             info!("vnc: showing display {shown} in a tab of its own, on a connection of its own");
                             besides += 1;
-                            beside = Some(start.start(besides, shown, feed, plan, beside_ended.clone()));
+                            beside = Some(start.start(besides, shown, feed, plan.clone(), beside_ended.clone()));
                         }
                         continue;
                     }
@@ -3219,7 +3221,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         continue;
                     }
                     ClientMsg::DisplayShown { display, feed } => {
-                        hp_tab_shown(&shared_here, display, feed, plan, macos).await;
+                        hp_tab_shown(&shared_here, display, feed, plan.clone(), macos).await;
                         continue;
                     }
                     other => other,
@@ -6508,7 +6510,8 @@ async fn hp_tab_shown(
     info!("vnc: showing display {display} in a tab of its own");
     *shared.tab.lock().unwrap() = Some(TabFeed {
         display,
-        sink: VideoSink::new("vnc", feed.frames, plan, feed.feedback, Oversize::Refuse),
+        // `--vp9-capture` keeps the first display alone.
+        sink: VideoSink::new("vnc", feed.frames, plan.captured(None), feed.feedback, Oversize::Refuse),
         shadow: Arc::new(std::sync::Mutex::new(Shadow::new("vnc", shown.size.0, shown.size.1))),
         live: false,
         covered: true,
@@ -8511,12 +8514,12 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() };
+        let walked = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default(), capture: None };
         assert_eq!(
             with_wlshare_vp9(&rest, walked),
             [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_SUBSAMPLED, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
         );
-        let held = RenderPlan { quality: 90, adaptive: false, chroma: Chroma::Full, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() };
+        let held = RenderPlan { quality: 90, adaptive: false, chroma: Chroma::Full, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default(), capture: None };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -9729,6 +9732,7 @@ mod tests {
             rdp_graphics: false,
             rdp_h264: false,
             software: Default::default(),
+            capture: None,
         };
         Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
     }
@@ -9765,6 +9769,7 @@ mod tests {
             rdp_graphics: false,
             rdp_h264: false,
             software: Default::default(),
+            capture: None,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Refuse);
         // Larger than any desktop these tests paint, so a rectangle lands in the
@@ -12356,9 +12361,9 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Full, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Full, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default(), capture: None };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
-        let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
+        let sink = VideoSink::new("vnc", frame_tx, plan.clone(), feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
         let mut shared = test_shared(uplink, shared_desktop(small, None, None), test_shadow(small));
         let encodings = wlshare_encoding_list(None, false, false);
@@ -12816,6 +12821,7 @@ mod tests {
             rdp_graphics: false,
             rdp_h264: false,
             software: Default::default(),
+            capture: None,
         };
         let feed = || {
             let (frames, rx) = mpsc::channel(8);
@@ -12830,7 +12836,7 @@ mod tests {
         // No tab while one display is chosen: the list names none.
         hp_select(&shared, 0, &sink, false).await.unwrap();
         let (early, _early_rx) = feed();
-        hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(early), plan, true).await;
+        hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(early), plan.clone(), true).await;
         assert!(shared.tab.lock().unwrap().is_none());
 
         hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
@@ -12958,7 +12964,7 @@ mod tests {
     async fn all_displays_over_three_screens_is_held() {
         let (uplink, _sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default(), capture: None };
         let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), Oversize::Hold);
         let shared = test_shared(uplink, shared_desktop((1280, 800), None, None), test_shadow((1280, 800)));
         let screens: [TestScreen; 3] = [

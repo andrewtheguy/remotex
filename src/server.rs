@@ -221,7 +221,11 @@ pub fn router(
     throughput: Throughput,
     hevc_decoder: Option<HevcDecoder>,
 ) -> Router {
-    let sessions = Arc::new(SessionManager::new(config.targets.clone(), page_decoders(&config, hevc_decoder.as_ref())));
+    let sessions = Arc::new(SessionManager::new(
+        config.targets.clone(),
+        page_decoders(&config, hevc_decoder.as_ref()),
+        config.vp9_capture.as_deref().map(Arc::from),
+    ));
     router_with_sessions(config, sessions, throughput, hevc_decoder)
 }
 
@@ -1122,6 +1126,7 @@ mod tests {
             meter: None,
             hevc_wasm: None,
             vp9_wasm: false,
+            vp9_capture: None,
             hp_decoders: Default::default(),
         }
     }
@@ -1434,6 +1439,7 @@ mod tests {
             meter: None,
             hevc_wasm: None,
             vp9_wasm: false,
+            vp9_capture: None,
             hp_decoders: Default::default(),
         };
 

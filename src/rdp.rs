@@ -166,7 +166,7 @@ pub async fn run(
     uplinks: Uplinks,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
+    let sink = VideoSink::new("rdp", frame_tx, plan.clone(), feedback, Oversize::Refuse);
     session(config, choices, plan, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
@@ -214,7 +214,7 @@ async fn session(
         choices,
         states_density(sizing, display),
         opening,
-        plan,
+        plan.clone(),
         audio,
         &uplinks,
     ));
@@ -1863,7 +1863,8 @@ async fn active_loop(
                                 sink: Arc::new(VideoSink::new(
                                     "rdp",
                                     feed.frames,
-                                    plan,
+                                    // `--vp9-capture` keeps the first display alone.
+                                    plan.clone().captured(None),
                                     feed.feedback,
                                     Oversize::Refuse,
                                 )),
@@ -2823,6 +2824,7 @@ mod tests {
             rdp_graphics: false,
             rdp_h264: false,
             software: Default::default(),
+            capture: None,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse);

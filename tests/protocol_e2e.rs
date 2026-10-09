@@ -1186,6 +1186,7 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         meter: None,
         hevc_wasm: None,
         vp9_wasm: false,
+        vp9_capture: None,
         hp_decoders: Default::default(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

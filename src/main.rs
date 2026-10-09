@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { config, listen } => {
+        Commands::Serve { config, listen, vp9_capture } => {
             // The listen address is the one thing a deployment says outside the
             // file — `--listen`, or `REMOTEX_LISTEN` for a container that has an
             // environment but no argv to edit. Everything else comes from the
@@ -32,11 +32,12 @@ async fn main() -> anyhow::Result<()> {
             info!("remotex {}, features: {}", env!("CARGO_PKG_VERSION"), remotex::cli::features_line());
             let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
-            let config = file.resolve_with(
+            let mut config = file.resolve_with(
                 listen.as_deref(),
                 &remotex::config::state_dir(&path),
                 &remotex::config::data_dir(path.parent().unwrap_or(std::path::Path::new(""))),
             )?;
+            config.vp9_capture = vp9_capture;
             serve(config).await?;
         }
         #[cfg(feature = "embedded-gateway")]
@@ -159,6 +160,9 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         .context("cannot record websocket throughput ([meter].database)")?;
     let hevc_decoder = load_hevc_decoder(&config)?;
     config.hp_decoders.load()?;
+    if let Some(dir) = &config.vp9_capture {
+        remotex::vp9_capture::prepare(dir)?;
+    }
     let app = server::router(config.clone(), throughput, hevc_decoder);
 
     // One server per listener over the same router — `Router` is `Clone`, and the
