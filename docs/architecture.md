@@ -425,6 +425,9 @@ that selects the stream. See
   the picture: `/api/targets` says so, the picker shows the passthrough as
   chosen, and a session started without it all the same ends before it dials
   the Mac.
+  A session that decodes the picture is offered it as Apple's viewer is, in
+  four strips the one decoder puts together; a passed one is offered a single
+  picture, which is what the browser's decoder shows.
   The media stream alone is the picture: ZRLE is stepped over unread and never
   encoded, and the page says the screen is not available until the stream sends
   the display's first picture.

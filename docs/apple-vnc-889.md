@@ -1105,12 +1105,12 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
 
 Each offer is a binary property list of four keys around a deflated
 AVConference protobuf. Remotex rebuilds Apple's offers field by field and changes
-two fields:
+one field, and a second in a session that passes the picture:
 
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
-| `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips. Each strip is coded as a separate picture and sent as an RTP stream of its own, with a DONL: its SSRC is the display's plus the strip's number, counted from 0. One tile is one picture of the whole display on the one SSRC, without DONL. |
+| `tilesPerFrame` (video stream field 6) | 4 | 4 decoded here, 1 passed | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together. One tile is one picture of the whole display on the one SSRC, which is what a browser's decoder is passed. |
 
 The video offer names two codecs by their RTP payload numbers, 123 for H.264
 and 100 for HEVC, each with its own feature string. Offered both, the Mac sends
@@ -1167,10 +1167,12 @@ other failures (see [Liveness](#the-stream)).
   `0x9311` or `0x9301` holding the picture's packet count and a frame counter.
   The profile is `0x9331` on a refresh picture (below), and that bit is all
   remotex reads of it. The marker bit ends a picture. RFC 7798 packetization:
-  single NAL units, aggregation packets, fragmentation units.
+  single NAL units, aggregation packets, fragmentation units. A stream of
+  four tiles differs: see [In strips](#in-strips).
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
   transfer, Display P3 primaries, with wavefront parallel processing
-  (`entropy_coding_sync_enabled_flag`) and no tiles. libavcodec (FFmpeg 9.0.2,
+  (`entropy_coding_sync_enabled_flag`) and no HEVC tiles, whatever
+  `tilesPerFrame` is. libavcodec (FFmpeg 9.0.2,
   the prebuilt one configured down to the HEVC decoder) decodes it. Remotex
   gives the decoder four slice threads, which decode a picture's rows in
   parallel; frame threads would hold each picture back. On macOS the decoder
@@ -1238,8 +1240,8 @@ other failures (see [Liveness](#the-stream)).
     PLI's and an RFC 5104 FIR's came at about 110 KB, on a 1600×1000 display
     the encoder had spent seconds refining. The request is subject to the
     least gap above. A PLI and a FIR bring an IDR whatever was acknowledged.
-  - **Remotex acknowledges every picture it hands on,** to its decoder or to
-    the browser, and after lost packets asks for a refresh and drops pictures
+  - **Remotex acknowledges every picture of a stream of one tile that it
+    hands on,** and after lost packets asks for a refresh and drops pictures
     until the marked one or an IDR. With 0.3% of the picture's packets dropped
     on the way to a gateway decoding the stream, the Mac's encoder logged three
     refreshes and no IDR after the stream's first, and no picture failed to
@@ -1248,7 +1250,7 @@ other failures (see [Liveness](#the-stream)).
   - **Remotex sends a PLI** where whoever is shown the stream has nothing left
     to predict from: when a stream starts without an IDR (the first packets
     can arrive before the socket is bound), when a picture fails to decode,
-    when the decoder falls eight pictures behind, which it warns about, and
+    when the decoder falls eight frames behind, which it warns about, and
     when a display comes back into view; for a passed stream, when the
     browser's link falls 15 behind and when the browser has to start over. It
     sends either request again every 500 ms until a picture it can go on from
@@ -1271,6 +1273,61 @@ other failures (see [Liveness](#the-stream)).
   until its own offer, except the answer to an offer still out. When the Mac
   names its ports and nothing arrives within 5 s, the log names the port and the
   likely firewall or NAT.
+
+
+#### In strips
+
+Offered `tilesPerFrame` 4, as Apple's viewer offers it, the Mac answers 4 and
+sends the display in four strips. Seen on the virtual Mac, at 1280×800,
+1440×900, 1600×1000 and 1920×1080.
+
+- **The strips.** Each is the display's whole width and a quarter of its
+  height rounded up to a multiple of 16: 208, 240, 256 and 272 rows at those
+  four sizes. They lie top to bottom a strip's height apart, so the last runs
+  past the display's last row, and what it holds there is not picture. The
+  parameter sets give the strip's size and declare no cropping.
+- **One SSRC a strip.** A strip's pictures come under the display's SSRC plus
+  the strip's number, from 0, on the display's port and under its key, each
+  SSRC with sequence numbers of its own, and so a rollover counter of its own.
+  The strips of one frame share its timestamp and the header extension's frame
+  counter, and the marker bit ends each strip's picture.
+- **Only what changed.** A frame carries the strips that changed and no
+  others. Under a moving pointer and a clock, 112 of 648 frames carried all
+  four. Nothing in a packet says how many strips a frame has.
+- **One HEVC stream.** The strips share one set of parameter sets and one
+  decoding order.
+  Every packet carries a 16-bit decoding order number, which counts each
+  strip's picture across all four SSRCs without a gap, and a picture's order
+  count is its place in that order. Merged in that order the pictures decode
+  as one stream of strip-sized pictures, which is how remotex decodes them: one
+  decoder, each picture placed by the SSRC it came under.
+- **Strips predict from each other at a keyframe.** A keyframe is an IDR of
+  strip 0 followed by an intra picture of each other strip, not an IDR, at
+  the same timestamp. After it a strip's pictures name two earlier ones of the
+  same strip, but among the first eight pictures of a stream nine references
+  named another strip's. Strip 1 decoded on its own carried a grey band from
+  its second picture to the end of a 15 s capture that decoded clean as one
+  stream. Four decoders, one a strip, do not decode it.
+- **The numbers are not laid out as RFC 7798 says.** An aggregation packet has
+  one `DONL`, after the payload header, and no `DOND` between its units. Every
+  fragment of a fragmented unit has the `DONL` after its FU header, not the
+  first fragment alone.
+- **No refresh pictures.** The parameter sets declare no long-term reference
+  pictures (`long_term_ref_pics_present_flag` 0), which is what a refresh
+  predicts from in a stream of one tile. A PLI sent as SRTCP brought the
+  keyframe above in 28 ms; one sent in the clear, in another run, brought
+  nothing.
+- **Remotex takes any gap as the loss of everything since the last keyframe.**
+  A packet missing from one strip's sequence, or a picture missing from the
+  decoding order, drops every strip's pictures until strip 0's next IDR, and a
+  PLI asks for it. It sends no acknowledgement and asks for no refresh.
+- **The display is shown a frame at a time.** The gateway holds a frame's
+  strips until it has all four for one timestamp, a strip of the next frame
+  arrives, or 8 ms pass with no strip: the Mac codes a frame's strips one after
+  another, and they arrived up to 7 ms apart.
+- **A passed stream is not offered strips.** A browser's `VideoDecoder` shows
+  each picture it decodes as the display, so the passthrough still offers one
+  tile.
 
 ### Rate control
 
@@ -1482,8 +1539,10 @@ is 10 s overdue.
 - **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers
   the target over longer than 30 s, and whether any offer field lowers the
   20 Mbit/s floor ([Rate control](#rate-control)).
-- **Four-tile frames**: how tall each strip is, and whether one strip's
-  pictures predict from another's.
+- **Four-tile frames**: what Apple's viewer acknowledges a tile picture with,
+  and whether anything short of a keyframe mends a loss; a stream of them
+  under loss, on a physical Mac, at 4K, and passed to a browser
+  ([In strips](#in-strips)).
 - **Cases the test Mac could not show:**
   - a non-console user;
   - hardware mirroring;

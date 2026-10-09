@@ -49,16 +49,18 @@
 //! - the flags word carries [`FLAG_NO_CURSOR`], which makes the agent capture the
 //!   screen without the pointer (`send cursor with video 0`) — the pointer keeps
 //!   arriving as its own shape over RFB;
-//! - `tilesPerFrame` is 1, so each picture is one HEVC picture of the whole
-//!   display; Apple's 4 splits it into strips coded as separate pictures.
+//! - `tilesPerFrame` is 1 for a stream passed to the browser, so each picture is
+//!   one HEVC picture of the whole display. A stream decoded here is offered
+//!   Apple's 4, which codes the display as four strips ([`Strips`]).
 //!
 //! Its bitrate entries are Apple's, and so is what bounds them: the Mac's rate
 //! controller walks the picture between 20 and 60 Mbit/s by the one-way delay this
 //! side reports ([`RateFeedback`]), every 50 ms as Apple's viewer does.
 //!
 //! The stream itself is HEVC Range Extensions, 4:4:4, full-range BT.709, RTP payload
-//! type 100 packed as RFC 7798 without DONL: single NAL units, aggregation packets
-//! and fragmentation units. [`Depacketizer`] reassembles access units from it, and a
+//! type 100 packed as RFC 7798: single NAL units, aggregation packets and
+//! fragmentation units, with decoding order numbers only where the display comes in
+//! strips ([`Strips`]). [`Depacketizer`] reassembles access units from it, and a
 //! lost packet costs a refresh ([`rtcp_refresh`]): a picture the Mac predicts from
 //! one this side acknowledged ([`rtcp_reference_ack`]), in place of an IDR. Where
 //! nothing is left to predict from, a PLI ([`rtcp_pli`]) brings an IDR within tens
@@ -179,8 +181,10 @@ const CODEC_ENTRIES: &[(u64, u64, Option<u64>)] = &[
     (0, 6_000_000, Some(131_072)),
 ];
 
-/// The screen-video stream's `tilesPerFrame`: one picture per frame.
-const TILES_PER_FRAME: u64 = 1;
+/// The strips Apple's own `tilesPerFrame` of 4 codes a display in, which a stream
+/// decoded here is offered. A stream passed to the browser is offered 1: one
+/// picture of the whole display, which is what a `VideoDecoder` there shows.
+const STRIPS: usize = 4;
 
 /// Minimal protocol-buffers writer: varints and length-delimited fields are the
 /// whole of what the offers use.
@@ -473,6 +477,8 @@ struct Offers {
     /// Each display's video leg, in the Mac's order: its first virtual display,
     /// then its second.
     videos: Vec<VideoOffer>,
+    /// The `tilesPerFrame` every video offer asks for: [`STRIPS`] or 1.
+    tiles: usize,
 }
 
 /// One video leg's keys, and this side's SSRC on it.
@@ -482,8 +488,9 @@ struct VideoOffer {
 }
 
 impl Offers {
-    /// For `displays` virtual displays, a video leg each.
-    fn new(displays: usize) -> Self {
+    /// For `displays` virtual displays, a video leg each, of `tiles` pictures to
+    /// a frame.
+    fn new(displays: usize, tiles: usize) -> Self {
         let key = || {
             let mut k = [0u8; 46];
             rand::fill(&mut k[..]);
@@ -500,6 +507,7 @@ impl Offers {
             audio_keys,
             audio_ssrc: rand::random(),
             videos,
+            tiles,
         }
     }
 
@@ -512,7 +520,7 @@ impl Offers {
             .iter()
             .zip(sizes)
             .map(|(video, size)| {
-                offer(MODE_VIDEO, &video_offer_blob(video.ssrc, *size, TILES_PER_FRAME), &self.call_id)
+                offer(MODE_VIDEO, &video_offer_blob(video.ssrc, *size, self.tiles as u64), &self.call_id)
             })
             .collect();
         let videos: Vec<(&[u8], &KeyPair)> =
@@ -732,28 +740,27 @@ fn rtp_header(data: &[u8]) -> Result<RtpHeader, SrtpError> {
     })
 }
 
-/// The receiving side of one SRTP stream: its session keys, and the rollover
+/// The receiving side of one leg's SRTP: its session keys, and the rollover
 /// counter that extends a 16-bit sequence number to a packet index.
 pub struct SrtpReceiver {
     keys: SessionKeys,
-    /// The highest sequence number authenticated so far, and its rollover counter.
-    /// Reset when the SSRC changes: every offer starts a stream with a new one.
-    last: Option<(u32, u16, u32)>,
+    /// For each SSRC, the highest sequence number authenticated so far and its
+    /// rollover counter. A picture in strips comes under an SSRC for each, with
+    /// sequence numbers of its own, and every offer starts a stream with new ones:
+    /// the [`STRIPS`] heard from most recently are kept, the newest last.
+    last: Vec<(u32, u16, u32)>,
 }
 
 impl SrtpReceiver {
     pub fn new(master: &MasterKey) -> Self {
-        Self { keys: SessionKeys::derive(master, 0), last: None }
+        Self { keys: SessionKeys::derive(master, 0), last: Vec::with_capacity(STRIPS) }
     }
 
     /// RFC 3711 Appendix A: the rollover counter `seq` most likely belongs to.
     fn guess_roc(&self, ssrc: u32, seq: u16) -> u32 {
-        let Some((last_ssrc, last_seq, roc)) = self.last else {
+        let Some(&(_, last_seq, roc)) = self.last.iter().find(|(last, ..)| *last == ssrc) else {
             return 0;
         };
-        if last_ssrc != ssrc {
-            return 0;
-        }
         if last_seq < 0x8000 {
             if seq.wrapping_sub(last_seq) > 0x8000 && seq > last_seq { roc.wrapping_sub(1) } else { roc }
         } else if seq < last_seq.wrapping_sub(0x8000) {
@@ -779,16 +786,19 @@ impl SrtpReceiver {
             return Err(SrtpError::Forged);
         }
         let index = (u64::from(roc) << 16) | u64::from(header.sequence);
-        let newer = match self.last {
-            Some((ssrc, seq, last_roc)) if ssrc == header.ssrc => index > (u64::from(last_roc) << 16 | u64::from(seq)),
-            _ => true,
-        };
-        if !newer {
-            return Err(SrtpError::Stale);
+        let known = self.last.iter().position(|(ssrc, ..)| *ssrc == header.ssrc);
+        if let Some(at) = known {
+            let (_, seq, last_roc) = self.last[at];
+            if index <= (u64::from(last_roc) << 16 | u64::from(seq)) {
+                return Err(SrtpError::Stale);
+            }
+            self.last.remove(at);
+        } else if self.last.len() == STRIPS {
+            self.last.remove(0);
         }
         let iv = self.keys.iv(header.ssrc, index);
         aes_ctr_xor(&self.keys.cipher, iv, &mut data[header.payload.0..end]);
-        self.last = Some((header.ssrc, header.sequence, roc));
+        self.last.push((header.ssrc, header.sequence, roc));
         Ok(header)
     }
 }
@@ -1021,7 +1031,7 @@ impl OneWayDelay {
 }
 
 // ---------------------------------------------------------------------------
-// HEVC over RTP (RFC 7798, without DONL)
+// HEVC over RTP (RFC 7798)
 // ---------------------------------------------------------------------------
 
 /// The NAL unit type of a two-byte HEVC NAL header's first byte.
@@ -1055,26 +1065,174 @@ pub enum Depacketized {
     Lost,
 }
 
-/// Access units out of a run of RTP payloads.
+/// One picture's packets, put back together: the reassembly under both
+/// [`Depacketizer`] and [`Strips`], which each decide what a whole picture is
+/// worth where it stands in its stream.
 ///
 /// A picture ends at the packet with the marker bit, or where the timestamp moves
-/// on. A gap in the sequence numbers drops the picture it fell in and everything
-/// after it until an IRAP picture or one the Mac marks as a refresh arrives,
-/// because every other picture predicts from one that was lost.
+/// on. A gap in the sequence numbers damages the picture it fell in.
 #[derive(Default)]
-pub struct Depacketizer {
-    ssrc: Option<u32>,
+struct Reassembler {
+    /// Whether the payloads carry decoding order numbers, as a stream in strips
+    /// does, and not as RFC 7798 lays them out: an aggregation packet has the one
+    /// number, with none between its units, and every fragment of a unit has it,
+    /// not the first alone.
+    donl: bool,
     next_sequence: Option<u16>,
     timestamp: Option<u32>,
     unit: AccessUnit,
     fragment: Option<Vec<u8>>,
     /// The current picture lost a packet.
     damaged: bool,
+    /// The current picture carries the Mac's refresh mark.
+    refresh: bool,
+    /// The current picture's decoding order number, which each of its packets
+    /// carries.
+    don: Option<u16>,
+}
+
+/// What one packet did to the picture in flight.
+struct Pushed {
+    /// Packets before this one never came.
+    lost: bool,
+    /// The picture the packet ended, if every packet of it came.
+    whole: Option<Whole>,
+}
+
+/// A picture every packet of which came.
+struct Whole {
+    unit: AccessUnit,
+    refresh: bool,
+    don: Option<u16>,
+}
+
+impl Reassembler {
+    fn numbered() -> Self {
+        Self { donl: true, ..Self::default() }
+    }
+
+    /// Take one packet. `None` for a duplicate, or a late one whose picture has
+    /// gone.
+    fn push(&mut self, header: &RtpHeader, payload: &[u8]) -> Option<Pushed> {
+        let mut lost = false;
+        if let Some(expected) = self.next_sequence {
+            let ahead = header.sequence.wrapping_sub(expected);
+            if ahead >= 0x8000 {
+                return None;
+            }
+            lost = ahead != 0;
+        }
+        self.next_sequence = Some(header.sequence.wrapping_add(1));
+        if self.timestamp.is_some_and(|ts| ts != header.timestamp) && (self.damaged || !self.unit.is_empty()) {
+            // The previous picture's last packet (the marked one) never came.
+            self.damaged = true;
+            self.finish();
+        }
+        self.damaged |= lost;
+        self.timestamp = Some(header.timestamp);
+        self.refresh |= header.refresh;
+        self.parse(payload);
+        let whole = if header.marker { self.finish() } else { None };
+        Some(Pushed { lost, whole })
+    }
+
+    fn parse(&mut self, payload: &[u8]) {
+        // The number sits after the payload header, and in a fragment after the
+        // fragment header that follows it.
+        let numbered = if self.donl { 2 } else { 0 };
+        if payload.len() < 2 {
+            self.damaged = true;
+            return;
+        }
+        let kind = nal_type(payload[0]);
+        let body = if kind == NAL_FU { 3 } else { 2 };
+        let Some(rest) = payload.get(body + numbered..) else {
+            self.damaged = true;
+            return;
+        };
+        if self.donl {
+            self.don.get_or_insert(u16::from_be_bytes([payload[body], payload[body + 1]]));
+        }
+        match kind {
+            NAL_AP => {
+                let mut rest = rest;
+                while rest.len() >= 2 {
+                    let size = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+                    if size < 2 || rest.len() < 2 + size {
+                        self.damaged = true;
+                        return;
+                    }
+                    self.unit.push(rest[2..2 + size].to_vec());
+                    rest = &rest[2 + size..];
+                }
+            }
+            NAL_FU => {
+                let fu = payload[2];
+                let (start, end, kind) = (fu & 0x80 != 0, fu & 0x40 != 0, fu & 0x3f);
+                if start {
+                    let mut nal = vec![(payload[0] & 0x81) | (kind << 1), payload[1]];
+                    nal.extend_from_slice(rest);
+                    self.fragment = Some(nal);
+                } else if let Some(nal) = self.fragment.as_mut() {
+                    nal.extend_from_slice(rest);
+                } else {
+                    self.damaged = true;
+                    return;
+                }
+                if end && let Some(nal) = self.fragment.take() {
+                    self.unit.push(nal);
+                }
+            }
+            _ => {
+                let mut nal = payload[..2].to_vec();
+                nal.extend_from_slice(rest);
+                self.unit.push(nal);
+            }
+        }
+    }
+
+    /// Pass over a packet, keeping in step with the stream: the sequence number
+    /// and the picture in flight are known when its packets are wanted again, so
+    /// the first one pushed is neither read as a duplicate nor taken for the
+    /// start of a picture it is the middle of. Whether the packet was one to
+    /// pass over, and not a duplicate or a late one.
+    fn skip(&mut self, header: &RtpHeader) -> bool {
+        if self.next_sequence.is_some_and(|expected| header.sequence.wrapping_sub(expected) >= 0x8000) {
+            return false;
+        }
+        *self = Self {
+            donl: self.donl,
+            next_sequence: Some(header.sequence.wrapping_add(1)),
+            timestamp: Some(header.timestamp),
+            damaged: !header.marker,
+            ..Self::default()
+        };
+        true
+    }
+
+    /// Close the current picture: it, if it is whole.
+    fn finish(&mut self) -> Option<Whole> {
+        let unit = std::mem::take(&mut self.unit);
+        let damaged = std::mem::take(&mut self.damaged) || self.fragment.take().is_some();
+        let refresh = std::mem::take(&mut self.refresh);
+        let don = self.don.take();
+        (!damaged && !unit.is_empty()).then_some(Whole { unit, refresh, don })
+    }
+}
+
+/// Access units out of a run of RTP payloads, of a stream that sends each
+/// picture whole: RFC 7798 without decoding order numbers.
+///
+/// A gap in the sequence numbers drops the picture it fell in and everything
+/// after it until an IRAP picture or one the Mac marks as a refresh arrives,
+/// because every other picture predicts from one that was lost.
+#[derive(Default)]
+pub struct Depacketizer {
+    ssrc: Option<u32>,
+    packets: Reassembler,
     /// Whether the stream is decodable from here: a random-access picture has
     /// arrived since the last loss.
     synced: bool,
-    /// The current picture carries the Mac's refresh mark.
-    refresh: bool,
     /// Out of step by lost packets alone, with every picture before them handed
     /// on: a refresh picture predicts from one of those, so the stream goes on
     /// from it. Not after [`Self::resync`], which gave pictures up.
@@ -1087,35 +1245,17 @@ impl Depacketizer {
             // A new stream, after an offer: it starts with an IDR of its own.
             *self = Self { ssrc: Some(header.ssrc), ..Self::default() };
         }
-        let mut lost = false;
-        if let Some(expected) = self.next_sequence {
-            let ahead = header.sequence.wrapping_sub(expected);
-            if ahead >= 0x8000 {
-                // A duplicate or a late packet whose picture has gone.
-                return Depacketized::Pending;
-            }
-            if ahead != 0 {
-                lost = true;
-            }
-        }
-        self.next_sequence = Some(header.sequence.wrapping_add(1));
+        let Some(pushed) = self.packets.push(header, payload) else {
+            return Depacketized::Pending;
+        };
         let mut out = Depacketized::Pending;
-        if self.timestamp.is_some_and(|ts| ts != header.timestamp) && (self.damaged || !self.unit.is_empty()) {
-            // The previous picture's last packet (the marked one) never came.
-            self.damaged = true;
-            self.finish();
-        }
-        if lost {
-            self.damaged = true;
+        if pushed.lost {
             self.resumable |= self.synced;
             self.synced = false;
             out = Depacketized::Lost;
         }
-        self.timestamp = Some(header.timestamp);
-        self.refresh |= header.refresh;
-        self.parse(payload);
         if header.marker {
-            if let Some(unit) = self.finish() {
+            if let Some(unit) = pushed.whole.and_then(|whole| self.judge(whole)) {
                 return Depacketized::Unit(unit);
             }
             if !self.synced {
@@ -1123,49 +1263,6 @@ impl Depacketizer {
             }
         }
         out
-    }
-
-    fn parse(&mut self, payload: &[u8]) {
-        if payload.len() < 2 {
-            self.damaged = true;
-            return;
-        }
-        match nal_type(payload[0]) {
-            NAL_AP => {
-                let mut rest = &payload[2..];
-                while rest.len() >= 2 {
-                    let size = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
-                    if size < 2 || rest.len() < 2 + size {
-                        self.damaged = true;
-                        return;
-                    }
-                    self.unit.push(rest[2..2 + size].to_vec());
-                    rest = &rest[2 + size..];
-                }
-            }
-            NAL_FU => {
-                if payload.len() < 3 {
-                    self.damaged = true;
-                    return;
-                }
-                let fu = payload[2];
-                let (start, end, kind) = (fu & 0x80 != 0, fu & 0x40 != 0, fu & 0x3f);
-                if start {
-                    let mut nal = vec![(payload[0] & 0x81) | (kind << 1), payload[1]];
-                    nal.extend_from_slice(&payload[3..]);
-                    self.fragment = Some(nal);
-                } else if let Some(nal) = self.fragment.as_mut() {
-                    nal.extend_from_slice(&payload[3..]);
-                } else {
-                    self.damaged = true;
-                    return;
-                }
-                if end && let Some(nal) = self.fragment.take() {
-                    self.unit.push(nal);
-                }
-            }
-            _ => self.unit.push(payload.to_vec()),
-        }
     }
 
     /// Drop everything up to the next random-access picture: a unit this side
@@ -1181,42 +1278,174 @@ impl Depacketizer {
         !self.synced && self.resumable
     }
 
-    /// Pass over a packet nobody is shown, keeping in step with the stream: the
-    /// sequence number and the picture in flight are known when its packets are
-    /// wanted again, so the first one pushed is neither read as a duplicate nor
-    /// taken for the start of a picture it is the middle of. Its pictures are
-    /// given up, as by [`Self::resync`].
+    /// Pass over a packet nobody is shown ([`Reassembler::skip`]). Its pictures
+    /// are given up, as by [`Self::resync`].
     pub fn skip(&mut self, header: &RtpHeader) {
         if self.ssrc != Some(header.ssrc) {
             *self = Self { ssrc: Some(header.ssrc), ..Self::default() };
         }
-        if self.next_sequence.is_some_and(|expected| header.sequence.wrapping_sub(expected) >= 0x8000) {
-            return;
+        if self.packets.skip(header) {
+            self.resync();
         }
-        *self = Self {
-            ssrc: self.ssrc,
-            next_sequence: Some(header.sequence.wrapping_add(1)),
-            timestamp: Some(header.timestamp),
-            damaged: !header.marker,
-            ..Self::default()
-        };
     }
 
-    /// Close the current picture: it, if it is whole and decodable.
-    fn finish(&mut self) -> Option<AccessUnit> {
-        let unit = std::mem::take(&mut self.unit);
-        let damaged = std::mem::take(&mut self.damaged) || self.fragment.take().is_some();
-        let refresh = std::mem::take(&mut self.refresh);
-        if damaged || unit.is_empty() {
-            return None;
-        }
+    /// A whole picture, if the stream is decodable at it.
+    fn judge(&mut self, whole: Whole) -> Option<AccessUnit> {
         if !self.synced
-            && (refresh && self.resumable || unit.iter().any(|nal| is_random_access(nal_type(nal[0]))))
+            && (whole.refresh && self.resumable
+                || whole.unit.iter().any(|nal| is_random_access(nal_type(nal[0]))))
         {
             self.synced = true;
             self.resumable = false;
         }
-        self.synced.then_some(unit)
+        self.synced.then_some(whole.unit)
+    }
+}
+
+/// Access units out of a display's picture sent in [`STRIPS`] strips, which is
+/// what the Mac makes of `tilesPerFrame`.
+///
+/// The display is cut into strips of its whole width, each a sixteenth-rounded
+/// quarter of its height, top to bottom, the last running past the display's
+/// last row. Each strip of a frame is coded as a picture of its own and sent
+/// under an SSRC of its own, the display's plus the strip's number, with the
+/// frame's timestamp. A frame carries only the strips that changed.
+///
+/// The strips are one HEVC stream all the same: they share their parameter sets
+/// and one decoding order, which each packet's decoding order number gives, a
+/// picture's order count being its place in it. A strip predicts from its own
+/// earlier pictures, but the first after a keyframe may predict from another
+/// strip's, so one decoder takes them all, in that order. A keyframe is an IDR
+/// of the first strip followed by intra pictures of the others.
+///
+/// A lost packet, or a picture missing from the order, drops everything up to
+/// the next such keyframe: the stream has no refresh pictures.
+pub struct Strips {
+    /// The display's SSRC, the first strip's.
+    base: Option<u32>,
+    strips: [Reassembler; STRIPS],
+    /// The decoding order number the next picture carries, while the stream is
+    /// decodable.
+    next: Option<u16>,
+}
+
+impl Default for Strips {
+    fn default() -> Self {
+        Self { base: None, strips: std::array::from_fn(|_| Reassembler::numbered()), next: None }
+    }
+}
+
+impl Strips {
+    /// Take `ssrc` as the stream's or a new stream's, and return the stream's:
+    /// the first strip's. A new stream, after an offer, starts with the first
+    /// strip's IDR, so an SSRC outside the strips' is one's first.
+    pub fn stream(&mut self, ssrc: u32) -> u32 {
+        match self.base {
+            Some(base) if ssrc.wrapping_sub(base) < STRIPS as u32 => base,
+            // That includes the SSRC just below one taken for the first strip's,
+            // of a stream first heard at a later strip.
+            _ => {
+                *self = Self { base: Some(ssrc), ..Self::default() };
+                ssrc
+            }
+        }
+    }
+
+    /// Which strip `ssrc` carries.
+    fn strip(&mut self, ssrc: u32) -> usize {
+        ssrc.wrapping_sub(self.stream(ssrc)) as usize
+    }
+
+    /// Take one packet, returning with it the strip it belongs to.
+    pub fn push(&mut self, header: &RtpHeader, payload: &[u8]) -> (usize, Depacketized) {
+        let strip = self.strip(header.ssrc);
+        let Some(pushed) = self.strips[strip].push(header, payload) else {
+            return (strip, Depacketized::Pending);
+        };
+        if pushed.lost {
+            self.next = None;
+        }
+        let out = match pushed.whole {
+            Some(Whole { unit, don: Some(don), .. })
+                if self.next == Some(don)
+                    || strip == 0 && unit.iter().any(|nal| (16..=23).contains(&nal_type(nal[0]))) =>
+            {
+                self.next = Some(don.wrapping_add(1));
+                Depacketized::Unit(unit)
+            }
+            Some(_) => {
+                self.next = None;
+                Depacketized::Lost
+            }
+            None if pushed.lost || header.marker && self.next.is_none() => Depacketized::Lost,
+            None => Depacketized::Pending,
+        };
+        (strip, out)
+    }
+
+    /// Drop everything up to the next keyframe.
+    pub fn resync(&mut self) {
+        self.next = None;
+    }
+
+    /// Pass over a packet nobody is shown ([`Reassembler::skip`]), giving its
+    /// pictures up.
+    pub fn skip(&mut self, header: &RtpHeader) {
+        let strip = self.strip(header.ssrc);
+        if self.strips[strip].skip(header) {
+            self.resync();
+        }
+    }
+}
+
+/// How a leg's packets become access units, by what its stream was offered:
+/// each picture whole, or in strips.
+enum Assembly {
+    Whole(Depacketizer),
+    Strips(Box<Strips>),
+}
+
+impl Assembly {
+    /// The SSRC that names the stream `ssrc` is of, or begins: its own, or of a
+    /// stream in strips the first strip's.
+    fn stream(&mut self, ssrc: u32) -> u32 {
+        match self {
+            Self::Whole(_) => ssrc,
+            Self::Strips(strips) => strips.stream(ssrc),
+        }
+    }
+
+    /// Take one packet, returning with it the strip it belongs to, of a stream
+    /// in strips.
+    fn push(&mut self, header: &RtpHeader, payload: &[u8]) -> (Option<usize>, Depacketized) {
+        match self {
+            Self::Whole(whole) => (None, whole.push(header, payload)),
+            Self::Strips(strips) => {
+                let (strip, taken) = strips.push(header, payload);
+                (Some(strip), taken)
+            }
+        }
+    }
+
+    fn resync(&mut self) {
+        match self {
+            Self::Whole(whole) => whole.resync(),
+            Self::Strips(strips) => strips.resync(),
+        }
+    }
+
+    fn resumes_at_refresh(&self) -> bool {
+        match self {
+            Self::Whole(whole) => whole.resumes_at_refresh(),
+            Self::Strips(_) => false,
+        }
+    }
+
+    fn skip(&mut self, header: &RtpHeader) {
+        match self {
+            Self::Whole(whole) => whole.skip(header),
+            Self::Strips(strips) => strips.skip(header),
+        }
     }
 }
 
@@ -1837,6 +2066,9 @@ struct Leg {
     /// Whether anybody is shown this display. The pictures of one nobody is shown
     /// are authenticated and dropped: neither decoded nor passed on.
     shown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The size the leg's stream was last offered for: the display its strips
+    /// are put together as.
+    offered: std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>,
 }
 
 /// Where the receiver and its decoder threads leave the first reason they stopped.
@@ -1892,7 +2124,7 @@ impl MediaStream {
         pass: bool,
         displays: usize,
     ) -> (Self, Vec<Pictures>) {
-        let offers = Offers::new(displays);
+        let offers = Offers::new(displays, if pass { 1 } else { STRIPS });
         let (legs, pictures) = (0..offers.videos.len())
             .map(|index| {
                 let (pictures, rx) = if pass {
@@ -1908,6 +2140,7 @@ impl MediaStream {
                     heard: Heard::default(),
                     pictured: Heard::default(),
                     shown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(index == 0)),
+                    offered: std::sync::Arc::default(),
                 };
                 (leg, rx)
             })
@@ -1996,6 +2229,9 @@ impl MediaStream {
         self.offered = Some(sizes.to_vec());
         self.owe(Owed::Stream { offered: now, pictured: [None; MAX_DISPLAYS] });
         let by_leg: Vec<(u16, u16)> = (0..sizes.len()).map(|leg| sizes[self.leg_of(leg)]).collect();
+        for (leg, size) in self.legs.iter().zip(&by_leg) {
+            *leg.offered.lock().unwrap() = Some(*size);
+        }
         Some(Offer::Configuration(self.offers.configuration(&by_leg)))
     }
 
@@ -2299,8 +2535,9 @@ pub const STREAM_START: std::time::Duration = std::time::Duration::from_secs(10)
 /// change, which stops the stream, owes nothing until its offer.
 pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(48);
 
-/// Access units the HEVC decoder thread may be behind by. Reaching it drops the
-/// unit, which costs a keyframe: every later picture predicts from it.
+/// Frames the HEVC decoder thread may be behind by, each [`STRIPS`] access units
+/// of a stream in strips. Reaching it drops the unit, which costs a keyframe:
+/// every later picture predicts from it.
 const DECODE_QUEUE: usize = 8;
 
 /// The least time between two keyframe requests. The Mac answers one in tens of
@@ -2457,7 +2694,7 @@ struct VideoLeg {
     onward: Onward,
     /// Set by the decoder thread for a unit that failed to decode.
     keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    depacketizer: Depacketizer,
+    assembly: Assembly,
     feedback: RateFeedback,
     keyframe_request: KeyframeRequest,
     /// The stream's picture size, from its parameter sets: what a refresh
@@ -2468,7 +2705,10 @@ struct VideoLeg {
     packets: u64,
     forged: u64,
     behind: u64,
+    /// Frames handed on since the log last gave their rate, and the timestamp
+    /// of the last: a frame in strips is as many pictures as changed.
     pictures: u64,
+    counted: Option<u32>,
     /// Refreshes and keyframes asked of the Mac.
     asks: u64,
 }
@@ -2563,29 +2803,31 @@ impl VideoLeg {
         };
         *self.shared.heard.lock().unwrap() = Some(arrived);
         *self.shared.pictured.lock().unwrap() = Some(arrived);
-        self.feedback.received(header.ssrc, header.timestamp, arrived);
+        let stream = self.assembly.stream(header.ssrc);
+        self.feedback.received(stream, header.timestamp, arrived);
         self.packets += 1;
         if self.packets == 1 {
             log::info!("vnc: the Mac's {} is flowing (SSRC {:#x})", self.name(alone), header.ssrc);
         }
-        if self.media_ssrc != header.ssrc {
+        if self.media_ssrc != stream {
             // A new stream, after an offer, starts with an IDR of its own.
             self.keyframe_request.settle();
             self.size = None;
         }
-        self.media_ssrc = header.ssrc;
+        self.media_ssrc = stream;
         // A display nobody is shown costs its packets' authentication and nothing
         // more. It starts over at the IDR [`MediaStream::show`] has asked for by
         // the time it is back in view, whose first packet may be the next one.
         if !self.shared.shown.load(std::sync::atomic::Ordering::Relaxed) {
-            self.depacketizer.skip(&header);
+            self.assembly.skip(&header);
             self.keyframe_request.settle();
             return Ok(Took::Nothing);
         }
         let payload = &data[header.payload.0..header.payload.1];
-        match self.depacketizer.push(&header, payload) {
+        let (strip, taken) = self.assembly.push(&header, payload);
+        match taken {
             Depacketized::Pending => Ok(Took::Nothing),
-            Depacketized::Lost if self.depacketizer.resumes_at_refresh() => Ok(Took::Wants(Ask::Refresh)),
+            Depacketized::Lost if self.assembly.resumes_at_refresh() => Ok(Took::Wants(Ask::Refresh)),
             Depacketized::Lost => Ok(Took::Wants(Ask::Keyframe)),
             Depacketized::Unit(unit) => {
                 // Only a stream that has had a picture it can go on from yields one.
@@ -2603,10 +2845,16 @@ impl VideoLeg {
                     log::warn!("vnc: stopped dumping the media stream: {e:#}");
                     *dump = None;
                 }
-                match self.onward.send(unit) {
+                match self.onward.send(Coded { unit, strip, timestamp: header.timestamp }) {
                     Sent::Queued => {
-                        self.pictures += 1;
-                        self.unacknowledged = Some(header.timestamp);
+                        if self.counted.replace(header.timestamp) != Some(header.timestamp) {
+                            self.pictures += 1;
+                        }
+                        // A stream in strips has no refresh pictures to predict
+                        // from an acknowledged one.
+                        if strip.is_none() {
+                            self.unacknowledged = Some(header.timestamp);
+                        }
                         Ok(Took::Nothing)
                     }
                     Sent::Full(depth) => {
@@ -2619,7 +2867,7 @@ impl VideoLeg {
                                 self.name(alone)
                             );
                         }
-                        self.depacketizer.resync();
+                        self.assembly.resync();
                         Ok(Took::Wants(Ask::Keyframe))
                     }
                     Sent::Unready => Ok(Took::Wants(Ask::Keyframe)),
@@ -2735,14 +2983,18 @@ impl Receiver {
             .enumerate()
             .map(|(index, ((shared, offer), port))| {
                 let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let strips = media.offers.tiles == STRIPS;
                 let onward = match &shared.pictures {
                     Outlet::Decoded(pictures) => {
+                        let depth = if strips { DECODE_QUEUE * STRIPS } else { DECODE_QUEUE };
                         let (units, decoder) = spawn_decoder(
                             pictures.clone(),
                             std::sync::Arc::clone(&keyframe),
                             std::sync::Arc::clone(&media.failed),
+                            std::sync::Arc::clone(&shared.offered),
+                            depth,
                         );
-                        Onward::Decoder(units, decoder)
+                        Onward::Decoder(units, decoder, depth)
                     }
                     Outlet::Passed(units) => Onward::Browser(Passer::default(), units.clone()),
                 };
@@ -2758,7 +3010,11 @@ impl Receiver {
                     shared: shared.clone(),
                     onward,
                     keyframe,
-                    depacketizer: Depacketizer::default(),
+                    assembly: if strips {
+                        Assembly::Strips(Box::default())
+                    } else {
+                        Assembly::Whole(Depacketizer::default())
+                    },
                     feedback: RateFeedback::new(epoch),
                     keyframe_request: KeyframeRequest::default(),
                     size: None,
@@ -2767,6 +3023,7 @@ impl Receiver {
                     forged: 0,
                     behind: 0,
                     pictures: 0,
+                    counted: None,
                     asks: 0,
                 })
             })
@@ -2908,14 +3165,14 @@ impl Receiver {
                     }
                 }
                 leg = keyframe_wanted(&self.videos) => {
-                    self.videos[leg].depacketizer.resync();
+                    self.videos[leg].assembly.resync();
                     self.videos[leg].keyframe_request.want(Ask::Keyframe);
                 }
             }
             for (leg, wanted) in self.videos.iter_mut().zip(want_keyframe) {
                 let failed = leg.keyframe.swap(false, std::sync::atomic::Ordering::Relaxed);
                 if failed {
-                    leg.depacketizer.resync();
+                    leg.assembly.resync();
                 }
                 leg.acknowledge().await;
                 leg.ask_keyframe(if failed { Some(Ask::Keyframe) } else { wanted }).await;
@@ -2928,7 +3185,7 @@ impl Receiver {
         fail(&self.failed, failure);
         for leg in self.videos {
             match leg.onward {
-                Onward::Decoder(units, decoder) => {
+                Onward::Decoder(units, decoder, _) => {
                     drop(units);
                     let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
                     if let Outlet::Decoded(pictures) = &leg.shared.pictures {
@@ -2943,10 +3200,20 @@ impl Receiver {
     }
 }
 
+/// An access unit on its way [`Onward`].
+struct Coded {
+    unit: AccessUnit,
+    /// Which strip of the display it is, of a stream in strips.
+    strip: Option<usize>,
+    /// Its frame's RTP timestamp, which the strips of one frame share.
+    timestamp: u32,
+}
+
 /// Where the receiver sends each access unit it reassembles.
 enum Onward {
     /// The decoder thread, whose pictures the session encodes as VP9.
-    Decoder(std::sync::mpsc::SyncSender<AccessUnit>, std::thread::JoinHandle<()>),
+    /// Its queue is as many units deep.
+    Decoder(std::sync::mpsc::SyncSender<Coded>, std::thread::JoinHandle<()>, usize),
     /// The read loop, which passes each unit to the browser as it came.
     Browser(Passer, tokio::sync::mpsc::Sender<Option<PassedUnit>>),
 }
@@ -2964,15 +3231,15 @@ enum Sent {
 }
 
 impl Onward {
-    fn send(&mut self, unit: AccessUnit) -> Sent {
+    fn send(&mut self, coded: Coded) -> Sent {
         match self {
-            Self::Decoder(units, _) => match units.try_send(unit) {
+            Self::Decoder(units, _, depth) => match units.try_send(coded) {
                 Ok(()) => Sent::Queued,
-                Err(std::sync::mpsc::TrySendError::Full(_)) => Sent::Full(DECODE_QUEUE),
+                Err(std::sync::mpsc::TrySendError::Full(_)) => Sent::Full(*depth),
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Sent::Stopped,
             },
             Self::Browser(passer, units) => {
-                let Some(passed) = passer.pass(&unit) else {
+                let Some(passed) = passer.pass(&coded.unit) else {
                     return Sent::Unready;
                 };
                 match units.try_send(Some(passed)) {
@@ -3002,36 +3269,145 @@ fn fail(failed: &Failure, error: anyhow::Error) {
     }
 }
 
+/// How long a frame some of whose strips have come waits for the rest before it
+/// is shown as it stands. Nothing says how many strips a frame has: the next
+/// frame's first strip does, or this. The Mac codes a frame's strips one after
+/// another, and they arrived up to 7 ms apart.
+const STRIP_WAIT: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// A display's picture, put together from its strips as they decode.
+struct Canvas {
+    picture: Picture,
+    /// A strip's rows, the last strip's running past the display's.
+    pitch: usize,
+    /// The strips placed since the canvas was made, a bit each: the display is
+    /// shown once it has them all.
+    placed: u8,
+    /// The strips placed since the display was last shown.
+    fresh: u8,
+}
+
+/// Every strip's bit.
+const ALL_STRIPS: u8 = (1 << STRIPS) - 1;
+
+impl Canvas {
+    /// Put the decoded `part` in as strip `strip` of a display of `size`,
+    /// starting `canvas` over where it is laid out for another.
+    fn place(canvas: &mut Option<Self>, size: Option<(u16, u16)>, strip: usize, part: &Picture) -> anyhow::Result<()> {
+        let (width, height) = size.context("a strip came for a display no stream was offered for")?;
+        let pitch = usize::from(part.size.1);
+        let rows = usize::from(height);
+        anyhow::ensure!(
+            part.size.0 == width && pitch * STRIPS >= rows && pitch * (STRIPS - 1) < rows,
+            "a {}\u{d7}{} strip is not a quarter of the {width}\u{d7}{height} display offered",
+            part.size.0,
+            part.size.1
+        );
+        let canvas = match canvas {
+            Some(canvas) if canvas.picture.size == (width, height) && canvas.pitch == pitch => canvas,
+            _ => canvas.insert(Self {
+                picture: Picture { size: (width, height), rgb: vec![0; usize::from(width) * rows * 3] },
+                pitch,
+                placed: 0,
+                fresh: 0,
+            }),
+        };
+        let row = usize::from(width) * 3;
+        let from = (strip * pitch * row).min(canvas.picture.rgb.len());
+        let into = &mut canvas.picture.rgb[from..];
+        let len = into.len().min(part.rgb.len());
+        into[..len].copy_from_slice(&part.rgb[..len]);
+        canvas.placed |= 1 << strip;
+        canvas.fresh |= 1 << strip;
+        Ok(())
+    }
+
+    /// The display as it stands, once every strip of it has come.
+    fn show(&mut self) -> Option<std::sync::Arc<Picture>> {
+        self.fresh = 0;
+        (self.placed == ALL_STRIPS)
+            .then(|| std::sync::Arc::new(Picture { size: self.picture.size, rgb: self.picture.rgb.clone() }))
+    }
+}
+
 /// The decoder thread: access units in, pictures out to the watch. Its queue's
 /// sender is the handle, and the thread, whose own handle comes with it, ends when
 /// the receive task drops it.
 /// `keyframe` is how it says a unit failed to decode, which the receive task turns
 /// into a PLI. A decoder that cannot be opened leaves why in `failed`.
+///
+/// A stream in strips decodes to its strips, in their one decoding order, and
+/// the display is shown when a frame's strips are all in: every strip has come
+/// for its timestamp, the next unit is another frame's, or [`STRIP_WAIT`] has
+/// passed. `offered` is the display the strips are a quarter each of.
 fn spawn_decoder(
     pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
     keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
     failed: Failure,
-) -> (std::sync::mpsc::SyncSender<AccessUnit>, std::thread::JoinHandle<()>) {
-    let (units, inbox) = std::sync::mpsc::sync_channel::<AccessUnit>(DECODE_QUEUE);
+    offered: std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>,
+    queue: usize,
+) -> (std::sync::mpsc::SyncSender<Coded>, std::thread::JoinHandle<()>) {
+    use std::sync::mpsc::RecvTimeoutError;
+
+    let (units, inbox) = std::sync::mpsc::sync_channel::<Coded>(queue);
     let thread = std::thread::spawn(move || {
         let mut decoder = match Hevc::new(true) {
             Ok(decoder) => decoder,
             Err(e) => return fail(&failed, e.context("no HEVC decoder")),
         };
         let mut failures: u64 = 0;
-        while let Ok(unit) = inbox.recv() {
-            match decoder.decode(&unit) {
-                Ok(Some(picture)) => {
+        let mut canvas: Option<Canvas> = None;
+        // The timestamp of the frame whose strips are placed and not yet shown.
+        let mut waiting: Option<u32> = None;
+        let show = |canvas: &mut Option<Canvas>| {
+            if let Some(picture) = canvas.as_mut().and_then(Canvas::show) {
+                pictures.send_replace(Some(picture));
+            }
+        };
+        loop {
+            let coded = match waiting {
+                None => inbox.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                Some(_) => inbox.recv_timeout(STRIP_WAIT),
+            };
+            let coded = match coded {
+                Ok(coded) => coded,
+                Err(RecvTimeoutError::Timeout) => {
+                    waiting = None;
+                    show(&mut canvas);
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            if waiting.is_some_and(|timestamp| timestamp != coded.timestamp) {
+                waiting = None;
+                show(&mut canvas);
+            }
+            let decoded = decoder.decode(&coded.unit).and_then(|picture| match (picture, coded.strip) {
+                (Some(picture), None) => {
                     pictures.send_replace(Some(std::sync::Arc::new(picture)));
+                    Ok(())
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    failures += 1;
-                    if failures <= 3 {
-                        log::warn!("vnc: a screen video picture did not decode: {e:#}");
+                (Some(part), Some(strip)) => {
+                    Canvas::place(&mut canvas, *offered.lock().unwrap(), strip, &part)?;
+                    if canvas.as_ref().is_some_and(|canvas| canvas.fresh == ALL_STRIPS) {
+                        waiting = None;
+                        show(&mut canvas);
+                    } else {
+                        waiting = Some(coded.timestamp);
                     }
-                    keyframe.store(true, std::sync::atomic::Ordering::Relaxed);
+                    Ok(())
                 }
+                // Each strip is a picture, and one the decoder kept back would
+                // come out as the next strip's.
+                (None, Some(_)) => anyhow::bail!("the decoder held a strip's picture back"),
+                (None, None) => Ok(()),
+            });
+            if let Err(e) = decoded {
+                failures += 1;
+                if failures <= 3 {
+                    log::warn!("vnc: a screen video picture did not decode: {e:#}");
+                }
+                keyframe.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
     });
@@ -3211,11 +3587,11 @@ mod tests {
         out
     }
 
-    /// One tile to a frame, the field of this blob that differs from Apple's, and
-    /// Apple's bitrate entries, the 40 Mbit/s one first, up to 100 Mbit/s.
+    /// One tile to a frame, as a passed stream is offered, and Apple's bitrate
+    /// entries, the 40 Mbit/s one first, up to 100 Mbit/s.
     #[test]
     fn the_video_offer_asks_for_one_picture_a_frame_at_apples_bitrates() {
-        let blob = video_offer_blob(7, (1280, 800), TILES_PER_FRAME);
+        let blob = video_offer_blob(7, (1280, 800), 1);
         let top = fields(&blob);
         let stream = top.iter().find_map(|(f, v)| (*f == 5).then(|| v.clone().unwrap_err())).unwrap();
         let stream = fields(&stream);
@@ -3480,9 +3856,9 @@ mod tests {
         let mut srtp = SrtpReceiver::new(&master());
         assert!(srtp.unprotect(&mut packet.clone()).is_ok());
         assert_eq!(srtp.unprotect(&mut packet.clone()), Err(SrtpError::Stale), "a duplicate");
-        srtp.last = Some((0xcafe_babe, 0x1235, 0));
+        srtp.last = vec![(0xcafe_babe, 0x1235, 0)];
         assert_eq!(srtp.unprotect(&mut packet.clone()), Err(SrtpError::Stale), "overtaken");
-        srtp.last = Some((0x0102_0304, 0x1235, 0));
+        srtp.last = vec![(0x0102_0304, 0x1235, 0)];
         assert!(srtp.unprotect(&mut packet.clone()).is_ok(), "a new stream starts over");
     }
 
@@ -3490,10 +3866,10 @@ mod tests {
     fn the_rollover_counter_follows_a_wrap_and_a_straggler() {
         let mut srtp = SrtpReceiver::new(&master());
         assert_eq!(srtp.guess_roc(1, 5), 0);
-        srtp.last = Some((1, 0xfff0, 0));
+        srtp.last = vec![(1, 0xfff0, 0)];
         assert_eq!(srtp.guess_roc(1, 0x0002), 1, "past the wrap");
         assert_eq!(srtp.guess_roc(1, 0xffff), 0);
-        srtp.last = Some((1, 0x0002, 1));
+        srtp.last = vec![(1, 0x0002, 1)];
         assert_eq!(srtp.guess_roc(1, 0xfff5), 0, "a late packet from before the wrap");
         assert_eq!(srtp.guess_roc(1, 0x0010), 1);
         assert_eq!(srtp.guess_roc(2, 0x0010), 0, "a new stream starts over");
@@ -3620,6 +3996,108 @@ mod tests {
         assert_eq!(d.push(&header(100, 0, true), IDR), Depacketized::Unit(vec![IDR.to_vec()]));
         let next = RtpHeader { ssrc: 10, ..header(5000, 0, true) };
         assert_eq!(d.push(&next, IDR), Depacketized::Unit(vec![IDR.to_vec()]), "not a gap");
+    }
+
+    /// A payload with the decoding order number a stream in strips carries: after
+    /// the payload header, and in a fragment after its fragment header.
+    fn numbered(don: u16, payload: &[u8]) -> Vec<u8> {
+        let at = if nal_type(payload[0]) == NAL_FU { 3 } else { 2 };
+        [&payload[..at], &don.to_be_bytes()[..], &payload[at..]].concat()
+    }
+
+    fn strip(strip: u32, sequence: u16, timestamp: u32, marker: bool) -> RtpHeader {
+        RtpHeader { ssrc: 9 + strip, ..header(sequence, timestamp, marker) }
+    }
+
+    /// A keyframe as the Mac sends one in strips, the first strip's parameter
+    /// sets aggregated under the one number and its IDR in fragments that each
+    /// carry it; then the strips that changed, each under its own SSRC and
+    /// sequence numbers, in the one decoding order.
+    #[test]
+    fn strips_come_out_in_their_one_decoding_order() {
+        let mut s = Strips::default();
+        assert_eq!(s.push(&strip(0, 10, 0, false), &numbered(7, &aggregation(&[VPS, SPS]))), (0, Depacketized::Pending));
+        let pieces = fragments(IDR, 3);
+        assert_eq!(s.push(&strip(0, 11, 0, false), &numbered(7, &pieces[0])), (0, Depacketized::Pending));
+        assert_eq!(s.push(&strip(0, 12, 0, false), &numbered(7, &pieces[1])), (0, Depacketized::Pending));
+        assert_eq!(
+            s.push(&strip(0, 13, 0, true), &numbered(7, &pieces[2])),
+            (0, Depacketized::Unit(vec![VPS.to_vec(), SPS.to_vec(), IDR.to_vec()]))
+        );
+        let trail = Depacketized::Unit(vec![TRAIL.to_vec()]);
+        assert_eq!(s.push(&strip(1, 500, 0, true), &numbered(8, TRAIL)), (1, trail));
+        let trail = || Depacketized::Unit(vec![TRAIL.to_vec()]);
+        // A frame carries the strips that changed.
+        assert_eq!(s.push(&strip(3, 900, 0, true), &numbered(9, TRAIL)), (3, trail()));
+        assert_eq!(s.push(&strip(0, 14, 400, true), &numbered(10, TRAIL)), (0, trail()));
+        assert_eq!(s.stream(12), 9, "the display's SSRC is its first strip's");
+    }
+
+    /// A picture missing from the decoding order is one every strip may predict
+    /// from, as is a packet lost to one strip: nothing is decodable until the
+    /// first strip's next IDR.
+    #[test]
+    fn a_picture_missing_from_the_order_drops_strips_until_the_first_strips_idr() {
+        let mut s = Strips::default();
+        let trail = || Depacketized::Unit(vec![TRAIL.to_vec()]);
+        let idr = || Depacketized::Unit(vec![IDR.to_vec()]);
+        // Joined mid-stream, at a strip taken for the first until an earlier one comes.
+        assert_eq!(s.push(&strip(1, 1, 0, true), &numbered(3, TRAIL)), (0, Depacketized::Lost));
+        assert_eq!(s.push(&strip(0, 1, 400, true), &numbered(4, IDR)), (0, idr()));
+        assert_eq!(s.push(&strip(1, 2, 400, true), &numbered(5, TRAIL)), (1, trail()));
+        assert_eq!(s.push(&strip(2, 1, 800, true), &numbered(7, TRAIL)), (2, Depacketized::Lost), "6 never came");
+        assert_eq!(s.push(&strip(0, 2, 1200, true), &numbered(8, TRAIL)), (0, Depacketized::Lost));
+        assert_eq!(s.push(&strip(2, 2, 1200, true), &numbered(9, IDR)), (2, Depacketized::Lost), "not the first strip's");
+        assert_eq!(s.push(&strip(0, 3, 1600, true), &numbered(10, IDR)), (0, idr()));
+        assert_eq!(s.push(&strip(3, 1, 1600, true), &numbered(11, TRAIL)), (3, trail()));
+
+        // A strip's own sequence numbers show a packet lost before the order does.
+        let pieces = fragments(TRAIL, 2);
+        assert_eq!(s.push(&strip(3, 3, 2000, true), &numbered(12, &pieces[1])), (3, Depacketized::Lost));
+        assert_eq!(s.push(&strip(0, 4, 2400, true), &numbered(13, TRAIL)), (0, Depacketized::Lost));
+        assert_eq!(s.push(&strip(0, 5, 2800, true), &numbered(14, IDR)), (0, idr()));
+
+        // A new stream, after an offer, is another display's worth of SSRCs.
+        let next = RtpHeader { ssrc: 5000, ..header(77, 0, true) };
+        assert_eq!(s.push(&next, &numbered(0, IDR)), (0, idr()));
+        assert_eq!(s.stream(5003), 5000);
+    }
+
+    /// Each strip's SSRC has sequence numbers of its own, so its own rollover.
+    #[test]
+    fn the_rollover_counter_is_each_strips_own() {
+        let mut srtp = SrtpReceiver::new(&master());
+        srtp.last = vec![(1, 0xfff0, 0), (2, 0x0005, 3)];
+        assert_eq!(srtp.guess_roc(1, 0x0002), 1);
+        assert_eq!(srtp.guess_roc(2, 0x0006), 3);
+        assert_eq!(srtp.guess_roc(3, 0x0006), 0, "a strip not heard from yet");
+    }
+
+    /// Strips are placed a strip's height apart, the last one's rows past the
+    /// display's left out, and the display is shown once it has all four.
+    #[test]
+    fn a_display_is_put_together_from_its_strips() {
+        let part = |value: u8| Picture { size: (2, 3), rgb: vec![value; 2 * 3 * 3] };
+        let mut canvas = None;
+        for strip in [0, 1, 3] {
+            Canvas::place(&mut canvas, Some((2, 10)), strip, &part(strip as u8 + 1)).unwrap();
+        }
+        assert!(canvas.as_mut().unwrap().show().is_none(), "a strip is still to come");
+        Canvas::place(&mut canvas, Some((2, 10)), 2, &part(3)).unwrap();
+        let shown = canvas.as_mut().unwrap().show().unwrap();
+        assert_eq!(shown.size, (2, 10));
+        let rows: Vec<u8> = shown.rgb.chunks(6).map(|row| row[0]).collect();
+        assert_eq!(rows, [1, 1, 1, 2, 2, 2, 3, 3, 3, 4]);
+        assert!(shown.rgb.chunks(6).all(|row| row.iter().all(|&v| v == row[0])));
+
+        // One strip of the next frame, and the display is whole with it.
+        Canvas::place(&mut canvas, Some((2, 10)), 1, &part(9)).unwrap();
+        assert_eq!(canvas.as_ref().unwrap().fresh, 0b0010);
+        assert_eq!(canvas.as_mut().unwrap().show().unwrap().rgb[3 * 6], 9);
+
+        assert!(Canvas::place(&mut canvas, Some((2, 13)), 0, &part(1)).is_err(), "not a quarter of 13 rows");
+        assert!(Canvas::place(&mut canvas, Some((4, 10)), 0, &part(1)).is_err());
+        assert!(Canvas::place(&mut canvas, None, 0, &part(1)).is_err());
     }
 
     /// A 64×48 4:4:4 stream from x265, full-range BT.709 as the Mac's is, and six
