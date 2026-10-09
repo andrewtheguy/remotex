@@ -1110,7 +1110,7 @@ one field, and a second in a session that passes the picture:
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
-| `tilesPerFrame` (video stream field 6) | 4 | 4 decoded here, 1 passed | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together. One tile is one picture of the whole display on the one SSRC, which is what a browser's decoder is passed. |
+| `tilesPerFrame` (video stream field 6) | 4 | 4 decoded here, 1 passed or for a display under 144 rows that four tiles fail on | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together. One tile is one picture of the whole display on the one SSRC, which is what a browser's decoder is passed. |
 
 The video offer names two codecs by their RTP payload numbers, 123 for H.264
 and 100 for HEVC, each with its own feature string. Offered both, the Mac sends
@@ -1278,12 +1278,13 @@ other failures (see [Liveness](#the-stream)).
 #### In strips
 
 Offered `tilesPerFrame` 4, as Apple's viewer offers it, the Mac answers 4 and
-sends the display in four strips. Seen on the virtual Mac, at 1280×800,
-1440×900, 1600×1000 and 1920×1080.
+sends the display in four strips. Seen on the virtual Mac, at sizes from
+160×120 to 1920×1080. The count the Mac answers is the lesser of its own and
+the offer's, whatever the display's size.
 
 - **The strips.** Each is the display's whole width and a quarter of its
-  height rounded up to a multiple of 16: 208, 240, 256 and 272 rows at those
-  four sizes. They lie top to bottom a strip's height apart, so the last runs
+  height rounded up to a multiple of 16: 208, 240, 256 and 272 rows for
+  displays of 800, 900, 1000 and 1080. They lie top to bottom a strip's height apart, so the last runs
   past the display's last row, and what it holds there is not picture. The
   parameter sets give the strip's size and declare no cropping.
 - **One SSRC a strip.** A strip's pictures come under the display's SSRC plus
@@ -1291,6 +1292,15 @@ sends the display in four strips. Seen on the virtual Mac, at 1280×800,
   SSRC with sequence numbers of its own, and so a rollover counter of its own.
   The strips of one frame share its timestamp and the header extension's frame
   counter, and the marker bit ends each strip's picture.
+- **Some small displays get no picture.** Where the rounding leaves the last
+  strip starting past the display's last row, the Mac answers the offer, its
+  encoder fails every frame (`VCPCompressionSessionEncodeFrame failed`,
+  error -12902), and no picture packet is sent: seen at 80, 90 and 136 rows,
+  where an offer of one tile brought the picture. By that rule the heights are
+  those under 48 rows, 65 to 95 and 129 to 143. A last strip that starts
+  exactly at the end is sent, with nothing of the display in it: 96 and 144
+  rows worked, as did 64, 100, 104, 112, 120 and 128. Remotex offers one tile
+  for a display of those heights.
 - **Only what changed.** A frame carries the strips that changed and no
   others. Under a moving pointer and a clock, 112 of 648 frames carried all
   four. Nothing in a packet says how many strips a frame has.

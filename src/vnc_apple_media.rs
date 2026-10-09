@@ -186,6 +186,25 @@ const CODEC_ENTRIES: &[(u64, u64, Option<u64>)] = &[
 /// picture of the whole display, which is what a `VideoDecoder` there shows.
 const STRIPS: usize = 4;
 
+/// The rows of each strip of a display `height` rows high: a quarter of them,
+/// rounded up to a multiple of 16.
+fn strip_rows(height: u16) -> usize {
+    usize::from(height).div_ceil(STRIPS).next_multiple_of(16)
+}
+
+/// Whether a display `height` rows high is offered in strips. The rounding can
+/// leave the last strip starting past the display's last row, and offered four
+/// tiles for such a display the Mac answers, its encoder refuses every frame,
+/// and no picture comes: at 80, 90 and 136 rows, where one tile brought the
+/// picture. Those are heights under 48 rows, from 65 to 95 and from 129 to 143,
+/// which are offered one tile. A last strip that starts just at the end, as at
+/// 96 and 144 rows, is sent, with nothing of the display in it. Neither side's
+/// negotiation looks at the size: the tile count is the lesser of the two
+/// sides', so this is for the viewer to avoid.
+fn in_strips(height: u16) -> bool {
+    strip_rows(height) * (STRIPS - 1) <= usize::from(height)
+}
+
 /// Minimal protocol-buffers writer: varints and length-delimited fields are the
 /// whole of what the offers use.
 #[derive(Default)]
@@ -477,8 +496,9 @@ struct Offers {
     /// Each display's video leg, in the Mac's order: its first virtual display,
     /// then its second.
     videos: Vec<VideoOffer>,
-    /// The `tilesPerFrame` every video offer asks for: [`STRIPS`] or 1.
-    tiles: usize,
+    /// Whether the picture is decoded here, and so offered in strips where the
+    /// display's height allows ([`in_strips`]).
+    decoded: bool,
 }
 
 /// One video leg's keys, and this side's SSRC on it.
@@ -488,9 +508,9 @@ struct VideoOffer {
 }
 
 impl Offers {
-    /// For `displays` virtual displays, a video leg each, of `tiles` pictures to
-    /// a frame.
-    fn new(displays: usize, tiles: usize) -> Self {
+    /// For `displays` virtual displays, a video leg each, whose picture is
+    /// `decoded` here or passed.
+    fn new(displays: usize, decoded: bool) -> Self {
         let key = || {
             let mut k = [0u8; 46];
             rand::fill(&mut k[..]);
@@ -507,8 +527,13 @@ impl Offers {
             audio_keys,
             audio_ssrc: rand::random(),
             videos,
-            tiles,
+            decoded,
         }
+    }
+
+    /// Whether the leg of a display of `size` is offered in strips.
+    fn strips(&self, size: (u16, u16)) -> bool {
+        self.decoded && in_strips(size.1)
     }
 
     /// The `0x1c` message for displays of `sizes` backing pixels, one per video
@@ -520,7 +545,8 @@ impl Offers {
             .iter()
             .zip(sizes)
             .map(|(video, size)| {
-                offer(MODE_VIDEO, &video_offer_blob(video.ssrc, *size, self.tiles as u64), &self.call_id)
+                let tiles = if self.strips(*size) { STRIPS } else { 1 };
+                offer(MODE_VIDEO, &video_offer_blob(video.ssrc, *size, tiles as u64), &self.call_id)
             })
             .collect();
         let videos: Vec<(&[u8], &KeyPair)> =
@@ -1406,6 +1432,10 @@ enum Assembly {
 }
 
 impl Assembly {
+    fn new(strips: bool) -> Self {
+        if strips { Self::Strips(Box::default()) } else { Self::Whole(Depacketizer::default()) }
+    }
+
     /// The SSRC that names the stream `ssrc` is of, or begins: its own, or of a
     /// stream in strips the first strip's.
     fn stream(&mut self, ssrc: u32) -> u32 {
@@ -2069,6 +2099,8 @@ struct Leg {
     /// The size the leg's stream was last offered for: the display its strips
     /// are put together as.
     offered: std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>,
+    /// Whether that offer asked for the display in strips.
+    strips: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Where the receiver and its decoder threads leave the first reason they stopped.
@@ -2124,7 +2156,7 @@ impl MediaStream {
         pass: bool,
         displays: usize,
     ) -> (Self, Vec<Pictures>) {
-        let offers = Offers::new(displays, if pass { 1 } else { STRIPS });
+        let offers = Offers::new(displays, !pass);
         let (legs, pictures) = (0..offers.videos.len())
             .map(|index| {
                 let (pictures, rx) = if pass {
@@ -2141,6 +2173,7 @@ impl MediaStream {
                     pictured: Heard::default(),
                     shown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(index == 0)),
                     offered: std::sync::Arc::default(),
+                    strips: std::sync::Arc::default(),
                 };
                 (leg, rx)
             })
@@ -2231,6 +2264,7 @@ impl MediaStream {
         let by_leg: Vec<(u16, u16)> = (0..sizes.len()).map(|leg| sizes[self.leg_of(leg)]).collect();
         for (leg, size) in self.legs.iter().zip(&by_leg) {
             *leg.offered.lock().unwrap() = Some(*size);
+            leg.strips.store(self.offers.strips(*size), std::sync::atomic::Ordering::Relaxed);
         }
         Some(Offer::Configuration(self.offers.configuration(&by_leg)))
     }
@@ -2535,9 +2569,9 @@ pub const STREAM_START: std::time::Duration = std::time::Duration::from_secs(10)
 /// change, which stops the stream, owes nothing until its offer.
 pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(48);
 
-/// Frames the HEVC decoder thread may be behind by, each [`STRIPS`] access units
-/// of a stream in strips. Reaching it drops the unit, which costs a keyframe:
-/// every later picture predicts from it.
+/// Frames in strips the HEVC decoder thread may be behind by, each [`STRIPS`]
+/// access units. Reaching it drops the unit, which costs a keyframe: every later
+/// picture predicts from it.
 const DECODE_QUEUE: usize = 8;
 
 /// The least time between two keyframe requests. The Mac answers one in tens of
@@ -2803,6 +2837,12 @@ impl VideoLeg {
         };
         *self.shared.heard.lock().unwrap() = Some(arrived);
         *self.shared.pictured.lock().unwrap() = Some(arrived);
+        // Each offer says anew whether its stream comes in strips, by the
+        // display's height, and the stream before it has stopped by then.
+        let strips = self.shared.strips.load(std::sync::atomic::Ordering::Relaxed);
+        if strips != matches!(self.assembly, Assembly::Strips(_)) {
+            self.assembly = Assembly::new(strips);
+        }
         let stream = self.assembly.stream(header.ssrc);
         self.feedback.received(stream, header.timestamp, arrived);
         self.packets += 1;
@@ -2983,10 +3023,9 @@ impl Receiver {
             .enumerate()
             .map(|(index, ((shared, offer), port))| {
                 let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let strips = media.offers.tiles == STRIPS;
                 let onward = match &shared.pictures {
                     Outlet::Decoded(pictures) => {
-                        let depth = if strips { DECODE_QUEUE * STRIPS } else { DECODE_QUEUE };
+                        let depth = DECODE_QUEUE * STRIPS;
                         let (units, decoder) = spawn_decoder(
                             pictures.clone(),
                             std::sync::Arc::clone(&keyframe),
@@ -3010,11 +3049,7 @@ impl Receiver {
                     shared: shared.clone(),
                     onward,
                     keyframe,
-                    assembly: if strips {
-                        Assembly::Strips(Box::default())
-                    } else {
-                        Assembly::Whole(Depacketizer::default())
-                    },
+                    assembly: Assembly::new(shared.strips.load(std::sync::atomic::Ordering::Relaxed)),
                     feedback: RateFeedback::new(epoch),
                     keyframe_request: KeyframeRequest::default(),
                     size: None,
@@ -3298,7 +3333,7 @@ impl Canvas {
         let pitch = usize::from(part.size.1);
         let rows = usize::from(height);
         anyhow::ensure!(
-            part.size.0 == width && pitch * STRIPS >= rows && pitch * (STRIPS - 1) < rows,
+            part.size.0 == width && pitch * STRIPS >= rows && pitch * (STRIPS - 1) <= rows,
             "a {}\u{d7}{} strip is not a quarter of the {width}\u{d7}{height} display offered",
             part.size.0,
             part.size.1
@@ -4063,6 +4098,27 @@ mod tests {
         assert_eq!(s.stream(5003), 5000);
     }
 
+    /// The strip heights the Mac sent, and the display heights it sent no picture
+    /// for when offered four tiles.
+    #[test]
+    fn a_display_is_offered_in_strips_unless_its_last_would_start_past_its_end() {
+        for (height, rows) in [(64, 16), (96, 32), (120, 32), (144, 48), (600, 160), (800, 208), (900, 240), (1000, 256), (1080, 272)] {
+            assert_eq!(strip_rows(height), rows, "{height} rows");
+            assert!(in_strips(height), "{height} rows");
+        }
+        for height in [80, 90, 136] {
+            assert!(!in_strips(height), "{height} rows");
+        }
+        let tiles = |offers: &Offers, size| {
+            let blob = video_offer_blob(7, size, if offers.strips(size) { STRIPS } else { 1 } as u64);
+            let stream = fields(&blob).iter().find_map(|(f, v)| (*f == 5).then(|| v.clone().unwrap_err())).unwrap();
+            fields(&stream).iter().find_map(|(f, v)| (*f == 6).then(|| *v.as_ref().unwrap())).unwrap()
+        };
+        assert_eq!(tiles(&Offers::new(1, true), (1600, 1000)), 4);
+        assert_eq!(tiles(&Offers::new(1, true), (160, 90)), 1);
+        assert_eq!(tiles(&Offers::new(1, false), (1600, 1000)), 1, "a passed stream");
+    }
+
     /// Each strip's SSRC has sequence numbers of its own, so its own rollover.
     #[test]
     fn the_rollover_counter_is_each_strips_own() {
@@ -4095,7 +4151,11 @@ mod tests {
         assert_eq!(canvas.as_ref().unwrap().fresh, 0b0010);
         assert_eq!(canvas.as_mut().unwrap().show().unwrap().rgb[3 * 6], 9);
 
+        // A last strip that starts at the display's end has nothing to place.
+        Canvas::place(&mut canvas, Some((2, 9)), 3, &part(7)).unwrap();
+        assert!(canvas.as_ref().unwrap().picture.rgb.iter().all(|&v| v == 0));
         assert!(Canvas::place(&mut canvas, Some((2, 13)), 0, &part(1)).is_err(), "not a quarter of 13 rows");
+        assert!(Canvas::place(&mut canvas, Some((2, 8)), 0, &part(1)).is_err(), "the last strip past 8 rows");
         assert!(Canvas::place(&mut canvas, Some((4, 10)), 0, &part(1)).is_err());
         assert!(Canvas::place(&mut canvas, None, 0, &part(1)).is_err());
     }
