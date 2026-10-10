@@ -1420,7 +1420,7 @@ false` the walk is pressure-only.
 
 A round costs what changed and not the desktop. The rectangles blitted into the
 mirror since the round before are what the picture differs by, and the encoder is
-handed them: screen-vp9 converts the rows they span and codes the blocks they touch,
+handed them: screen-vp9 reads the rectangles into its planes and codes the blocks they touch,
 and every other block is skipped as the client holds it, at the quality it holds it.
 With one small change a 4K frame encodes in 11 ms for 26 and a 1080p one in 4 for 9,
 measured in screen-vp9. A keyframe, a stream's first frame and the settle's are the
