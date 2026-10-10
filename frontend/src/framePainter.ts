@@ -503,30 +503,54 @@ export function createFramePainter(options: {
     strips = [];
   };
 
+  // The browser's decoder's pictures onto the desktop's canvas, each whole and at
+  // its own size with its top row at `top`, under a clip of the desktop's w×h. A
+  // picture can run past the desktop: the encoder is held to even sides and an odd
+  // desktop does not have them, and a display's last strip runs past its last
+  // row, holding nothing of the picture there. The clip is what cuts it, and not
+  // a source rectangle, which WebKit's canvas does not read of a `VideoFrame`:
+  // it draws the frame whole into the destination, so a last strip cut that way
+  // came squeezed, with the rows past the display at the bottom of it.
+  const place = (
+    pictures: Iterable<{ image: CanvasImageSource; top: number }>,
+    w: number,
+    h: number,
+  ) => {
+    const context = options.context();
+    if (!context) {
+      return;
+    }
+    context.save();
+    try {
+      context.beginPath();
+      context.rect(0, 0, w, h);
+      context.clip();
+      for (const { image, top } of pictures) {
+        context.drawImage(image, 0, top);
+      }
+    } finally {
+      context.restore();
+    }
+  };
+
   // The frame `record` is the last strip of, onto the desktop's canvas: every
   // strip held of a desktop of the record's size, each a strip's rows below the
-  // one before, the last cut at the desktop's last row. A strip of a desktop of
-  // another size is of a stream since replaced, and is dropped.
+  // one before. A strip of a desktop of another size is of a stream since
+  // replaced, and is dropped.
   const paintStrips = (record: VideoMsg) => {
     const { w, h } = record;
     const pitch = stripRows(h);
-    const context = options.context();
-    let drawn = false;
+    const pictures = strips
+      .filter((strip) => strip.w === w && strip.h === h)
+      .map((strip) => ({ image: strip.frame, top: strip.index * pitch }))
+      .filter(({ top }) => top < h);
     try {
-      for (const strip of strips) {
-        const top = strip.index * pitch;
-        const rows = Math.min(pitch, h - top);
-        if (strip.w !== w || strip.h !== h || rows <= 0) {
-          continue;
-        }
-        context?.drawImage(strip.frame, 0, 0, w, rows, 0, top, w, rows);
-        drawn = true;
-      }
+      place(pictures, w, h);
     } finally {
       // Whatever became of the drawing: a frame held is decoder memory.
       releaseStrips();
     }
-    if (drawn) {
+    if (pictures.length > 0) {
       // The desktop's own canvas is the picture again.
       hidePlanes();
       painted();
@@ -534,17 +558,12 @@ export function createFramePainter(options: {
   };
 
   const paint = (record: VideoMsg, image: DecodedPicture) => {
-    const context = options.context();
     if (isSoftwarePlanes(image)) {
       if (!presentPlanes(image, record.w, record.h)) {
         return;
       }
     } else {
-      const { w, h } = record;
-      // Cropped by the desktop's size rather than drawn whole: the encoder is held
-      // to even sides and an odd desktop does not have them, so the decoded picture
-      // can be a pixel wider or taller than the desktop.
-      context?.drawImage(image, 0, 0, w, h, 0, 0, w, h);
+      place([{ image, top: 0 }], record.w, record.h);
       // The desktop's own canvas is the picture again.
       hidePlanes();
     }
