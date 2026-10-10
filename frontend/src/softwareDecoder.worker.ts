@@ -1,4 +1,4 @@
-// BETA: the decode worker behind softwareDecoder.ts. It loads one software
+// The decode worker behind softwareDecoder.ts. It loads one software
 // decoder's module once (softwareDecoderModule.ts), the one its first stream
 // names, with a pool of threads, runs one decoder per stream the paint worker
 // opens, and answers every unit with one picture or none.

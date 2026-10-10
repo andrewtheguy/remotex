@@ -22,8 +22,8 @@ axum server ── single session slot ── protocol engine
 ```
 
 Ordinary RDP and VNC source frames are decoded in the gateway and sent as one VP9
-stream of the whole desktop, at the quality and chroma the target's render plan
-resolves to. wlshare, reached as `subtype = "wlshare"`, instead codes that
+stream of the whole desktop, at 4:4:4 and at the quality the target's render
+plan resolves to. wlshare, reached as `subtype = "wlshare"`, instead codes that
 resolved VP9 stream itself for the gateway to pass through unchanged. A
 VNC desktop too large for that stream, in a session that does not resize it, has no
 picture: the session stays up and the page offers the remote's displays — see
@@ -100,7 +100,7 @@ The three native servers have these in common:
 
 [wlshare](https://github.com/andrewtheguy/wlshare), this project's own VNC
 server for wlroots-based Wayland desktops, is the ideal. It codes the desktop as
-VP9 itself, at the quality and chroma the target asks for, and walks that quality
+VP9 itself, at 4:4:4 and the quality the target asks for, and walks that quality
 by the browser's link, so the gateway passes its stream through untouched and
 the session still adapts to a slow link. Because wlshare is ours, what RFB
 lacks is added to it as an extension: pixel density, switching outputs,
@@ -184,8 +184,8 @@ passed.
   `frontend/wasm/flac` is the lossless sound's decoder, the page's
   alone: the gateway's FLAC is libFLAC and shares no code with it, so it has no
   crate under `crates/`. It has no threads, needs no shared memory, and builds
-  on stable. `frontend/wasm/vp9` is the BETA software VP9 decoder, for the
-  4:4:4 stream of a session started so
+  on stable. `frontend/wasm/vp9` is the software VP9 decoder, for the
+  gateway's 4:4:4 stream in a page whose browser's own decoder does not take it
   ([Decoded in the page](#decoded-in-the-page)). It is not built here: it is a
   release of [vp9-wasm](https://github.com/andrewtheguy/vp9-wasm), which
   `pin.json` in that directory names by version and SHA-256. The frontend's
@@ -311,15 +311,16 @@ is the only candidate for that today, not because another codec is ruled out: a
 second encoder is a decision of its own, weighed as
 [The codec](#the-codec) weighs HEVC.
 
-#### The browser's four answers
+#### The browser's three answers
 
-The browser is asked four questions, each once at page load and stated on the
-session socket: which VP9 profile its decoder takes (for
-`render_chroma = "auto"`), whether it decodes a High Performance Mac's HEVC,
-whether it composes an RDP host's graphics pipeline, and whether it decodes the
-H.264 such a pipeline may carry. The
-gateway *selects* a chroma on the first and never refuses a client for it. The
-last refuses nobody either: it decides only whether a passed pipeline's host is
+The browser is asked three questions, each once at page load and stated on the
+session socket: whether it decodes a High Performance Mac's HEVC, whether it
+composes an RDP host's graphics pipeline, and whether it decodes the H.264 such
+a pipeline may carry. The page asks a fourth of its own decoder and tells the
+gateway nothing of it: whether it takes the gateway's 4:4:4 VP9, which decides
+only whether the page decodes that stream itself
+([Decoded in the page](#decoded-in-the-page)). The
+last of the three refuses nobody: it decides only whether a passed pipeline's host is
 told it may draw with H.264, on a target whose `egfx_h264` key allows it. The
 other two say which passthrough the browser can take. They grey the choice at
 the picker, where a browser that says no starts the target encoded here; they
@@ -333,7 +334,7 @@ a wider capability negotiation, and do not let either rebuild a session with
 choices nobody made.
 Preserve the announced configuration and color-space behavior in
 [The codec](#the-codec) and
-[Choosing a chroma](#choosing-a-chroma).
+[Colour and what the link will bear](#colour-and-what-the-link-will-bear).
 
 #### A desktop past the ceiling
 
@@ -361,11 +362,11 @@ ordinary VNC clients. Do not list a wlshare extension on a plain target, or
 detect wlshare on one.
 
 A `wlshare` target lists the VP9 encoding for every browser, with the plan's
-chroma, dial and walk as pseudo-encodings beside it, and passes its frames
+dial and walk as pseudo-encodings beside it, and passes its frames
 untouched; the stream is the subtype's picture, with no key and no choice at
 the picker beside it. A server that ignores the listing is encoded here from
-ZRLE. Do not transcode a passed frame, pass one at a chroma other than the
-plan's, ask wlshare for the plan with a client message, or add a key or a choice
+ZRLE. Do not transcode a passed frame, pass one at a chroma other than 4:4:4,
+ask wlshare for the plan with a client message, or add a key or a choice
 that selects the stream. See
 [wlshare's stream, passed through](#wlshares-stream-passed-through).
 
@@ -562,15 +563,15 @@ without resize has no picture until the remote sends a smaller one — see
 A target's stream keys are per target, and every one has a default:
 
 - `video_quality` (1–100, default 90) is the ceiling the stream holds to.
-- `render_chroma` (`"auto"`, the default, or `"420"` / `"444"`) is how much colour
-  the stream carries per pixel. A target that writes nothing resolves it per
-  browser; the two fixed answers are selections no decoder can overrule. See
-  [the codec](#the-codec) for why it, and not the quality, is where a desktop
-  stream's picture goes, and [choosing a chroma](#choosing-a-chroma) for when to
-  take the decision away from the browser.
 - `render_adaptive` (on unless a target writes `false`) lets VP9 encoded in the
   gateway track the measured link — see
-  [what the link will bear](#choosing-a-chroma) for the signal and the walk.
+  [what the link will bear](#colour-and-what-the-link-will-bear) for the signal
+  and the walk.
+
+There is no chroma key: the stream is always 4:4:4, profile 1. See
+[the codec](#the-codec) for why the chroma, and not the quality, is where a
+desktop stream's picture goes, and [decoded in the page](#decoded-in-the-page)
+for the browsers whose own decoder does not take it.
   There is no floor key: the walk's floor is a constant of the encoder's, where
   it hands off from quality to frame rate as WebRTC's quality scaler does at its
   own quantizer threshold, and the settle sharpens a quiet desktop back at the
@@ -580,13 +581,13 @@ None of them reaches a passed stream: a session started with the passthrough
 sends the Mac's HEVC, or the RDP host's pipeline, as it came.
 
 The engines never see the config keys. They and the session's choices collapse
-to one `RenderPlan` (`quality`, `adaptive`, `chroma`, `apple_media`,
-`rdp_graphics`, `rdp_h264`) at the config boundary in
+to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `rdp_graphics`,
+`rdp_h264`, `software`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
 ```text
-video_quality / render_chroma / render_adaptive, and the session's choices
+video_quality / render_adaptive, and the session's choices
   → TargetConfig::render_plan(choices, browser decoders) → RenderPlan → vnc::run / rdp::run
   → VideoSink::new(engine, frame_tx, plan, feedback, oversize)
   → DesktopStream (src/stream.rs) → vp9::Stream
@@ -633,9 +634,9 @@ Five rules hold the stream up, and each is a rule somewhere:
   frames would decode wrongly. A resize while a round is out drops that round on its
   return (its epoch is stale), and the pixels the new desktop blitted meanwhile are
   owed a stream of their own.
-- **The picture may be a pixel larger than the desktop.** The 4:2:0 conversion
-  needs even sides — VP9 itself does not, nor 4:4:4, and both are held to them
-  anyway — so the mirror is padded up with its edge repeated (black would be a seam
+- **The picture may be a pixel larger than the desktop.** Neither VP9 nor its
+  4:4:4 conversion needs even sides, and the stream is held to them anyway, as
+  wlshare's is — so the mirror is padded up with its edge repeated (black would be a seam
   the encoder paid for every frame). The record header carries the *true* desktop
   size and the client crops.
 
@@ -665,14 +666,16 @@ encoded and decoded through the same libvpx:
 | 4:4:4, lossless (q 0)        | 912 KB   | 70 KB       | 49.5 dB | 4           |
 
 Every 4:2:0 row is the conversion's own floor; speed, loop filter, tuning and
-adaptive quantization moved nothing either. `render_chroma = "444"` selects VP9
-profile 1 — a colour sample per pixel, the same quantizer, a keyframe a third
-larger, inter frames no larger, about a third more encode time — and the codec
-string it announces is `vp09.01.…` instead of `vp09.00.…`. The cost is the
-decoder: no browser's hardware VP9 path takes profile 1 — Intel's media engines
-from Ice Lake on decode it, but Chromium's D3D11 and VA-API decoders advertise
-profiles 0 and 2 only — so it always decodes in software, and a browser with no software VP9 at all, which is iOS and
-iPadOS, refuses the configuration by name the way it would refuse any other.
+adaptive quantization moved nothing either. So every stream is VP9 profile 1
+(`vp9::CHROMA`) — a colour sample per pixel, the same quantizer, a keyframe a
+third larger, inter frames no larger, about a third more encode time — and the
+codec string it announces is `vp09.01.…`. The cost is the decoder: no browser's
+hardware VP9 path takes profile 1 — Intel's media engines from Ice Lake on
+decode it, but Chromium's D3D11 and VA-API decoders advertise profiles 0 and 2
+only — so it always decodes in software, and a browser with no software VP9 at
+all, which is iOS and iPadOS, has the page decode it in WebAssembly instead
+([Decoded in the page](#decoded-in-the-page)). There is no 4:2:0 stream to fall
+back on: the page's decoder is the fallback, and the encoder makes one stream.
 `a_444_stream_keeps_the_colour_420_averages_away` in `screen-vp9` is the round
 trip that pins the difference, through the archive's own decoder.
 
@@ -722,7 +725,7 @@ wlshare has a VP9 encoding of its own, `WLSV` (`0x574c5356`), made for its deskt
 clients and for this gateway: every update one rectangle over the whole desktop, a
 `u32` length and one frame of a single stream. That stream is the one this gateway
 would encode from the same pixels — coded by the same `screen-vp9` crate at the
-same speed, screen tuning and dial, 8-bit at either chroma, BT.601 at studio swing
+same speed, screen tuning and dial, 8-bit 4:4:4, BT.601 at studio swing
 declared in its keyframes, so the two are one stream by construction — so on a
 `wlshare` target the gateway lists it for every browser, tells wlshare what the
 plan resolved to, and each frame goes to the browser as it came: no ZRLE on either
@@ -734,25 +737,22 @@ sends.
   the head of a `wlshare` target's `SetEncodings` for a desktop within the ceiling,
   and next to it, as pseudo-encodings the way Tight's quality levels ride the same
   list, what wlshare is to code: `WLQ` plus the target's `video_quality` as the
-  ceiling wlshare's walk never goes above, `WLS0` for a plan whose chroma resolved
-  to 4:2:0, and `WLSD` for one without `render_adaptive`, which holds the dial
-  there rather than walking it on the browser's lag. So a browser whose decoder
-  takes only profile 0 is passed a 4:2:0 stream rather than one encoded here, and
-  the target's keys mean on a passed stream what they mean on one coded here.
+  ceiling wlshare's walk never goes above, and `WLSD` for a plan without
+  `render_adaptive`, which holds the dial there rather than walking it on the
+  browser's lag. So the target's keys mean on a passed stream what they mean on
+  one coded here.
   Pseudo-encodings rather than a client message because a server that is not
   wlshare ignores an encoding it does not know where a message it does not know
   ends the connection, and because they ride the list that names the encoding, so
-  wlshare's first frame is already the plan's. The plan is fixed for an engine, and
-  a reload that resolves otherwise rebuilds the engine
-  ([choosing a chroma](#choosing-a-chroma)), so a session never changes carriage or
-  chroma mid-stream. wlshare announces nothing: it sends the encoding in place of
-  ZRLE.
+  wlshare's first frame is already the plan's. The plan is fixed for an engine, so
+  a session never changes carriage mid-stream. wlshare announces nothing: it
+  sends the encoding in place of ZRLE.
 - **Passed as it came** (`VideoSink::pass`). The frame's opening bits are read for
-  its profile, which must be the plan's chroma's — a server that did not code what
-  it was asked is refused by name rather than handed to a decoder configured for
-  the other — and whether it is a keyframe; its size is held to the ceiling a
-  stream encoded here is; the configuration announced ahead of it is the plan's
-  chroma's string for its size, its level figured at 60 frames a second, wlshare's
+  its profile, which must be 4:4:4's — a server that did not code what this
+  gateway streams is refused by name rather than handed to a decoder configured
+  for another — and whether it is a keyframe; its size is held to the ceiling a
+  stream encoded here is; the configuration announced ahead of it is profile 1's
+  string for its size, its level figured at 60 frames a second, wlshare's
   default `max_fps`, since wlshare rather than the gateway paces it. Its bytes take their share
   of `QUEUE_BUDGET` and go out in order with the messages around them. The mirror,
   the rounds, the interval, the quality walk and the settle do not run: wlshare
@@ -825,8 +825,7 @@ Three controls with similar names therefore remain separate:
 | `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway, including every picture after local HEVC decoding; it does not reach passed HEVC |
 
 - **The browser says whether it can.** The page asks once, at load (`frontend/src/appleMedia.ts`),
-  and states the answer as `apple_media=true|false` on every session socket, beside
-  its chroma. The picker offers the passthrough to a page that said yes, or
+  and states the answer as `apple_media=true|false` on every session socket. The picker offers the passthrough to a page that said yes, or
   that will decode the picture itself, and greys it for any other, and the
   gateway holds each to it
   ([What a session is started with](#what-a-session-is-started-with)). For the picture it asks its `VideoDecoder` about the configuration
@@ -871,7 +870,7 @@ Three controls with similar names therefore remain separate:
   gateway reads it once at start-up and refuses to start unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
   worker calls that build's exports. A gateway that serves
   it says so of each High Performance target in `GET /api/targets`
-  (`software.hevc`), and the picker then shows *Decode HEVC in this page* under a
+  (`software`), and the picker then shows *Decode HEVC in this page* under a
   target whose picture is ticked to pass
   ([Decoded in the page](#decoded-in-the-page)). A session started with it has
   the page decode the picture with the decoder, in a worker of its own, on a page
@@ -880,7 +879,7 @@ Three controls with similar names therefore remain separate:
   the picture can tick the passthrough only so, and the row is then held ticked,
   so Chrome on a GPU without HEVC Range Extensions is passed the whole stream:
   its own decoder for the sound, the page's for the picture. The software decoder is shaped as a `VideoDecoder`
-  (`frontend/src/softwareDecoder.ts`, which the page's software VP9 decoder
+  (`frontend/src/softwareDecoder.ts`, which the page's VP9 decoder
   shares: [Decoded in the page](#decoded-in-the-page)), so the paint
   worker's stream runs it as it runs the browser's (`frontend/src/videoDecoder.ts`).
   What it outputs is not a `VideoFrame` but the picture's three planes where the
@@ -977,7 +976,7 @@ Three controls with similar names therefore remain separate:
   a picture (`stream_carries`). The stream coming back starts at an IDR,
   announced again by its `VideoFormat`. The resize notice covers a resize in
   progress and stands in front while both hold.
-- **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
+- **The dial does not reach it.** `video_quality` and the adaptive
   walk govern only VP9: the whole picture of a browser that says no.
   `render_adaptive` neither enables nor disables the Mac's separate, always-on
   High Performance controller. The Opus keys have no sound to reach and are
@@ -1016,8 +1015,7 @@ three quarters VP9 encoding and a quarter decoding; passing the commands leaves
 the gateway the connection, the channel's bulk compression and the frame
 acknowledgements, a few percent of a core whatever the desktop is doing. What it
 costs is the browser's work, and the quality walk: what the host draws with is
-sent as it is, so `video_quality`, `render_chroma` and `render_adaptive` reach
-nothing of it.
+sent as it is, so `video_quality` and `render_adaptive` reach nothing of it.
 
 The compositor the page runs is the gateway's own, unit tested
 as it is there, and the module built from it is tested as the page loads it.
@@ -1198,87 +1196,73 @@ the pipeline.
 
 ### Decoded in the page
 
-BETA. A session can be started with its picture decoded by the page's own
-software decoders, in WebAssembly, and not by the browser's `VideoDecoder`. It
-is a choice made under the target at the picker, beside the size, the sound and
-the passthrough
-([What a session is started with](#what-a-session-is-started-with)). There are
-two such decoders, one for each of two streams, and a session is decoded with
-one of them at most, since its picture is one stream. So the picker's row names
-the decoder: *Decode VP9 in this page* or *Decode HEVC in this page*.
+The page has two software decoders of its own, in WebAssembly, for the two
+streams a browser's `VideoDecoder` may not take:
 
-| Stream | Decoder | The gateway has it where | A target offers it where |
+| Stream | Decoder | Who decides | Where |
 |---|---|---|---|
-| VP9 at 4:4:4, profile 1 | [vp9-wasm](https://github.com/andrewtheguy/vp9-wasm), in the bundle (`frontend/wasm/vp9`) | `[vp9_wasm].enabled` is set | its `render_chroma` is not `"420"` |
-| A High Performance Mac's passed HEVC | [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), served at `/hevc/` | it read the release archive ([Apple's media stream, passed through](#apples-media-stream-passed-through)) | it is `ard-high-performance`, and while the Mac's picture is passed |
-
-Which of the two a session has follows from its passthrough
-(`TargetConfig::software_chosen`): the HEVC decoder while a Mac's picture is
-passed, the VP9 decoder while nothing is passed, and neither while an RDP
-host's graphics pipeline is, which is no video. Whatever VP9 a session with a
-Mac's picture passed also sends stays the browser's own decoder's.
+| The gateway's VP9, 4:4:4, profile 1 | [vp9-wasm](https://github.com/andrewtheguy/vp9-wasm), in the bundle (`frontend/wasm/vp9`) | each page, from its own decoder's answer | wherever the browser's own decoder does not take profile 1 |
+| BETA: a High Performance Mac's passed HEVC | [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), served at `/hevc/` | the session, at the picker | a gateway that read the release archive ([Apple's media stream, passed through](#apples-media-stream-passed-through)), on `ard-high-performance` while the Mac's picture is passed |
 
 Both are written for the one shape of stream they decode and compiled with
-SIMD128 and threads. `[vp9_wasm]` is a switch, off unless set, while the
-operator compares, in use, 4:4:4 decoded in the page with the 4:2:0 a browser
-without profile 1 is sent otherwise, which is what decides whether the encoder
-goes on making both.
+SIMD128 and threads.
 
-**The session holds the decision, and the gateway tells every page of it.**
-`connect` carries the choice (`Choices::software`), the slot keeps it with the
-others, and the plan the engine runs names the decoders it resolved to
-(`RenderPlan::software`). Two things follow from the plan:
+**The VP9 is each page's to decode however it can.** Every browser is sent the
+same 4:4:4 stream, and the gateway is told nothing about which decoder takes
+it. The page asks its own `VideoDecoder` once, at load, about the profile 1
+configuration the gateway announces (`frontend/src/nativeVp9.ts`). Where it
+says yes, the browser's own decoder decodes the stream, as Chromium, Firefox and
+Safari on macOS do in software; where it says a definite no, as Safari on iOS
+and iPadOS does, which decodes VP9 in hardware alone, the page builds the
+WebAssembly decoder for every profile 1 format instead
+(`pageModuleFor` in `frontend/src/softwareDecoder.ts`). Only a definite no
+hands the stream to the page: `isConfigSupported` has answered the same
+question differently on the same browser, so a yes, an answer with no verdict
+and an exception all keep the browser's own decoder, whose refusal at
+`configure` is then by name. No picker row offers the choice, and two pages of
+one session, a desktop and an iPad after a takeover say, may decode it
+differently. A page that would decode it itself and cannot run the module
+(below) says so in the video banner and decodes nothing.
 
-- With the VP9 decoder among them the session's chroma is 4:4:4, whatever the
-  socket's `chroma` says: that answer is the browser's own decoder's, and it
-  selects nothing here. So a page that comes back answering otherwise resumes
-  the same engine.
-- Every `videoFormat` says whether its stream is the page's to decode
-  (`software`): true for profile 1 (`vp09.01.`) and for the Mac's HEVC under
-  the decoders the session has, false for anything else, profile 0 included.
-  A repaint announces the format again, so a page that attaches later is told
-  as the first was.
+**The Mac's HEVC is the session's to decide, and the gateway tells every page
+of it.** `connect` carries the choice (`Choices::software`), the slot keeps it
+with the others, and the plan the engine runs says so (`RenderPlan::software`).
+Every `videoFormat` says whether its stream is the page's to decode
+(`software`): true for the Mac's HEVC under such a plan, false for anything
+else, the VP9 included. A repaint announces the format again, so a page that
+attaches later is told as the first was, and the session's page, the same page
+reloaded and a second display's tab decode the Mac's picture with the same
+kind of decoder.
 
-A page builds its decoder from that flag and from nothing of its own
-(`frontend/src/videoDecoder.ts`): no URL switch, no answer of the page's. So
-the session's page, the same page reloaded and a second display's tab, however
-that was opened, decode one session with the same kind of decoder. The Info
-card's Video row, and a display tab's menu, end with which it is: the browser's
-native decoder, or this page's WebAssembly decoder.
+The Info card's Video row, and a display tab's menu, end with which decoder a
+stream has: the browser's native decoder, or this page's WebAssembly decoder.
 
-**Nothing stands in for a decoder that was chosen.** A `connect` that asks
-where the gateway and the target have no decoder for the session's picture,
-beside a passed pipeline included, is refused by name, `target "…" does not offer decoding in the page`, and starts
-nothing. A page told to decode a stream in a decoder it cannot run says so in
-the video banner and decodes nothing: the browser's own decoder is not tried in
-its place, since the picture would then pass for the page's.
+**Nothing stands in for a decoder that was chosen.** A `connect` that asks for
+the Mac's HEVC decoded in the page where the gateway has no such decoder, or
+where the session passes no Mac's picture, is refused by name, `target "…" does
+not offer decoding in the page`, and starts nothing. A page told to decode a
+stream in a decoder it cannot run says so in the video banner and decodes
+nothing: the browser's own decoder is not tried in its place, since the picture
+would then pass for the page's.
 
-**The picker's row** (`softwareRow` in `frontend/src/targetChoices.ts`):
+**The picker's row** (`softwareRow` in `frontend/src/targetChoices.ts`), BETA,
+for the Mac's HEVC alone:
 
-- `GET /api/targets` says of each target which decoders a session on it can
-  use (`software: { vp9, hevc }`). The row is there, under that decoder's
-  name, where the session would use one: the VP9 decoder with nothing ticked to
-  pass, or the HEVC decoder with the Mac's picture ticked to pass.
-- It cannot be ticked together with a passthrough of a stream the page has no
-  decoder for, an RDP host's pipeline or a Mac's picture on a gateway without
-  the HEVC decoder: while that is ticked the VP9 row is greyed and unticked,
-  saying so, and Start sends the passthrough alone.
-- It is greyed, with the reason, where this page cannot run the decoder the
-  session would use: shared-memory SIMD WebAssembly on the cross-origin
-  isolated page and a WebGL 2 canvas to present on, and for the Mac's HEVC a
-  canvas that can be given its primaries (`frontend/src/softwareSupport.ts`).
-- Until somebody chooses, it is ticked where the browser's own decoder refuses
-  the stream the session starts on, profile 1 or the Mac's HEVC, and unticked
-  where it takes it. iOS and iPadOS Safari, which decode VP9 in hardware alone,
-  are who the first is for. The choice is remembered for the target as the
-  others are.
-- Where the Mac's picture is passed and only the page decodes it, the row is
-  ticked and held: that is what let the passthrough be ticked. The socket's
-  `apple_media` is still the browser's own decoder's "no"; it is the choice in
-  `connect` that tells the gateway this page takes the stream, and the gateway
-  refuses the passthrough from a browser that has neither
-  (`TargetConfig::beyond_page`). An owner that comes back to such a session is
-  not sent to the picker for that "no".
+- `GET /api/targets` says of each target whether a session on it can have it
+  (`software`). The row, *Decode HEVC in this page*, is there while the Mac's
+  picture is ticked to pass.
+- It is greyed, with the reason, where this page cannot run the decoder:
+  shared-memory SIMD WebAssembly on the cross-origin isolated page and a WebGL 2
+  canvas that can be given the stream's primaries to present on
+  (`frontend/src/softwareSupport.ts`).
+- Where the browser's own decoder takes the HEVC it is a choice, unticked until
+  somebody ticks it, and remembered for the target as the others are.
+- Where only the page decodes it, the row is ticked and held: that is what let
+  the passthrough be ticked. The socket's `apple_media` is still the browser's
+  own decoder's "no"; it is the choice in `connect` that tells the gateway this
+  page takes the stream, and the gateway refuses the passthrough from a browser
+  that has neither (`TargetConfig::beyond_page`). An owner that comes back to
+  such a session is not sent to the picker for that "no".
 
 **How a decoder runs.** One wrapper, one decode worker implementation and one
 pool thread serve both modules (`frontend/src/softwareDecoder.ts`,
@@ -1294,58 +1278,13 @@ BT.601's coefficients at studio swing to the desktop's own R'G'B' and converts
 nothing else. So the shader inverts that matrix and the canvas is left in sRGB,
 which hands the display the pixels the desktop had.
 
-### Choosing a chroma
+### Colour and what the link will bear
 
-The key takes three answers: the default resolves per browser, and the other two
-are decisions no browser can overrule.
-
-**`"auto"` — 4:4:4 where the decoder takes profile 1, 4:2:0 where it does not.**
-The default, and what a target that writes no chroma gets: every browser is sent
-the most colour its own decoder takes, and no target is written down twice under
-two names to serve a desktop and an iPad. The page asks
-its own `VideoDecoder` once, at load, about the profile 1 configuration the gateway
-would announce (`frontend/src/videoChroma.ts`), and states the answer as
-`chroma=444|420` on every session socket it opens. `render_plan` resolves the key
-against it; nothing else reads it.
-
-The answer rides the socket URL rather than a message because of *when* it is
-needed: a reattach decides at attach
-([session lifecycle](#session-lifecycle)), before the browser has sent
-anything, whether the running engine is still one that browser can be given. It
-is held on the attachment (`ClientSlot`) and read by both engine starts —
-including the one reattachment that would otherwise resume a running engine,
-which compares the plan the returning browser resolves to against the plan that
-is running and rebuilds when they differ.
-
-This is **selection, never refusal**. Only a definite `supported === false` gives up the colour; a "yes", an
-answer with no verdict, and an `isConfigSupported` that throws all read as 4:4:4,
-and a browser that answered wrongly still ends where every browser ends, at its own
-decoder's refusal by name. One question at page load, no round trip in front of a
-session, and no path where the gateway turns a client away on the strength of a
-probe.
-
-**BETA: 4:4:4 decoded in the page.** A session started with *Decode in this
-page* is sent 4:4:4 whatever its browser answered, and the page decodes it:
-[Decoded in the page](#decoded-in-the-page). The answer on the socket stays the
-browser's own decoder's, and resolves `"auto"` for every other session.
-
-**`"444"` — profile 1 for every browser, refusals included.** Set it to hold a
-fleet to one bitstream, or to pin one side of a measurement; an iPhone or iPad
-watching the target is sent a stream its own decoder rejects by name, unless
-its session is one [decoded in the page](#decoded-in-the-page). Losing the hardware
-decoder on the browsers that do take it is a smaller loss than it reads: the
-GPU-process decoder is the one that goes quiet under stream churn, and software
-libvpx is what answers every chunk (`frontend/src/videoDecoder.ts`). What it costs
-is CPU on the client, roughly twice the samples per frame.
-
-**`"420"` — profile 0 for every browser.** A selection rather than a default: a
-decoder that would have taken profile 1 is sent the subsampled stream anyway. Right for a fleet that must stay on
-a hardware decoder, or where the target is photographic rather than text and the
-chroma buys nothing.
-
-Set nothing and every browser gets what it can decode. The two fixed answers are
-for when the bitstream, not the picture, is the thing being held
-still.
+Every stream encoded here is 4:4:4, profile 1 ([the codec](#the-codec)), and no
+browser is asked which it takes: one whose own decoder refuses it decodes it in
+the page ([Decoded in the page](#decoded-in-the-page)). One stream for every
+browser is what lets a reattach resume the running engine for whichever page
+comes back, and lets the encoder make one bitstream.
 
 The keyframe header also *says* the conversion is BT.601 studio swing
 (`VP9E_SET_COLOR_SPACE` / `VP9E_SET_COLOR_RANGE`). libvpx writes *unknown* unless
@@ -1481,7 +1420,7 @@ and the close goes out last.
 
 **The client decodes it with WebCodecs** `VideoDecoder`, reached through
 `frontend/src/videoDecoder.ts` and driven from `framePainter.ts` — the batch loop,
-which replaces the decoder when the stream restarts on a different size. A session
+which replaces the decoder when the stream restarts on a different size. A stream
 [decoded in the page](#decoded-in-the-page) runs the page's software decoder
 through the same file, in the same shape. **Which decoder is the platform's choice**: the
 configuration states no `hardwareAcceleration`. A `prefer-software` hint would
@@ -1533,7 +1472,8 @@ slower unoptimised.
 **VP9 is the one encoder because nothing else qualifies yet.** What the encoder is
 for is the stream that adapts: the quality walk, and the frame rate after it, set
 between frames with no keyframe
-([Choosing a chroma](#choosing-a-chroma) for what the walk moves). A second encoder
+([Colour and what the link will bear](#colour-and-what-the-link-will-bear) for
+what the walk moves). A second encoder
 has to do that at 4:4:4 before it is worth maintaining. HEVC is the one with a
 reason behind it: Apple's devices decode it in hardware, where VP9 at 4:4:4 is
 decoded in software by every browser, and a High Performance Mac's picture
@@ -1569,17 +1509,18 @@ on the same browser twice to build a refusal on, and a refusal phrased as "this
 browser accepted none" turns any fault near the path into an accusation against
 the browser.
 
-What the browser is asked is four questions. One selects rather than refuses: how
-much colour this decoder takes, for `render_chroma = "auto"` to resolve against
-([choosing a chroma](#choosing-a-chroma)). A wrong answer to it costs a picture,
-not a desktop. One decides what a host is told and nothing else: whether this
-browser decodes the H.264 a passed RDP pipeline may carry. The other two say
+What the browser is asked is three questions. One decides what a host is told and
+nothing else: whether this browser decodes the H.264 a passed RDP pipeline may
+carry. The other two say
 which passthrough the browser can take: a High
 Performance Mac's HEVC, and an RDP host's graphics pipeline. They
 decide what the picker offers before a session starts, where a "no" starts the
 target encoded here, and they keep a session started with a passthrough from
 being sent to a browser that cannot show it
-([What a session is started with](#what-a-session-is-started-with)).
+([What a session is started with](#what-a-session-is-started-with)). Whether
+the browser's own decoder takes the 4:4:4 VP9 is asked by the page for itself:
+it chooses the page's decoder or the browser's, and the gateway, which sends
+every browser the same stream, is not told.
 
 The refusal itself stays where it always was: one honest failure at the client's own
 decoder. The gateway announces the configuration in `ServerMsg::VideoFormat` before
@@ -1597,14 +1538,12 @@ Authentication and desktop ownership are separate:
    and `GET /api/targets`' state the gateway's version in `X-Remotex-Version`,
    and a page whose own differs, a tab left open across an upgrade, opens no
    session and lists no target: it says both versions and offers a reload.
-3. `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
+3. `/ws?session=<token>&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
    attaches to the slot and reports the target picker or the current connected
-   target. `chroma`, `apple_media`, `rdp_graphics`
-   and `rdp_h264` are required: the most colour this browser's video decoder
-   takes, whether it decodes a High Performance Mac's HEVC,
-   whether it composes an RDP host's graphics pipeline, and whether it decodes
-   the H.264 such a pipeline may carry; see
-   [Choosing a chroma](#choosing-a-chroma),
+   target. `apple_media`, `rdp_graphics` and `rdp_h264` are required: whether
+   this browser decodes a High Performance Mac's HEVC, whether it composes an
+   RDP host's graphics pipeline, and whether it decodes the H.264 such a
+   pipeline may carry; see
    [Apple's media stream, passed through](#apples-media-stream-passed-through) and
    [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
    The media sockets carry the token alone.
@@ -1632,11 +1571,7 @@ Every `connect` first ends any running engine, including one already connected
 to the same target, and the next engine is not spawned until that process exits;
 `ENGINE_EXIT_GRACE` bounds the wait. Switching targets and logging out likewise
 end the engine outright. The sole resume is the owning browser reattaching to
-the same target after its session socket drops, and it resumes only while the
-running engine is still the one that reattachment resolves to: a reload re-runs
-the chroma question, and an `"auto"` target whose browser comes back with a
-different answer is rebuilt rather than resumed, because the stream that is
-running is one that browser has just said it cannot decode. An engine passing an
+the same target after its session socket drops. An engine passing an
 RDP host's graphics pipeline is never resumed: the page that comes back holds
 none of what the host draws against
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)),
@@ -1662,8 +1597,8 @@ instead of a reconnect.
 These things about a session are chosen by whoever starts it, before it starts:
 how the desktop is sized, whether the remote's sound is taken and as what,
 whether the remote's own stream is passed through, where a second virtual
-display sits, and, BETA, whether the picture is decoded by the page's own
-software decoders ([Decoded in the page](#decoded-in-the-page)), which is the
+display sits, and, BETA, whether a Mac's passed HEVC is decoded by the page's
+own software decoder ([Decoded in the page](#decoded-in-the-page)), which is the
 gateway's to offer as well as the target's. Picking a target at the picker opens it,
 its options show under it with a Start button, and Start sends `connect` with the
 choices (`Choices` in `src/config.rs`). None of them is a config key.
@@ -1845,7 +1780,8 @@ it three times: the paint window in `ws.rs` holds the next batch when too many a
 owed or the oldest is owed too long, on a `render_adaptive` target the same
 measurement — published through `LinkFeedback` — moves a stream's quality before
 the window ever parks, and it decides when a batch's share of `QUEUE_BUDGET` (see
-[choosing a chroma](#choosing-a-chroma), where the queues are sized) goes back to
+[Colour and what the link will bear](#colour-and-what-the-link-will-bear),
+where the queues are sized) goes back to
 the engine.
 Nothing is dropped in any of them; an access unit's dependency order is untouched.
 
@@ -3096,14 +3032,6 @@ there too, so `check-config` refuses an icon the browser would have. A file is
 then read per request, which is what lets an operator swap the image without a
 restart; an inline one is held in the resolved config as `Bytes`, cheap to clone
 with the state around it.
-
-`[vp9_wasm]` is top-level for the same reason and is one switch, `enabled`,
-which a table must carry: whether a session may be started with its VP9 decoded
-at 4:4:4 by the page's software decoder, which the picker then offers under each
-target that can send it ([Decoded in the page](#decoded-in-the-page)). Absent or
-false, no target offers it and a `connect` that asks is refused. It is opt-in
-while the operator compares 4:4:4 decoded in the page with the 4:2:0 a browser
-without profile 1 is sent without it.
 
 `[meter]` is top-level for the same reason and records the throughput of the
 browser's four WebSockets in an SQLite database, one row per target, socket and

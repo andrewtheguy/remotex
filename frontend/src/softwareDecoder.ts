@@ -1,14 +1,17 @@
-// BETA: the page's software decoders, for a stream the browser's `VideoDecoder`
-// does not take, or is not given:
-// - `hevc`, a High Performance Mac's passed HEVC: andrewtheguy/hevc-wasm's
-//   decoder, which the gateway serves where it has the release archive.
+// The page's software decoders, for a stream the browser's `VideoDecoder` does
+// not take, or is not given:
 // - `vp9`, the gateway's VP9 at 4:4:4, profile 1: andrewtheguy/vp9-wasm's
-//   decoder, which is in the bundle (frontend/wasm/vp9).
+//   decoder, which is in the bundle (frontend/wasm/vp9). Which decodes the VP9 is
+//   each page's to say: the browser's own decoder where it takes profile 1, and
+//   this one where it does not (nativeVp9.ts), so a session's pages may differ.
+// - `hevc`, BETA, a High Performance Mac's passed HEVC: andrewtheguy/hevc-wasm's
+//   decoder, which the gateway serves where it has the release archive. Which
+//   decodes that is the session's to say and no page's: it is chosen at the
+//   picker (targetChoices.ts), held by the gateway, and stated with each
+//   `videoFormat`, so every page attached to a session builds the same kind of
+//   decoder for it.
 //
-// Which decodes a stream is the session's to say and no page's: it is chosen at
-// the picker (targetChoices.ts), held by the gateway, and stated with each
-// `videoFormat`, so every page attached to a session builds the same kind of
-// decoder for it (videoDecoder.ts).
+// `pageModuleFor` says which, and `videoDecoder.ts` builds it.
 //
 // Each is written for the one stream it decodes and compiled to WebAssembly with
 // SIMD128 and threads, and the two modules present one interface, so one worker
@@ -47,13 +50,31 @@ export const MODULE_CODEC: Record<SoftwareModule, string> = {
 /**
  * The module that decodes a configuration string, or null for one neither does:
  * HEVC, and VP9 profile 1, which is the gateway's 4:4:4 (`codec_string` in
- * src/vp9.rs). Profile 0 is every browser's own decoder's.
+ * src/vp9.rs).
  */
 export function softwareModuleFor(codec: string): SoftwareModule | null {
   if (codec.startsWith("hev1.") || codec.startsWith("hvc1.")) {
     return "hevc";
   }
   return codec.startsWith("vp09.01.") ? "vp9" : null;
+}
+
+/**
+ * The page's module that decodes a stream announced as `format`, or undefined
+ * for the browser's own decoder: the session's to say for a Mac's HEVC
+ * (`software`), and this page's for the gateway's VP9, which it decodes where
+ * the browser's own decoder does not take profile 1 (`nativeVp9`). Null for a
+ * stream the session says is the page's and no module decodes.
+ */
+export function pageModuleFor(
+  format: { decode: string; software?: boolean },
+  nativeVp9: boolean,
+): SoftwareModule | null | undefined {
+  const module = softwareModuleFor(format.decode);
+  if (format.software) {
+    return module;
+  }
+  return module === "vp9" && !nativeVp9 ? "vp9" : undefined;
 }
 
 /** What the paint worker sends the decode worker. */

@@ -225,11 +225,10 @@ impl Mirror {
 
 /// Refuse a coded picture the encoder will not take.
 ///
-/// The coded picture is the mirror's: the desktop grown to even sides. 4:2:0
-/// subsamples chroma 2×2, and 4:4:4, which would not need even sides, is held to the
-/// same ones: one geometry, not two. VP9 itself does not need them either; the
-/// mirror's padding already supplies the column or row an odd desktop is short of,
-/// and a chroma plane rounded up would be a second path to be wrong in.
+/// The coded picture is the mirror's: the desktop grown to even sides. Neither the
+/// 4:4:4 stream nor VP9 itself needs them, and the stream is held to them anyway,
+/// as wlshare's is: the mirror's padding supplies the column or row an odd desktop
+/// is short of, and the two ends code one geometry.
 ///
 /// That cannot be a config-time refusal — only the remote knows its own size, and it
 /// may change mid-session — so the message has to carry the whole explanation to
@@ -292,7 +291,6 @@ impl Mirror {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Chroma;
 
     /// A rectangle from a position and a size, which is what most of these want.
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
@@ -353,7 +351,7 @@ mod tests {
     }
 
     /// What the encoder costs on desktop pixels — the measurement that settles VP9's
-    /// `Q_FINEST`, `CPU_USED` and thread count, and what 4:4:4 costs over 4:2:0.
+    /// `Q_FINEST`, `CPU_USED` and thread count.
     ///
     /// `#[ignore]`d because it takes a minute and prints rather than asserts: the numbers
     /// are the output, and a threshold on them would be a test of this machine.
@@ -384,23 +382,20 @@ mod tests {
         const FRAMES: u32 = 60;
         let sizes = [(1280u16, 800u16), (1920, 1080)];
         let qualities = [20u8, 40, 60, 80];
-        let chromas = [Chroma::Subsampled, Chroma::Full];
 
         println!(
-            "\n| size      | chroma | quality | KB total | KB keyframe | µs/frame encode \
+            "\n| size      | quality | KB total | KB keyframe | µs/frame encode \
              | µs/frame convert | kbit/s at 30fps |"
         );
         println!(
-            "|-----------|--------|---------|----------|-------------|-----------------\
+            "|-----------|---------|----------|-------------|-----------------\
              |------------------|-----------------|"
         );
         for (w, h) in sizes {
-            for (chroma, quality) in
-                chromas.iter().flat_map(|c| qualities.iter().map(move |q| (*c, *q)))
-            {
+            for quality in qualities {
                 let mut mirror = Mirror::new(w, h).expect("a mirror");
                 let mut stream =
-                    crate::vp9::Stream::new(mirror.coded(), quality, chroma)
+                    crate::vp9::Stream::new(mirror.coded(), quality)
                         .expect("a stream");
                 let mut total = 0usize;
                 let mut keyframe_bytes = 0usize;
@@ -423,7 +418,7 @@ mod tests {
 
                 // The conversion on its own, over the same pixels: it is inside the
                 // encode timing above, and this is what says how much of it it was.
-                let mut picture = screen_vp9::Picture::new(mirror.coded().0, mirror.coded().1, chroma.into(), threads()).expect("a picture");
+                let mut picture = screen_vp9::Picture::new(mirror.coded().0, mirror.coded().1, crate::vp9::CHROMA, threads()).expect("a picture");
                 let crop = mirror.picture().to_vec();
                 let started = std::time::Instant::now();
                 for _ in 0..FRAMES {
@@ -433,9 +428,8 @@ mod tests {
 
                 let bits = total as f64 * 8.0;
                 println!(
-                    "| {:9} | {:6} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
+                    "| {:9} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
                     format!("{w}x{h}"),
-                    chroma.name(),
                     quality,
                     total / 1024,
                     keyframe_bytes / 1024,

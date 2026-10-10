@@ -1232,18 +1232,20 @@ pub enum ServerMsg {
     /// size-derived level, and a browser that just attached has seen none.
     ///
     /// `decode` is the exact WebCodecs configuration string to hand `VideoDecoder.configure` —
-    /// `vp09.00.40.08.01.06.06.06.00`. It comes from the encoder rather than from a prediction, and it is sent
+    /// `vp09.01.40.08.03.06.06.06.00`. It comes from the encoder rather than from a prediction, and it is sent
     /// with the round that produced the stream's first unit because that is where the encoder's
     /// answer exists.
     ///
     /// `passthrough` says whose stream it is: the remote's own, passed to the browser untouched
     /// (wlshare's VP9, a High Performance Mac's HEVC), or one this gateway encoded.
     ///
-    /// `software` says what decodes it: BETA, the page's own software decoder for
-    /// this stream and not the browser's `VideoDecoder`, in a session started so
-    /// ([`crate::config::RenderPlan::software`]). It is the session's and not a
-    /// page's, so every page attached builds the same kind of decoder: the
-    /// session's page, one that reattaches, a second display's tab.
+    /// `software` says whether a Mac's passed HEVC is decoded in the page's own
+    /// software decoder and not the browser's `VideoDecoder`: BETA, in a session
+    /// started so ([`crate::config::RenderPlan::software`]). It is the session's and
+    /// not a page's, so every page attached builds the same kind of decoder: the
+    /// session's page, one that reattaches, a second display's tab. It is never set
+    /// for VP9, which each page decodes in the browser's own decoder where that
+    /// takes profile 1 and in its WebAssembly one where it does not.
     ///
     /// `strips` says how many strips each picture of the stream comes in, a unit
     /// each ([`Strip`]): [`Strip::COUNT`] for a High Performance Mac's passed in
@@ -1906,13 +1908,13 @@ mod tests {
             passthrough: None,
             camera: false,
             microphone: false,
-            render: "video q90 4:4:4 · adaptive".to_owned(),
+            render: "video q90 · adaptive".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 · adaptive"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1940,12 +1942,12 @@ mod tests {
         // How to decode the stream, which is the message a client cannot work out for
         // itself: VP9 carries no parameter sets, so every field here is the gateway's
         // answer and a renamed one is a decoder that never gets configured.
-        match (ServerMsg::VideoFormat { decode: "vp09.00.40.08".to_owned(), passthrough: true, software: false, strips: 1 })
+        match (ServerMsg::VideoFormat { decode: "vp09.01.40.08".to_owned(), passthrough: true, software: false, strips: 1 })
             .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"videoFormat","decode":"vp09.00.40.08","passthrough":true,"software":false,"strips":1}"#
+                r#"{"type":"videoFormat","decode":"vp09.01.40.08","passthrough":true,"software":false,"strips":1}"#
             ),
             None => panic!("videoFormat must be a text frame"),
         }

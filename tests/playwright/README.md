@@ -75,22 +75,19 @@ browser whose own decoder refuses the Mac's HEVC, which Playwright's Chromium
 is: the target offers no such decoder, the session starts without the
 passthrough and is sent VP9, and nothing under `/hevc/` is asked for.
 
-`software-vp9.spec.ts` is the BETA software VP9 decoder, the vp9-wasm module in
-the bundle, on a gateway whose config sets `[vp9_wasm]`, in a session started
-with *Decode VP9 in this page*. It asserts that the gateway lists the target as
-offering the decoder, that Start sends the choice, that every format announced
-is profile 1 and says this page decodes it, that the decode worker loads the
-module's file, once, that the first keyframe's batch is acknowledged with no
-video error or repaint request before it, and that the page shows the canvas the
-module's planes are drawn on. The page is then reloaded, which sends no
-`connect`: it must be told the same of the stream it is repainted with, since
-the choice is the session's. A second case makes the browser answer no to
+`software-vp9.spec.ts` is the page's software VP9 decoder, the vp9-wasm module
+in the bundle, which a page uses where the browser's own decoder refuses the
+gateway's 4:4:4 stream. It asserts that the picker offers no choice of VP9
+decoder, and that a browser whose own decoder takes profile 1, which
+Playwright's Chromium does, is announced profile 1 not said to be the page's,
+decodes it itself, never fetches the module and keeps the graphics canvas
+hidden, as the Info card says. A second case makes the browser answer no to
 profile 1, as iOS Safari does, by replacing `isConfigSupported` for that one
-question: the row is then found ticked, the socket says `chroma=420`, and the
-session is 4:4:4 decoded in the module all the same. With the row unticked it
-asserts the other decision: the browser's own decoder, the module never fetched,
-and that canvas hidden. Against a gateway without the table it asserts that the
-picker has no such row.
+question: the gateway announces the same stream, the decode worker loads the
+module's file once, the first keyframe's batch is acknowledged with no video
+error or repaint request before it, the page shows the canvas the module's
+planes are drawn on, and the Info card names the WebAssembly decoder. The page
+is then reloaded and decodes the repainted stream the same way.
 
 `soft-keyboard.spec.ts` is the soft keyboard, read from the same socket: that a
 key tapped on it is the `key` frames the page sends, down then up; that a tapped
@@ -271,9 +268,8 @@ bun run test:hevc
 Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`,
 which runs the test that the target offers no such decoder instead.
 
-The software VP9 spec needs a gateway whose config sets `[vp9_wasm] enabled =
-true` and has a live target that leaves `render_chroma` unset, named by
-`REMOTEX_PLAYWRIGHT_VP9_TARGET`:
+The software VP9 spec needs a gateway with a live target that sends VP9, named
+by `REMOTEX_PLAYWRIGHT_VP9_TARGET`:
 
 ```sh
 cargo run --profile qa -- serve --config tmp/qa_vp9.toml
@@ -287,9 +283,6 @@ REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
 REMOTEX_PLAYWRIGHT_VP9_TARGET='desktop' \
 bun run test:vp9
 ```
-
-Against a gateway without the table, add `REMOTEX_PLAYWRIGHT_VP9_WASM=0`, which
-runs the test that the picker has no such row instead.
 
 The audio and picker specs use the test-tone gateway instead of a live target:
 

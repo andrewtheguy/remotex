@@ -44,6 +44,7 @@ import {
   mosaicSender,
   mosaicView,
 } from "./mosaic.ts";
+import { nativeVp9 } from "./nativeVp9.ts";
 import { createSender } from "./outbound.ts";
 import { advancePaintGeneration, sendPaintAck } from "./paintAck.ts";
 import { createRectCache } from "./pointerRect.ts";
@@ -67,6 +68,7 @@ import {
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { decodesRdpH264 } from "./rdpH264.ts";
 import { remotePoint } from "./remotePoint.ts";
+import { pageModuleFor } from "./softwareDecoder.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
 import type { Choices } from "./targetChoices.ts";
 import {
@@ -76,7 +78,6 @@ import {
   type Point,
 } from "./touchGestures.ts";
 import { attachTouchPassthrough } from "./touchPassthrough.ts";
-import { videoChroma } from "./videoChroma.ts";
 
 // The WebSocket/claim connection-flow state machine (independent of the
 // picker-vs-desktop `mode` the attached socket carries):
@@ -1553,7 +1554,6 @@ export function useRemoteDesktop(
       const socket = new WebSocket(
         gatewaySocketUrl("/ws", sessionId, {
           screen: hostDisplayMsg(),
-          chroma: videoChroma(),
           appleMedia: decodesAppleMedia(),
           rdpGraphics: composesRdpGraphics(),
           rdpH264: decodesRdpH264(),
@@ -2107,7 +2107,7 @@ export function useRemoteDesktop(
           setVideoStream({
             decode: msg.decode,
             passthrough: msg.passthrough,
-            software: msg.software,
+            software: pageModuleFor(msg, nativeVp9()) !== undefined,
             strips: msg.strips,
           });
           break;

@@ -1,4 +1,4 @@
-// BETA: the software decoders' pictures (softwareDecoder.ts), shown from the
+// The software decoders' pictures (softwareDecoder.ts), shown from the
 // GPU.
 //
 // A picture is three 8-bit planes in the decoder's memory. Each is uploaded as a

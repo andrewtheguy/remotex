@@ -21,11 +21,8 @@ import {
   stripRows,
   type VideoMsg,
 } from "./protocol.ts";
-import {
-  type DecodedPicture,
-  isSoftwarePlanes,
-  type SoftwareModule,
-} from "./softwareDecoder.ts";
+import { type DecodedPicture, isSoftwarePlanes } from "./softwareDecoder.ts";
+import type { PageDecoding } from "./softwareSupport.ts";
 import {
   createDesktopVideo,
   type DesktopVideo,
@@ -133,7 +130,7 @@ export function createFramePainter(options: {
    */
   makeGraphicsVideo?: () => EgfxVideo;
   /**
-   * BETA: where a software decoder's pictures are drawn, the same canvas
+   * Where a software decoder's pictures are drawn, the same canvas
    * (planesPicture.ts). A painter given none presents none.
    */
   makePlanesPicture?: () => PlanesPicture;
@@ -144,8 +141,8 @@ export function createFramePainter(options: {
    * desktop's, and only the page can show or hide it.
    */
   onGraphicsShown?: (shown: boolean) => void;
-  /** BETA: the software decoders this page can run (see `createDesktopVideo`). */
-  runs?: Readonly<Record<SoftwareModule, boolean>>;
+  /** How this page decodes (see `createDesktopVideo`). */
+  decoding?: PageDecoding;
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and
   // is not queued behind draws — an eviction closes the socket from under whatever
@@ -328,7 +325,7 @@ export function createFramePainter(options: {
         onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
       },
       undefined,
-      options.runs,
+      options.decoding,
     );
     videoComplained = false;
     options.onVideoError(null);

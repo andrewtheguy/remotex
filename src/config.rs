@@ -155,121 +155,6 @@ impl Protocol {
     }
 }
 
-/// How much colour a video stream carries per pixel, as the encoder and the wire have
-/// it: one of two VP9 profiles, and never a question. What a *target* asks for is
-/// [`ChromaChoice`], which has a third answer this deliberately does not.
-///
-/// This is where the picture loss on a desktop stream actually is — not the
-/// quantizer. Measured 2026-09-01 on 1280×800 of rendered text, coloured on a dark
-/// terminal and black on white, encoded and decoded through libvpx: every 4:2:0
-/// quantizer from the dial's finest to mathematically lossless lands at the same
-/// 28.5 dB with a worst pixel 135 code values off, and so does the RGB→I420
-/// conversion with no codec behind it at all. A one-pixel coloured glyph stem
-/// shares its one colour sample with three background pixels and comes back at a
-/// quarter of its saturation, and nothing downstream can put it back. The same
-/// picture at 4:4:4 and the same quantizer measures 42.8 dB with a worst pixel 33
-/// off. `a_444_stream_keeps_the_colour_420_averages_away` in [`crate::vp9`] is the
-/// round trip that pins it.
-///
-/// `Deserialize` for the session socket's `chroma` query parameter — the browser
-/// naming the most colour its decoder takes, which is a settled chroma and not a
-/// choice. No `Default`: a stream's chroma is resolved from a [`ChromaChoice`] and,
-/// where that is [`ChromaChoice::Auto`], from that answer; there is no third source
-/// for one to come from silently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-pub enum Chroma {
-    /// 4:2:0 — one colour sample per 2×2 pixels, VP9 profile 0. The one every VP9
-    /// decoder takes, hardware ones included, which is why it is what
-    /// [`ChromaChoice::Auto`] falls back to.
-    #[serde(rename = "420")]
-    Subsampled,
-    /// 4:4:4 — a colour sample per pixel, VP9 profile 1. On the picture above:
-    /// a keyframe a third larger, inter frames no larger, a third more encode
-    /// time, and coloured text that is the colour it was.
-    ///
-    /// The trade is the decoder. Hardware that decodes profile 1 exists, but no
-    /// browser's hardware VP9 path takes it, so in a browser this always decodes
-    /// in software — Chromium does (measured headless, 2026-09-01),
-    /// and a browser with no software VP9 at all, which is iOS and iPadOS, refuses
-    /// the stream by name at `VideoDecoder.configure`, the same way it would refuse
-    /// any configuration it lacks. Losing the hardware path is a smaller loss than
-    /// it reads: the GPU-process decoder is the one that goes quiet under churn, and
-    /// software libvpx is what answers every chunk (see
-    /// `frontend/src/videoDecoder.ts`).
-    ///
-    /// [`ChromaChoice::Auto`] exists to get in front of that refusal without making
-    /// the operator maintain a second target for the browsers that would raise it.
-    #[serde(rename = "444")]
-    Full,
-}
-
-/// The encoder's own word for it: the config's chroma is a key and a wire answer, the
-/// crate's is a VP9 profile, and this is the one place the first becomes the second.
-impl From<Chroma> for screen_vp9::Chroma {
-    fn from(chroma: Chroma) -> Self {
-        match chroma {
-            Chroma::Subsampled => Self::Subsampled,
-            Chroma::Full => Self::Full,
-        }
-    }
-}
-
-impl Chroma {
-    /// How the config key spells it, for messages that name it back.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Subsampled => "420",
-            Self::Full => "444",
-        }
-    }
-
-    /// How a card spells it, for a reader rather than for a key — the sampling
-    /// itself, which is what says this is a chroma and not another quality dial.
-    /// See [`RenderPlan::describe`].
-    pub fn card_name(self) -> &'static str {
-        match self {
-            Self::Subsampled => "4:2:0",
-            Self::Full => "4:4:4",
-        }
-    }
-}
-
-/// What [`TargetConfig::render_chroma`] can say: let the browser pick the profile,
-/// or select one for every browser alike.
-///
-/// A type of its own rather than `Option<Chroma>`, because an encoder must never be
-/// handed a chroma that still has a question in it: what a target asks for and what a
-/// stream carries are different types, and [`TargetConfig::render_plan`] is the one
-/// place the first becomes the second.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-pub enum ChromaChoice {
-    /// 4:4:4 where the browser's decoder takes VP9 profile 1, 4:2:0 where it says it
-    /// does not. The default, and the only value that is not a decision about every
-    /// browser at once.
-    ///
-    /// The browser is asked once, at page load, and states the answer on its session
-    /// socket (`frontend/src/videoChroma.ts`, [`crate::ws`]); the gateway selects on
-    /// it and never refuses a client for it, so a browser that answers wrongly still
-    /// ends where it always did, at its own decoder's refusal by name. One target
-    /// serves a desktop and an iPad without being written down twice, which is why
-    /// this is the answer a target that says nothing gets.
-    #[default]
-    #[serde(rename = "auto")]
-    Auto,
-    /// 4:2:0 for every browser ([`Chroma::Subsampled`]), selected rather than
-    /// resolved: the decoder that would have taken profile 1 is sent the subsampled
-    /// stream anyway. What every stream was before this key existed, and what to
-    /// write to hold a fleet to the hardware-decodable bitstream.
-    #[serde(rename = "420")]
-    Subsampled,
-    /// 4:4:4 for every browser ([`Chroma::Full`]), refusals included: an iPhone or
-    /// iPad watching this target is sent a stream its `VideoDecoder` rejects by name.
-    /// The setting to hold a fleet to one bitstream, or to pin one side of a
-    /// comparison — [`Self::Auto`] is what serves a mixed one.
-    #[serde(rename = "444")]
-    Full,
-}
-
 /// A target's audio keys as the encoder consumes them, resolved by
 /// [`TargetConfig::audio_plan`]. In bits per second because that is libopus's
 /// unit; the config speaks kbit/s because a person does.
@@ -312,8 +197,6 @@ pub struct RenderPlan {
     /// ([`TargetConfig::render_adaptive`]). Off, the congestion walk keeps its
     /// historical shape: pressure only.
     pub adaptive: bool,
-    /// [`TargetConfig::render_chroma`], resolved.
-    pub chroma: Chroma,
     /// The Mac's picture passes as it came, its HEVC rather than VP9 encoded
     /// here: [`Passthrough::AppleMedia`], chosen at the picker. None of the fields
     /// above reach such a picture.
@@ -329,10 +212,10 @@ pub struct RenderPlan {
     /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
     /// [`Self::rdp_graphics`].
     pub rdp_h264: bool,
-    /// BETA: the streams of this session every attached page decodes in its own
-    /// software decoders, as each `videoFormat` then says ([`Choices::software`]).
-    /// With its VP9 among them, [`Self::chroma`] is 4:4:4.
-    pub software: PageDecoders,
+    /// BETA: every attached page decodes the Mac's passed HEVC in its own
+    /// software decoder, as each `videoFormat` of it then says
+    /// ([`Choices::software`], [`page_decodes`]).
+    pub software: bool,
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
@@ -341,8 +224,8 @@ pub struct RenderPlan {
 /// ([`Choices::passthrough`]).
 ///
 /// For a LAN either way: the stream is the remote's own, with no quality walk
-/// behind it, so [`TargetConfig::video_quality`], [`TargetConfig::render_chroma`]
-/// and the adaptive keys do not reach a passed picture.
+/// behind it, so [`TargetConfig::video_quality`] and the adaptive keys do not
+/// reach a passed picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Passthrough {
@@ -387,36 +270,14 @@ impl Passthrough {
     }
 }
 
-/// BETA: the page's software decoders, by the stream each decodes: VP9 at 4:4:4
-/// (andrewtheguy/vp9-wasm, in the page's bundle) and a High Performance Mac's
-/// HEVC (andrewtheguy/hevc-wasm, which a gateway that has its archive serves).
-///
-/// As a gateway's, which of them it has for a page: `[vp9_wasm].enabled`, and the
-/// archive it read ([`crate::hevc_wasm`]). As a target's, which a session on it can
-/// be decoded with ([`TargetConfig::software`]), which `/api/targets` states. As a
-/// plan's, which a session started with [`Choices::software`] is, one at most: every page
-/// attached to it is told so, format by format ([`Self::decodes`]), so no two of
-/// them decode one session differently.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct PageDecoders {
-    pub vp9: bool,
-    pub hevc: bool,
-}
-
-impl PageDecoders {
-    /// Neither: a session decoded by the browser's own decoder.
-    pub const NONE: Self = Self { vp9: false, hevc: false };
-
-    pub fn any(self) -> bool {
-        self.vp9 || self.hevc
-    }
-
-    /// Whether a stream announced as `decode`, a WebCodecs configuration string,
-    /// is one of these decoders': VP9 profile 1, which is 4:4:4, or HEVC.
-    pub fn decodes(self, decode: &str) -> bool {
-        (self.vp9 && decode.starts_with("vp09.01."))
-            || (self.hevc && (decode.starts_with("hev1.") || decode.starts_with("hvc1.")))
-    }
+/// Whether a stream announced as `decode`, a WebCodecs configuration string, is
+/// decoded by every attached page in its own software decoder: a Mac's HEVC, in
+/// a session whose plan says so ([`RenderPlan::software`]). The VP9 encoded here
+/// never is: each page decodes that in the browser's own decoder where it takes
+/// profile 1 and in its WebAssembly one where it does not, which is the page's
+/// to know and no session's.
+pub fn page_decodes(software: bool, decode: &str) -> bool {
+    software && (decode.starts_with("hev1.") || decode.starts_with("hvc1."))
 }
 
 /// Which choices the picker shows under a target: what its type has to offer, from
@@ -463,11 +324,10 @@ pub struct Choices {
     /// Where the second virtual display sits.
     #[serde(default)]
     pub placement: Placement,
-    /// BETA: decode the session's picture in one of the page's software decoders
-    /// ([`PageDecoders`]) and not in the browser's own: its VP9, which is then
-    /// 4:4:4 whatever the browser's decoder takes, or a Mac's HEVC where that is
-    /// passed. Refused where the gateway and the target have no decoder for the
-    /// session's picture ([`TargetConfig::accepts_software`]).
+    /// BETA: decode a Mac's passed HEVC in the page's software decoder
+    /// (andrewtheguy/hevc-wasm, which a gateway that has its archive serves) and
+    /// not in the browser's own. Refused where the gateway has no such decoder or
+    /// the session passes no Mac's picture ([`TargetConfig::accepts_software`]).
     #[serde(default)]
     pub software: bool,
     /// Ask a High Performance Mac whose picture is passed for one tile, each
@@ -599,14 +459,13 @@ pub struct NotOffered {
 
 /// What the attached browser said it can take, from its session socket
 /// ([`crate::ws`]): the questions the page asks once at load and states on every
-/// session socket it opens. The chroma *selects* a stream. The two after it say which
-/// passthrough this browser can be served, which is what the picker greys a choice
-/// by and what ends a session whose owner comes back unable to take its own
-/// ([`TargetConfig::beyond`]).
+/// session socket it opens. The first two say which passthrough this browser can
+/// be served, which is what the picker greys a choice by and what ends a session
+/// whose owner comes back unable to take its own ([`TargetConfig::beyond`]). Its
+/// VP9 decoder is no question: every browser is sent 4:4:4, and a page whose own
+/// decoder refuses profile 1 decodes it in WebAssembly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decoders {
-    /// The most colour it takes, which resolves [`ChromaChoice::Auto`].
-    pub chroma: Chroma,
     /// Whether it decodes a High Performance Mac's picture: the HEVC, Range
     /// Extensions 4:4:4 ([`Passthrough::AppleMedia`]).
     pub apple_media: bool,
@@ -631,22 +490,17 @@ impl Decoders {
     }
 }
 
-/// A browser that states `chroma` and takes every passthrough, for tests about
-/// everything else a browser says.
 #[cfg(test)]
-impl From<Chroma> for Decoders {
-    fn from(chroma: Chroma) -> Self {
-        Self { chroma, apple_media: true, rdp_graphics: true, rdp_h264: true }
-    }
+impl Decoders {
+    /// A browser that takes every passthrough, for tests about everything else.
+    pub const ALL: Self = Self { apple_media: true, rdp_graphics: true, rdp_h264: true };
 }
 
 impl RenderPlan {
-    /// This plan for a session whose pages decode `software` themselves: the VP9
-    /// module decodes 4:4:4 alone, so that is the chroma, whatever the browser's
-    /// own decoder said it takes.
-    pub fn decoded_by_page(self, software: PageDecoders) -> Self {
-        let chroma = if software.vp9 { Chroma::Full } else { self.chroma };
-        Self { chroma, software, ..self }
+    /// This plan for a session whose pages decode a Mac's passed HEVC themselves
+    /// ([`TargetConfig::software_chosen`]).
+    pub fn decoded_by_page(self, software: bool) -> Self {
+        Self { software, ..self }
     }
 
     /// The stream this plan passes untouched, if any.
@@ -663,35 +517,18 @@ impl RenderPlan {
     /// This plan in one line, for the client's session card.
     ///
     /// The resolved plan rather than the config keys: what a target *does* is the
-    /// plan its keys collapse to, defaults and the browser's chroma included, and a
-    /// description built from the keys would restate the file while the encoder did
-    /// something the reader has to derive.
+    /// plan its keys collapse to, defaults included, and a description built from
+    /// the keys would restate the file while the encoder did something the reader
+    /// has to derive. The VP9 is always 4:4:4, so the card does not say so.
     pub fn describe(&self) -> String {
-        self.card(None)
-    }
-
-    /// [`Self::describe`] with the chroma slot said differently — the one thing a
-    /// reader without a browser knows better than a resolved plan does, because
-    /// [`ChromaChoice::Auto`] has nothing here to resolve against. See
-    /// [`TargetConfig::render_summary`], the only caller that passes anything.
-    fn card(&self, chroma_slot: Option<&str>) -> String {
         if let Some(passthrough) = self.passthrough() {
             let h264 = if self.rdp_h264 { " with H.264" } else { "" };
             return format!("{}{h264}, passed through", passthrough.stream());
         }
-        // Always named, because with `auto` the default there is no chroma a card
-        // may leave unsaid: an unnamed one would read as 4:2:0 selected on a
-        // session that is 4:2:0 only because this browser declined profile 1. What
-        // the slot says is the profile on the wire — or, for a config card,
-        // whatever `chroma_slot` puts there instead.
-        let chroma = match chroma_slot {
-            Some(slot) => slot.to_owned(),
-            None => self.chroma.card_name().to_owned(),
-        };
         // The walk as a suffix: the quality named before it is a ceiling the link
         // may fall below.
         let adaptive = if self.adaptive { " · adaptive" } else { "" };
-        format!("video q{} {chroma}{adaptive}", self.quality)
+        format!("video q{}{adaptive}", self.quality)
     }
 }
 
@@ -928,18 +765,6 @@ pub struct TargetConfig {
     /// it can, and one with room to spare never earns better.
     #[serde(default)]
     pub video_quality: Option<u8>,
-    /// Chroma sampling of this target's video stream; `None` reads as
-    /// [`ChromaChoice::Auto`], which is every browser getting the most colour its
-    /// own decoder takes.
-    ///
-    /// Written down only to take that decision away from the browser: `"444"` sends
-    /// profile 1 to a decoder that refuses it by name, `"420"` sends the subsampled
-    /// stream to one that would have taken the colour. Both are the right key for a
-    /// measurement or for a fleet held to one bitstream, and the wrong one for a
-    /// target watched from more than one kind of browser. See [`ChromaChoice`] and
-    /// [`Self::render_plan`].
-    #[serde(default)]
-    pub render_chroma: Option<ChromaChoice>,
     /// Let [`Self::video_quality`] track the measured link — on unless the
     /// operator turned it off.
     ///
@@ -1045,72 +870,52 @@ impl TargetConfig {
     /// The stream keys resolved to the one [`RenderPlan`] the engines see, so
     /// `rdp::run` / `vnc::run` need not know the config enums.
     ///
-    /// `decoders` is what the attached browser said its `VideoDecoder` takes,
-    /// carried on the session socket and held with its attachment
-    /// ([`crate::session::SessionManager::attach`]). Its chroma is read by
-    /// [`ChromaChoice::Auto`] and by nothing else: a target that names a profile
-    /// gets that profile whatever this says, which is what keeps the explicit key a
-    /// decision no browser can overrule. `choices` is what the session was started
+    /// `decoders` is what the attached browser said it can take, carried on the
+    /// session socket and held with its attachment
+    /// ([`crate::session::SessionManager::attach`]): here, whether it decodes the
+    /// H.264 a passed pipeline may carry. `choices` is what the session was started
     /// with, whose passthrough is this target's own ([`Self::passthrough`]).
     pub fn render_plan(&self, choices: Choices, decoders: Decoders) -> RenderPlan {
         let quality = self.video_quality();
         let adaptive = self.render_adaptive();
-        let chroma = match self.render_chroma.unwrap_or_default() {
-            ChromaChoice::Subsampled => Chroma::Subsampled,
-            ChromaChoice::Full => Chroma::Full,
-            ChromaChoice::Auto => decoders.chroma,
-        };
         let passthrough = self.passthrough(choices);
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
         let rdp_h264 = rdp_graphics && self.egfx_h264 && decoders.rdp_h264;
-        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics, rdp_h264, software: PageDecoders::default() }
+        RenderPlan { quality, adaptive, apple_media, rdp_graphics, rdp_h264, software: false }
     }
 
-    /// BETA: which of the page's software decoders a session on this target can
-    /// be decoded with, of those the `gateway` has: VP9's unless the target holds
-    /// every browser to 4:2:0, which that decoder does not take, and HEVC's on a
-    /// target with a Mac's picture to pass.
-    pub fn software(&self, gateway: PageDecoders) -> PageDecoders {
-        PageDecoders {
-            vp9: gateway.vp9 && self.render_chroma.unwrap_or_default() != ChromaChoice::Subsampled,
-            hevc: gateway.hevc && self.offers().passthrough == Some(Passthrough::AppleMedia),
-        }
+    /// BETA: whether a session on this target can have a Mac's passed HEVC
+    /// decoded in the page's software decoder, where the gateway has it
+    /// (`page_hevc`): on a target with a Mac's picture to pass.
+    pub fn software(&self, page_hevc: bool) -> bool {
+        page_hevc && self.offers().passthrough == Some(Passthrough::AppleMedia)
     }
 
-    /// Which of them a session started with `choices` is decoded with: none
-    /// unless it chose so, and then the one its picture is: HEVC's while the
-    /// Mac's picture is passed, VP9's while nothing is, and neither while an RDP
-    /// host's pipeline is, which is no video.
-    pub fn software_chosen(&self, choices: Choices, gateway: PageDecoders) -> PageDecoders {
-        if !choices.software {
-            return PageDecoders::default();
-        }
-        let offered = self.software(gateway);
-        match self.passthrough(choices) {
-            Some(Passthrough::AppleMedia) => PageDecoders { vp9: false, hevc: offered.hevc },
-            Some(Passthrough::RdpGraphics) => PageDecoders::NONE,
-            None => PageDecoders { vp9: offered.vp9, hevc: false },
-        }
+    /// Whether a session started with `choices` has its pages decode the Mac's
+    /// HEVC themselves: where it chose so and passes the Mac's picture.
+    pub fn software_chosen(&self, choices: Choices, page_hevc: bool) -> bool {
+        choices.software
+            && self.passthrough(choices) == Some(Passthrough::AppleMedia)
+            && self.software(page_hevc)
     }
 
     /// Whether `choices`' software decoding is something this target and the
-    /// `gateway` have for the session. One that asks where neither decoder would
-    /// decode anything, beside a passthrough of another stream included, is
-    /// refused, not started on the browser's own decoder.
-    pub fn accepts_software(&self, choices: Choices, gateway: PageDecoders) -> Result<(), NotOffered> {
-        if choices.software && !self.software_chosen(choices, gateway).any() {
+    /// gateway have for the session. One that asks where the page's decoder would
+    /// decode nothing, beside no passthrough or a passthrough of another stream
+    /// included, is refused, not started on the browser's own decoder.
+    pub fn accepts_software(&self, choices: Choices, page_hevc: bool) -> Result<(), NotOffered> {
+        if choices.software && !self.software_chosen(choices, page_hevc) {
             return Err(NotOffered { target: self.name.clone(), choice: "decoding in the page" });
         }
         Ok(())
     }
 
     /// The passthrough a session started with `choices` runs on that `decoders`'
-    /// browser cannot take, given the page's own decoders the session has
-    /// (`software`): the Mac's HEVC is taken by a page that decodes it itself.
-    pub fn beyond_page(&self, choices: Choices, decoders: Decoders, software: PageDecoders) -> Option<Passthrough> {
-        self.beyond(choices, decoders)
-            .filter(|passthrough| !(software.hevc && *passthrough == Passthrough::AppleMedia))
+    /// browser cannot take, given whether its pages decode the Mac's HEVC
+    /// themselves (`software`): such a page takes it whatever its own decoder says.
+    pub fn beyond_page(&self, choices: Choices, decoders: Decoders, software: bool) -> Option<Passthrough> {
+        self.beyond(choices, decoders).filter(|passthrough| !(software && *passthrough == Passthrough::AppleMedia))
     }
 
     /// The choices the picker shows under this target.
@@ -1201,26 +1006,11 @@ impl TargetConfig {
     /// The render dial for a reader with no browser in front of it — the TUI's
     /// target card, which describes a config file rather than a session.
     ///
-    /// The chroma is where a config card and a session card part: a session has a
-    /// browser and therefore a profile, and a file has only what the operator asked
-    /// for. So this card says `chroma auto` where the browser decides — which is the
-    /// default, and now most targets — and names the sampling where one was
-    /// selected for every browser alike. Naming one of `auto`'s two answers here
-    /// would print a colour this target may never send.
-    ///
-    /// The decoder passed below is read by [`ChromaChoice::Auto`] and by nothing
-    /// else, and `auto` is exactly the case whose slot is overwritten — so the
-    /// argument reaches no card, and a selected `"420"` or `"444"` prints itself.
-    ///
     /// A passthrough is a session's choice and not the file's, so the card is the
     /// VP9 one every target has.
     pub fn render_summary(&self) -> String {
-        let slot = match self.render_chroma.unwrap_or_default() {
-            ChromaChoice::Auto => Some("chroma auto"),
-            ChromaChoice::Subsampled | ChromaChoice::Full => None,
-        };
-        let decoders = Decoders { chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
-        self.render_plan(Choices::default(), decoders).card(slot)
+        let decoders = Decoders { apple_media: false, rdp_graphics: false, rdp_h264: false };
+        self.render_plan(Choices::default(), decoders).describe()
     }
 
     /// Whether a session started with `choices` is sent this target's sound
@@ -1634,11 +1424,6 @@ pub struct ConfigFile {
     /// [`Self::branding`]'s reason.
     #[serde(default)]
     pub hevc_wasm: Option<HevcWasmSection>,
-    /// The `[vp9_wasm]` table: BETA, whether the page may decode VP9 at 4:4:4
-    /// itself, in the software decoder its bundle holds. Absent, or present with
-    /// `enabled = false`, it does not. Top-level for [`Self::branding`]'s reason.
-    #[serde(default)]
-    pub vp9_wasm: Option<Vp9WasmSection>,
     /// The `[hp_decoders]` table: on Windows, the folders a High Performance
     /// target's decoders are loaded from, for a gateway that keeps them off
     /// `PATH`. Absent, they are looked for when a session needs them. Top-level
@@ -1685,22 +1470,6 @@ pub struct HevcWasmSection {
     /// gateway's data directory ([`data_dir`]). A gateway told where the archive is
     /// refuses to start without it.
     pub archive: PathBuf,
-}
-
-/// The `[vp9_wasm]` table as written.
-///
-/// The decoder is andrewtheguy/vp9-wasm's, in the page's bundle, so there is no
-/// archive to name: the table is the one switch. It is for a browser whose own
-/// `VideoDecoder` refuses VP9 profile 1, which otherwise asks for 4:2:0
-/// (`frontend/src/videoChroma.ts`): with the switch on, such a page asks for
-/// 4:4:4 and decodes it in the module. Off unless set, while an operator compares
-/// the two in use.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Vp9WasmSection {
-    /// Whether the page may. Required, as `[meter].enabled` is: a table says in
-    /// as many words which it is.
-    pub enabled: bool,
 }
 
 /// The `[meter]` table as written. See [`crate::throughput`].
@@ -1760,9 +1529,6 @@ pub struct AppConfig {
     /// `[hevc_wasm]` names, or the one found in the data directory. `None` serves
     /// no decoder.
     pub hevc_wasm: Option<PathBuf>,
-    /// `[vp9_wasm].enabled`: whether the page may decode VP9 at 4:4:4 in its own
-    /// software decoder, which `/api/config` tells it.
-    pub vp9_wasm: bool,
     /// `[hp_decoders]`: the folders the gateway loads the High Performance
     /// decoders from at start-up. Empty looks for them when a session needs them.
     pub hp_decoders: HpDecoders,
@@ -2144,7 +1910,6 @@ impl ConfigFile {
             dev_hostname: None,
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
-            vp9_wasm: self.vp9_wasm.is_some_and(|section| section.enabled),
             hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
@@ -2258,7 +2023,6 @@ impl ConfigFile {
                 .context("invalid [server].dev_subdomain")?,
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
-            vp9_wasm: self.vp9_wasm.is_some_and(|section| section.enabled),
             hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
@@ -3010,40 +2774,14 @@ mod tests {
         }
     }
 
-    /// `[vp9_wasm]` is one switch, off unless the table turns it on, and a table
-    /// has to say which.
-    #[test]
-    fn the_page_decodes_vp9_in_software_only_where_the_table_says_so() {
-        let allowed = |table: &str| {
-            ConfigFile::parse(&format!("{table}\n{}", minimal())).unwrap().resolve().unwrap().vp9_wasm
-        };
-        assert!(!allowed(""), "no [vp9_wasm] leaves the browser's own decoder");
-        assert!(!allowed("[vp9_wasm]\nenabled = false"));
-        assert!(allowed("[vp9_wasm]\nenabled = true"));
-        for (bad, says) in [
-            ("", "enabled"),
-            ("enabled = \"yes\"", "enabled"),
-            ("enabled = true\narchive = \"vp9.tar.gz\"", "archive"),
-        ] {
-            let err = ConfigFile::parse(&format!("[vp9_wasm]\n{bad}\n{}", minimal())).expect_err(bad);
-            assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
-        }
-    }
-
-    /// A session is decoded by one of its pages' own decoders where it chose
-    /// that and the gateway and the target have the one for its picture: VP9's
-    /// unless the target holds every browser to 4:2:0, HEVC's while a Mac's
-    /// picture is passed, and neither beside an RDP host's passed pipeline. The
-    /// VP9 is then 4:4:4 whatever the browser's decoder said, and a choice that
-    /// would decode nothing is refused by name.
+    /// A session has a Mac's passed HEVC decoded by its pages' own decoder where
+    /// it chose that, passes the Mac's picture, and the gateway has the decoder.
+    /// A choice that would decode nothing in the page is refused by name: the VP9
+    /// encoded here is every page's own to decode, never the session's.
     #[test]
     fn a_session_is_decoded_by_the_page_where_the_gateway_and_the_target_have_the_decoder() {
-        let both = PageDecoders { vp9: true, hevc: true };
-        let vp9 = PageDecoders { vp9: true, hevc: false };
-        let hevc = PageDecoders { vp9: false, hevc: true };
         let target = |keys: &str| parse_target(keys).unwrap().targets.remove(0);
         let auto = target("");
-        let subsampled = target("render_chroma = \"420\"");
         let mac = ConfigFile::parse(&vnc_toml(
             "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n",
         ))
@@ -3051,45 +2789,47 @@ mod tests {
         .targets
         .remove(0);
 
-        assert_eq!(auto.software(both), vp9, "an RDP host has no HEVC to pass");
-        assert_eq!(auto.software(hevc), PageDecoders::NONE);
-        assert_eq!(subsampled.software(both), PageDecoders::NONE, "the module takes no 4:2:0");
-        assert_eq!(mac.software(both), both);
+        assert!(!auto.software(true), "an RDP host has no HEVC to pass");
+        assert!(mac.software(true));
+        assert!(!mac.software(false), "not on a gateway without the decoder");
 
         let chosen = Choices { software: true, ..Choices::default() };
         let passed = Choices { passthrough: true, ..chosen };
-        assert_eq!(auto.software_chosen(Choices::default(), both), PageDecoders::NONE, "only where chosen");
-        assert_eq!(mac.software_chosen(chosen, both), vp9, "its HEVC is not passed");
-        assert_eq!(mac.software_chosen(passed, both), hevc, "one decoder a session");
-        assert_eq!(mac.software_chosen(passed, hevc), hevc);
-        assert_eq!(mac.software_chosen(passed, vp9), PageDecoders::NONE);
-        assert_eq!(auto.software_chosen(passed, both), PageDecoders::NONE, "a passed pipeline is no video");
+        assert!(!mac.software_chosen(Choices { software: false, ..passed }, true), "only where chosen");
+        assert!(!mac.software_chosen(chosen, true), "its HEVC is not passed");
+        assert!(mac.software_chosen(passed, true));
+        assert!(!mac.software_chosen(passed, false));
+        assert!(!auto.software_chosen(passed, true), "a passed pipeline is no video");
 
-        assert_eq!(auto.accepts_software(Choices::default(), PageDecoders::NONE), Ok(()));
-        assert_eq!(auto.accepts_software(chosen, vp9), Ok(()));
-        for (target, choices, gateway) in
-            [(&auto, chosen, PageDecoders::NONE), (&auto, chosen, hevc), (&subsampled, chosen, both), (&mac, chosen, hevc), (&auto, passed, both), (&mac, passed, vp9)]
-        {
-            let refused = target.accepts_software(choices, gateway).unwrap_err();
+        assert_eq!(auto.accepts_software(Choices::default(), false), Ok(()));
+        assert_eq!(mac.accepts_software(passed, true), Ok(()));
+        for (target, choices, page_hevc) in [(&auto, chosen, true), (&mac, chosen, true), (&auto, passed, true), (&mac, passed, false)] {
+            let refused = target.accepts_software(choices, page_hevc).unwrap_err();
             assert_eq!(refused.choice, "decoding in the page");
             assert!(refused.to_string().contains("does not offer decoding in the page"), "{refused}");
         }
 
-        // The browser's own answer selects nothing in such a session.
-        let declines = Decoders { chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
-        let plan = auto.render_plan(chosen, declines).decoded_by_page(auto.software_chosen(chosen, vp9));
-        assert_eq!((plan.chroma, plan.software), (Chroma::Full, vp9));
-        let plan = mac.render_plan(passed, declines).decoded_by_page(mac.software_chosen(passed, hevc));
-        assert_eq!((plan.chroma, plan.software), (Chroma::Subsampled, hevc), "its VP9 stays the browser's");
-        // And a Mac's passed picture is not beyond a page that decodes it itself.
-        assert_eq!(mac.beyond_page(passed, declines, PageDecoders::NONE), Some(Passthrough::AppleMedia));
-        assert_eq!(mac.beyond_page(passed, declines, hevc), None);
+        let declines = Decoders { apple_media: false, rdp_graphics: false, rdp_h264: false };
+        let plan = mac.render_plan(passed, declines).decoded_by_page(mac.software_chosen(passed, true));
+        assert!(plan.software);
+        // A Mac's passed picture is not beyond a page that decodes it itself.
+        assert_eq!(mac.beyond_page(passed, declines, false), Some(Passthrough::AppleMedia));
+        assert_eq!(mac.beyond_page(passed, declines, true), None);
 
-        assert!(vp9.decodes("vp09.01.40.08.03.06.06.06.00"));
-        assert!(!vp9.decodes("vp09.00.40.08.01.06.06.06.00"), "profile 0 is the browser's");
-        assert!(!vp9.decodes("hev1.4.10.L150.BE.8"));
-        assert!(hevc.decodes("hev1.4.10.L150.BE.8"));
-        assert!(!PageDecoders::NONE.decodes("vp09.01.40.08.03.06.06.06.00"));
+        // Only the Mac's HEVC, and only under such a plan, is the page's to decode.
+        assert!(page_decodes(true, "hev1.4.10.L150.BE.8"));
+        assert!(page_decodes(true, "hvc1.4.10.L150.BE.8"));
+        assert!(!page_decodes(true, "vp09.01.40.08.03.06.06.06.00"), "the VP9 is each page's own to decode");
+        assert!(!page_decodes(false, "hev1.4.10.L150.BE.8"));
+    }
+
+    /// The VP9 is 4:4:4 and the page decodes it where the browser does not, so
+    /// there is neither a chroma to configure nor a switch for that decoder: both
+    /// keys are refused as unknown.
+    #[test]
+    fn neither_a_chroma_nor_a_vp9_decoder_switch_is_configured() {
+        assert!(parse_target("render_chroma = \"444\"").is_err());
+        assert!(ConfigFile::parse(&format!("[vp9_wasm]\nenabled = true\n{}", minimal())).is_err());
     }
 
     /// `[hp_decoders]` is Windows': a gateway there names the folder its decoder
@@ -3386,39 +3126,35 @@ mod tests {
     }
 
     /// A target with no stream keys streams the whole desktop at the default dial,
-    /// with the adaptive walk on and the browser choosing the chroma.
+    /// with the adaptive walk on.
     #[test]
     fn a_bare_target_streams_at_the_defaults() {
         let cfg = parse_target("").expect("a bare target");
-        for decoder in [Chroma::Subsampled, Chroma::Full] {
-            assert_eq!(
-                cfg.targets[0].render_plan(Choices::default(), decoder.into()),
-                RenderPlan {
-                    quality: DEFAULT_VIDEO_QUALITY,
-                    adaptive: true,
-                    chroma: decoder,
-                    apple_media: false,
-                    rdp_graphics: false,
-                    rdp_h264: false,
-                    software: Default::default(),
-                }
-            );
-        }
+        assert_eq!(
+            cfg.targets[0].render_plan(Choices::default(), Decoders::ALL),
+            RenderPlan {
+                quality: DEFAULT_VIDEO_QUALITY,
+                adaptive: true,
+                apple_media: false,
+                rdp_graphics: false,
+                rdp_h264: false,
+                software: false,
+            }
+        );
     }
 
     #[test]
     fn a_video_quality_is_the_streams_dial() {
         let cfg = parse_target("video_quality = 60").expect("a quality");
         assert_eq!(
-            cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into()),
+            cfg.targets[0].render_plan(Choices::default(), Decoders::ALL),
             RenderPlan {
                 quality: 60,
                 adaptive: true,
-                chroma: Chroma::Subsampled,
                 apple_media: false,
                 rdp_graphics: false,
                 rdp_h264: false,
-                software: Default::default(),
+                software: false,
             }
         );
     }
@@ -3431,74 +3167,20 @@ mod tests {
         }
     }
 
-    /// A target that writes no chroma gets the browser's answer: unset resolves
-    /// exactly as `"auto"` does. A target that names a profile is not moved by the
-    /// decoder in front of it — that is the whole difference between selecting a
-    /// chroma and leaving it to be resolved.
+    /// The TUI reads a config file with no browser in front of it, and a session
+    /// card reads the resolved plan: both say the dial and whether the walk runs.
     #[test]
-    fn render_chroma_defaults_to_the_browsers_answer() {
-        let video = |extra: &str, decoder: Chroma| {
-            parse_target(&format!("video_quality = 100\n{extra}")).unwrap().targets[0]
-                .render_plan(Choices::default(), decoder.into())
-        };
-        let stream = |chroma| RenderPlan {
-            quality: 100,
-            adaptive: true,
-            chroma,
-            apple_media: false,
-            rdp_graphics: false,
-            rdp_h264: false,
-            software: Default::default(),
-        };
-        assert_eq!(video("", Chroma::Full), stream(Chroma::Full));
-        assert_eq!(video("", Chroma::Subsampled), stream(Chroma::Subsampled));
-        assert_eq!(video("render_chroma = \"auto\"", Chroma::Full), stream(Chroma::Full));
-        assert_eq!(video("render_chroma = \"auto\"", Chroma::Subsampled), stream(Chroma::Subsampled));
-        // A named profile asks nobody.
-        assert_eq!(video("render_chroma = \"420\"", Chroma::Full), stream(Chroma::Subsampled));
-        assert_eq!(video("render_chroma = \"444\"", Chroma::Subsampled), stream(Chroma::Full));
-        // And the key takes only the two samplings VP9 profiles 0 and 1 are.
-        let err = parse_target("render_chroma = \"422\"").unwrap_err();
-        assert!(format!("{err:#}").contains("422"), "{err:#}");
-    }
-
-    /// The TUI reads a config file with no browser in front of it, so `auto` — the
-    /// default, and therefore most cards — is the one target it cannot describe by
-    /// resolving. It says the chroma is the browser's to pick; a target that
-    /// selected one names the sampling it selected.
-    ///
-    /// The two readings have to stay apart on the card, because on the wire they are
-    /// different decisions: `4:2:0` here is every browser held to the subsampled
-    /// stream, where `chroma auto` is the profile-1 decoders getting the colour.
-    #[test]
-    fn a_target_card_says_whether_the_chroma_is_auto_or_selected() {
+    fn a_card_describes_the_stream() {
         let summary = |extra: &str| {
             parse_target(&format!("video_quality = 60\n{extra}")).unwrap().targets[0].render_summary()
         };
-        assert_eq!(summary(""), "video q60 chroma auto · adaptive");
-        assert_eq!(summary("render_chroma = \"auto\""), summary(""));
-        assert_eq!(summary("render_chroma = \"420\""), "video q60 4:2:0 · adaptive");
-        assert_eq!(summary("render_chroma = \"444\""), "video q60 4:4:4 · adaptive");
-        assert_eq!(summary("render_adaptive = false"), "video q60 chroma auto");
-    }
-
-    /// The session card names the resolved plan: the dial, the chroma on the wire,
-    /// and the floor where the walk runs.
-    #[test]
-    fn a_session_card_describes_the_resolved_stream() {
-        let describe = |keys: &str, decoder: Chroma| {
-            parse_target(keys).unwrap().targets[0].render_plan(Choices::default(), decoder.into()).describe()
+        assert_eq!(summary(""), "video q60 · adaptive");
+        assert_eq!(summary("render_adaptive = false"), "video q60");
+        let describe = |keys: &str| {
+            parse_target(keys).unwrap().targets[0].render_plan(Choices::default(), Decoders::ALL).describe()
         };
-        assert_eq!(describe("video_quality = 60", Chroma::Subsampled), "video q60 4:2:0 · adaptive");
-        assert_eq!(describe("video_quality = 60", Chroma::Full), "video q60 4:4:4 · adaptive");
-        assert_eq!(
-            describe("video_quality = 60\nrender_chroma = \"444\"", Chroma::Subsampled),
-            "video q60 4:4:4 · adaptive"
-        );
-        assert_eq!(
-            describe("video_quality = 60\nrender_adaptive = false", Chroma::Subsampled),
-            "video q60 4:2:0"
-        );
+        assert_eq!(describe("video_quality = 60"), "video q60 · adaptive");
+        assert_eq!(describe("video_quality = 60\nrender_adaptive = false"), "video q60");
     }
 
     // Nothing in a target says what the remote runs. The engines discover it
@@ -3771,8 +3453,8 @@ mod tests {
             .remove(0)
         };
         let hp = mac("ard-high-performance");
-        let takes = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: false, rdp_h264: false };
-        let declines = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: false, rdp_h264: false };
+        let takes = Decoders { apple_media: true, rdp_graphics: false, rdp_h264: false };
+        let declines = Decoders { apple_media: false, rdp_graphics: false, rdp_h264: false };
         let passed = Choices { passthrough: true, ..Choices::default() };
 
         assert_eq!(hp.offers().passthrough, Some(Passthrough::AppleMedia));
@@ -3785,7 +3467,7 @@ mod tests {
         assert_eq!(hp.beyond(passed, takes), None);
         assert_eq!(hp.beyond(passed, declines), Some(Passthrough::AppleMedia));
         assert_eq!(hp.beyond(Choices::default(), declines), None, "VP9 is for every browser");
-        assert_eq!(hp.render_summary(), "video q90 chroma auto · adaptive", "the file chooses none");
+        assert_eq!(hp.render_summary(), "video q90 · adaptive", "the file chooses none");
 
         // The sound comes with the picture, chosen or not, so it is not offered.
         assert!(!hp.offers().audio);
@@ -4347,22 +4029,20 @@ vnc_password = \"x\"")).unwrap();
             win.offers(),
             Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics), placement: false }
         );
-        for chroma in [Chroma::Subsampled, Chroma::Full] {
-            let composes = Decoders { chroma, apple_media: false, rdp_graphics: true, rdp_h264: false };
-            let plan = win.render_plan(passed, composes);
-            assert!(plan.rdp_graphics);
-            assert_eq!(plan.describe(), "the host's graphics pipeline, passed through");
-            assert_eq!(win.beyond(passed, composes), None);
-            let cannot = Decoders { rdp_graphics: false, rdp_h264: false, ..composes };
-            assert_eq!(win.beyond(passed, cannot), Some(Passthrough::RdpGraphics));
-            assert!(!win.render_plan(Choices::default(), composes).rdp_graphics);
-        }
-        assert_eq!(win.render_summary(), "video q90 chroma auto · adaptive");
+        let composes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false };
+        let plan = win.render_plan(passed, composes);
+        assert!(plan.rdp_graphics);
+        assert_eq!(plan.describe(), "the host's graphics pipeline, passed through");
+        assert_eq!(win.beyond(passed, composes), None);
+        let cannot = Decoders { rdp_graphics: false, rdp_h264: false, ..composes };
+        assert_eq!(win.beyond(passed, cannot), Some(Passthrough::RdpGraphics));
+        assert!(!win.render_plan(Choices::default(), composes).rdp_graphics);
+        assert_eq!(win.render_summary(), "video q90 · adaptive");
 
         // H.264 on the passed pipeline is the target's key, the session's choice
         // and the browser's answer together, and none of them alone.
         let h264 = rdp("egfx_h264 = true");
-        let decodes = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: true, rdp_h264: true };
+        let decodes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: true };
         let plan = h264.render_plan(passed, decodes);
         assert!(plan.rdp_graphics && plan.rdp_h264);
         assert_eq!(plan.describe(), "the host's graphics pipeline with H.264, passed through");
@@ -4543,9 +4223,9 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
-        let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() });
-        assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive");
+        let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false });
+        assert_eq!(plan.describe(), "video q80 · adaptive");
     }
 
     /// A target that turned the walk off stays exactly on its dial: the
@@ -4555,9 +4235,9 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_false_leaves_the_plan_without_a_walk() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
-        let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() });
-        assert_eq!(plan.describe(), "video q80 4:2:0");
+        let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false });
+        assert_eq!(plan.describe(), "video q80");
     }
 
     /// The floor key is gone: a settle sharpens a quiet desktop at the dial, which

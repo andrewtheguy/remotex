@@ -221,15 +221,8 @@ pub fn router(
     throughput: Throughput,
     hevc_decoder: Option<HevcDecoder>,
 ) -> Router {
-    let sessions = Arc::new(SessionManager::new(config.targets.clone(), page_decoders(&config, hevc_decoder.as_ref())));
+    let sessions = Arc::new(SessionManager::new(config.targets.clone(), hevc_decoder.is_some()));
     router_with_sessions(config, sessions, throughput, hevc_decoder)
-}
-
-/// BETA: the page's software decoders this gateway has for a session to choose:
-/// VP9's where `[vp9_wasm]` enables it, since the module is in every page's
-/// bundle, and HEVC's where the gateway read its archive and so serves it.
-fn page_decoders(config: &AppConfig, hevc_decoder: Option<&HevcDecoder>) -> crate::config::PageDecoders {
-    crate::config::PageDecoders { vp9: config.vp9_wasm, hevc: hevc_decoder.is_some() }
 }
 
 /// [`router`] over a caller-supplied session slot.
@@ -681,10 +674,9 @@ struct TargetInfo {
     default_size: Option<Points>,
     /// Whether the picker offers the remote's sound as a choice.
     audio: bool,
-    /// BETA: the page's software decoders a session on this target can choose to
-    /// be decoded with, of those this gateway has: `vp9` for its VP9 at 4:4:4, and
-    /// `hevc` for a Mac's HEVC while that is passed.
-    software: crate::config::PageDecoders,
+    /// BETA: whether a session on this target can choose to have a Mac's passed
+    /// HEVC decoded in the page's software decoder, which this gateway serves.
+    software: bool,
     /// The stream the picker offers to pass untouched, `null` where the target
     /// has none.
     passthrough: Option<crate::config::Passthrough>,
@@ -713,11 +705,11 @@ impl From<(u16, u16)> for Points {
 
 impl TargetInfo {
     /// `apple_decoders` is whether this gateway's host can decode a Mac's
-    /// picture, and `page_decoders` the software decoders it has for a page.
+    /// picture, and `page_hevc` whether it serves the page's HEVC decoder.
     fn of(
         target: &crate::config::TargetConfig,
         apple_decoders: bool,
-        page_decoders: crate::config::PageDecoders,
+        page_hevc: bool,
     ) -> Self {
         let offers = target.offers();
         Self {
@@ -730,7 +722,7 @@ impl TargetInfo {
             size: target.size.map(Points::from),
             default_size: target.sized().then(|| crate::config::DEFAULT_SIZE.into()),
             audio: offers.audio,
-            software: target.software(page_decoders),
+            software: target.software(page_hevc),
             passthrough: offers.passthrough,
             passthrough_only: target.media_stream() && !apple_decoders,
             placement: offers.placement,
@@ -750,8 +742,8 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
     let targets = &state.config.targets;
     let apple_decoders = !targets.iter().any(crate::config::TargetConfig::media_stream)
         || crate::vnc::apple_decoders().is_ok();
-    let page_decoders = page_decoders(&state.config, state.hevc_decoder.as_ref());
-    Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders, page_decoders)).collect())
+    let page_hevc = state.hevc_decoder.is_some();
+    Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders, page_hevc)).collect())
 }
 
 #[derive(Deserialize)]
@@ -868,7 +860,7 @@ struct ClaimResponse {
 
 /// Claim the single session slot. Returns the token the WebSocket
 /// must present as
-/// `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`;
+/// `/ws?session=<token>&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`;
 /// 409 while another browser is attached (retry with `force` to take over). The media sockets
 /// present the token alone — `chroma`, the most colour this browser's video
 /// decoder takes, is the session socket's and is required there
@@ -1102,7 +1094,6 @@ mod tests {
                 camera: false,
                 microphone: false,
                 video_quality: None,
-                render_chroma: None,
                 render_adaptive: None,
                 virtual_display: false,
                 audio_bitrate: None,
@@ -1121,7 +1112,6 @@ mod tests {
             dev_hostname: dev_hostname.map(str::to_owned),
             meter: None,
             hevc_wasm: None,
-            vp9_wasm: false,
             hp_decoders: Default::default(),
         }
     }
@@ -1345,7 +1335,6 @@ mod tests {
             camera: false,
             microphone: false,
             video_quality: None,
-            render_chroma: None,
             render_adaptive: None,
             virtual_display: false,
             audio_bitrate: None,
@@ -1433,7 +1422,6 @@ mod tests {
             dev_hostname: None,
             meter: None,
             hevc_wasm: None,
-            vp9_wasm: false,
             hp_decoders: Default::default(),
         };
 
@@ -1487,33 +1475,32 @@ mod tests {
         // sizes, no sound, no stream.
         assert_eq!(
             entry("mac", true),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":{"vp9":false,"hevc":false},"passthrough":null,"passthroughOnly":false,"placement":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthrough":null,"passthroughOnly":false,"placement":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":{"vp9":false,"hevc":false},"passthrough":"rdp-graphics","passthroughOnly":false,"placement":false}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthrough":"rdp-graphics","passthroughOnly":false,"placement":false}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // stream is, and is the only way in on a host without its decoders.
         let fast = entry("fast", true);
-        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":{"vp9":false,"hevc":false},"passthrough":"apple-media","passthroughOnly":false,"placement":false}"#), "{fast}");
+        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthrough":"apple-media","passthroughOnly":false,"placement":false}"#), "{fast}");
         assert!(entry("fast", false).ends_with(r#""passthroughOnly":true,"placement":false}"#));
         // Which says nothing about a target with no such stream.
         assert!(entry("win", false).ends_with(r#""passthroughOnly":false,"placement":false}"#));
         // Where the second display sits is offered by a host asked for two.
         assert!(entry("two", true).ends_with(r#""placement":true}"#));
-        // The page's decoders a session can choose, of those the gateway has: none
-        // where it has none.
-        assert!(entry("win", true).contains(r#""software":{"vp9":false,"hevc":false},"#));
+        // The page's HEVC decoder is a choice where the gateway has it and the
+        // target has a Mac's picture to pass.
+        assert!(entry("fast", true).contains(r#""software":false,"#));
         let with = |name: &str| {
             let target = targets.iter().find(|target| target.name == name).unwrap();
-            let both = crate::config::PageDecoders { vp9: true, hevc: true };
-            serde_json::to_string(&TargetInfo::of(target, true, both)).unwrap()
+            serde_json::to_string(&TargetInfo::of(target, true, true)).unwrap()
         };
-        assert!(with("win").contains(r#""software":{"vp9":true,"hevc":false},"#));
-        assert!(with("fast").contains(r#""software":{"vp9":true,"hevc":true},"#));
+        assert!(with("win").contains(r#""software":false,"#));
+        assert!(with("fast").contains(r#""software":true,"#));
         // wlshare's sound is offered, and a target with no sound to choose
         // offers none.
         assert!(entry("sway", true).contains(r#""audio":true,"#));

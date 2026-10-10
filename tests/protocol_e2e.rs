@@ -1185,7 +1185,6 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
-        vp9_wasm: false,
         hp_decoders: Default::default(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1222,7 +1221,6 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         camera: false,
         microphone: false,
         video_quality: None,
-        render_chroma: None,
         render_adaptive: None,
         virtual_display: false,
         audio_bitrate: None,
@@ -1254,7 +1252,7 @@ const RESIZE: &str = r#"{"size":"window"}"#;
 
 /// The session socket of a fake-Mac test: a browser that takes the Mac's stream.
 async fn connect_mac_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
-    common::connect_ws_stating(addr, token, cookie, "444", true).await
+    common::connect_ws_stating(addr, token, cookie, true).await
 }
 
 async fn next_mac_request(rx: &mut mpsc::UnboundedReceiver<MacRequest>) -> MacRequest {

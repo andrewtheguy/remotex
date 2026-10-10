@@ -14,7 +14,7 @@ use crate::audio::AudioBridge;
 use crate::camera::{CameraBridge, CameraFormat, CameraSignal};
 use crate::mic::{MicBridge, MicSignal};
 use crate::config::{
-    AudioPlan, Choices, Decoders, NotOffered, PageDecoders, Passthrough, Protocol, RenderPlan, Subtype, TargetConfig,
+    AudioPlan, Choices, Decoders, NotOffered, Passthrough, Protocol, RenderPlan, Subtype, TargetConfig,
 };
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ClientMsg, HostDisplay, MouseButton, ServerMsg, TouchPhase};
@@ -328,10 +328,8 @@ struct EngineSlot {
     /// Held rather than recomputed: it is resolved when the engine is built and
     /// cannot change while the engine runs, so a reattach reports what is
     /// *running* rather than what today's config file says. Held as the plan
-    /// rather than as its one-line description because a reattach also has to
-    /// *compare* it: an `auto` chroma resolved against the browser that was here,
-    /// and the browser coming back may not be the one it was resolved for
-    /// ([`SessionManager::attach`]).
+    /// rather than as its one-line description because a reattach also asks it
+    /// whether a graphics pipeline is passed ([`SessionManager::attach`]).
     plan: RenderPlan,
     /// Where this engine puts redirected audio, for a session with sound. It lives on
     /// the engine slot because that is the lifetime audio has: a subscription
@@ -783,9 +781,9 @@ impl State {
 pub struct SessionManager {
     /// Every target profile the browser may pick from the picker.
     targets: Vec<TargetConfig>,
-    /// BETA: the page's software decoders this gateway has for a session to
-    /// choose ([`Choices::software`]).
-    page_decoders: PageDecoders,
+    /// BETA: whether this gateway serves the page's HEVC decoder, for a session
+    /// to choose ([`Choices::software`]).
+    page_hevc: bool,
     spawn_engine: EngineSpawner,
     /// The slot's one link-feedback handle, shared between whichever ws bridge is
     /// attached (writer) and whichever engine is running (reader). One rather than
@@ -804,14 +802,14 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub fn new(targets: Vec<TargetConfig>, page_decoders: PageDecoders) -> Self {
-        Self { page_decoders, ..Self::with_spawner(targets, Box::new(spawn_engine)) }
+    pub fn new(targets: Vec<TargetConfig>, page_hevc: bool) -> Self {
+        Self { page_hevc, ..Self::with_spawner(targets, Box::new(spawn_engine)) }
     }
 
-    /// Test seam: the manager with these software decoders for its pages.
+    /// Test seam: the manager with or without the page's HEVC decoder.
     #[cfg(test)]
-    pub(crate) fn with_page_decoders(self, page_decoders: PageDecoders) -> Self {
-        Self { page_decoders, ..self }
+    pub(crate) fn with_page_hevc(self, page_hevc: bool) -> Self {
+        Self { page_hevc, ..self }
     }
 
     /// The plan a session of `selected` runs for a browser that said `decoders`:
@@ -820,13 +818,13 @@ impl SessionManager {
         let Selected { target, choices } = selected;
         target
             .render_plan(*choices, decoders)
-            .decoded_by_page(target.software_chosen(*choices, self.page_decoders))
+            .decoded_by_page(target.software_chosen(*choices, self.page_hevc))
     }
 
     /// The passthrough of a session of `target` started with `choices` that a
     /// browser saying `decoders` cannot take, its own decoder and the page's both.
     fn beyond(&self, target: &TargetConfig, choices: Choices, decoders: Decoders) -> Option<Passthrough> {
-        target.beyond_page(choices, decoders, target.software_chosen(choices, self.page_decoders))
+        target.beyond_page(choices, decoders, target.software_chosen(choices, self.page_hevc))
     }
 
     /// The selected target's position in the `[[targets]]` list, `None` on the picker.
@@ -840,7 +838,7 @@ impl SessionManager {
         let state = State::default();
         Self {
             targets,
-            page_decoders: PageDecoders::default(),
+            page_hevc: false,
             spawn_engine,
             feedback: Arc::new(LinkFeedback::new()),
             selected_index: Arc::clone(&state.selected_index),
@@ -961,9 +959,9 @@ impl SessionManager {
     /// `display` and `decoders` are what this browser said about itself, carried on
     /// the socket's URL so they exist at attach time. `decoders` is what it can
     /// take, and it is kept on the attachment for every engine this browser starts
-    /// ([`ClientSlot::decoders`]): a target that named `render_chroma = "auto"`
-    /// streams the colour this answer allows, and a passthrough is started only
-    /// for a browser that said it takes it.
+    /// ([`ClientSlot::decoders`]): a passthrough is started only for a browser
+    /// that said it takes it, and a passed pipeline carries H.264 only for one
+    /// that said it decodes it.
     ///
     /// A session reaches an attach only as its owner's: a claim by any other
     /// browser has ended it ([`Self::claim`]). The owner reattaching resumes the
@@ -1020,23 +1018,7 @@ impl SessionManager {
             st.take_engine();
             st.clear_selection();
         }
-        // A resumed engine is the right engine only while what it was built for
-        // still holds, and one thing it was built for is a fact about the browser
-        // rather than about the config: a `render_chroma = "auto"` stream carries
-        // the colour the *previous* attachment said its decoder takes. A reload
-        // keeps the claim but re-runs that question, so a browser coming back with
-        // a different answer would resume onto a stream its decoder refuses. End
-        // the engine instead and let the reconnect below build the one this
-        // browser can actually decode. Every other reattach compares equal and
-        // resumes exactly as before.
-        if let (Some(selected), Some(engine)) = (&st.selected, &st.engine)
-            && self.plan(selected, decoders) != engine.plan
-        {
-            info!("session: the browser takes a different stream; rebuilding it");
-            st.take_engine();
-        }
-        // A passed graphics pipeline has no resume either, whatever the browser
-        // says: the host draws against what its client already holds — surfaces,
+        // A passed graphics pipeline has no resume, whatever the browser says: the host draws against what its client already holds — surfaces,
         // cache slots, each codec's caches — and answers even a repaint out of
         // them, so a page that comes back holding none of it cannot be made whole
         // by the engine that is running. It is given one that starts.
@@ -1656,9 +1638,7 @@ impl SessionManager {
     /// is refused, and so is a passthrough this browser said it cannot take: the
     /// picker shows neither as something to tick, so either is a client that did
     /// not ask it. Both tell the browser with a [`ServerMsg::Error`] and leave the
-    /// slot as it was. The chroma this browser said its decoder takes, held on the
-    /// attachment since [`Self::attach`], refuses nothing: it *selects* one for a
-    /// target that named none.
+    /// slot as it was.
     ///
     /// `display` is the client's screen from [`ClientMsg::Connect`], handed to
     /// the engine at spawn so a High Performance session can open its virtual
@@ -1690,7 +1670,7 @@ impl SessionManager {
                 }
             };
             let offered =
-                target.accepts(choices).and_then(|()| target.accepts_software(choices, self.page_decoders));
+                target.accepts(choices).and_then(|()| target.accepts_software(choices, self.page_hevc));
             let refused = match offered {
                 Err(not_offered) => Some(ConnectError::NotOffered(not_offered)),
                 Ok(()) => self.beyond(&target, choices, decoders).map(ConnectError::Beyond),
@@ -2150,7 +2130,7 @@ mod tests {
 
 
     use super::*;
-    use crate::config::{Chroma, ChromaChoice, Placement, Sizing, Sound};
+    use crate::config::{Placement, Sizing, Sound};
     use crate::audio::PCM_CD_QUALITY;
     use crate::protocol::UNSCALED;
 
@@ -2248,7 +2228,6 @@ mod tests {
             camera: meta.camera,
             microphone: meta.microphone,
             video_quality: None,
-            render_chroma: None,
             render_adaptive: None,
             audio_bitrate: None,
             virtual_display: false,
@@ -2302,12 +2281,6 @@ mod tests {
             // that could is gone, and what a client can decode is answered by its own
             // decoder rather than by this connect.
             video_target("video"),
-            // The same target with the chroma left to the browser, which is the one
-            // thing a client says about its decoder and the only key that reads it.
-            TargetConfig {
-                render_chroma: Some(ChromaChoice::Auto),
-                ..video_target("video-auto")
-            },
         ];
         (Arc::new(SessionManager::with_spawner(targets, spawner)), hook_rx)
     }
@@ -2387,7 +2360,7 @@ mod tests {
         assert_ne!(first, second, "each claim mints a fresh token");
 
         // Attached slot: a plain claim is refused…
-        let _att = mgr.attach(&second, None, Chroma::Full.into()).await.unwrap();
+        let _att = mgr.attach(&second, None, Decoders::ALL).await.unwrap();
         assert!(mgr.claim(false, None, "login").is_err());
         // …but the holder reclaims with its token, and force takes over.
         mgr.claim(false, Some(&second), "login").unwrap();
@@ -2397,17 +2370,17 @@ mod tests {
     #[tokio::test]
     async fn attach_requires_the_current_token() {
         let (mgr, _hooks) = manager_with_fake_engine();
-        assert!(mgr.attach("nope", None, Chroma::Full.into()).await.is_err(), "no claim yet");
+        assert!(mgr.attach("nope", None, Decoders::ALL).await.is_err(), "no claim yet");
         let token = mgr.claim(false, None, "login").unwrap();
-        assert!(mgr.attach("stale", None, Chroma::Full.into()).await.is_err());
-        assert!(mgr.attach(&token, None, Chroma::Full.into()).await.is_ok());
+        assert!(mgr.attach("stale", None, Decoders::ALL).await.is_err());
+        assert!(mgr.attach(&token, None, Decoders::ALL).await.is_ok());
     }
 
     #[tokio::test]
     async fn attach_announces_the_picker_and_connect_starts_the_engine() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
 
         // No engine yet: attach lands the browser on the picker.
         expect_picker(&mut att.events).await;
@@ -2460,7 +2433,7 @@ mod tests {
             );
         let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
 
         let screen = HostDisplay { w: 1512, h: 982, scale: 200, fit: false };
@@ -2494,7 +2467,7 @@ mod tests {
             );
         let mgr = Arc::new(SessionManager::with_spawner(vec![fake_target("fake")], spawner));
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
 
         mgr.connect(att.id, "fake", Some(HostDisplay { w: 0, h: 982, scale: 100, fit: false }), Choices::default()).await.unwrap();
@@ -2510,7 +2483,7 @@ mod tests {
     async fn connected_status_carries_the_targets_capability_metadata() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
 
         // An RDP target with resize on: the connect status carries the
@@ -2528,14 +2501,14 @@ mod tests {
         // same metadata.
         mgr.detach(att.id);
         let token = mgr.claim(false, Some(&token), "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
 
         // And so does audio, which is what tells the browser it may offer the toggle
         // that opens the audio socket.
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-audio", None, SOUND).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
@@ -2549,7 +2522,7 @@ mod tests {
         for (name, protocol) in [("vnc-resize", "vnc"), ("rdp-resize", "rdp")] {
             let (mgr, _hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None, "login").unwrap();
-            let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+            let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
             expect_picker(&mut att.events).await;
             mgr.connect(att.id, name, None, RESIZE).await.unwrap();
             match recv(&mut att.events).await {
@@ -2570,7 +2543,7 @@ mod tests {
     async fn connect_rejects_unknown_targets_and_stale_attachments() {
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
 
         assert!(matches!(
@@ -2585,175 +2558,58 @@ mod tests {
 
     /// A video target connects like any other — nothing refuses a browser for what it
     /// said it can decode — and its connected status carries the resolved render line,
-    /// which is the one place a client learns this session streams. This target names
-    /// its own chroma, so the browser's answer changes nothing about it.
+    /// which is the one place a client learns this session streams.
     #[tokio::test]
     async fn a_video_target_connects_and_names_its_render_plan() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
 
         mgr.connect(att.id, "video", None, Choices::default()).await.unwrap();
         assert!(hooks.try_recv().is_ok(), "engine spawned on connect");
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
-                assert_eq!(render, "video q60 4:4:4 · adaptive")
+                assert_eq!(render, "video q60 · adaptive")
             }
             other => panic!("expected connected, got {other:?}"),
         }
     }
 
-    /// A session started to be decoded by its pages is 4:4:4 for a browser whose
-    /// own decoder takes only 4:2:0, and the engine is told which of the page's
-    /// decoders it has. One that comes back answering otherwise resumes the same
-    /// engine: its answer selects nothing here. On a gateway with no decoder for
-    /// it the same `connect` is refused by name and starts nothing.
+    /// A session started with a Mac's picture passed and decoded by its pages has
+    /// the engine told so. On a gateway without the page's HEVC decoder the same
+    /// `connect` is refused by name and starts nothing.
     #[tokio::test]
-    async fn a_session_decoded_by_the_page_is_444_whatever_the_browser_takes() {
-        let chosen = Choices { software: true, ..Choices::default() };
-        let vp9 = PageDecoders { vp9: true, hevc: false };
-        let manager = |page_decoders| {
+    async fn a_session_decoded_by_the_page_is_told_to_the_engine() {
+        let chosen = Choices { passthrough: true, software: true, ..Choices::default() };
+        let manager = |page_hevc| {
             let (hook_tx, hook_rx) = std_mpsc::channel();
             let spawner: EngineSpawner = Box::new(
                 move |_target, _choices, plan, _display, _input_rx, _frame_tx, _audio, _camera, _feedback| {
                     hook_tx.send(plan).unwrap();
                 },
             );
-            let targets = vec![TargetConfig { render_chroma: Some(ChromaChoice::Auto), ..video_target("auto") }];
-            (Arc::new(SessionManager::with_spawner(targets, spawner).with_page_decoders(page_decoders)), hook_rx)
+            let targets = vec![mac_target("mac")];
+            (Arc::new(SessionManager::with_spawner(targets, spawner).with_page_hevc(page_hevc)), hook_rx)
         };
 
-        let (mgr, plans) = manager(vp9);
+        let (mgr, plans) = manager(true);
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Subsampled.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, DECLINES).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "auto", None, chosen).await.unwrap();
+        mgr.connect(att.id, "mac", None, chosen).await.unwrap();
         let plan = plans.try_recv().unwrap();
-        assert_eq!((plan.chroma, plan.software), (Chroma::Full, vp9));
-        drop(att);
-        let _back = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
-        assert!(plans.try_recv().is_err(), "the same session was rebuilt for a browser's answer");
+        assert!(plan.apple_media && plan.software);
 
-        let (mgr, plans) = manager(PageDecoders::NONE);
+        let (mgr, plans) = manager(false);
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, TAKES).await.unwrap();
         expect_picker(&mut att.events).await;
-        match mgr.connect(att.id, "auto", None, chosen).await {
+        match mgr.connect(att.id, "mac", None, chosen).await {
             Err(ConnectError::NotOffered(refused)) => assert_eq!(refused.choice, "decoding in the page"),
             other => panic!("expected a refusal, got {other:?}"),
         }
         assert!(plans.try_recv().is_err(), "a refused connect started an engine");
-    }
-
-    /// `render_chroma = "auto"` is resolved from the attachment, which is where the
-    /// browser's one answer lives — so the same target streams 4:4:4 to a decoder
-    /// that takes profile 1 and 4:2:0 to one that does not, and the engine and the
-    /// session card are handed the same plan either way.
-    #[tokio::test]
-    async fn an_auto_chroma_target_streams_what_the_attached_browser_takes() {
-        for (answer, want, card) in [
-            (Chroma::Full, Chroma::Full, "video q60 4:4:4 · adaptive"),
-            (Chroma::Subsampled, Chroma::Subsampled, "video q60 4:2:0 · adaptive"),
-        ] {
-            let (hook_tx, hook_rx) = std_mpsc::channel();
-            let spawner: EngineSpawner = Box::new(
-                move |_target,
-                      _choices,
-                      plan,
-                      _display,
-                      _input_rx,
-                      _frame_tx,
-                      _audio,
-                      _camera,
-                      _feedback| {
-                    hook_tx.send(plan).unwrap();
-                },
-            );
-            let mgr = Arc::new(SessionManager::with_spawner(
-                vec![TargetConfig {
-                    render_chroma: Some(ChromaChoice::Auto),
-                    ..video_target("video-auto")
-                }],
-                spawner,
-            ));
-            let token = mgr.claim(false, None, "login").unwrap();
-            let mut att = mgr.attach(&token, None, answer.into()).await.unwrap();
-            expect_picker(&mut att.events).await;
-            mgr.connect(att.id, "video-auto", None, Choices::default()).await.unwrap();
-
-            assert_eq!(
-                hook_rx.try_recv().expect("connect spawns the engine"),
-                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() },
-                "the engine must be built for what the browser said it takes"
-            );
-            match recv(&mut att.events).await {
-                AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
-                    assert_eq!(render, card, "the card names the plan the engine got")
-                }
-                other => panic!("expected connected, got {other:?}"),
-            }
-        }
-    }
-
-    /// A reload keeps the claim and re-runs the browser's chroma question. The
-    /// answer is normally the same one and the engine is resumed untouched; when
-    /// it is not, the running stream is one this browser cannot decode, and
-    /// resuming it would leave a session that never paints.
-    #[tokio::test]
-    async fn a_reload_answering_differently_rebuilds_an_auto_stream() {
-        let (hook_tx, hook_rx) = std_mpsc::channel();
-        let (display_tx, display_rx) = std_mpsc::channel();
-        let spawner: EngineSpawner = Box::new(
-            move |_target,
-                  _choices,
-                  plan,
-                  display,
-                  _input_rx,
-                  _frame_tx,
-                  _audio,
-                  _camera,
-                  _feedback| {
-                hook_tx.send(plan).unwrap();
-                display_tx.send(display).unwrap();
-            },
-        );
-        let mgr = Arc::new(SessionManager::with_spawner(
-            vec![TargetConfig {
-                render_chroma: Some(ChromaChoice::Auto),
-                ..video_target("video-auto")
-            }],
-            spawner,
-        ));
-
-        let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
-        expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "video-auto", None, Choices::default()).await.unwrap();
-        assert!(matches!(
-            hook_rx.try_recv(),
-            Ok(RenderPlan { chroma: Chroma::Full, .. })
-        ));
-        expect_connected(&mut att.events, "video-auto").await;
-
-        // The same answer: the ordinary reload, which resumes the engine that is
-        // already running rather than starting anything.
-        let mut same = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
-        assert!(hook_rx.try_recv().is_err(), "an unchanged answer must resume the engine");
-        expect_connected(&mut same.events, "video-auto").await;
-
-        // A different answer: the running stream carries colour this decoder has
-        // just said it refuses, so the target is rebuilt for it, opening for the
-        // screen the attach named.
-        let screen = HostDisplay { w: 1512, h: 982, scale: 200, fit: false };
-        let mut changed = mgr.attach(&token, Some(screen), Chroma::Subsampled.into()).await.unwrap();
-        assert_eq!(
-            hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() },
-            "the rebuilt stream must follow the browser that came back"
-        );
-        assert_eq!(display_rx.try_iter().last(), Some(Some(screen)));
-        expect_connected(&mut changed.events, "video-auto").await;
     }
 
     /// A High Performance Mac, which offers its media stream to pass.
@@ -2762,8 +2618,8 @@ mod tests {
     }
 
     /// A browser that takes the Mac's stream, and one that does not.
-    const TAKES: Decoders = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: true, rdp_h264: false };
-    const DECLINES: Decoders = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: true, rdp_h264: false };
+    const TAKES: Decoders = Decoders { apple_media: true, rdp_graphics: true, rdp_h264: false };
+    const DECLINES: Decoders = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false };
 
     /// Assert the next event is the connected status of a Mac's session that passes
     /// its stream, sound included.
@@ -2932,7 +2788,7 @@ mod tests {
         let win = TargetConfig { protocol: Protocol::Rdp, ..video_target("win") };
         let mgr = Arc::new(SessionManager::with_spawner(vec![win], spawner));
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "win", None, PASSED).await.unwrap();
         assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { rdp_graphics: true, rdp_h264: false, .. })));
@@ -2945,7 +2801,7 @@ mod tests {
         };
         expect_passed_win(&mut att.events).await;
 
-        let mut back = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut back = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         assert!(
             matches!(hook_rx.try_recv(), Ok(RenderPlan { rdp_graphics: true, rdp_h264: false, .. })),
             "the same browser coming back is still given a pipeline from its start"
@@ -2954,7 +2810,7 @@ mod tests {
 
         // A page that cannot compose it is not given one, nor the desktop encoded
         // here instead: the session ends for it to choose again.
-        let cannot = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: false, rdp_h264: false };
+        let cannot = Decoders { apple_media: true, rdp_graphics: false, rdp_h264: false };
         let mut ended = mgr.attach(&token, None, cannot).await.unwrap();
         assert!(hook_rx.try_recv().is_err());
         expect_beyond_then_picker(&mut ended.events, "graphics pipeline").await;
@@ -2964,7 +2820,7 @@ mod tests {
     async fn frames_reach_the_attached_client_and_are_dropped_while_detached() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3003,7 +2859,7 @@ mod tests {
         // Reattach to the running engine (the owner's reclaim): it announces
         // connected, then only frames sent after the reattach arrive.
         let token = mgr.claim(false, Some(&token), "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(hooks.try_recv().is_err(), "no second engine while one runs");
         assert!(matches!(input_rx.recv().await, Some(ClientMsg::Refresh)));
@@ -3031,7 +2887,7 @@ mod tests {
         assert!(matches!(mgr.attach_display("login", FIRST_DISPLAY, None), Err(DisplayRefused::NotOwner)));
         let token = mgr.claim(false, None, "login").unwrap();
         assert!(matches!(mgr.attach_display("another", FIRST_DISPLAY, None), Err(DisplayRefused::NotOwner)));
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         let _first = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
@@ -3135,7 +2991,7 @@ mod tests {
     async fn a_tab_of_its_own_carries_the_clipboard_both_ways() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         let mut first = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
@@ -3221,7 +3077,7 @@ mod tests {
     async fn the_picture_waits_for_the_display_socket_of_an_attached_browser() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3245,7 +3101,7 @@ mod tests {
             let protocol = meta.protocol.name();
             let (mgr, hooks) = manager_with_fake_engine();
             let token = mgr.claim(false, None, "login").unwrap();
-            let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+            let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
             expect_picker(&mut att.events).await;
             mgr.connect(att.id, target, None, meta.choices()).await.unwrap();
             expect_connected_meta(&mut att.events, target, meta).await;
@@ -3268,7 +3124,7 @@ mod tests {
         tokio::time::pause();
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3277,7 +3133,7 @@ mod tests {
         mgr.detach(att.id);
         tokio::task::yield_now().await;
         tokio::time::advance(REATTACH_GRACE_PERIOD / 2).await;
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
 
@@ -3290,7 +3146,7 @@ mod tests {
     async fn heartbeat_expiry_stops_the_engine_immediately() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3304,7 +3160,7 @@ mod tests {
     async fn reattach_asks_the_running_engine_for_a_refresh() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3320,7 +3176,7 @@ mod tests {
 
         mgr.detach(att.id);
         let token = mgr.claim(false, Some(&token), "login").unwrap();
-        let _att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let _att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
     }
 
@@ -3346,7 +3202,7 @@ mod tests {
     async fn a_detach_releases_what_the_browser_left_held() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3370,7 +3226,7 @@ mod tests {
 
         // The reattach resumes the engine with nothing left to release.
         let token = mgr.claim(false, Some(&token), "login").unwrap();
-        let _att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let _att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         assert_eq!(drain(&mut input_rx), ["Refresh"]);
     }
 
@@ -3378,7 +3234,7 @@ mod tests {
     async fn a_superseded_attachment_releases_what_it_left_held() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3387,7 +3243,7 @@ mod tests {
         mgr.forward_input(att.id, key("ShiftLeft", true));
         drain(&mut input_rx);
         // A reload attaches before the old socket is noticed gone.
-        let _new = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let _new = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         assert_eq!(drain(&mut input_rx), ["ShiftLeft false", "Refresh"]);
         // The old socket's late keyup is dropped, and there is nothing to repeat.
         mgr.forward_input(att.id, key("ShiftLeft", false));
@@ -3399,7 +3255,7 @@ mod tests {
     async fn an_ending_engine_is_told_to_release_before_its_input_closes() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3418,7 +3274,7 @@ mod tests {
     async fn disconnect_returns_to_the_picker_and_reconnect_respawns() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3446,7 +3302,7 @@ mod tests {
     async fn logging_out_stops_the_engine_and_the_next_login_lands_on_the_picker() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3458,12 +3314,12 @@ mod tests {
         // The attached socket does not stay attached to a slot whose claim is gone.
         assert!(matches!(recv(&mut att.events).await, AttachEvent::Evicted));
         // And the token it attached with is spent, so nothing can reattach on it.
-        assert!(mgr.attach(&token, None, Chroma::Full.into()).await.is_err(), "the claim is released");
+        assert!(mgr.attach(&token, None, Decoders::ALL).await.is_err(), "the claim is released");
 
         // The whole point: a fresh login gets the picker, not the desktop it just
         // logged out of.
         let next = mgr.claim(false, None, "login").unwrap();
-        let mut again = mgr.attach(&next, None, Chroma::Full.into()).await.unwrap();
+        let mut again = mgr.attach(&next, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut again.events).await;
         assert!(hooks.try_recv().is_err(), "no engine survived the log out");
     }
@@ -3476,7 +3332,7 @@ mod tests {
         let (mgr, hooks) = manager_with_fake_engine();
         mgr.log_out();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         // And again while attached but in the picker state.
         mgr.log_out();
@@ -3491,7 +3347,7 @@ mod tests {
     async fn takeover_evicts_the_previous_client_and_lands_on_the_picker() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token_a = mgr.claim(false, None, "login").unwrap();
-        let mut att_a = mgr.attach(&token_a, None, Chroma::Full.into()).await.unwrap();
+        let mut att_a = mgr.attach(&token_a, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_a.events).await;
         mgr.connect(att_a.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att_a.events, "fake").await;
@@ -3500,11 +3356,11 @@ mod tests {
         let token_b = mgr.claim(true, None, "login").unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
         // The old token is superseded, and A's engine ended with A's claim.
-        assert!(mgr.attach(&token_a, None, Chroma::Full.into()).await.is_err());
+        assert!(mgr.attach(&token_a, None, Decoders::ALL).await.is_err());
         assert!(engine_a.0.is_closed(), "the takeover ends the previous browser's engine");
         drop(engine_a);
 
-        let mut att_b = mgr.attach(&token_b, None, Chroma::Full.into()).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_b.events).await;
         assert!(hooks.try_recv().is_err(), "nothing starts until the new browser picks");
 
@@ -3529,7 +3385,7 @@ mod tests {
     async fn a_claim_during_the_reattach_grace_lands_on_the_picker() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token_a = mgr.claim(false, None, "login").unwrap();
-        let mut att_a = mgr.attach(&token_a, None, Chroma::Full.into()).await.unwrap();
+        let mut att_a = mgr.attach(&token_a, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_a.events).await;
         mgr.connect(att_a.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att_a.events, "fake").await;
@@ -3538,7 +3394,7 @@ mod tests {
 
         let token_b = mgr.claim(false, None, "login").unwrap();
         assert!(engine_a.0.is_closed());
-        let mut att_b = mgr.attach(&token_b, None, Chroma::Full.into()).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_b.events).await;
         assert!(hooks.try_recv().is_err());
     }
@@ -3548,13 +3404,13 @@ mod tests {
         let (mgr, _hooks) = manager_with_fake_engine();
         // A never connects — it just holds the slot on the picker.
         let token_a = mgr.claim(false, None, "login").unwrap();
-        let mut att_a = mgr.attach(&token_a, None, Chroma::Full.into()).await.unwrap();
+        let mut att_a = mgr.attach(&token_a, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_a.events).await;
 
         // B force-claims and attaches: it inherits the picker state.
         let token_b = mgr.claim(true, None, "login").unwrap();
         assert!(matches!(recv(&mut att_a.events).await, AttachEvent::Evicted));
-        let mut att_b = mgr.attach(&token_b, None, Chroma::Full.into()).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_b.events).await;
     }
 
@@ -3562,7 +3418,7 @@ mod tests {
     async fn engine_death_returns_to_the_picker_and_reconnect_respawns() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
@@ -3604,7 +3460,7 @@ mod tests {
         hooks: &std_mpsc::Receiver<EngineEnds>,
     ) -> (String, Attachment, Arc<AudioBridge>, EngineEnds) {
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-audio", None, SOUND).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
@@ -3853,7 +3709,7 @@ mod tests {
     async fn an_audio_socket_with_no_source_is_accepted_and_silent() {
         let (mgr, _hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
 
         let sound = mgr.attach_audio(&token).unwrap();
@@ -3948,7 +3804,7 @@ mod tests {
         mgr.detach(att.id);
         audio.wave(one_frame_of_pcm());
         let token_again = mgr.claim(false, Some(&token), "login").unwrap();
-        let mut back = mgr.attach(&token_again, None, Chroma::Full.into()).await.unwrap();
+        let mut back = mgr.attach(&token_again, None, Decoders::ALL).await.unwrap();
         expect_connected_meta(&mut back.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
 
         // Never interrupted: one listener throughout, and the buffer sent while the
@@ -3989,7 +3845,7 @@ mod tests {
 
         // And it stays gone across the new browser's connect, which is where a
         // surviving slot would have shown itself.
-        let mut att_b = mgr.attach(&token_b, None, Chroma::Full.into()).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_b.events).await;
         mgr.connect(att_b.id, "rdp-audio", None, SOUND).await.unwrap();
         expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
@@ -4035,7 +3891,7 @@ mod tests {
         // The new holder lands on the picker, and its own audio socket — opened on
         // its own claim — is armed onto the bridge of the session it starts.
         let mut sound_b = mgr.attach_audio(&token_b).unwrap();
-        let mut att_b = mgr.attach(&token_b, None, Chroma::Full.into()).await.unwrap();
+        let mut att_b = mgr.attach(&token_b, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_b.events).await;
         mgr.connect(att_b.id, "rdp-audio", None, SOUND).await.unwrap();
         expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
@@ -4178,7 +4034,7 @@ mod tests {
         hooks: &std_mpsc::Receiver<EngineEnds>,
     ) -> (String, Attachment, Arc<CameraBridge>, Arc<CamRecorder>, EngineEnds) {
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-camera", None, Choices::default()).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-camera", Meta::of(Protocol::Rdp).camera())
@@ -4212,7 +4068,7 @@ mod tests {
         assert!(matches!(mgr.attach_camera("nope"), Err(UplinkRefused::InvalidToken)));
 
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         // The picker: nothing is running, so there is nothing to plug into.
         assert!(matches!(mgr.attach_camera(&token), Err(UplinkRefused::Unsupported)));
@@ -4363,7 +4219,7 @@ mod tests {
         hooks: &std_mpsc::Receiver<EngineEnds>,
     ) -> (String, Attachment, Arc<MicRecorder>, EngineEnds) {
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-mic", None, Choices::default()).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-mic", Meta::of(Protocol::Rdp).microphone()).await;
@@ -4380,7 +4236,7 @@ mod tests {
         let (mgr, hooks) = manager_with_fake_engine();
         assert!(matches!(mgr.attach_mic("nope"), Err(UplinkRefused::InvalidToken)));
         let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         assert!(matches!(mgr.attach_mic(&token), Err(UplinkRefused::Unsupported)));
         mgr.connect(att.id, "rdp-camera", None, Choices::default()).await.unwrap();

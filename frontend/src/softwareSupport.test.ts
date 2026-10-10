@@ -1,4 +1,4 @@
-// BETA: which of the page's software decoders a page can run and present: both
+// Which of the page's software decoders a page can run and present: both
 // need shared-memory WebAssembly on an isolated page and a WebGL 2 canvas off the
 // page, and a Mac's HEVC a canvas that can be given its primaries besides.
 import assert from "node:assert/strict";

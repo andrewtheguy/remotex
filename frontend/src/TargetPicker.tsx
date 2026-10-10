@@ -15,7 +15,6 @@ import {
   targetOptions,
 } from "./targetChoices.ts";
 import { sizeFollows } from "./useRemoteDesktop.ts";
-import { videoChroma } from "./videoChroma.ts";
 
 // The post-login target picker: the state where the user is authenticated and
 // holds the session slot, but no connection has started yet (see
@@ -124,9 +123,8 @@ export default function TargetPicker({
   // desktop can follow, which decides the sizes a target offers here.
   const abilities = {
     appleMedia: decodesAppleMedia(),
-    profile1: videoChroma() === "444",
     rdpGraphics: composesRdpGraphics(),
-    runs: runnableDecoders(),
+    runsHevc: runnableDecoders().hevc,
     follows: sizeFollows(),
   };
 

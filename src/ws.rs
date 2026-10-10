@@ -4,7 +4,7 @@
 //! Five endpoints. Four present the claim token from `POST /api/session`; the
 //! display socket presents none.
 //!
-//! `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
+//! `/ws?session=<token>&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
 //! is the session: it attaches to the single slot
 //! ([`crate::session::SessionManager`]). The URL also names what only this browser
 //! knows about itself — its screen (`w`/`h`/`scale`/`fit`, the same values `connect`
@@ -90,7 +90,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::{
     camera::{CameraFormat, CameraSignal},
-    config::{Chroma, Decoders},
+    config::Decoders,
     feedback::LinkFeedback,
     mic::MicSignal,
     protocol::{self, ClientMsg, Held, Painted, ServerMsg, WireFrame},
@@ -798,7 +798,7 @@ pub struct WsParams {
 
 /// The session socket's query string: the claim token, plus the two things this
 /// browser knows about itself that the gateway cannot see — the screen it is on and
-/// the chroma its video decoder takes.
+/// the streams its decoders take.
 #[derive(Deserialize)]
 pub struct SessionParams {
     session: Option<String>,
@@ -810,19 +810,14 @@ pub struct SessionParams {
     scale: Option<u16>,
     /// [`crate::protocol::HostDisplay::fit`]; absent is a pointer client.
     fit: Option<bool>,
-    /// The most colour this browser's `VideoDecoder` takes — VP9 profile 1 or only
-    /// profile 0 — asked of it once at page load and stated here, because the socket
-    /// is the one thing that is open both when it picks a target and when its reattach
-    /// has to start the selected one over.
-    ///
-    /// Required. A socket that does not say is a client this gateway has nothing to
-    /// resolve an unset `render_chroma` against, and the upgrade is refused at the
-    /// door rather than answered with a guess.
-    chroma: Chroma,
     /// Whether this browser decodes a High Performance Mac's picture, its HEVC —
-    /// asked once at page load like [`Self::chroma`] and required for the same
-    /// reason: a session that passes the picture is served only to a browser that
-    /// said yes.
+    /// asked of it once at page load and stated here, because the socket is the one
+    /// thing that is open both when it picks a target and when its reattach has to
+    /// start the selected one over.
+    ///
+    /// Required: a session that passes the picture is served only to a browser that
+    /// said yes, and a socket that does not say is refused at the door rather than
+    /// answered with a guess.
     apple_media: bool,
     /// Whether this browser composes an RDP host's graphics pipeline: a
     /// cross-origin isolated page with shared memory for the compositor's threads
@@ -854,7 +849,6 @@ pub async fn handler(
             params.session,
             display,
             Decoders {
-                chroma: params.chroma,
                 apple_media: params.apple_media,
                 rdp_graphics: params.rdp_graphics,
                 rdp_h264: params.rdp_h264,
@@ -1760,8 +1754,8 @@ mod tests {
     use crate::protocol::ServerMsg;
     use crate::session::SessionManager;
 
-    /// The session socket states the chroma its decoder takes, whether it takes the
-    /// Mac's stream and whether it composes an RDP pipeline, and one that does not
+    /// The session socket states whether it takes the Mac's stream, whether it
+    /// composes an RDP pipeline and whether it decodes its H.264, and one that does not
     /// is refused at the upgrade — there is no default to fall back to, because a
     /// gateway guessing at a browser is exactly what the parameters replace. The
     /// media sockets are asked nothing of the kind: they carry the claim and stop
@@ -1774,43 +1768,35 @@ mod tests {
             Query::<SessionParams>::try_from_uri(&format!("/ws?{query}").parse::<Uri>().unwrap())
                 .map(|Query(p)| p)
         };
-        let full = parse("session=t&chroma=444&apple_media=true&rdp_graphics=false&rdp_h264=false")
-            .expect("a browser that takes profile 1");
-        assert_eq!(full.chroma, Chroma::Full);
+        let full = parse("session=t&apple_media=true&rdp_graphics=false&rdp_h264=false")
+            .expect("a browser that takes the Mac's stream");
         assert!(full.apple_media);
         assert!(!full.rdp_graphics);
         assert!(!full.rdp_h264);
         assert_eq!(full.session.as_deref(), Some("t"));
-        let subsampled =
-            parse("session=t&w=430&h=932&scale=300&fit=true&chroma=420&apple_media=false&rdp_graphics=true&rdp_h264=true")
+        let declines =
+            parse("session=t&w=430&h=932&scale=300&fit=true&apple_media=false&rdp_graphics=true&rdp_h264=true")
                 .expect("a browser that does not, naming its screen too");
-        assert_eq!(subsampled.chroma, Chroma::Subsampled);
-        assert!(!subsampled.apple_media);
-        assert!(subsampled.rdp_graphics);
-        assert!(subsampled.rdp_h264);
+        assert!(!declines.apple_media);
+        assert!(declines.rdp_graphics);
+        assert!(declines.rdp_h264);
         assert_eq!(
-            (subsampled.w, subsampled.h, subsampled.scale, subsampled.fit),
+            (declines.w, declines.h, declines.scale, declines.fit),
             (Some(430), Some(932), Some(300), Some(true))
         );
         assert!(parse("session=t").is_err(), "a socket that does not say is not a client");
         assert!(
-            parse("session=t&chroma=444&rdp_graphics=true&rdp_h264=true").is_err(),
+            parse("session=t&rdp_graphics=true&rdp_h264=true").is_err(),
             "nor one that does not say whether it takes the Mac's stream"
         );
         assert!(
-            parse("session=t&chroma=444&apple_media=true&rdp_h264=true").is_err(),
+            parse("session=t&apple_media=true&rdp_h264=true").is_err(),
             "nor one that does not say whether it composes a pipeline"
         );
         assert!(
-            parse("session=t&chroma=444&apple_media=true&rdp_graphics=true").is_err(),
+            parse("session=t&apple_media=true&rdp_graphics=true").is_err(),
             "nor one that does not say whether it decodes a pipeline's H.264"
         );
-        // `auto` is a *target's* answer, not a browser's: a decoder takes one of two
-        // profiles, and a client that named a question would leave the gateway
-        // resolving one question with another.
-        let rest = "apple_media=false&rdp_graphics=false&rdp_h264=false";
-        assert!(parse(&format!("session=t&chroma=auto&{rest}")).is_err(), "the browser answers, it does not ask");
-        assert!(parse(&format!("session=t&chroma=422&{rest}")).is_err(), "there are two profiles");
 
         let media = Query::<WsParams>::try_from_uri(&"/ws/audio?session=t".parse::<Uri>().unwrap())
             .expect("the media sockets carry the token alone");
@@ -2306,7 +2292,6 @@ mod tests {
             camera: false,
             microphone: false,
             video_quality: None,
-            render_chroma: None,
             render_adaptive: None,
             virtual_display: false,
             audio_bitrate: None,
@@ -2334,7 +2319,7 @@ mod tests {
                 let throughput = Arc::clone(&served_throughput);
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full.into(), HEARTBEAT_TIMINGS, throughput)
+                        session(socket, sessions, Some(token), None, Decoders::ALL, HEARTBEAT_TIMINGS, throughput)
                     })
                 }
             }),
@@ -2429,7 +2414,7 @@ mod tests {
                     let token = bridged.clone();
                     async move {
                         ws.on_upgrade(move |socket| {
-                            session(socket, sessions, Some(token), None, Chroma::Full.into(), timings, Arc::default())
+                            session(socket, sessions, Some(token), None, Decoders::ALL, timings, Arc::default())
                         })
                     }
                 }),
@@ -2538,7 +2523,7 @@ mod tests {
                 let token = token.clone();
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full.into(), timings, Arc::default())
+                        session(socket, sessions, Some(token), None, Decoders::ALL, timings, Arc::default())
                     })
                 }
             }),
@@ -2587,7 +2572,7 @@ mod tests {
         let replacement_token = assertions
             .claim(false, None, "login")
             .expect("heartbeat timeout did not release the browser attachment");
-        let mut replacement = assertions.attach(&replacement_token, None, Chroma::Full.into()).await.unwrap();
+        let mut replacement = assertions.attach(&replacement_token, None, Decoders::ALL).await.unwrap();
         assert!(matches!(
             replacement.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
@@ -2668,7 +2653,7 @@ mod tests {
                 let token = token.clone();
                 async move {
                     ws.on_upgrade(move |socket| {
-                        session(socket, sessions, Some(token), None, Chroma::Full.into(), timings, Arc::default())
+                        session(socket, sessions, Some(token), None, Decoders::ALL, timings, Arc::default())
                     })
                 }
             }),
@@ -2717,7 +2702,7 @@ mod tests {
         let token = sessions.claim(false, None, "login").unwrap();
         // A live desktop, driven in process: this test is about the audio socket, and
         // the session socket only has to exist for `connect` to be legal.
-        let mut att = sessions.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        let mut att = sessions.attach(&token, None, Decoders::ALL).await.unwrap();
         assert!(matches!(
             att.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))

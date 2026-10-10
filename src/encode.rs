@@ -29,7 +29,7 @@ use screen_vp9::walk::{LAG_CLEAR, QualityWalk};
 #[cfg(test)]
 use screen_vp9::walk::SETTLE_IDLE;
 
-use crate::config::{Chroma, RenderPlan};
+use crate::config::RenderPlan;
 use crate::feedback::LinkFeedback;
 use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
@@ -170,12 +170,9 @@ enum Pending {
 /// line the task logged on its own way out would be cancelled before it printed.
 struct Shared {
     oversize: Oversize,
-    /// The plan's chroma: what a frame passed through ([`VideoSink::pass`]) is held
-    /// to, since wlshare was asked to code at it.
-    chroma: Chroma,
-    /// The streams the session's pages decode themselves, which each
-    /// `VideoFormat` says of its own ([`RenderPlan::software`]).
-    software: crate::config::PageDecoders,
+    /// Whether the session's pages decode a Mac's passed HEVC themselves, which
+    /// each `VideoFormat` of it says ([`RenderPlan::software`]).
+    software: bool,
     /// Whether the desktop's picture is held — see [`Oversize`]. Decided by each
     /// `Resize` ([`VideoSink::msg`]).
     oversized: AtomicBool,
@@ -258,16 +255,15 @@ struct Shared {
 
 impl Shared {
     fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>, oversize: Oversize) -> Self {
-        let RenderPlan { quality, adaptive, chroma, software, .. } = plan;
+        let RenderPlan { quality, adaptive, software, .. } = plan;
         Self {
             oversize,
-            chroma,
             software,
             oversized: AtomicBool::new(false),
             too_many_screens: AtomicBool::new(false),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
-                stream: DesktopStream::new(quality, chroma),
+                stream: DesktopStream::new(quality),
                 congestion: QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, adaptive),
                 due_at: None,
             }),
@@ -578,7 +574,7 @@ impl VideoSink {
 
     /// Queue a `w`×`h` frame the remote encoded itself as the next access unit,
     /// untouched: wlshare's VP9 encoding, which is the stream this gateway would have
-    /// encoded from the same pixels at the plan's chroma ([`crate::stream::pass`]).
+    /// encoded from the same pixels ([`crate::stream::pass`]).
     ///
     /// None of the stream's own machinery applies. There is no mirror, round,
     /// interval, quality walk or settle: the remote paces, codes and sharpens its
@@ -591,7 +587,7 @@ impl VideoSink {
     /// keyframe, which the full update the engine asks for at the same moment brings,
     /// and the keyframe goes out behind a fresh announcement.
     pub async fn pass(&self, w: u16, h: u16, frame: Vec<u8>) -> anyhow::Result<()> {
-        let passed = crate::stream::pass(w, h, &frame, self.shared.chroma)?;
+        let passed = crate::stream::pass(w, h, &frame)?;
         self.forward(w, h, frame, passed).await.map(drop)
     }
 
@@ -655,7 +651,7 @@ impl VideoSink {
             self.shared.keyframe_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
         if let Some(decode) = announce {
-            let software = self.shared.software.decodes(&decode);
+            let software = crate::config::page_decodes(self.shared.software, &decode);
             self.push(Pending::Msg(ServerMsg::VideoFormat { decode, passthrough: true, software, strips })).await?;
         }
         let unit = VideoUnit { w, h, strip: passed.strip, keyframe: passed.keyframe, data: frame, held };
@@ -1024,7 +1020,7 @@ async fn order_loop(
         // that needs it arrives. Sent here rather than pushed, because this *is* the
         // ordered task: nothing queued behind this round can overtake it.
         if let Some(decode) = produced.format {
-            let software = shared.software.decodes(&decode);
+            let software = crate::config::page_decodes(shared.software, &decode);
             let msg = ServerMsg::VideoFormat { decode, passthrough: false, software, strips: 1 };
             if frame_tx.send(msg).await.is_err() {
                 break;
@@ -1157,7 +1153,6 @@ impl fmt::Display for Totals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Chroma;
     use crate::protocol::{UNSCALED, VideoUnit};
 
     /// A fresh, never-written link measurement: what every sink here runs on, so
@@ -1186,7 +1181,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: crate::config::PageDecoders::NONE };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1262,7 +1257,8 @@ mod tests {
     /// What `pass` reads; the rest is the remote's.
     fn passed_frame(keyframe: bool, len: usize) -> Vec<u8> {
         let mut frame = vec![0u8; len];
-        frame[0] = if keyframe { 0x80 } else { 0x84 };
+        // Profile 1, which is 4:4:4.
+        frame[0] = if keyframe { 0xa0 } else { 0xa4 };
         frame
     }
 
@@ -1280,7 +1276,7 @@ mod tests {
 
         let out = drain(&mut frame_rx, 3).await;
         assert!(
-            matches!(&out[0], ServerMsg::VideoFormat { decode, passthrough: true, .. } if decode == "vp09.00.40.08.01.06.06.06.00"),
+            matches!(&out[0], ServerMsg::VideoFormat { decode, passthrough: true, .. } if decode == "vp09.01.40.08.03.06.06.06.00"),
             "{:?}",
             out[0]
         );
@@ -1420,15 +1416,14 @@ mod tests {
         assert!(frame_rx.try_recv().is_err());
     }
 
-    /// Only the stream at the chroma wlshare was asked for — the one the
-    /// announcement describes — is passed.
+    /// Only a 4:4:4 stream — the one the announcement describes — is passed.
     #[tokio::test]
     async fn a_passed_frame_of_another_profile_is_refused() {
         let (sink, _frame_rx) = video_sink(1280, 800).await;
         let mut frame = passed_frame(true, 10);
-        frame[0] = 0xa0; // profile 1
+        frame[0] = 0x80; // profile 0
         let error = sink.pass(1280, 800, frame).await.unwrap_err();
-        assert!(format!("{error:#}").contains("profile 1, not the 4:2:0"), "{error:#}");
+        assert!(format!("{error:#}").contains("profile 0, not the 4:4:4"), "{error:#}");
     }
 
     /// Past the ceiling, a source that holds sends nothing of the picture: its
@@ -1548,12 +1543,11 @@ mod tests {
         out
     }
 
-    /// A session whose pages decode its VP9 themselves says so with each format, a repaint's
-    /// included: that is what a page that attaches later builds its decoder from.
+    /// The VP9 encoded here is each page's own to decode, so its formats never say the
+    /// session's pages decode it, even in a session whose pages decode a Mac's HEVC.
     #[tokio::test]
-    async fn a_stream_the_page_decodes_says_so_with_every_format() {
-        let software = crate::config::PageDecoders { vp9: true, hevc: false };
-        let plan = RenderPlan { chroma: Chroma::Full, software, ..VIDEO };
+    async fn the_vp9_encoded_here_is_never_the_sessions_to_decode() {
+        let plan = RenderPlan { apple_media: true, software: true, ..VIDEO };
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
         let sink = VideoSink::new("test", frame_tx, plan, feedback(), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED }).await.unwrap();
@@ -1570,7 +1564,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(formats, [(true, true), (true, true)]);
+        assert_eq!(formats, [(true, false), (true, false)]);
     }
 
     /// The `VideoFormat` contract, which is the whole of what a client needs to build a decoder:
@@ -1592,7 +1586,7 @@ mod tests {
         let ServerMsg::VideoFormat { decode, passthrough: false, .. } = &out[0] else {
             panic!("the first thing a stream sends must be its format, encoded here, got {:?}", out[0]);
         };
-        assert!(decode.starts_with("vp09.00."), "not a VP9 profile-0 configuration: {decode}");
+        assert!(decode.starts_with("vp09.01."), "not a VP9 profile-1 configuration: {decode}");
         let announced = decode.clone();
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
 
@@ -1954,7 +1948,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2081,7 +2075,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false, software: Default::default() };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

@@ -73,7 +73,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
-        vp9_wasm: false,
         hp_decoders: Default::default(),
         targets: vec![TargetConfig {
             name: "tigervnc-dummy".to_owned(),
@@ -95,7 +94,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             camera: false,
             microphone: false,
             video_quality: None,
-            render_chroma: None,
             render_adaptive: None,
             virtual_display: false,
             audio_bitrate: None,

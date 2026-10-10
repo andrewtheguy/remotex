@@ -251,9 +251,8 @@ export type ControlMsg =
       // camera's twin: enabled afresh each session by opening /ws/mic.
       microphone: boolean;
       // The render dial this session resolved to, in one line —
-      // `video q90 4:4:4 · adaptive`. The *resolved plan* rather than the config
-      // keys, which the reader may not have: defaults and the browser's own chroma
-      // are already applied.
+      // `video q90 · adaptive`. The *resolved plan* rather than the config keys,
+      // which the reader may not have: defaults are already applied.
       render: string;
     }
   // How to play the audio frames that follow, sent once when audio is enabled and
@@ -288,10 +287,11 @@ export type ControlMsg =
   // untouched (wlshare's VP9, a High Performance Mac's HEVC), or one the gateway
   // encoded.
   //
-  // `software` says what decodes it: BETA, the page's own software decoder for the
-  // stream (softwareDecoder.ts) and not the browser's `VideoDecoder`, in a session
-  // started so at the picker. It is the session's, so every page attached to it is
-  // told the same.
+  // `software` says whether a Mac's HEVC is decoded in the page's own software
+  // decoder (softwareDecoder.ts) and not the browser's `VideoDecoder`: BETA, in a
+  // session started so at the picker. It is the session's, so every page attached
+  // to it is told the same. It is never set for VP9, which each page decodes as it
+  // can (nativeVp9.ts).
   | {
       type: "videoFormat";
       decode: string;

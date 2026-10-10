@@ -1,22 +1,22 @@
-// BETA: the page's software VP9 decoder (frontend/src/softwareDecoder.ts), the
-// bundled vp9-wasm module, which decodes the gateway's 4:4:4 stream in a session
-// started with "Decode VP9 in this page" at the picker, on a gateway whose
-// `[vp9_wasm]` enables it.
+// The page's software VP9 decoder (frontend/src/softwareDecoder.ts), the bundled
+// vp9-wasm module, which decodes the gateway's 4:4:4 stream in a page whose
+// browser's own decoder does not take profile 1 (frontend/src/nativeVp9.ts). The
+// gateway sends every browser the same stream and is told nothing: which decoder
+// a page builds is that page's own decision.
 //
-// What is asserted is what the system decides: what the gateway lists the target
-// as offering, the row the picker then shows and what Start sends, the chroma the
-// page states on its session socket, what the gateway announces — the stream, and
-// that this page decodes it — whether the page loads the module, which is only
-// ever fetched to decode with, and — for the one claim about decoding itself —
-// that the first keyframe's batch was acknowledged with no decoder failure before
-// it. That last holds by ordering, not timing: a failed decoder settles its unit
-// and reports the failure in the same turn, and the paint worker posts the report
-// before the acknowledgement (framePainter.ts, useRemoteDesktop.ts). Which canvas
-// the page shows says which path presented: the module's planes are drawn on the
-// one over the desktop's.
+// What is asserted is what the system decides: that the picker has no row for it,
+// what the gateway announces — profile 1, never said to be the page's — whether
+// the page loads the module, which is only ever fetched to decode with, and — for
+// the one claim about decoding itself — that the first keyframe's batch was
+// acknowledged with no decoder failure before it. That last holds by ordering,
+// not timing: a failed decoder settles its unit and reports the failure in the
+// same turn, and the paint worker posts the report before the acknowledgement
+// (framePainter.ts, useRemoteDesktop.ts). Which canvas the page shows says which
+// path presented: the module's planes are drawn on the one over the desktop's.
+// Playwright's Chromium decodes profile 1 itself, so a browser that does not is
+// made by answering the page's one question of it with a no.
 //
-// It needs a gateway whose local config has a live target that sends VP9 at the
-// chroma the page asks for (no `render_chroma`), and `[vp9_wasm] enabled = true`:
+// It needs a gateway whose local config has a live target that sends VP9:
 //
 //     cargo run --profile qa -- serve --config tmp/qa_vp9.toml
 //
@@ -25,33 +25,24 @@
 //     REMOTEX_PLAYWRIGHT_PASSWORD=… \
 //     REMOTEX_PLAYWRIGHT_VP9_TARGET=desktop \
 //     bun run test:vp9
-//
-// Against a gateway without the table, set REMOTEX_PLAYWRIGHT_VP9_WASM=0: the
-// picker must then have no such row.
 import { expect, type Page, test } from "@playwright/test";
 
 import {
-  BASE_URL,
   leaveSession,
   logIn,
   logInAndConnectTo,
   returnToPicker,
-  startTarget,
   targetNamePattern,
 } from "./support";
 
 /// The opt-in, and the target name in one, as the video spec's.
 const VP9_TARGET = process.env.REMOTEX_PLAYWRIGHT_VP9_TARGET;
 
-/// Whether the gateway under test enables the module: said by whoever configured
-/// it, and held against what the gateway itself lists.
-const ENABLED = process.env.REMOTEX_PLAYWRIGHT_VP9_WASM !== "0";
-
 /// The module in the bundle, under the name the build gives it.
 const MODULE = /^\/assets\/vp9_bg-[\w-]+\.wasm$/;
 
-/// The picker's row, by its label.
-const ROW = /^Decode (VP9|HEVC) in this page/;
+/// A picker row for decoding in the page, by its label: only a Mac's HEVC has one.
+const ROW = /^Decode .* in this page/;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
@@ -65,10 +56,8 @@ interface Format {
 }
 
 interface Session {
-  /** Each session socket's `chroma`, the page's answer, in the order opened. */
-  chromas: (string | null)[];
-  /** The `choices` of every `connect` the page sent. */
-  connects: { software?: boolean }[];
+  /** Each session socket's query, in the order opened. */
+  queries: URLSearchParams[];
   /** Each display socket's `videoFormat`s, in the order the sockets opened. */
   sockets: Format[][];
   /** The sequence of the first batch that opens with a keyframe on the newest socket. */
@@ -85,8 +74,7 @@ interface Session {
 /// module's file. Registered before navigation.
 function watchSession(page: Page): Session {
   const seen: Session = {
-    chromas: [],
-    connects: [],
+    queries: [],
     sockets: [],
     acks: [],
     refreshes: [],
@@ -102,15 +90,7 @@ function watchSession(page: Page): Session {
   page.on("websocket", (ws) => {
     const url = new URL(ws.url());
     if (url.pathname === "/ws") {
-      seen.chromas.push(url.searchParams.get("chroma"));
-      ws.on("framesent", ({ payload }) => {
-        if (typeof payload === "string") {
-          const message = JSON.parse(payload);
-          if (message.type === "connect") {
-            seen.connects.push(message.choices);
-          }
-        }
-      });
+      seen.queries.push(url.searchParams);
       return;
     }
     if (url.pathname !== "/ws/display") {
@@ -156,6 +136,18 @@ function watchSession(page: Page): Session {
   return seen;
 }
 
+/// Make the page's browser one whose own decoder refuses profile 1, as far as the
+/// page's one question of it goes.
+async function refuseProfile1(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const ask = VideoDecoder.isConfigSupported.bind(VideoDecoder);
+    VideoDecoder.isConfigSupported = (config) =>
+      config.codec.startsWith("vp09.01.")
+        ? Promise.resolve({ supported: false, config })
+        : ask(config);
+  });
+}
+
 /// The newest display socket's first keyframe, acknowledged: decoded, or failed
 /// and said so first.
 async function firstKeyframeAcknowledged(page: Page, seen: Session) {
@@ -169,24 +161,18 @@ async function firstKeyframeAcknowledged(page: Page, seen: Session) {
   await expect(page.getByRole("alert")).toHaveCount(0);
 }
 
-/// What the gateway lists the target as offering of the page's decoders, asked of
-/// it directly with the page's login.
-async function offered(page: Page): Promise<unknown> {
-  const response = await page.request.get(
-    new URL("/api/targets", BASE_URL).toString(),
-  );
-  const targets: { name: string; software: unknown }[] = await response.json();
-  return targets.find((target) => target.name === VP9_TARGET)?.software;
-}
-
-/// Every format the newest display socket announced, once it has announced one.
-async function announced(seen: Session, sockets: number): Promise<Format[]> {
+/// Every format the newest display socket announced, once it has announced one:
+/// profile 1, and none of them said to be the page's to decode.
+async function announcedProfile1(seen: Session, sockets: number) {
   await expect
     .poll(() => seen.sockets.length >= sockets && seen.sockets.at(-1)?.length, {
       timeout: 20_000,
     })
     .toBeTruthy();
-  return seen.sockets.at(-1) ?? [];
+  for (const format of seen.sockets.at(-1) ?? []) {
+    expect(format.decode, "the gateway's 4:4:4").toMatch(/^vp09\.01\./);
+    expect(format.software, "the page's own decision").toBe(false);
+  }
 }
 
 /// The Info card's Video row ends with which decoder the session's picture has.
@@ -212,22 +198,48 @@ test.describe("a VP9 target and the page's software decoder", () => {
     await leaveSession(page);
   });
 
-  test("chosen at the picker, 4:4:4 is decoded in the module, and again by the page that comes back", async ({
+  test("the picker offers no choice of VP9 decoder", async ({ page }) => {
+    await logIn(page);
+    if (await page.getByRole("button", { name: "Open menu" }).isVisible()) {
+      await returnToPicker(page);
+    }
+    const row = page.getByRole("button", {
+      name: targetNamePattern(VP9_TARGET ?? ""),
+    });
+    await row.click();
+    const item = page.getByRole("listitem").filter({ has: row });
+    await expect(
+      item.getByRole("button", { name: "Start", exact: true }),
+    ).toBeVisible();
+    await expect(item.getByRole("checkbox", { name: ROW })).toHaveCount(0);
+  });
+
+  test("a browser whose own decoder takes profile 1 decodes it itself", async ({
     page,
   }) => {
-    test.skip(!ENABLED, "the gateway does not set [vp9_wasm]");
     const seen = watchSession(page);
-    await logInAndConnectTo(page, VP9_TARGET ?? "", "", { software: true });
+    await logInAndConnectTo(page, VP9_TARGET ?? "");
 
-    expect(await offered(page)).toMatchObject({ vp9: true });
+    expect(
+      seen.queries.at(-1)?.has("chroma"),
+      "the gateway is asked nothing about VP9",
+    ).toBe(false);
+    await announcedProfile1(seen, 1);
+    await firstKeyframeAcknowledged(page, seen);
+    await expect(page.locator("canvas.graphics")).toBeHidden();
+    expect(seen.moduleLoads).toEqual([]);
+    await expectInfo(page, "decoded by the browser's native decoder");
+  });
+
+  test("a browser whose own decoder refuses profile 1 is sent the same stream and decodes it in the module, and again when it comes back", async ({
+    page,
+  }) => {
+    await refuseProfile1(page);
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, VP9_TARGET ?? "");
+
     expect(await page.evaluate(() => globalThis.crossOriginIsolated)).toBe(true);
-    expect(seen.connects.at(-1)?.software, "Start sent the choice").toBe(true);
-    for (const format of await announced(seen, 1)) {
-      expect(format.decode, "profile 1, which the module decodes").toMatch(
-        /^vp09\.01\./,
-      );
-      expect(format.software, "told to decode it in the page").toBe(true);
-    }
+    await announcedProfile1(seen, 1);
     await firstKeyframeAcknowledged(page, seen);
     expect(seen.refreshes, "repaints the page asked for").toEqual([]);
     // Its pictures are drawn on the canvas over the desktop's, which the page
@@ -236,118 +248,16 @@ test.describe("a VP9 target and the page's software decoder", () => {
     // Loaded by the decode worker and compiled once: its threads are given the
     // compiled module.
     expect(seen.moduleLoads).toEqual([200]);
+    await expectInfo(page, "decoded by this page's WebAssembly decoder");
 
-    // The session's, not this page's: a page that comes back to it made no choice
-    // and is told the same of the stream it is repainted with.
+    // The page that comes back asks again, and decodes the same stream the same way.
     await page.reload();
     await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
       timeout: 20_000,
     });
-    expect(seen.connects, "the page that came back started nothing").toHaveLength(1);
-    const again = await announced(seen, 2);
-    for (const format of again) {
-      expect(format).toMatchObject({ software: true });
-      expect(format.decode).toMatch(/^vp09\.01\./);
-    }
+    await announcedProfile1(seen, 2);
     await firstKeyframeAcknowledged(page, seen);
     await expect(page.locator("canvas.graphics")).toBeVisible();
     expect(seen.moduleLoads).toHaveLength(2);
-  });
-
-  test("a browser whose own decoder refuses profile 1 finds the row ticked, and is sent 4:4:4 all the same", async ({
-    page,
-  }) => {
-    test.skip(!ENABLED, "the gateway does not set [vp9_wasm]");
-    // Such a browser, as far as the page's one question of it goes.
-    await page.addInitScript(() => {
-      const ask = VideoDecoder.isConfigSupported.bind(VideoDecoder);
-      VideoDecoder.isConfigSupported = (config) =>
-        config.codec.startsWith("vp09.01.")
-          ? Promise.resolve({ supported: false, config })
-          : ask(config);
-    });
-    const seen = watchSession(page);
-    // The row is left as the picker shows it.
-    await logInAndConnectTo(page, VP9_TARGET ?? "");
-
-    expect(seen.chromas.at(-1), "its own decoder's answer").toBe("420");
-    expect(seen.connects.at(-1)?.software).toBe(true);
-    for (const format of await announced(seen, 1)) {
-      expect(format.decode).toMatch(/^vp09\.01\./);
-      expect(format.software).toBe(true);
-    }
-    await firstKeyframeAcknowledged(page, seen);
-    await expect(page.locator("canvas.graphics")).toBeVisible();
-    expect(seen.moduleLoads).toEqual([200]);
-  });
-
-  test("not chosen, the browser's own decoder decodes what it asked for", async ({
-    page,
-  }) => {
-    test.skip(!ENABLED, "the gateway does not set [vp9_wasm]");
-    const seen = watchSession(page);
-    await logInAndConnectTo(page, VP9_TARGET ?? "", "", { software: false });
-
-    // Chromium decodes profile 1 itself.
-    expect(seen.chromas.at(-1)).toBe("444");
-    expect(seen.connects.at(-1)?.software).toBe(false);
-    for (const format of await announced(seen, 1)) {
-      expect(format.software).toBe(false);
-    }
-    await firstKeyframeAcknowledged(page, seen);
-    await expect(page.locator("canvas.graphics")).toBeHidden();
-    expect(seen.moduleLoads).toEqual([]);
-  });
-
-  test("the choice is each session's: unticked for the next one, the browser decodes that one", async ({
-    page,
-  }) => {
-    test.skip(!ENABLED, "the gateway does not set [vp9_wasm]");
-    const seen = watchSession(page);
-    await logInAndConnectTo(page, VP9_TARGET ?? "", "", { software: true });
-    for (const format of await announced(seen, 1)) {
-      expect(format.software).toBe(true);
-    }
-    await firstKeyframeAcknowledged(page, seen);
-    await expect(page.locator("canvas.graphics")).toBeVisible();
-    await expectInfo(page, "decoded by this page's WebAssembly decoder");
-
-    await returnToPicker(page);
-    const formats = () => seen.sockets.flat();
-    const before = formats().length;
-    await startTarget(page, VP9_TARGET ?? "", { software: false });
-    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
-      timeout: 20_000,
-    });
-    expect(seen.connects.map((connect) => connect.software)).toEqual([
-      true,
-      false,
-    ]);
-    await expect
-      .poll(() => formats().length, { timeout: 20_000 })
-      .toBeGreaterThan(before);
-    for (const format of formats().slice(before)) {
-      expect(format.software, "the second session's format").toBe(false);
-    }
-    await expect(page.locator("canvas.graphics")).toBeHidden();
-    await expectInfo(page, "decoded by the browser's native decoder");
-  });
-
-  test("on a gateway that does not enable it, the picker has no such row", async ({
-    page,
-  }) => {
-    test.skip(ENABLED, "the gateway sets [vp9_wasm]");
-    await logIn(page);
-    if (await page.getByRole("button", { name: "Open menu" }).isVisible()) {
-      await returnToPicker(page);
-    }
-    expect(await offered(page)).toMatchObject({ vp9: false });
-    const row = page.getByRole("button", {
-      name: targetNamePattern(VP9_TARGET ?? ""),
-    });
-    await row.click();
-    const item = page.getByRole("listitem").filter({ has: row });
-    await expect(item.getByRole("button", { name: "Start", exact: true })).toBeVisible();
-    await expect(item.getByRole("checkbox", { name: ROW })).toHaveCount(0);
   });
 });

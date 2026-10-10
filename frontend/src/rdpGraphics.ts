@@ -1,6 +1,6 @@
-// Whether this page composes an RDP host's graphics pipeline: the third question
-// about itself the gateway is told, beside the chroma (videoChroma.ts) and the
-// Mac's stream (appleMedia.ts), and ahead of the pipeline's H.264 (rdpH264.ts).
+// Whether this page composes an RDP host's graphics pipeline: the second question
+// about itself the gateway is told, beside the Mac's stream (appleMedia.ts), and
+// ahead of the pipeline's H.264 (rdpH264.ts).
 //
 // A session started with the pipeline passed is composed here, by the gateway's own
 // compositor compiled to WebAssembly (egfxCompositor.ts). That needs two things of
@@ -12,8 +12,7 @@
 // The answer greys the choice at the picker where it is no, and rides every session
 // socket this page opens (`gateway.ts`), so a page that comes back to its session
 // saying no is returned to the picker instead of being sent a stream it cannot
-// compose. Unlike the chroma it is not a selection: nothing is rebuilt for a page
-// that says no.
+// compose. Nothing is rebuilt for a page that says no.
 
 let answer: boolean | null = null;
 

@@ -113,24 +113,6 @@
 #[hevc_wasm]
 #archive = "/srv/remotex/hevc-wasm-v0.0.8.tar.gz"
 
-# BETA: lets a session be started with its VP9 decoded by the page, at 4:4:4,
-# for a browser whose own VideoDecoder refuses VP9 profile 1 — Safari on iOS and
-# iPadOS, for one, which decodes VP9 in hardware alone. Such a browser otherwise
-# asks for 4:2:0 and is sent that. With enabled = true the picker shows "Decode
-# in this page" under every target whose render_chroma is not "420", ticked to
-# begin with in a browser whose own decoder refuses profile 1 and unticked in one
-# that takes it. A session started with it is sent 4:4:4 whatever the browser
-# answered, and every page attached to it decodes that in andrewtheguy/vp9-wasm's
-# decoder, which is part of the page: there is no archive to place. The page
-# needs shared-memory SIMD WebAssembly on the cross-origin isolated page every
-# gateway serves and a WebGL 2 canvas to present on; the row is greyed where it
-# has not. Off unless set here, and then no target offers the choice and the
-# page never loads the decoder: the table is for comparing, in use, 4:4:4
-# decoded in the page with the 4:2:0 such a browser gets without it.
-#
-#[vp9_wasm]
-#enabled = true
-
 # On Windows, the folder an `ard-high-performance` target's HEVC decoder is
 # loaded from: FFmpeg's avcodec and avutil DLLs. With nothing set here the
 # gateway looks for them when a session needs them, beside remotex.exe and on
@@ -614,44 +596,14 @@ password = "change-me"
 # remote audio has. A browser pointed at a gateway on a plain-HTTP LAN address shows
 # a banner saying so instead of a desktop, until it is behind TLS (localhost is
 # exempt).
+#
+# The stream is always VP9 at 4:4:4 (profile 1), a colour sample per pixel, so
+# coloured text keeps its colour; there is no chroma to set. A browser whose own
+# decoder takes profile 1 decodes it there, in software, since no browser's
+# hardware VP9 path takes it. One whose decoder does not — Safari on iOS and
+# iPadOS, which decodes VP9 in hardware alone — decodes it in the page's own
+# WebAssembly decoder, which is part of the page and needs nothing set here.
 #video_quality = 90
-
-# How much colour the stream carries per pixel. Left out, it is "auto": the
-# browser's own decoder decides. The other two answers take that decision away from
-# it, for every browser alike.
-#
-#   "420"  — one colour sample per 2×2 pixels (VP9 profile 0). The one every decoder
-#            takes, hardware ones included, sent even to a decoder that would have
-#            taken the colour.
-#   "444"  — a colour sample per pixel (VP9 profile 1). This, not video_quality, is
-#            where a desktop stream's visible loss is: a one-pixel coloured glyph stem
-#            on a dark terminal shares its one 4:2:0 colour sample with three pixels of
-#            background and comes back at a quarter of its saturation, at any quality
-#            — measured, lossless 4:2:0 is no better than quality 100. 4:4:4 keeps it,
-#            for a keyframe about a third larger and inter frames no larger. In a
-#            browser it decodes in software: hardware that decodes profile 1 exists,
-#            but no browser's hardware VP9 path takes it. Chromium decodes it; iOS and
-#            iPadOS have no software VP9 at all and refuse it by name, and this setting
-#            sends it to them anyway.
-#   "auto" — 4:4:4 where the browser's decoder takes profile 1, 4:2:0 where it says it
-#            does not. The default. The page asks its own VideoDecoder once, at load,
-#            and states the answer on its session socket.
-#
-# Which to write down:
-#
-#   Watched from more than one kind of browser — a desktop and an iPad, say — leave
-#   the key out. "auto" is the whole reason this target need not be duplicated under
-#   two names, and every browser gets the best picture it can actually decode.
-#
-#   Set "444" only to hold a fleet to one bitstream or to pin one side of a measurement:
-#   it asks nobody, so any iOS or iPadOS client sees the decoder's refusal instead of a
-#   desktop. On the browsers that do take it the cost is client CPU — twice the chroma
-#   samples per frame, and no hardware path — which in this system's experience is the
-#   safer decoder anyway: the GPU-process one is what goes quiet under stream churn.
-#
-#   Set "420" for a fleet that must stay on a hardware decoder, or where the target is
-#   photographic rather than text and the extra colour buys nothing worth the bytes.
-#render_chroma = "auto"
 
 # `video_quality` tracks measured client queueing — on unless this turns it off. The
 # configured quality remains the ceiling; the stream adds the client's paint lag to its

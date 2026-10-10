@@ -78,7 +78,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
-        vp9_wasm: false,
         hp_decoders: Default::default(),
         targets: vec![wlshare, plain],
     };
@@ -110,7 +109,6 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         camera: true,
         microphone: true,
         video_quality: None,
-        render_chroma: None,
         render_adaptive: None,
         virtual_display: false,
         audio_bitrate: None,
@@ -328,21 +326,15 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
         (1600, 1200, 2.0),
         "the output left behind keeps what it was set to"
     );
-    // The socket states a 4:4:4 decoder, so every access unit above was wlshare's own
-    // VP9 passed through at 4:4:4, across a density change, a resize and an output
-    // switch.
+    // Every access unit above was wlshare's own VP9 passed through at 4:4:4, across
+    // a density change, a resize and an output switch.
     assert!(
         container.logs().contains("asked for VP9"),
         "wlshare was not asked for its VP9 encoding:\n{}",
         container.logs()
     );
-    assert!(
-        container.logs().contains("asked for VP9, 4:4:4"),
-        "wlshare was not asked for 4:4:4:\n{}",
-        container.logs()
-    );
     let decode = view.decode.as_deref().expect("a video format was announced");
-    assert!(decode.starts_with("vp09.01."), "a 4:4:4 browser was announced {decode}");
+    assert!(decode.starts_with("vp09.01."), "the stream was announced as {decode}");
     assert_eq!(view.passed, Some(true), "the stream is wlshare's own");
 }
 
@@ -460,35 +452,6 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
     assert!(
         !container.logs().contains("asked for VP9"),
         "a plain target asked wlshare for its VP9 encoding:\n{}",
-        container.logs()
-    );
-}
-
-/// A browser whose decoder takes only profile 0 is passed wlshare's stream as well,
-/// coded at 4:2:0 because the gateway asked for it: the announcement is the profile
-/// 0 string, and wlshare says what it was asked for.
-#[tokio::test]
-#[ignore = "requires Docker or Podman"]
-async fn a_420_browser_is_passed_wlshares_stream_at_420() {
-    common::init_logging();
-    let (container, vnc_port) = start_wlshare().await;
-
-    let addr = spawn_app(vnc_port).await;
-    let cookie = common::login(addr).await;
-    let token = common::claim_session(addr, &cookie).await;
-    let mut ws = common::connect_ws_as(addr, &token, &cookie, "420").await;
-    let mut view = View::new();
-    ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"window"}}}}"#
-    )))
-    .await
-    .unwrap();
-    view.until(&mut ws, "the desktop's first keyframe", |v| v.decode.is_some()).await;
-    let decode = view.decode.as_deref().unwrap();
-    assert!(decode.starts_with("vp09.00."), "a 4:2:0 browser was announced {decode}");
-    assert!(
-        container.logs().contains("asked for VP9, 4:2:0"),
-        "wlshare was not asked for 4:2:0:\n{}",
         container.logs()
     );
 }

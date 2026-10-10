@@ -169,7 +169,7 @@ test.describe("a High Performance target and the page's software decoder", () =>
       software: true,
     });
 
-    expect(await offered(page)).toMatchObject({ hevc: true });
+    expect(await offered(page)).toBe(true);
     expect(await page.evaluate(() => globalThis.crossOriginIsolated)).toBe(true);
     expect(seen.connects.at(-1)).toMatchObject({
       passthrough: true,
@@ -217,7 +217,7 @@ test.describe("a High Performance target and the page's software decoder", () =>
     // stream, so the session starts without it.
     await logInAndConnectTo(page, HEVC_TARGET ?? "");
 
-    expect(await offered(page)).toMatchObject({ hevc: false });
+    expect(await offered(page)).toBe(false);
     expect(seen.appleMedia, "this browser's own decoder").toBe("false");
     expect(seen.connects.at(-1)?.passthrough).toBe(false);
     await expect

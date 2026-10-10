@@ -37,7 +37,7 @@ import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { createPlanesPicture } from "./planesPicture.ts";
 import { binaryFrameKind } from "./protocol.ts";
-import type { RunnableDecoders } from "./softwareSupport.ts";
+import type { PageDecoding } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 /**
@@ -57,11 +57,8 @@ export type PainterCommand =
        * and a software decoder's (planesPicture.ts).
        */
       graphics: OffscreenCanvas;
-      /**
-       * BETA: which of the page's software decoders this page can run, for a
-       * stream its `videoFormat` says is decoded in one (softwareSupport.ts).
-       */
-      runs: RunnableDecoders;
+      /** How this page decodes the streams it is sent (softwareSupport.ts). */
+      decoding: PageDecoding;
     }
   | {
       type: "frame";
@@ -259,7 +256,7 @@ export function createPainterWorker(
             makePlanesPicture: () => createPlanesPicture(command.graphics),
             onGraphicsShown: (shown) =>
               post({ type: "graphicsShown", shown, epoch }),
-            runs: command.runs,
+            decoding: command.decoding,
           });
           break;
         case "frame": {
