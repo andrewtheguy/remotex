@@ -59,36 +59,45 @@ interface FakeFrame {
   closed: boolean;
 }
 
-/** Nine-argument draws: the source rectangle is what crops a padded frame. */
-let cropped: {
-  sx: number;
-  sy: number;
-  sw: number;
-  sh: number;
-  dx: number;
-  dy: number;
-  dw: number;
-  dh: number;
-}[] = [];
+/**
+ * The draws: where each picture's top left went, and the clip it was drawn
+ * under, which is what cuts a picture that runs past the desktop.
+ */
+let cropped: { dx: number; dy: number; w: number; h: number }[] = [];
 let decoded: FakeFrame[] = [];
 let videoErrors: (string | null)[] = [];
 /** Chains that were cut. The stub never goes quiet, so these are failures. */
 let videoKeyframeAsks: string[] = [];
 
-const context = {
-  drawImage(_source: unknown, ...args: number[]) {
-    cropped.push({
-      sx: args[0],
-      sy: args[1],
-      sw: args[2],
-      sh: args[3],
-      dx: args[4],
-      dy: args[5],
-      dw: args[6],
-      dh: args[7],
-    });
-  },
-} as unknown as CanvasRenderingContext2D;
+/** A canvas that records its draws, and nothing else of a context. */
+const recording = (
+  draw: (dx: number, dy: number, clip: { w: number; h: number }) => void,
+) => {
+  let clip = { w: Number.NaN, h: Number.NaN };
+  const saved: (typeof clip)[] = [];
+  return {
+    save() {
+      saved.push(clip);
+    },
+    restore() {
+      clip = saved.pop() ?? clip;
+    },
+    beginPath() {},
+    rect(_x: number, _y: number, w: number, h: number) {
+      clip = { w, h };
+    },
+    clip() {},
+    drawImage(_source: unknown, ...args: number[]) {
+      // Three arguments: a picture is drawn whole, at its own size.
+      assert.equal(args.length, 2);
+      draw(args[0], args[1], clip);
+    },
+  } as unknown as CanvasRenderingContext2D;
+};
+
+const context = recording((dx, dy, clip) => {
+  cropped.push({ dx, dy, ...clip });
+});
 
 // The WebCodecs decoder, which this runtime has none of — and which the client
 // refuses to start without, so it is installed for every test here. Only its shape
@@ -240,9 +249,7 @@ test("a frame is cropped to the desktop, drawn at the origin", async () => {
   // The encoder is held to even sides and an odd desktop does not have them, so the
   // decoded picture can be a pixel wider or taller than the desktop.
   await announced().draw(batchFrame([{ w: 1599, h: 1015, payload: KEYFRAME }]));
-  assert.deepEqual(cropped, [
-    { sx: 0, sy: 0, sw: 1599, sh: 1015, dx: 0, dy: 0, dw: 1599, dh: 1015 },
-  ]);
+  assert.deepEqual(cropped, [{ dx: 0, dy: 0, w: 1599, h: 1015 }]);
   assert.deepEqual(chunkTypes, ["key"]);
   assert.ok(
     decoded.every((frame) => frame.closed),
@@ -251,8 +258,9 @@ test("a frame is cropped to the desktop, drawn at the origin", async () => {
 });
 
 test("the browser's decoder's strips are placed by number, at their frame's last", async () => {
-  // A display of 900 rows is in strips of 240, the last cut at its last row. A
-  // frame is the strips that changed, and nothing of it is drawn before its last.
+  // A display of 900 rows is in strips of 240, the last cut at its last row by
+  // the clip. A frame is the strips that changed, and nothing of it is drawn
+  // before its last.
   const p = announced();
   const strip = (index: number, ends: boolean, keyframe = false) => ({
     w: 1440,
@@ -265,27 +273,13 @@ test("the browser's decoder's strips are placed by number, at their frame's last
   assert.deepEqual(cropped, []);
   assert.ok(decoded.every((frame) => !frame.closed));
   await p.draw(batchFrame([strip(2, false), strip(3, true)]));
-  const at = (dy: number, rows: number) => ({
-    sx: 0,
-    sy: 0,
-    sw: 1440,
-    sh: rows,
-    dx: 0,
-    dy,
-    dw: 1440,
-    dh: rows,
-  });
-  assert.deepEqual(cropped, [
-    at(0, 240),
-    at(240, 240),
-    at(480, 240),
-    at(720, 180),
-  ]);
+  const at = (dy: number) => ({ dx: 0, dy, w: 1440, h: 900 });
+  assert.deepEqual(cropped, [at(0), at(240), at(480), at(720)]);
   assert.ok(decoded.every((frame) => frame.closed));
 
   cropped = [];
   await p.draw(batchFrame([strip(2, true)]));
-  assert.deepEqual(cropped, [at(480, 240)]);
+  assert.deepEqual(cropped, [at(480)]);
   assert.deepEqual(chunkTypes, ["key", "delta", "delta", "delta", "delta"]);
   assert.equal(decoders, 1);
 });
@@ -324,11 +318,9 @@ test("a frame whose last strip the decoder gave no picture for is not painted", 
 });
 
 test("strips are closed when drawing them throws", async () => {
-  const throwing = {
-    drawImage() {
-      throw new Error("the canvas is gone");
-    },
-  } as unknown as CanvasRenderingContext2D;
+  const throwing = recording(() => {
+    throw new Error("the canvas is gone");
+  });
   const p = announced(throwing);
   const last = { w: 64, h: 64, payload: [0], strip: { index: 0, ends: true } };
   await assert.rejects(p.draw(batchFrame([last])));

@@ -1341,8 +1341,10 @@ the offer's, whatever the display's size.
   to show a frame it decodes, and the page puts the display together and shows
   it at each frame's last strip: in its own decoder, in a session started with
   *Decode HEVC in this page*, and otherwise from the pictures the browser's
-  `VideoDecoder` outputs, one a strip. A probe can ask for one tile instead
-  (`Choices::whole`)
+  `VideoDecoder` outputs, one a strip, each drawn whole under a clip of the
+  display: WebKit's canvas reads no source rectangle of a `VideoFrame`, and a
+  last strip cut by one came squeezed, with the rows past the display in it.
+  A probe can ask for one tile instead (`Choices::whole`)
   ([Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through)).
 
 ### Rate control
