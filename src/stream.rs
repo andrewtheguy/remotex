@@ -30,9 +30,9 @@ struct Live {
     dirty: bool,
     /// Whether the next access unit must be one a decoder can start from.
     keyframe_owed: bool,
-    /// Whether the next access unit is owed the whole picture, changed or not, as an
-    /// inter frame: the settle's ([`DesktopStream::refresh`]).
-    whole: bool,
+    /// The quality the next access unit is owed the whole picture at, changed or
+    /// not, as an inter frame: the settle's ([`DesktopStream::settle`]).
+    settle: Option<u8>,
     /// The configuration string already announced to the client, if any.
     ///
     /// Cleared by [`DesktopStream::force_keyframe`], which is what makes a reattach
@@ -228,7 +228,7 @@ impl DesktopStream {
                     // Its whole picture is owed: nothing has carried these pixels yet.
                     dirty: true,
                     keyframe_owed: true,
-                    whole: false,
+                    settle: None,
                     announced: None,
                 }
             }
@@ -250,7 +250,7 @@ impl DesktopStream {
         };
         self.mirror = Some(spare);
         self.round_out = true;
-        let changed = (!live.whole).then_some(staged);
+        let changed = live.settle.is_none().then_some(staged);
         Ok(Some(Round { mirror: current, live, changed, skipped: 0, epoch: self.epoch }))
     }
 
@@ -311,17 +311,18 @@ impl DesktopStream {
     }
 
     /// Mark the stream dirty over pixels it has already carried, so the next round
-    /// re-encodes them at the quality now in force.
+    /// re-encodes them at `quality` and leaves the dial where it is.
     ///
     /// The settle ([`crate::encode`]): a screen that stopped changing while the link
     /// had the dial walked down would otherwise keep that coarse picture until it
     /// next changed. An inter frame over the unchanged mirror at a finer quantizer
     /// sharpens it; no keyframe is needed. It is encoded whole: a round otherwise
-    /// encodes where the mirror changed, which here is nowhere.
-    pub fn refresh(&mut self) {
+    /// encodes where the mirror changed, which here is nowhere. The frame and the
+    /// dial's way there and back are `screen-vp9`'s ([`Stream::settle`]).
+    pub fn settle(&mut self, quality: u8) {
         if let Some(live) = &mut self.live {
             live.dirty = true;
-            live.whole = true;
+            live.settle = Some(quality);
         }
     }
 
@@ -373,11 +374,18 @@ impl Round {
         self.live.keyframe_owed
     }
 
-    /// The quality the encoder is running at — which can sit below
+    /// The quality this round is encoded at: the settle's for its one frame, and
+    /// otherwise what the encoder is running at — which can sit below
     /// [`DesktopStream::quality`] while a stream that refused a retune waits for
     /// [`DesktopStream::put_back`] to try again.
     pub fn quality(&self) -> u8 {
-        self.live.quality
+        self.live.settle.unwrap_or(self.live.quality)
+    }
+
+    /// Whether this round is the settle's: the whole picture once at the dial,
+    /// which is no verdict about the link.
+    pub fn settling(&self) -> bool {
+        self.live.settle.is_some()
     }
 
     /// The coarsest quality any of the client's picture will be at once this round
@@ -388,7 +396,7 @@ impl Round {
     /// does not pay.
     pub fn coarsest(&self) -> u8 {
         if self.live.keyframe_owed || self.changed.is_none() {
-            self.live.quality
+            self.quality()
         } else {
             self.live.quality.min(self.live.stream.coarsest())
         }
@@ -414,13 +422,23 @@ impl Round {
             live.stream.force_keyframe();
         }
         let mut produced = Produced { format: None, unit: None };
-        let Some(unit) = live.stream.encode(&self.mirror, self.changed.as_deref())? else {
+        let encoded = match live.settle {
+            Some(quality) => {
+                let settled = live.stream.settle(&self.mirror, quality);
+                // Where the encoder says it is, which is not where it was if it
+                // would not leave the settle's quality: `put_back` then tries again.
+                live.quality = live.stream.quality();
+                settled
+            }
+            None => live.stream.encode(&self.mirror, self.changed.as_deref()),
+        };
+        let Some(unit) = encoded? else {
             self.skipped += 1;
             return Ok(produced);
         };
         live.dirty = false;
         live.keyframe_owed = false;
-        live.whole = false;
+        live.settle = None;
         // The announcement goes out ahead of the unit, which is the contract
         // `ServerMsg::VideoFormat` states.
         if let Some(decode) = live.stream.decode_string()
@@ -619,10 +637,14 @@ mod tests {
         assert_eq!(round(&mut stream, &mut picture).1, 20);
         stream.set_quality(60).expect("a retune");
 
-        // The settle: nothing changed, and the whole picture is encoded at the dial.
-        stream.refresh();
+        // The settle: nothing changed, and the whole picture is encoded at the dial,
+        // which the link has walked down and which stays there.
+        stream.set_quality(20).expect("a retune");
+        stream.settle(60);
         let (changed, coarsest, keyframe) = round(&mut stream, &mut picture);
         assert_eq!((changed, coarsest, keyframe), (None, 60, false));
+        assert_eq!(stream.quality(), 20, "the settle moved the dial");
+        stream.set_quality(60).expect("a retune");
         assert!(near(at(&picture, 32, 32), 120) && near(at(&picture, 216, 176), 200));
         // And it is the one round's: the next is told where the mirror changed again.
         stream.blit(first, &flat(32, 32, 90)).expect("a blit");

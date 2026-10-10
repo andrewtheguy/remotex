@@ -26,6 +26,8 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 use screen_vp9::walk::{LAG_CLEAR, QualityWalk};
+#[cfg(test)]
+use screen_vp9::walk::SETTLE_IDLE;
 
 use crate::config::{Chroma, RenderPlan};
 use crate::feedback::LinkFeedback;
@@ -74,12 +76,6 @@ const ENCODE_DEPTH: usize = 16;
 /// behind at 4 Mbit/s; an unthrottled link 100 ms away carried what it did before.
 const QUEUE_BUDGET: u32 = 512 * 1024;
 
-/// How long the stream must have gone out below the dial and then sat quiet before
-/// it is settled back at the dial. Long enough that a brief pause in motion is not
-/// chased with a redundant re-encode, short enough that a settled screen sharpens
-/// while the eye is still on it.
-const SETTLE_IDLE: Duration = Duration::from_millis(500);
-
 /// How often the order task wakes to look for a quiet stream to settle. It has to
 /// be its own timer rather than something the next frame does, because a screen
 /// that stops changing produces no next frame — which is exactly the case a settle
@@ -111,24 +107,23 @@ const VIDEO_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 /// The stream, and what the link will bear.
 struct Video {
     stream: DesktopStream,
-    /// wlshare's walk of the dial, with the plan's quality as its ceiling and
+    /// screen-vp9's walk of the dial, with the plan's quality as its ceiling and
     /// [`VIDEO_FRAME_INTERVAL`] as the frame it slows from. Its verdicts are the
     /// push's blocking ([`VideoSink::adjust`]) and, on an adaptive plan, the paint
     /// window's lag ([`LinkFeedback::lag`]) — whose threshold sits well under
     /// [`crate::ws`]'s 150 ms lag gate on purpose: by the time that gate parks the
     /// window the backpressure chain blocks the push on its own, so the walk
     /// moves quality while the window is still open, before the stall.
+    ///
+    /// It is also what knows a settle is owed: told what every round left of the
+    /// picture the client holds ([`QualityWalk::sent`]), it says when a screen
+    /// that stops changing below the dial is to be sharpened there
+    /// ([`QualityWalk::settle_at`]), which is what [`settle_stream`] comes back for.
     congestion: QualityWalk,
     /// The earliest the next round may be encoded — see [`VIDEO_FRAME_INTERVAL`].
     /// `None` before the first one, so a freshly connected desktop paints without
     /// waiting out an interval.
     due_at: Option<tokio::time::Instant>,
-    /// When the last round went out coarser than the dial, if it did — the picture
-    /// the client is holding is then below the configured quality, and a screen that
-    /// stops changing would keep it that way. `None` once a round at the dial has
-    /// gone out, which sharpens every block, moved or not. What [`settle_stream`]
-    /// comes back for.
-    coarse_at: Option<tokio::time::Instant>,
 }
 
 /// What a source's desktop too large for a video stream ([`video::within_ceiling`])
@@ -275,7 +270,6 @@ impl Shared {
                 stream: DesktopStream::new(quality, chroma),
                 congestion: QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, adaptive),
                 due_at: None,
-                coarse_at: None,
             }),
             round_returned: Notify::new(),
             passing: AtomicBool::new(false),
@@ -446,16 +440,10 @@ impl VideoSink {
         // the dial that encodes only where the picture changed, which leaves the
         // rest as coarse as it was.
         let quality = round.quality();
-        video.coarse_at = video.congestion.coarse(round.coarsest()).then_some(now);
-        // A round above what the walk holds is the settle's one frame at the dial
-        // ([`settle_stream`]): the rounds after it go back to what the link bears.
-        // There is no encoder home to refuse this — the round has it — and
-        // `put_back` brings the returning one to it.
-        let walk = video.congestion.quality();
-        let settling = quality > walk;
-        if settling && let Err(e) = video.stream.set_quality(walk) {
-            warn!("{}: could not return the video quality to {walk} after a settle: {e:#}", self.engine);
-        }
+        video.congestion.sent(round.coarsest(), now.into_std());
+        // The settle's one frame at the dial ([`settle_stream`]), which leaves the
+        // encoder where the walk had it for the rounds after.
+        let settling = round.settling();
         let keyframe = round.keyframe();
         if keyframe {
             video.congestion.keyframe(now.into_std());
@@ -538,7 +526,7 @@ impl VideoSink {
     async fn adjust(&self, blocked: Duration, quality: u8, exempt: bool) {
         self.shared.worst_quality.fetch_min(u64::from(quality), Ordering::Relaxed);
         let mut video = self.shared.video.lock().await;
-        if video.congestion.coarse(quality) {
+        if quality < video.congestion.ceiling() {
             self.shared.coarsened.fetch_add(1, Ordering::Relaxed);
         }
         if exempt {
@@ -902,12 +890,14 @@ impl VideoSink {
 ///
 /// The congestion walk only runs when a round is taken, and a round is only taken
 /// when something changed — so a screen that stops right after the link coarsened
-/// it would keep that picture for good. Once the stream has been idle
-/// [`SETTLE_IDLE`] and the client's lag has cleared, this puts the encoder at the
-/// dial and marks the unchanged mirror dirty; the engine, woken the way a returning
-/// round wakes it, encodes it as one inter frame, which sharpens every block and
-/// costs no keyframe. The walk keeps its place: [`VideoSink::frame`] returns the
-/// stream to it for the rounds after that one, and the one frame is no verdict.
+/// it would keep that picture for good. Once the walk says the settle is owed
+/// ([`QualityWalk::settle_at`], [`screen_vp9::walk::SETTLE_IDLE`] after the round
+/// that left the picture coarse) and the client's lag has cleared, this marks the
+/// unchanged mirror dirty, to be encoded whole at the dial; the engine, woken the
+/// way a returning round wakes it, encodes it as one inter frame, which sharpens
+/// every block and costs no keyframe. The walk keeps its place and so does the
+/// encoder's dial: the frame is `screen-vp9`'s, which leaves the stream where the
+/// link had it for the rounds after that one, and the one frame is no verdict.
 ///
 /// It waits for [`LAG_CLEAR`] and not merely for the lag to stop counting as
 /// behind: settling while the link is still behind would only be walked back down
@@ -916,27 +906,19 @@ impl VideoSink {
 async fn settle_stream(engine: &'static str, shared: &Shared) {
     let now = tokio::time::Instant::now();
     let mut video = shared.video.lock().await;
-    let Some(coarse_at) = video.coarse_at else {
+    let Some(owed_at) = video.congestion.settle_at() else {
         return;
     };
     if video.stream.round_out()
         || video.stream.dirty()
-        || now.saturating_duration_since(coarse_at) < SETTLE_IDLE
+        || now.into_std() < owed_at
         || (video.congestion.lag_aware() && shared.feedback.lag(now) > LAG_CLEAR)
     {
         return;
     }
     let dial = video.congestion.ceiling();
-    // The encoder first and the walk only after it: on failure nothing is recorded,
-    // the settle stays owed, and the next tick tries again. The picture on screen is
-    // still a good one, only a coarser one.
-    if let Err(e) = video.stream.set_quality(dial) {
-        warn!("{engine}: could not take the video quality back to {dial}: {e:#}");
-        return;
-    }
     video.congestion.settle(now.into_std());
-    video.stream.refresh();
-    video.coarse_at = None;
+    video.stream.settle(dial);
     let walk = video.congestion.quality();
     drop(video);
     debug!("{engine}: the desktop went quiet below the dial; settling it at {dial} (motion stays at {walk})");
@@ -1014,8 +996,9 @@ async fn order_loop(
             // The settle was judged owed before the round was encoded, by the worst
             // it could leave. What it did leave is known now: a round at the dial
             // over the last coarse blocks owes none.
-            if !video.congestion.coarse(round.left()) {
-                video.coarse_at = None;
+            let left = round.left();
+            if left >= video.congestion.ceiling() {
+                video.congestion.sent(left, Instant::now());
             }
             video.stream.put_back(round);
             video.stream.dirty()
@@ -1881,11 +1864,11 @@ mod tests {
         tokio::time::timeout(SETTLE_IDLE * 4, sink.round_returned())
             .await
             .expect("a quiet stream below the dial was never settled");
-        assert_eq!(sink.shared.video.lock().await.stream.quality(), 60, "the dial was not taken back");
         sink.frame().await.unwrap();
         sink.flush().await;
         let units = drain_units(&mut frame_rx, 1).await;
         assert!(!units[0].keyframe, "a settle is an inter frame, not a keyframe");
+        assert_eq!(sink.shared.video.lock().await.stream.quality(), 20, "the settle moved the dial the link had walked");
 
         // Settled at the dial, so there is nothing more to come back for.
         tokio::time::sleep(SETTLE_IDLE * 4).await;
@@ -1994,7 +1977,8 @@ mod tests {
         tokio::time::timeout(SETTLE_IDLE * 4, sink.round_returned())
             .await
             .expect("the settle never came once the lag cleared");
-        assert_eq!(sink.shared.video.lock().await.stream.quality(), 60);
+        assert!(sink.due_at().await.is_some(), "the settle marked nothing to encode");
+        assert_eq!(sink.shared.video.lock().await.stream.quality(), 20, "the settle moved the dial the link had walked");
     }
 
     /// What the engines park on. `None` has to mean "nothing is owed", or a still
