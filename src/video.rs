@@ -423,7 +423,7 @@ mod tests {
 
                 // The conversion on its own, over the same pixels: it is inside the
                 // encode timing above, and this is what says how much of it it was.
-                let mut picture = screen_vp9::Picture::new(mirror.coded().0, mirror.coded().1, chroma.into()).expect("a picture");
+                let mut picture = screen_vp9::Picture::new(mirror.coded().0, mirror.coded().1, chroma.into(), threads()).expect("a picture");
                 let crop = mirror.picture().to_vec();
                 let started = std::time::Instant::now();
                 for _ in 0..FRAMES {

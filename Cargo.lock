@@ -2291,7 +2291,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.378"
+version = "0.0.379"
 dependencies = [
  "aes",
  "anyhow",
@@ -2634,8 +2634,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screen-vp9"
-version = "0.0.12"
-source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.12#13001f893f15e53a7a638af4516c2472f983d308"
+version = "0.0.13"
+source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.13#8acd93a6f2ed7e8574404054e2b78c6366f168ef"
 dependencies = [
  "libvpx-prebuilt-sys",
  "log",

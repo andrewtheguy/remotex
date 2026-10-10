@@ -1429,12 +1429,13 @@ whole picture.
 The walk only runs when a round is taken, and a round is only taken when something
 changed, so a desktop that stops moving right after the link coarsened it would keep
 that picture until something changed again. The order task's settle tick is what
-comes back for it. Once the stream has been idle `SETTLE_IDLE` since a round that
-left any of the picture below the dial — one encoded below it, or one at the dial
-over part of a picture coarsened before it — and on a `render_adaptive` target the
-lag has cleared, it puts the encoder at the dial and marks the unchanged mirror
-dirty, the whole of it. The engine
-encodes that as one inter frame. libvpx codes the residual of unchanged blocks at
+comes back for it. Once the stream has been idle screen-vp9's `SETTLE_IDLE` since a
+round that left any of the picture below the dial — one encoded below it, or one at
+the dial over part of a picture coarsened before it, which the walk is told and
+keeps — and on a `render_adaptive` target the lag has cleared, it marks the
+unchanged mirror dirty, the whole of it, to be encoded at the dial. The engine
+encodes that as one inter frame, and the encoder's dial is left where the link had
+it: the frame is screen-vp9's, the one wlshare's own stream is settled with. libvpx codes the residual of unchanged blocks at
 the finer quantizer, so the frame sharpens the whole desktop without a keyframe; the
 vp9 test `a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe` guards
 that. The walk keeps its place through it: the round after the settle's goes back

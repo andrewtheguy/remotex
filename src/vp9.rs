@@ -157,12 +157,39 @@ impl Stream {
         let changed: Option<Vec<screen_vp9::Rect>> = changed.map(|rects| rects.iter().map(|rect| coded_rect(mirror, *rect)).collect());
         let mut data = Vec::new();
         let keyframe = self.stream.encode_rgb(mirror.picture(), changed.as_deref(), self.keyframe_owed, &mut data).context("encoding a VP9 frame")?;
+        Ok(self.unit(keyframe, data))
+    }
+
+    /// Settle `mirror` at `quality`: encode it whole and at that quality, as one
+    /// inter frame unless a keyframe is owed, and leave the dial where it was.
+    ///
+    /// What a desktop that went quiet while the link had it coarse is sent once
+    /// ([`crate::encode`]): every block sharpened, and the rounds after it at what
+    /// the link bears again. `None` and the mirror's padding are as
+    /// [`Self::encode`] has them. An encoder that would not move its dial back is an
+    /// error: it stays at the [`Self::quality`] it reports.
+    pub fn settle(&mut self, mirror: &Mirror, quality: u8) -> anyhow::Result<Option<AccessUnit>> {
+        anyhow::ensure!(
+            mirror.coded() == self.coded,
+            "a {}x{} vp9 stream was handed a {}x{} mirror",
+            self.coded.0,
+            self.coded.1,
+            mirror.coded().0,
+            mirror.coded().1
+        );
+        let mut data = Vec::new();
+        let keyframe = self.stream.settle_rgb(mirror.picture(), quality, self.keyframe_owed, &mut data).context("settling a VP9 stream")?;
+        Ok(self.unit(keyframe, data))
+    }
+
+    /// The access unit an encode produced, if it produced one.
+    fn unit(&mut self, keyframe: Option<bool>, data: Vec<u8>) -> Option<AccessUnit> {
         // Cleared only when something came out: a frame that produced no bitstream still
         // owes its keyframe, and the caller's dirty flag is what brings it back.
-        Ok(keyframe.map(|keyframe| {
+        keyframe.map(|keyframe| {
             self.keyframe_owed = false;
             AccessUnit { data, keyframe }
-        }))
+        })
     }
 }
 
