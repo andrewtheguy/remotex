@@ -131,12 +131,11 @@ impl Stream {
 
     /// Encode `mirror` as it stands.
     ///
-    /// `changed` is where the mirror differs from the one the last access unit carried,
-    /// or `None` for one that may differ anywhere, which is also how a picture that has
-    /// not changed is sharpened: only the rows those rectangles span are converted and
-    /// only the blocks they touch encoded, the rest of the frame being the picture the
-    /// client holds, at the quality it holds it. A keyframe and a stream's first frame
-    /// are the whole mirror whatever `changed` says.
+    /// `changed` is where the mirror differs from the one read for the last access
+    /// unit, or `None` for one that may differ anywhere: only those rectangles are
+    /// converted and only the blocks they touch encoded, the rest of the frame being
+    /// the picture the client holds, at the quality it holds it. A keyframe and a
+    /// stream's first frame are the whole mirror whatever `changed` says.
     ///
     /// `None` means the encoder produced no bitstream. The caller must then leave its dirty flag
     /// set, so those pixels ride on the next frame — which is what keeps a frame that produced
@@ -146,17 +145,9 @@ impl Stream {
     ///
     /// The mirror must have been padded ([`Mirror::pad_edges`]), which is the caller's job.
     pub fn encode(&mut self, mirror: &Mirror, changed: Option<&[Rect]>) -> anyhow::Result<Option<AccessUnit>> {
-        anyhow::ensure!(
-            mirror.coded() == self.coded,
-            "a {}x{} vp9 stream was handed a {}x{} mirror",
-            self.coded.0,
-            self.coded.1,
-            mirror.coded().0,
-            mirror.coded().1
-        );
-        let changed: Option<Vec<screen_vp9::Rect>> = changed.map(|rects| rects.iter().map(|rect| coded_rect(mirror, *rect)).collect());
+        self.read(mirror, changed.filter(|_| !self.keyframe_owed))?;
         let mut data = Vec::new();
-        let keyframe = self.stream.encode_rgb(mirror.picture(), changed.as_deref(), self.keyframe_owed, &mut data).context("encoding a VP9 frame")?;
+        let keyframe = self.stream.encode(self.keyframe_owed, &mut data).context("encoding a VP9 frame")?;
         Ok(self.unit(keyframe, data))
     }
 
@@ -169,6 +160,14 @@ impl Stream {
     /// [`Self::encode`] has them. An encoder that would not move its dial back is an
     /// error: it stays at the [`Self::quality`] it reports.
     pub fn settle(&mut self, mirror: &Mirror, quality: u8) -> anyhow::Result<Option<AccessUnit>> {
+        self.read(mirror, None)?;
+        let mut data = Vec::new();
+        let keyframe = self.stream.settle(quality, self.keyframe_owed, &mut data).context("settling a VP9 stream")?;
+        Ok(self.unit(keyframe, data))
+    }
+
+    /// Read `mirror` into the stream where it `changed`, or whole.
+    fn read(&mut self, mirror: &Mirror, changed: Option<&[Rect]>) -> anyhow::Result<()> {
         anyhow::ensure!(
             mirror.coded() == self.coded,
             "a {}x{} vp9 stream was handed a {}x{} mirror",
@@ -177,9 +176,8 @@ impl Stream {
             mirror.coded().0,
             mirror.coded().1
         );
-        let mut data = Vec::new();
-        let keyframe = self.stream.settle_rgb(mirror.picture(), quality, self.keyframe_owed, &mut data).context("settling a VP9 stream")?;
-        Ok(self.unit(keyframe, data))
+        let changed: Option<Vec<screen_vp9::Rect>> = changed.map(|rects| rects.iter().map(|rect| coded_rect(mirror, *rect)).collect());
+        self.stream.read_rgb(mirror.picture(), changed.as_deref()).context("reading the mirror for a VP9 frame")
     }
 
     /// The access unit an encode produced, if it produced one.
