@@ -1252,12 +1252,11 @@ mod tests {
             .unwrap();
     }
 
-    /// The opening byte of a profile 0 VP9 frame — the 4:2:0 these sinks' plan asks
-    /// wlshare for: `frame_marker` 2, profile 0, not a repeat, then `frame_type`.
-    /// What `pass` reads; the rest is the remote's.
+    /// The opening byte of a profile 1 VP9 frame — the 4:4:4 every stream is:
+    /// `frame_marker` 2, profile 1, not a repeat, then `frame_type`. What `pass`
+    /// reads; the rest is the remote's.
     fn passed_frame(keyframe: bool, len: usize) -> Vec<u8> {
         let mut frame = vec![0u8; len];
-        // Profile 1, which is 4:4:4.
         frame[0] = if keyframe { 0xa0 } else { 0xa4 };
         frame
     }
