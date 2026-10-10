@@ -15,6 +15,7 @@ import {
   type VideoDecoderLike,
   type VideoDecoderLikeInit,
 } from "./softwareDecoder.ts";
+import type { PageDecoding } from "./softwareSupport.ts";
 import { createDesktopVideo, createVideoStream } from "./videoDecoder.ts";
 
 /** A frame the fake decoder emitted, so a test can see it was handed over and closed. */
@@ -244,7 +245,7 @@ test("a new picture size replaces the decoder", async () => {
   assert.equal(tagOf(await resized), 0xb2);
 });
 
-test("a stream is decoded by the page where the gateway says so, by the module that decodes it", async () => {
+test("a stream is decoded by the page where the session or the browser says so, by the module that decodes it", async () => {
   // The decode workers made, by name: a software decoder starts its module's.
   const workers: string[] = [];
   const globals = globalThis as unknown as { Worker: unknown };
@@ -263,26 +264,48 @@ test("a stream is decoded by the page where the gateway says so, by the module t
   const HEVC = "hev1.4.10.L150.BE.8";
   const BOTH = { hevc: true, vp9: true };
   try {
-    // The format, what the page runs, then the worker started, or "browser" for
-    // its own decoder, or null for a stream said and not decoded.
+    // The format, how the page decodes, then the worker started, or "browser"
+    // for its own decoder, or null for a stream said and not decoded.
     const cases: [
       { decode: string; software?: boolean },
-      { hevc: boolean; vp9: boolean },
+      PageDecoding,
       string | null,
     ][] = [
-      [{ decode: VP9_444, software: true }, BOTH, "vp9-decoder"],
-      [{ decode: HEVC, software: true }, BOTH, "hevc-decoder"],
-      // Not said: the browser's own, whatever the page could run.
-      [{ decode: VP9_444, software: false }, BOTH, "browser"],
-      [{ decode: VP9_444 }, BOTH, "browser"],
-      [{ decode: HEVC, software: false }, BOTH, "browser"],
-      // Said of a stream the page cannot run the decoder of: no other stands in.
-      [{ decode: VP9_444, software: true }, { hevc: true, vp9: false }, null],
-      [{ decode: HEVC, software: true }, { hevc: false, vp9: true }, null],
+      // The VP9 is the page's where the browser's own decoder does not take it.
+      [{ decode: VP9_444 }, { runs: BOTH, nativeVp9: true }, "browser"],
+      [{ decode: VP9_444 }, { runs: BOTH, nativeVp9: false }, "vp9-decoder"],
+      // A profile its module does not decode stays the browser's.
+      [{ decode: VP9_420 }, { runs: BOTH, nativeVp9: false }, "browser"],
+      // A Mac's HEVC is the page's where the session says so.
+      [
+        { decode: HEVC, software: true },
+        { runs: BOTH, nativeVp9: true },
+        "hevc-decoder",
+      ],
+      [
+        { decode: HEVC, software: false },
+        { runs: BOTH, nativeVp9: false },
+        "browser",
+      ],
+      // The page's to decode with a module it cannot run: no other stands in.
+      [
+        { decode: VP9_444 },
+        { runs: { hevc: true, vp9: false }, nativeVp9: false },
+        null,
+      ],
+      [
+        { decode: HEVC, software: true },
+        { runs: { hevc: false, vp9: true }, nativeVp9: true },
+        null,
+      ],
       // Said of a stream no module decodes.
-      [{ decode: VP9_420, software: true }, BOTH, null],
+      [
+        { decode: VP9_420, software: true },
+        { runs: BOTH, nativeVp9: true },
+        null,
+      ],
     ];
-    for (const [format, runs, expected] of cases) {
+    for (const [format, decoding, expected] of cases) {
       resetSoftwareDecodersForTests();
       const browsers = built.length;
       workers.length = 0;
@@ -293,12 +316,12 @@ test("a stream is decoded by the page where the gateway says so, by the module t
           onNeedsKeyframe: () => {},
         },
         STALL_MS,
-        runs,
+        decoding,
       );
       table.setFormat(format);
       void table.decode(size, unit(1), true);
       void table.decode(size, unit(2), false);
-      const which = JSON.stringify([format, runs]);
+      const which = JSON.stringify([format, decoding]);
       const software = expected !== null && expected !== "browser";
       assert.deepEqual(workers, software ? [expected] : [], which);
       assert.equal(
@@ -314,7 +337,7 @@ test("a stream is decoded by the page where the gateway says so, by the module t
       }
       if (expected === null) {
         assert.equal(errors[0][1], false, which);
-        assert.match(errors[0][0], /decoded by this page/, which);
+        assert.match(errors[0][0], /this page/, which);
       }
       table.close();
       resetSoftwareDecodersForTests();
@@ -329,7 +352,7 @@ test("a format that says otherwise of the same stream replaces the decoder", asy
     { onError: () => {}, onNeedsKeyframe: () => {} },
     STALL_MS,
   );
-  const decode = "vp09.01.40.08.03.06.06.06.00";
+  const decode = "hev1.4.10.L150.BE.8";
   table.setFormat({ decode, software: false });
   void table.decode(size, unit(1), true);
   const first = built[built.length - 1];

@@ -3,8 +3,9 @@
 // This decodes the whole desktop as one inter-frame stream: normally VP9, or the
 // HEVC a High Performance Mac made when that stream is passed through (see
 // `VideoUnit` in src/protocol.rs). The decoder is the browser's `VideoDecoder`,
-// or for a stream the page was told to decode in software, a decoder of the same
-// shape over a WebAssembly module (softwareDecoder.ts). The units arrive as VIDEO records in the batches
+// or for a stream the page decodes itself, a decoder of the same shape over a
+// WebAssembly module (softwareDecoder.ts): the gateway's VP9 where the browser's
+// own decoder does not take it, and a Mac's HEVC where the session says so. The units arrive as VIDEO records in the batches
 // and are painted onto the canvas. What is not ordinary is that the stream is a
 // *chain* — every frame means "what changed since the one before it" — so none of
 // them may be dropped, reordered, or decoded twice.
@@ -38,10 +39,11 @@ import {
   type DecodedPicture,
   MODULE_CODEC,
   type PictureStrip,
-  softwareModuleFor,
+  pageModuleFor,
   type VideoDecoderLike,
   type VideoDecoderLikeInit,
 } from "./softwareDecoder.ts";
+import type { PageDecoding } from "./softwareSupport.ts";
 
 /**
  * How to decode the stream, from the gateway's `videoFormat` message.
@@ -52,7 +54,7 @@ import {
 export interface VideoFormat {
   decode: string;
   /**
-   * BETA: the stream is decoded in the page's software decoder for it
+   * BETA: a Mac's HEVC is decoded in the page's software decoder for it
    * (softwareDecoder.ts) and not in the browser's `VideoDecoder`: the session was
    * started so, and the gateway says it to every page attached.
    */
@@ -106,12 +108,15 @@ export function createDesktopVideo(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
   /**
-   * BETA: which of the page's software decoders this page can run
-   * (softwareSupport.ts). A stream the gateway says is decoded in one this page
-   * cannot run is not decoded: the session chose that decoder, and the browser's
-   * own does not stand in for it.
+   * How this page decodes (softwareSupport.ts, nativeVp9.ts). A stream the page
+   * decodes itself in a module it cannot run is not decoded: the browser's own
+   * decoder does not stand in for a module the session chose, and refuses by
+   * name the VP9 the module was to decode.
    */
-  runs: Readonly<Record<"hevc" | "vp9", boolean>> = { hevc: false, vp9: false },
+  decoding: PageDecoding = {
+    runs: { hevc: false, vp9: false },
+    nativeVp9: true,
+  },
 ): DesktopVideo {
   interface Live {
     stream: VideoStream;
@@ -143,15 +148,15 @@ export function createDesktopVideo(
   // as told, so that is one sentence and not one a unit.
   let said = false;
 
-  // What builds the decoder of a stream the gateway says is the page's own to
-  // decode, or undefined for the browser's own. Null for a stream this page was
-  // told to decode and cannot, which is said and not decoded.
+  // What builds the decoder of a stream this page decodes itself, or undefined
+  // for the browser's own. Null for one it would decode and cannot, which is said
+  // and not decoded.
   const softwareDecoderFor = (format: VideoFormat) => {
-    if (!format.software) {
+    const module = pageModuleFor(format, decoding.nativeVp9);
+    if (module === undefined) {
       return undefined;
     }
-    const module = softwareModuleFor(format.decode);
-    if (module !== null && runs[module]) {
+    if (module !== null && decoding.runs[module]) {
       return (init: VideoDecoderLikeInit) =>
         createSoftwareDecoder(module, init);
     }
@@ -160,7 +165,9 @@ export function createDesktopVideo(
       handlers.onError(
         module === null
           ? `This session's picture is decoded by this page, which has no decoder for ${format.decode}.`
-          : `This session's picture is decoded by this page's ${MODULE_CODEC[module]} decoder, which this browser cannot run: it needs WebGL 2 and a cross-origin isolated page. End the session and start it without "Decode ${MODULE_CODEC[module]} in this page".`,
+          : module === "vp9"
+            ? "This browser's own decoder does not take the gateway's 4:4:4 VP9, and this page cannot run its own: that needs WebGL 2 and a cross-origin isolated page."
+            : `This session's picture is decoded by this page's ${MODULE_CODEC[module]} decoder, which this browser cannot run: it needs WebGL 2 and a cross-origin isolated page. End the session and start it without "Decode ${MODULE_CODEC[module]} in this page".`,
         false,
         format.decode,
       );
@@ -499,9 +506,9 @@ export function createVideoStream(
     codec: format.decode,
     optimizeForLatency: true,
     // `hardwareAcceleration` is deliberately left out, so a browser decodes this
-    // however it decodes VP9. (The one thing this page does state about its decoder
-    // is which chroma it takes, asked once at load and answered to the gateway
-    // rather than to a decoder — see videoChroma.ts.) Asking for software here is a
+    // however it decodes VP9. (The one thing this page asks of its decoder is
+    // whether it takes the 4:4:4 stream at all, once at load, which decides
+    // whether this decoder is built for it — see nativeVp9.ts.) Asking for software here is a
     // hint by specification — WebKit
     // falls back past it, Firefox disregards it — and on iOS and iPadOS it is a hint
     // with nothing behind it at all: WebKit maps `prefer-software` to

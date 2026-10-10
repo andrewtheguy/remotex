@@ -20,6 +20,7 @@
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
+import { nativeVp9 } from "./nativeVp9.ts";
 import { batchFrameSequence } from "./protocol.ts";
 import { runnableDecoders } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
@@ -162,7 +163,7 @@ export function desktopPainterFor(
       type: "init",
       canvas: offscreen,
       graphics: offscreenGraphics,
-      runs: runnableDecoders(),
+      decoding: { runs: runnableDecoders(), nativeVp9: nativeVp9() },
     },
     [offscreen, offscreenGraphics],
   );

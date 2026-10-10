@@ -329,9 +329,8 @@ async def main() -> int:
     parser.add_argument(
         "--software",
         action="store_true",
-        help="start the session decoded in the page's own software decoder; the "
-        "gateway must have the decoder for the session's picture ([vp9_wasm], or "
-        "[hevc_wasm] for a High Performance Mac's passed with --passthrough)",
+        help="start a High Performance Mac passed with --passthrough decoded in the "
+        "page's own HEVC decoder; the gateway must have that decoder ([hevc_wasm])",
     )
     parser.add_argument(
         "--whole",
@@ -381,7 +380,7 @@ async def main() -> int:
     apple_media = "true" if args.apple_media else "false"
     rdp_graphics = "true" if args.rdp_graphics else "false"
     url = (
-        f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444"
+        f"ws://127.0.0.1:{args.port}/ws?session={token}"
         f"&apple_media={apple_media}&rdp_graphics={rdp_graphics}&rdp_h264=false"
     )
     choices = {

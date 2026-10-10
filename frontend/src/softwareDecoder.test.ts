@@ -1,4 +1,4 @@
-// BETA: a software decoder's `VideoDecoder` shape, as far as it goes without
+// A software decoder's `VideoDecoder` shape, as far as it goes without
 // its worker.
 import assert from "node:assert/strict";
 import { test } from "node:test";

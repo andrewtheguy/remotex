@@ -1,4 +1,4 @@
-// BETA: the software decoders' modules (softwareDecoder.ts), as a decode worker
+// The software decoders' modules (softwareDecoder.ts), as a decode worker
 // and each thread of its pool load one. Both are wasm-bindgen's, with one
 // interface: hevc-wasm's, which vp9-wasm's was written to.
 //

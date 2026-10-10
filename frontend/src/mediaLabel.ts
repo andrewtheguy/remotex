@@ -105,8 +105,9 @@ export interface VideoStreamInfo {
   // Not a stream at all: an RDP host's graphics pipeline, composed here
   // (`graphicsStart`). No decoder is configured and `decode` names nothing.
   composed?: boolean;
-  // BETA: decoded by one of the page's WebAssembly decoders (softwareDecoder.ts)
-  // and not by the browser's own, as the gateway said with the format.
+  // Decoded by one of the page's WebAssembly decoders (softwareDecoder.ts) and
+  // not by the browser's own: the VP9 where the browser's own does not take it,
+  // and a Mac's HEVC where the gateway said so with the format.
   software?: boolean;
   // How many strips each picture of the stream comes in, where more than one.
   strips?: number;

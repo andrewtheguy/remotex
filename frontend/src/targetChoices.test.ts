@@ -16,16 +16,14 @@ import {
 // A desktop browser, whose window a desktop can follow.
 const ABLE: Abilities = {
   appleMedia: true,
-  profile1: true,
   rdpGraphics: true,
-  runs: { vp9: true, hevc: true },
+  runsHevc: true,
   follows: "window",
 };
 const UNABLE: Abilities = {
   appleMedia: false,
-  profile1: false,
   rdpGraphics: false,
-  runs: { vp9: false, hevc: false },
+  runsHevc: false,
   follows: "window",
 };
 const TABLET: Abilities = { ...ABLE, follows: "screen" };
@@ -43,7 +41,7 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     size: null,
     defaultSize: DEFAULT_SIZE,
     audio: false,
-    software: { vp9: false, hevc: false },
+    software: false,
     passthrough: null,
     passthroughOnly: false,
     placement: false,
@@ -342,15 +340,10 @@ test("the second display's place is a choice where the target offers it", () => 
   assert.equal(stale.choices.placement, "right");
 });
 
-// BETA: decoding in this page.
-const VP9_PAGE = { software: { vp9: true, hevc: false } };
-const MAC_PAGE = { ...HIGH_PERFORMANCE, software: { vp9: true, hevc: true } };
-const MAC_HEVC_PAGE = {
-  ...HIGH_PERFORMANCE,
-  software: { vp9: false, hevc: true },
-};
-/** A browser whose own decoder takes neither stream, and whose page runs both. */
-const NEEDS_PAGE: Abilities = { ...ABLE, appleMedia: false, profile1: false };
+// BETA: decoding a Mac's passed HEVC in this page.
+const MAC_PAGE = { ...HIGH_PERFORMANCE, software: true };
+/** A browser whose own decoder does not take the Mac's HEVC, and whose page does. */
+const NEEDS_PAGE: Abilities = { ...ABLE, appleMedia: false };
 
 function softwareRow(options: {
   rows: {
@@ -364,95 +357,51 @@ function softwareRow(options: {
   return options.rows.find((row) => row.key === "software") ?? null;
 }
 
-test("decoding in this page has no row where the gateway has no decoder for the session", () => {
-  assert.equal(softwareRow(targetOptions(RDP, undefined, ABLE)), null);
+test("decoding in this page has a row only while a Mac's picture the gateway decodes for it is passed", () => {
+  // No target but a Mac has HEVC to pass, and the VP9 is no choice.
+  assert.equal(softwareRow(targetOptions(RDP, undefined, NEEDS_PAGE)), null);
   assert.equal(
     targetOptions(RDP, { software: true }, NEEDS_PAGE).choices.software,
     false,
-    "remembered from a gateway that had one: not sent to one that has none",
+    "remembered from a Mac: not sent for another target",
   );
-  // The Mac's HEVC decoder alone decodes nothing of a session encoded here.
-  const encoded = targetOptions(MAC_HEVC_PAGE, { passthrough: false }, ABLE);
+  // A Mac's picture encoded here is VP9, which the page decodes however it can.
+  const encoded = targetOptions(MAC_PAGE, { passthrough: false }, NEEDS_PAGE);
   assert.equal(softwareRow(encoded), null);
   assert.equal(encoded.choices.software, false);
-  const passed = targetOptions(MAC_HEVC_PAGE, { passthrough: true }, ABLE);
+  // A gateway without the page's decoder offers none.
+  const without = targetOptions(HIGH_PERFORMANCE, { passthrough: true }, ABLE);
+  assert.equal(softwareRow(without), null);
+  const passed = targetOptions(MAC_PAGE, { passthrough: true }, ABLE);
   assert.match(softwareRow(passed)?.label ?? "", /^Decode HEVC in this page/);
 });
 
-test("decoding in this page names the one decoder the session would use, and is not had with another passthrough", () => {
-  // A Mac: VP9 encoded here, or its HEVC passed, never both.
-  const encoded = softwareRow(
-    targetOptions(MAC_PAGE, { passthrough: false, software: true }, ABLE),
-  );
-  assert.match(encoded?.label ?? "", /^Decode VP9 in this page/);
-  const passed = softwareRow(
-    targetOptions(MAC_PAGE, { passthrough: true, software: true }, ABLE),
-  );
-  assert.match(passed?.label ?? "", /^Decode HEVC in this page/);
-  assert.doesNotMatch(passed?.note ?? "", /VP9/);
-
-  // A passed stream the page has no decoder for: the row is held unticked.
-  for (const offered of [
-    { ...RDP, passthrough: "rdp-graphics" as const, ...VP9_PAGE },
-    { ...MAC_PAGE, software: { vp9: true, hevc: false } },
-  ]) {
-    const both = targetOptions(
-      offered,
-      { passthrough: true, software: true },
-      ABLE,
-    );
-    const row = softwareRow(both);
-    assert.match(row?.label ?? "", /^Decode VP9 in this page/);
-    assert.deepEqual([row?.checked, row?.disabled], [false, true]);
-    assert.match(row?.note ?? "", /Not with the passthrough/);
-    assert.deepEqual(
-      [both.choices.passthrough, both.choices.software],
-      [true, false],
-    );
-    // Without the passthrough it is the choice it was.
-    const alone = targetOptions(
-      offered,
-      { passthrough: false, software: true },
-      ABLE,
-    );
-    assert.deepEqual(
-      [softwareRow(alone)?.disabled, alone.choices.software],
-      [false, true],
-    );
-  }
-});
-
-test("decoding in this page is ticked for a browser whose own decoder refuses the stream, until somebody chooses", () => {
-  const offered = target(VP9_PAGE);
-  for (const [abilities, remembered, checked] of [
-    [ABLE, undefined, false],
-    [NEEDS_PAGE, undefined, true],
-    [ABLE, true, true],
-    [NEEDS_PAGE, false, false],
+test("decoding in this page is a choice where the browser's own decoder takes the Mac's HEVC", () => {
+  for (const [remembered, checked] of [
+    [undefined, false],
+    [true, true],
+    [false, false],
   ] as const) {
     const options = targetOptions(
-      offered,
-      remembered === undefined ? undefined : { software: remembered },
-      abilities,
+      MAC_PAGE,
+      { passthrough: true, software: remembered },
+      ABLE,
     );
     const row = softwareRow(options);
     assert.ok(row);
     assert.equal(row.disabled, false);
     assert.equal(row.checked, checked);
     assert.equal(options.choices.software, checked);
-    assert.match(row.note, /4:4:4/);
   }
-  // On a Mac whose picture is passed, the stream in question is its HEVC.
-  const hevcOnly = { ...ABLE, profile1: false };
-  const passed = targetOptions(MAC_PAGE, { passthrough: true }, hevcOnly);
-  assert.equal(softwareRow(passed)?.checked, false);
-  const encoded = targetOptions(MAC_PAGE, { passthrough: false }, hevcOnly);
-  assert.equal(softwareRow(encoded)?.checked, true);
 });
 
 test("decoding in this page is greyed where this page cannot run the decoder", () => {
-  const cannot = { ...NEEDS_PAGE, runs: { vp9: false, hevc: false } };
-  const options = targetOptions(target(VP9_PAGE), { software: true }, cannot);
+  const cannot = { ...ABLE, runsHevc: false };
+  const options = targetOptions(
+    MAC_PAGE,
+    { passthrough: true, software: true },
+    cannot,
+  );
   const row = softwareRow(options);
   assert.ok(row);
   assert.equal(row.disabled, true);
@@ -483,22 +432,14 @@ test("a Mac's picture only this page decodes can be passed, and is then decoded 
   // Without the page's HEVC decoder, served or runnable, the passthrough is
   // greyed as for any browser that cannot take it.
   for (const [offered, abilities] of [
-    [{ ...MAC_PAGE, software: { vp9: true, hevc: false } }, NEEDS_PAGE],
-    [MAC_PAGE, { ...NEEDS_PAGE, runs: { vp9: true, hevc: false } }],
+    [HIGH_PERFORMANCE, NEEDS_PAGE],
+    [MAC_PAGE, { ...NEEDS_PAGE, runsHevc: false }],
   ] as const) {
     const greyed = targetOptions(offered, { passthrough: true }, abilities);
     const passthrough = greyed.rows.find((r) => r.key === "passthrough");
     assert.equal(passthrough?.disabled, true);
     assert.equal(greyed.choices.passthrough, false);
   }
-
-  // The page's VP9 decoder is no part of such a session.
-  const hevcAlone = { ...NEEDS_PAGE, runs: { vp9: false, hevc: true } };
-  const taken = targetOptions(MAC_PAGE, { passthrough: true }, hevcAlone);
-  assert.deepEqual(
-    [taken.choices.passthrough, taken.choices.software],
-    [true, true],
-  );
 
   // A gateway that can only pass the picture starts for such a browser too.
   const only = { ...MAC_PAGE, passthroughOnly: true };

@@ -1,5 +1,3 @@
-import type { VideoChroma } from "./videoChroma.ts";
-
 /// Where this client's gateway is, and how to call it.
 ///
 /// The page is served by its gateway, so every request is same-origin. Keeping URL
@@ -39,8 +37,7 @@ export function gatewayFetch(
 /// `wss:` whether or not the page itself was loaded over TLS.
 ///
 /// The session socket also names what only this window knows about itself: its
-/// `screen` (the same numbers `connect` carries), the chroma its video decoder
-/// takes, whether it decodes a High Performance Mac's picture, whether it composes
+/// `screen` (the same numbers `connect` carries), whether it decodes a High Performance Mac's picture, whether it composes
 /// an RDP host's graphics pipeline, and whether it decodes the H.264 such a
 /// pipeline may carry. All are here for one reason — a
 /// gateway holding a target whose engine a claim change ended reconnects it at
@@ -53,7 +50,6 @@ export function gatewaySocketUrl(
   session: string,
   client?: {
     screen: { w: number; h: number; scale: number; fit: boolean };
-    chroma: VideoChroma;
     appleMedia: boolean;
     rdpGraphics: boolean;
     rdpH264: boolean;
@@ -67,7 +63,6 @@ export function gatewaySocketUrl(
     url.searchParams.set("h", String(client.screen.h));
     url.searchParams.set("scale", String(client.screen.scale));
     url.searchParams.set("fit", String(client.screen.fit));
-    url.searchParams.set("chroma", client.chroma);
     url.searchParams.set("apple_media", String(client.appleMedia));
     url.searchParams.set("rdp_graphics", String(client.rdpGraphics));
     url.searchParams.set("rdp_h264", String(client.rdpH264));

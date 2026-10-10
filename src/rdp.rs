@@ -2818,7 +2818,6 @@ mod tests {
         let plan = crate::config::RenderPlan {
             quality: 60,
             adaptive: false,
-            chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
             rdp_graphics: false,
             rdp_h264: false,

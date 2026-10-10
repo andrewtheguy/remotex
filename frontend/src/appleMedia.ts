@@ -1,15 +1,15 @@
-// What this browser decodes of a High Performance Mac's own media stream: the second
+// What this browser decodes of a High Performance Mac's own media stream: the first
 // question about its decoders the gateway is told, asked once, before the client
-// mounts, beside the chroma (videoChroma.ts).
+// mounts, beside the page's own question about VP9 (nativeVp9.ts).
 //
 // The two halves are separate questions with separate consequences:
 // - The picture. A session started with the Mac's picture passed sends its HEVC as
 //   it came, instead of VP9 encoded from decoded pictures. The picker offers that
 //   choice to a browser that says yes here, or whose page can decode the picture
 //   itself, and greys it for any other, which starts the target with VP9. The answer rides every
-//   session socket this page opens (`gateway.ts`), for the same reason the chroma
-//   does: a page that comes back to its session saying no is returned to the
-//   picker instead of being sent what it cannot decode.
+//   session socket this page opens (`gateway.ts`): a page that comes back to its
+//   session saying no is returned to the picker instead of being sent what it
+//   cannot decode.
 // - The sound. Every session on such a Mac is sent its AAC-ELD as it came: the
 //   gateway has no decoder for it. So this answer chooses nothing and is told to
 //   nobody. It is which form of the configuration the player uses
@@ -33,8 +33,8 @@
 // at the picker (targetChoices.ts): that is the session's choice, which the
 // gateway holds and tells every page of, and not this page's answer.
 //
-// The other way round from the chroma on a doubt. VP9 is what every browser here
-// decodes, so only a definite "yes" offers the Mac's picture, and anything that
+// The other way round from VP9's question on a doubt (nativeVp9.ts). VP9 is what
+// every page here decodes, so only a definite "yes" offers the Mac's picture, and anything that
 // throws reads as "no". The one target it can leave unstartable is a Mac on a gateway
 // whose host lacks the HEVC decoder's library, which has no other picture to send.
 

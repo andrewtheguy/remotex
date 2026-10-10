@@ -369,38 +369,24 @@ pub fn init_logging() {
 /// Open the session WebSocket with a claim token and the login cookie, and the
 /// first display's socket beside it.
 ///
-/// `chroma=444` is what a browser whose decoder takes VP9 profile 1 states, and
-/// `apple_media=false` one that takes no Mac's stream; the session socket requires
-/// every answer, and no target here passes a stream, so these tests give the
-/// ordinary desktop ones.
+/// `apple_media=false` is a browser that takes no Mac's stream; the session socket
+/// requires every answer, and no target here passes a stream, so these tests give
+/// the ordinary desktop ones.
 #[allow(dead_code)]
 pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
-    connect_ws_as(addr, token, cookie, "444").await
+    connect_ws_stating(addr, token, cookie, false).await
 }
 
-/// [`connect_ws`] as a browser whose decoder takes `chroma` — `444` or `420`, the
-/// two answers the socket takes.
-#[allow(dead_code)]
-pub async fn connect_ws_as(addr: SocketAddr, token: &str, cookie: &str, chroma: &str) -> Ws {
-    connect_ws_stating(addr, token, cookie, chroma, false).await
-}
-
-/// [`connect_ws_as`] stating too whether this browser decodes a High Performance
-/// Mac's stream, which a session started with it passed is served to no other. It
+/// [`connect_ws`] stating whether this browser decodes a High Performance Mac's
+/// stream, which a session started with it passed is served to no other. It
 /// composes an RDP host's graphics pipeline either way, and decodes no H.264 on
 /// one.
 #[allow(dead_code)]
-pub async fn connect_ws_stating(
-    addr: SocketAddr,
-    token: &str,
-    cookie: &str,
-    chroma: &str,
-    apple_media: bool,
-) -> Ws {
+pub async fn connect_ws_stating(addr: SocketAddr, token: &str, cookie: &str, apple_media: bool) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
     let mut request = format!(
-        "ws://{addr}/ws?session={token}&chroma={chroma}&apple_media={apple_media}&rdp_graphics=true&rdp_h264=false"
+        "ws://{addr}/ws?session={token}&apple_media={apple_media}&rdp_graphics=true&rdp_h264=false"
     )
         .into_client_request()
         .unwrap();

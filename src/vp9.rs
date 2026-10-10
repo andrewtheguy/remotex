@@ -13,7 +13,6 @@
 
 use anyhow::Context as _;
 
-use crate::config::Chroma;
 use crate::shadow::Rect;
 use crate::video::{AccessUnit, Mirror, check_picture};
 
@@ -28,13 +27,32 @@ pub use screen_vp9::{FrameHeader, frame_header};
 /// at its own rate ([`crate::stream::pass`]).
 pub const ENCODED_FPS: u64 = 30;
 
-/// The WebCodecs codec string for a `w`×`h` stream at `chroma` and `fps` — what
+/// The chroma sampling of every VP9 stream this gateway sends: 4:4:4, profile 1.
+///
+/// This is where the picture loss on a desktop stream actually is — not the
+/// quantizer. Measured 2026-09-01 on 1280×800 of rendered text, coloured on a dark
+/// terminal and black on white, encoded and decoded through libvpx: every 4:2:0
+/// quantizer from the dial's finest to mathematically lossless lands at the same
+/// 28.5 dB with a worst pixel 135 code values off, and so does the RGB→I420
+/// conversion with no codec behind it at all. A one-pixel coloured glyph stem
+/// shares its one colour sample with three background pixels and comes back at a
+/// quarter of its saturation. The same picture at 4:4:4 and the same quantizer
+/// measures 42.8 dB with a worst pixel 33 off.
+///
+/// No browser's hardware VP9 path takes profile 1, so the browser's own decoder
+/// takes it in software where it has one, and a page whose own decoder refuses
+/// it, as iOS and iPadOS do, decodes it in WebAssembly
+/// (`frontend/src/softwareDecoder.ts`). So there is no 4:2:0 stream to fall back
+/// on, and no browser is asked which it takes.
+pub const CHROMA: screen_vp9::Chroma = screen_vp9::Chroma::Full;
+
+/// The WebCodecs codec string for a `w`×`h` stream at `fps` — what
 /// `ServerMsg::VideoFormat` carries, derived here rather than in the client because VP9
 /// has no in-band parameter sets for a client to read one out of. `None` for a picture no
 /// VP9 level covers, which [`check_picture`] has already refused long before this is
 /// reached.
-pub fn codec_string(w: u16, h: u16, chroma: Chroma, fps: u64) -> Option<String> {
-    screen_vp9::codec_string(w, h, chroma.into(), fps)
+pub fn codec_string(w: u16, h: u16, fps: u64) -> Option<String> {
+    screen_vp9::codec_string(w, h, CHROMA, fps)
 }
 
 /// One VP9 stream over a [`Mirror`]'s coded picture.
@@ -61,21 +79,21 @@ pub struct Stream {
 }
 
 impl Stream {
-    /// A stream over a mirror whose coded size is `coded`, at `quality` (1–100) and `chroma`.
+    /// A stream over a mirror whose coded size is `coded`, at `quality` (1–100).
     ///
     /// The refusal of a picture too large is [`check_picture`]'s. VP9 does not need even
     /// sides and is held to them anyway — see the note there.
-    pub fn new(coded: (u16, u16), quality: u8, chroma: Chroma) -> anyhow::Result<Self> {
+    pub fn new(coded: (u16, u16), quality: u8) -> anyhow::Result<Self> {
         check_picture(coded)?;
         // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
-        let stream = screen_vp9::Stream::new(coded.0, coded.1, chroma.into(), quality, crate::video::threads())
+        let stream = screen_vp9::Stream::new(coded.0, coded.1, CHROMA, quality, crate::video::threads())
             .with_context(|| format!("vp9 encoder for a {}x{} picture", coded.0, coded.1))?;
         Ok(Self {
             stream,
             coded,
             keyframe_owed: false,
-            decode: codec_string(coded.0, coded.1, chroma, ENCODED_FPS),
+            decode: codec_string(coded.0, coded.1, ENCODED_FPS),
             #[cfg(test)]
             refusals: 0,
         })
@@ -222,7 +240,7 @@ mod tests {
     /// A mirror and the stream over it.
     fn whole(w: u16, h: u16, quality: u8) -> (Mirror, Stream) {
         let mirror = Mirror::new(w, h).expect("a mirror");
-        let stream = Stream::new(mirror.coded(), quality, Chroma::Subsampled).expect("a stream");
+        let stream = Stream::new(mirror.coded(), quality).expect("a stream");
         (mirror, stream)
     }
 
@@ -249,11 +267,11 @@ mod tests {
         stream.force_keyframe();
         let asked = moving(&mut mirror, &mut stream, 3);
         assert!(asked.keyframe, "force_keyframe did not reach the encoder");
-        assert_eq!(frame_header(&asked.data), Some(FrameHeader { profile: 0, keyframe: true }));
+        assert_eq!(frame_header(&asked.data), Some(FrameHeader { profile: 1, keyframe: true }));
         // And it is not sticky: the frame after a forced keyframe is an ordinary one.
         let after = moving(&mut mirror, &mut stream, 4);
         assert!(!after.keyframe);
-        assert_eq!(frame_header(&after.data), Some(FrameHeader { profile: 0, keyframe: false }));
+        assert_eq!(frame_header(&after.data), Some(FrameHeader { profile: 1, keyframe: false }));
     }
 
     /// The dial reaches the running encoder without a keyframe, and the test's refusal
@@ -277,14 +295,13 @@ mod tests {
         assert_eq!(stream.quality(), 60);
     }
 
-    /// The stream's profile and colour fields follow the config's chroma into the string
-    /// the browser is configured with, at the rate this gateway paces to.
+    /// The string the browser is configured with is profile 1's, 4:4:4, at the rate this
+    /// gateway paces to.
     #[test]
-    fn the_codec_string_follows_the_chroma() {
-        assert_eq!(codec_string(1920, 1080, Chroma::Subsampled, ENCODED_FPS).as_deref(), Some("vp09.00.40.08.01.06.06.06.00"));
-        assert_eq!(codec_string(1920, 1080, Chroma::Full, ENCODED_FPS).as_deref(), Some("vp09.01.40.08.03.06.06.06.00"));
+    fn the_codec_string_is_profile_1() {
+        assert_eq!(codec_string(1920, 1080, ENCODED_FPS).as_deref(), Some("vp09.01.40.08.03.06.06.06.00"));
         let (_, stream) = whole(1920, 1080, 60);
-        assert_eq!(stream.decode_string(), Some("vp09.00.40.08.01.06.06.06.00"));
+        assert_eq!(stream.decode_string(), Some("vp09.01.40.08.03.06.06.06.00"));
     }
 
     /// The odd case, which is where a chroma plane would be half a pixel wide if the mirror
@@ -295,7 +312,7 @@ mod tests {
         mirror.blit(rect(0, 0, 1919, 1079), &flat(1919, 1079, [90, 90, 90])).expect("a full-screen blit");
         mirror.pad_edges();
         let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
-        assert_eq!(frame_header(&unit.data).map(|header| header.profile), Some(0));
+        assert_eq!(frame_header(&unit.data).map(|header| header.profile), Some(1));
     }
 
     /// A change that reaches an odd desktop's last column or row takes the mirror's
@@ -314,7 +331,7 @@ mod tests {
 
     #[test]
     fn a_picture_too_large_is_refused_by_name() {
-        let Err(refused) = Stream::new((5120, 2880), 60, Chroma::Subsampled) else {
+        let Err(refused) = Stream::new((5120, 2880), 60) else {
             panic!("a 5K picture was accepted");
         };
         let message = format!("{refused:#}");

@@ -7,7 +7,6 @@
 //! home, and the rectangles staged while the round was away are what the next take
 //! syncs across and what re-dirties the stream.
 
-use crate::config::Chroma;
 use crate::protocol::{Held, VideoUnit};
 use crate::shadow::Rect;
 use crate::video::Mirror;
@@ -47,9 +46,6 @@ pub struct DesktopStream {
     /// has moved it. A stream rebuilt after a resize starts here, so one built while
     /// the link is behind starts where the link left off.
     quality: u8,
-    /// The chroma sampling the encoder is built with — the target's, for its whole
-    /// session; nothing moves it.
-    chroma: Chroma,
     /// The desktop, learned from [`crate::protocol::ServerMsg::Resize`]. `None` until
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
@@ -80,10 +76,9 @@ pub struct DesktopStream {
 }
 
 impl DesktopStream {
-    pub fn new(quality: u8, chroma: Chroma) -> Self {
+    pub fn new(quality: u8) -> Self {
         Self {
             quality,
-            chroma,
             size: None,
             mirror: None,
             spare: None,
@@ -223,7 +218,7 @@ impl DesktopStream {
                 let coded = self.mirror.as_ref().expect("owed pixels mean a mirror").coded();
                 self.owed = false;
                 Live {
-                    stream: Stream::new(coded, self.quality, self.chroma)?,
+                    stream: Stream::new(coded, self.quality)?,
                     quality: self.quality,
                     // Its whole picture is owed: nothing has carried these pixels yet.
                     dirty: true,
@@ -500,23 +495,23 @@ pub struct Passed {
 const PASSED_FPS: u64 = 60;
 
 /// Check a `w`×`h` frame of wlshare's VP9 encoding, which is the stream this gateway
-/// would otherwise have encoded from the same pixels at the plan's `chroma`: its
-/// profile, BT.601 at studio swing, declared in its keyframes. The profile is read
-/// and held to the chroma wlshare was asked for, so the configuration announced for
-/// it is the one the frame needs.
-pub fn pass(w: u16, h: u16, frame: &[u8], chroma: Chroma) -> anyhow::Result<Passed> {
+/// would otherwise have encoded from the same pixels: 4:4:4, BT.601 at studio swing,
+/// declared in its keyframes. The profile is read and held to 4:4:4's
+/// ([`crate::vp9::CHROMA`]), so the configuration announced for it is the one the
+/// frame needs.
+pub fn pass(w: u16, h: u16, frame: &[u8]) -> anyhow::Result<Passed> {
     let header = crate::vp9::frame_header(frame)
         .ok_or_else(|| anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header"))?;
-    let asked = screen_vp9::Chroma::from(chroma);
+    let asked = crate::vp9::CHROMA;
     anyhow::ensure!(
         header.profile == asked.profile(),
-        "the server's VP9 frame is profile {}, not the {} profile {} this session asked for",
+        "the server's VP9 frame is profile {}, not the {} profile {} this gateway streams",
         header.profile,
         asked.name(),
         asked.profile()
     );
     crate::video::check_picture((w, h))?;
-    let decode = crate::vp9::codec_string(w, h, chroma, PASSED_FPS)
+    let decode = crate::vp9::codec_string(w, h, PASSED_FPS)
         .ok_or_else(|| anyhow::anyhow!("no VP9 level covers a {w}x{h} picture"))?;
     Ok(Passed { decode, keyframe: header.keyframe, strip: None })
 }
@@ -530,36 +525,30 @@ mod tests {
     #[test]
     fn a_passed_frame_past_the_ceiling_is_refused() {
         let keyframe = [0xa0u8, 0, 0, 0];
-        assert!(pass(1920, 1080, &keyframe, Chroma::Full).is_ok());
-        let refused = pass(5376, 2288, &keyframe, Chroma::Full).expect_err("a 5376x2288 frame was passed");
+        assert!(pass(1920, 1080, &keyframe).is_ok());
+        let refused = pass(5376, 2288, &keyframe).expect_err("a 5376x2288 frame was passed");
         assert_eq!(
             refused.to_string(),
             crate::video::check_picture((5376, 2288)).unwrap_err().to_string()
         );
     }
 
-    /// A passed frame is announced at the chroma wlshare was asked for, and one of
-    /// the other profile — a server that did not do as asked — is refused by name
-    /// rather than handed to a decoder configured for something else.
+    /// A passed frame is announced as 4:4:4, and one of another profile — a server
+    /// that did not code what this gateway streams — is refused by name rather than
+    /// handed to a decoder configured for something else.
     #[test]
-    fn a_passed_frame_is_held_to_the_chroma_asked_for() {
+    fn a_passed_frame_is_held_to_4_4_4() {
         let (profile_0, profile_1) = ([0x80u8, 0, 0, 0], [0xa0u8, 0, 0, 0]);
-        let subsampled = pass(1920, 1080, &profile_0, Chroma::Subsampled).expect("a 4:2:0 frame for a 4:2:0 plan");
-        assert!(subsampled.decode.starts_with("vp09.00."), "{}", subsampled.decode);
-        let full = pass(1920, 1080, &profile_1, Chroma::Full).expect("a 4:4:4 frame for a 4:4:4 plan");
+        let full = pass(1920, 1080, &profile_1).expect("a 4:4:4 frame");
         assert!(full.decode.starts_with("vp09.01."), "{}", full.decode);
         assert_eq!(
-            pass(1920, 1080, &profile_1, Chroma::Subsampled).unwrap_err().to_string(),
-            "the server's VP9 frame is profile 1, not the 4:2:0 profile 0 this session asked for"
-        );
-        assert_eq!(
-            pass(1920, 1080, &profile_0, Chroma::Full).unwrap_err().to_string(),
-            "the server's VP9 frame is profile 0, not the 4:4:4 profile 1 this session asked for"
+            pass(1920, 1080, &profile_0).unwrap_err().to_string(),
+            "the server's VP9 frame is profile 0, not the 4:4:4 profile 1 this gateway streams"
         );
     }
 
     fn stream(w: u16, h: u16) -> DesktopStream {
-        let mut stream = DesktopStream::new(60, Chroma::Subsampled);
+        let mut stream = DesktopStream::new(60);
         stream.want(w, h);
         stream
     }

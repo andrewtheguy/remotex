@@ -1,4 +1,4 @@
-// BETA: one thread of a software decoder's pool (softwareDecoder.worker.ts): an
+// One thread of a software decoder's pool (softwareDecoder.worker.ts): an
 // instance of the module on the memory the decode worker's instance has, which
 // takes a seat in the pool and decodes what the pool hands it.
 //

@@ -1,7 +1,6 @@
 // Whether this page decodes the H.264 an RDP host may draw with on a passed
-// pipeline: the fourth question about itself the gateway is told, beside the chroma
-// (videoChroma.ts), the Mac's stream (appleMedia.ts) and the pipeline itself
-// (rdpGraphics.ts).
+// pipeline: the third question about itself the gateway is told, beside the Mac's
+// stream (appleMedia.ts) and the pipeline itself (rdpGraphics.ts).
 //
 // EXPERIMENTAL, and behind a target's `egfx_h264` key. A host told its client takes
 // H.264 hands the parts of the desktop that move like video to it. The gateway has
