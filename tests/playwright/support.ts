@@ -149,16 +149,10 @@ export function readRemoteClipboard(): string {
 // `resize` is the desktop following this window. Off, the session takes the size
 // the target keeps where the picker offers one; a target with no size configured
 // follows the window whatever is asked, since that is the one size it has here.
-//
-// `software` is the exception: it is a Mac's passed HEVC decoded in this page, a
-// row only a gateway with the page's HEVC decoder shows, and whose default is a
-// fact about the browser. Named, the row is set to it; left out, the row is left as the
-// picker shows it, which is what a spec about that default reads.
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
   passthrough?: boolean;
-  software?: boolean;
 }
 
 // A picker button reads "<name> <protocol> · <host>", so a target is named by what
@@ -260,11 +254,6 @@ export async function startTarget(
   const wanted = choices.passthrough ?? false;
   if (wanted || ((await passed.count()) > 0 && (await passed.isEnabled()))) {
     await passed.setChecked(wanted, { timeout: LEAVE_TIMEOUT_MS });
-  }
-  if (choices.software !== undefined) {
-    await item
-      .getByRole("checkbox", { name: /^Decode HEVC in this page/ })
-      .setChecked(choices.software, { timeout: LEAVE_TIMEOUT_MS });
   }
   await item.getByRole("button", { name: "Start", exact: true }).click();
 }

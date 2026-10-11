@@ -221,7 +221,7 @@ pub fn router(
     throughput: Throughput,
     hevc_decoder: Option<HevcDecoder>,
 ) -> Router {
-    let sessions = Arc::new(SessionManager::new(config.targets.clone(), hevc_decoder.is_some()));
+    let sessions = Arc::new(SessionManager::new(config.targets.clone()));
     router_with_sessions(config, sessions, throughput, hevc_decoder)
 }
 
@@ -674,8 +674,8 @@ struct TargetInfo {
     default_size: Option<Points>,
     /// Whether the picker offers the remote's sound as a choice.
     audio: bool,
-    /// BETA: whether a session on this target can choose to have a Mac's passed
-    /// HEVC decoded in the page's software decoder, which this gateway serves.
+    /// BETA: whether a page whose own decoder refuses this target's passed HEVC
+    /// can decode it in the software decoder this gateway serves.
     software: bool,
     /// The stream the picker offers to pass untouched, `null` where the target
     /// has none.
@@ -860,7 +860,7 @@ struct ClaimResponse {
 
 /// Claim the single session slot. Returns the token the WebSocket
 /// must present as
-/// `/ws?session=<token>&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`;
+/// `/ws?session=<token>&apple_media=true|false&page_hevc=true|false&rdp_graphics=true|false&rdp_h264=true|false`;
 /// 409 while another browser is attached (retry with `force` to take over). The media sockets
 /// present the token alone — `chroma`, the most colour this browser's video
 /// decoder takes, is the session socket's and is required there

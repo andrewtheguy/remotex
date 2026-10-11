@@ -1,7 +1,8 @@
 // Whether this page can run a software decoder (softwareDecoder.ts) and show what
-// it decodes. The picker asks before it offers a Mac's HEVC decoded in the page
-// (targetChoices.ts), and the paint worker is told, since a page that would decode
-// a stream itself and cannot says so and decodes nothing (videoDecoder.ts).
+// it decodes. The picker asks before it offers a Mac's picture passed to a browser
+// whose own decoder refuses it (targetChoices.ts), the session socket states the
+// HEVC answer (gateway.ts), and the paint worker is told, since a page that would
+// decode a stream itself and cannot says so and decodes nothing (videoDecoder.ts).
 
 import type { SoftwareModule } from "./softwareDecoder.ts";
 
@@ -65,11 +66,13 @@ export type RunnableDecoders = Record<SoftwareModule, boolean>;
 /**
  * How this page decodes the streams it is sent: which of its software decoders it
  * can run, and whether the browser's own decoder takes the gateway's VP9
- * (nativeVp9.ts), which the page decodes itself where it does not.
+ * (nativeVp9.ts) and a Mac's HEVC (appleMedia.ts), each of which the page decodes
+ * itself where it does not.
  */
 export interface PageDecoding {
   runs: RunnableDecoders;
   nativeVp9: boolean;
+  nativeHevc: boolean;
 }
 
 let runnable: RunnableDecoders | null = null;

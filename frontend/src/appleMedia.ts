@@ -29,14 +29,16 @@
 //   picks one.
 //
 // The picture's answer is the browser's own decoder's and nothing else's. A
-// picture it refuses can still be decoded by the page, in a session started so
-// at the picker (targetChoices.ts): that is the session's choice, which the
-// gateway holds and tells every page of, and not this page's answer.
+// picture it refuses is decoded by the page instead, in its software HEVC decoder,
+// where the page runs it and the gateway serves it (softwareDecoder.ts): the
+// session socket states both answers, and the gateway is not told which decodes.
 //
 // The other way round from VP9's question on a doubt (nativeVp9.ts). VP9 is what
-// every page here decodes, so only a definite "yes" offers the Mac's picture, and anything that
-// throws reads as "no". The one target it can leave unstartable is a Mac on a gateway
-// whose host lacks the HEVC decoder's library, which has no other picture to send.
+// every page here decodes, so only a definite "yes" hands the Mac's picture to the
+// browser's own decoder, and anything that throws reads as "no". The one target it
+// can leave unstartable is a Mac on a gateway whose host lacks the HEVC decoder's
+// library, which has no other picture to send, seen from a page that cannot decode
+// the picture itself.
 
 /**
  * The picture asked about: macwork's stream, 1600×1000, as its sequence parameter

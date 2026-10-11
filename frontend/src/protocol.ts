@@ -285,18 +285,12 @@ export type ControlMsg =
   // VP9 has no parameter sets, and the gateway already parsed a passed HEVC stream's.
   // `passthrough` says whose stream it is: the remote's own, passed through
   // untouched (wlshare's VP9, a High Performance Mac's HEVC), or one the gateway
-  // encoded.
-  //
-  // `software` says whether a Mac's HEVC is decoded in the page's own software
-  // decoder (softwareDecoder.ts) and not the browser's `VideoDecoder`: BETA, in a
-  // session started so at the picker. It is the session's, so every page attached
-  // to it is told the same. It is never set for VP9, which each page decodes as it
-  // can (nativeVp9.ts).
+  // encoded. Which decoder takes it is this page's own to say
+  // (softwareDecoder.ts), and the gateway is not told.
   | {
       type: "videoFormat";
       decode: string;
       passthrough: boolean;
-      software: boolean;
       // How many strips each picture comes in, a unit each (`VideoStrip`): 4 for
       // a High Performance Mac's passed in strips, 1 for whole pictures.
       strips: number;

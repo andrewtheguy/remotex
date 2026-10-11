@@ -1238,18 +1238,14 @@ pub enum ServerMsg {
     /// `passthrough` says whose stream it is: the remote's own, passed to the browser untouched
     /// (wlshare's VP9, a High Performance Mac's HEVC), or one this gateway encoded.
     ///
-    /// `software` says whether a Mac's passed HEVC is decoded in the page's own
-    /// software decoder and not the browser's `VideoDecoder`: BETA, in a session
-    /// started so ([`crate::config::RenderPlan::software`]). It is the session's and
-    /// not a page's, so every page attached builds the same kind of decoder: the
-    /// session's page, one that reattaches, a second display's tab. It is never set
-    /// for VP9, which each page decodes in the browser's own decoder where that
-    /// takes profile 1 and in its WebAssembly one where it does not.
+    /// Which decoder takes the stream is each page's own to say, and the gateway is not told:
+    /// the browser's `VideoDecoder` where it takes the stream, and the page's WebAssembly one
+    /// for the gateway's VP9 or a Mac's HEVC where it does not.
     ///
     /// `strips` says how many strips each picture of the stream comes in, a unit
     /// each ([`Strip`]): [`Strip::COUNT`] for a High Performance Mac's passed in
     /// strips, and 1 for every stream whose units are whole pictures.
-    VideoFormat { decode: String, passthrough: bool, software: bool, strips: u8 },
+    VideoFormat { decode: String, passthrough: bool, strips: u8 },
     /// The remote started consuming the camera — an application on it opened
     /// the device — and the browser should encode and send from now on,
     /// starting at a keyframe. Camera-socket traffic only, like the two below:
@@ -1371,7 +1367,6 @@ enum ControlMsg<'a> {
     VideoFormat {
         decode: &'a str,
         passthrough: bool,
-        software: bool,
         strips: u8,
     },
     CameraStart {
@@ -1501,8 +1496,8 @@ impl ServerMsg {
             ServerMsg::CameraKeyframe => control(&ControlMsg::CameraKeyframe),
             ServerMsg::MicOpen => control(&ControlMsg::MicOpen),
             ServerMsg::MicClose => control(&ControlMsg::MicClose),
-            ServerMsg::VideoFormat { decode, passthrough, software, strips } => {
-                control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough, software: *software, strips: *strips })
+            ServerMsg::VideoFormat { decode, passthrough, strips } => {
+                control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough, strips: *strips })
             }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
@@ -1680,7 +1675,6 @@ mod tests {
                     audio: crate::config::Sound::Off,
                     passthrough: true,
                     placement: crate::config::Placement::Right,
-                    software: false,
                     whole: false,
                 }
             ),
@@ -1941,12 +1935,12 @@ mod tests {
         // How to decode the stream, which is the message a client cannot work out for
         // itself: VP9 carries no parameter sets, so every field here is the gateway's
         // answer and a renamed one is a decoder that never gets configured.
-        match (ServerMsg::VideoFormat { decode: "vp09.01.40.08".to_owned(), passthrough: true, software: false, strips: 1 })
+        match (ServerMsg::VideoFormat { decode: "vp09.01.40.08".to_owned(), passthrough: true, strips: 1 })
             .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"videoFormat","decode":"vp09.01.40.08","passthrough":true,"software":false,"strips":1}"#
+                r#"{"type":"videoFormat","decode":"vp09.01.40.08","passthrough":true,"strips":1}"#
             ),
             None => panic!("videoFormat must be a text frame"),
         }

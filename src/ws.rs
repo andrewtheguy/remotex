@@ -4,7 +4,7 @@
 //! Five endpoints. Four present the claim token from `POST /api/session`; the
 //! display socket presents none.
 //!
-//! `/ws?session=<token>&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
+//! `/ws?session=<token>&apple_media=true|false&page_hevc=true|false&rdp_graphics=true|false&rdp_h264=true|false`
 //! is the session: it attaches to the single slot
 //! ([`crate::session::SessionManager`]). The URL also names what only this browser
 //! knows about itself — its screen (`w`/`h`/`scale`/`fit`, the same values `connect`
@@ -810,15 +810,19 @@ pub struct SessionParams {
     scale: Option<u16>,
     /// [`crate::protocol::HostDisplay::fit`]; absent is a pointer client.
     fit: Option<bool>,
-    /// Whether this browser decodes a High Performance Mac's picture, its HEVC —
-    /// asked of it once at page load and stated here, because the socket is the one
-    /// thing that is open both when it picks a target and when its reattach has to
-    /// start the selected one over.
+    /// Whether this browser's own decoder takes a High Performance Mac's picture,
+    /// its HEVC — asked of it once at page load and stated here, because the socket
+    /// is the one thing that is open both when it picks a target and when its
+    /// reattach has to start the selected one over.
     ///
     /// Required: a session that passes the picture is served only to a browser that
-    /// said yes, and a socket that does not say is refused at the door rather than
-    /// answered with a guess.
+    /// can decode it, and a socket that does not say is refused at the door rather
+    /// than answered with a guess.
     apple_media: bool,
+    /// BETA: whether this page runs the software HEVC decoder, which decodes the
+    /// Mac's picture where the browser's own decoder does not, on a gateway that
+    /// serves it ([`Decoders::stated`]). Asked and required as the others are.
+    page_hevc: bool,
     /// Whether this browser composes an RDP host's graphics pipeline: a
     /// cross-origin isolated page with shared memory for the compositor's threads
     /// and a WebGL 2 canvas for its picture. Asked and required as
@@ -848,11 +852,13 @@ pub async fn handler(
             state.sessions,
             params.session,
             display,
-            Decoders {
-                apple_media: params.apple_media,
-                rdp_graphics: params.rdp_graphics,
-                rdp_h264: params.rdp_h264,
-            },
+            Decoders::stated(
+                params.apple_media,
+                params.page_hevc,
+                state.hevc_decoder.is_some(),
+                params.rdp_graphics,
+                params.rdp_h264,
+            ),
             HEARTBEAT_TIMINGS,
             Arc::clone(&state.throughput.meters),
         )
@@ -1768,16 +1774,18 @@ mod tests {
             Query::<SessionParams>::try_from_uri(&format!("/ws?{query}").parse::<Uri>().unwrap())
                 .map(|Query(p)| p)
         };
-        let full = parse("session=t&apple_media=true&rdp_graphics=false&rdp_h264=false")
+        let full = parse("session=t&apple_media=true&page_hevc=false&rdp_graphics=false&rdp_h264=false")
             .expect("a browser that takes the Mac's stream");
         assert!(full.apple_media);
+        assert!(!full.page_hevc);
         assert!(!full.rdp_graphics);
         assert!(!full.rdp_h264);
         assert_eq!(full.session.as_deref(), Some("t"));
         let declines =
-            parse("session=t&w=430&h=932&scale=300&fit=true&apple_media=false&rdp_graphics=true&rdp_h264=true")
+            parse("session=t&w=430&h=932&scale=300&fit=true&apple_media=false&page_hevc=true&rdp_graphics=true&rdp_h264=true")
                 .expect("a browser that does not, naming its screen too");
         assert!(!declines.apple_media);
+        assert!(declines.page_hevc);
         assert!(declines.rdp_graphics);
         assert!(declines.rdp_h264);
         assert_eq!(
@@ -1786,15 +1794,19 @@ mod tests {
         );
         assert!(parse("session=t").is_err(), "a socket that does not say is not a client");
         assert!(
-            parse("session=t&rdp_graphics=true&rdp_h264=true").is_err(),
+            parse("session=t&page_hevc=true&rdp_graphics=true&rdp_h264=true").is_err(),
             "nor one that does not say whether it takes the Mac's stream"
         );
         assert!(
-            parse("session=t&apple_media=true&rdp_h264=true").is_err(),
+            parse("session=t&apple_media=true&rdp_graphics=true&rdp_h264=true").is_err(),
+            "nor one that does not say whether its page decodes the Mac's stream"
+        );
+        assert!(
+            parse("session=t&apple_media=true&page_hevc=true&rdp_h264=true").is_err(),
             "nor one that does not say whether it composes a pipeline"
         );
         assert!(
-            parse("session=t&apple_media=true&rdp_graphics=true").is_err(),
+            parse("session=t&apple_media=true&page_hevc=true&rdp_graphics=true").is_err(),
             "nor one that does not say whether it decodes a pipeline's H.264"
         );
 

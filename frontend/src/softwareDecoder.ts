@@ -6,10 +6,8 @@
 //   this one where it does not (nativeVp9.ts), so a session's pages may differ.
 // - `hevc`, BETA, a High Performance Mac's passed HEVC: andrewtheguy/hevc-wasm's
 //   decoder, which the gateway serves where it has the release archive. Which
-//   decodes that is the session's to say and no page's: it is chosen at the
-//   picker (targetChoices.ts), held by the gateway, and stated with each
-//   `videoFormat`, so every page attached to a session builds the same kind of
-//   decoder for it.
+//   decodes that is each page's to say too: the browser's own decoder where it
+//   takes the Mac's HEVC, and this one where it does not (appleMedia.ts).
 //
 // `pageModuleFor` says which, and `videoDecoder.ts` builds it.
 //
@@ -60,21 +58,20 @@ export function softwareModuleFor(codec: string): SoftwareModule | null {
 }
 
 /**
- * The page's module that decodes a stream announced as `format`, or undefined
- * for the browser's own decoder: the session's to say for a Mac's HEVC
- * (`software`), and this page's for the gateway's VP9, which it decodes where
- * the browser's own decoder does not take profile 1 (`nativeVp9`). Null for a
- * stream the session says is the page's and no module decodes.
+ * The page's module that decodes a stream announced as `decode`, or undefined
+ * for the browser's own decoder: the module where the browser's own decoder
+ * does not take the stream, the gateway's VP9 at profile 1 (`nativeVp9`) or a
+ * Mac's HEVC (`nativeHevc`).
  */
 export function pageModuleFor(
-  format: { decode: string; software?: boolean },
-  nativeVp9: boolean,
-): SoftwareModule | null | undefined {
-  const module = softwareModuleFor(format.decode);
-  if (format.software) {
-    return module;
+  decode: string,
+  native: { nativeVp9: boolean; nativeHevc: boolean },
+): SoftwareModule | undefined {
+  const module = softwareModuleFor(decode);
+  if (module === "vp9" && !native.nativeVp9) {
+    return "vp9";
   }
-  return module === "vp9" && !nativeVp9 ? "vp9" : undefined;
+  return module === "hevc" && !native.nativeHevc ? "hevc" : undefined;
 }
 
 /** What the paint worker sends the decode worker. */
