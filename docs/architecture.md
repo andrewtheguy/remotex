@@ -292,11 +292,12 @@ passed.
 #### One encoder, or passed untouched
 
 A session's picture reaches the browser one of two ways, both ordinary:
-- **Encoded here** as VP9 by the gateway's one video encoder, the
-  `screen-vp9` crate wlshare codes its own stream with, pinned by release tag
-  in `Cargo.toml`. A libvpx setting, the conversion in front of it, the codec
-  string or the quality walk changes in the screen-vp9 repository and reaches
-  here as a pin bump.
+- **Encoded here** as VP9 by the `screen-vp9` crate wlshare codes its own
+  stream with, pinned by release tag in `Cargo.toml`: libvpx, or for a target
+  that sets `experimental_native_vp9` the **experimental** encoder that crate
+  has written in Rust. A libvpx setting, how the Rust encoder codes, the
+  conversion in front of them, the codec string or the quality walk changes in
+  the screen-vp9 repository and reaches here as a pin bump.
 - **Passed untouched**, as the remote made it, for the browser to decode or
   compose: today wlshare's VP9 on a `wlshare` target, and in a session started
   with the target's passthrough a High Performance Mac's HEVC or an RDP host's
@@ -739,7 +740,10 @@ sends.
   ceiling wlshare's walk never goes above, and `WLSD` for a plan without
   `render_adaptive`, which holds the dial there rather than walking it on the
   browser's lag. So the target's keys mean on a passed stream what they mean on
-  one coded here.
+  one coded here. A target that sets `experimental_native_vp9` lists `WLSX`
+  too, which has wlshare code the stream with its **experimental** encoder
+  written in Rust in place of libvpx, as the same key has this gateway code
+  what it encodes itself; nothing here reads the stream any differently for it.
   Pseudo-encodings rather than a client message because a server that is not
   wlshare ignores an encoding it does not know where a message it does not know
   ends the connection, and because they ride the list that names the encoding, so
@@ -1449,8 +1453,15 @@ would not take.
 #### The codec
 
 The gateway **encodes VP9 only** (`src/vp9.rs`), and there is no codec key: one
-encoder is one to maintain. The encoder is the `screen-vp9` crate, its own
-repository pinned by release tag here and in wlshare, and the one place libvpx is
+codec is one to maintain. The encoder is the `screen-vp9` crate, its own
+repository pinned by release tag here and in wlshare. It holds two: libvpx, which
+every stream is coded with unless its target says otherwise, and an
+**experimental** one written in Rust, which a target's `experimental_native_vp9`
+asks for and the default `native-vp9` feature builds in. That one's kernels are
+NEON on arm64 and AVX2 on amd64, so an amd64 gateway is built for AVX2, and one
+for a machine without it is built without the feature
+([x86-64 CPU compatibility](../packaging/README.md#x86-64-cpu-compatibility)).
+The crate is the one place libvpx is
 spoken to for this gateway and for wlshare's own stream: the quantizer pinned to the dial, screen-content
 tuning, no lag, no dropped frames, no keyframe unasked, the colour declared in the
 bitstream, the retune without a keyframe, and the RGB→YUV conversion in front of it
@@ -2982,7 +2993,8 @@ The entire substrate is behind the default `embedded-gateway` Cargo feature:
 the module, token authentication, config audience, CLI commands, and their
 `check-config --embedded` validation mode compile out together. Native packages
 retain it. Container artifacts are built separately with
-`--no-default-features`; the build script and Dockerfile reject a
+`--no-default-features` and the features the script names, `native-vp9` unless
+told otherwise; the build script and Dockerfile reject a
 binary that exposes any embedded CLI surface.
 
 There is no separate native client: every instance is the same SPA loaded

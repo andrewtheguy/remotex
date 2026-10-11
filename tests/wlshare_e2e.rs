@@ -35,6 +35,20 @@ const PLAIN_TARGET: &str = "wlshare-dummy-plain";
 /// Where the wlshare checkout to build is, when not beside this repository.
 const WLSHARE_DIR_ENV: &str = "REMOTEX_TEST_WLSHARE_DIR";
 
+/// Which of wlshare's VP9 encoders the `wlshare` target asks for: `libvpx`, which
+/// is what an unset variable means, or `native`, its experimental encoder
+/// (`experimental_native_vp9`). Every test here holds for either.
+const WLSHARE_VP9_ENV: &str = "REMOTEX_TEST_WLSHARE_VP9";
+
+/// Whether the run asks for wlshare's experimental encoder ([`WLSHARE_VP9_ENV`]).
+fn native_vp9() -> bool {
+    match std::env::var(WLSHARE_VP9_ENV).as_deref() {
+        Err(_) | Ok("libvpx") => false,
+        Ok("native") => true,
+        Ok(other) => panic!("{WLSHARE_VP9_ENV}={other}: libvpx or native"),
+    }
+}
+
 /// Wait until wlshare answers RFB on the published port: rootless podman's
 /// forwarder accepts a connection before anything listens inside.
 async fn wait_for_vnc_port(port: u16) {
@@ -110,6 +124,7 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         microphone: true,
         video_quality: None,
         render_adaptive: None,
+        experimental_native_vp9: native_vp9(),
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,
@@ -333,6 +348,9 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
         "wlshare was not asked for its VP9 encoding:\n{}",
         container.logs()
     );
+    // And coded by the encoder the run asked for.
+    let coder = if native_vp9() { "coded by screen-vp9's Rust coder (experimental)" } else { "coded by libvpx" };
+    assert!(container.logs().contains(coder), "wlshare's VP9 was not {coder}:\n{}", container.logs());
     let decode = view.decode.as_deref().expect("a video format was announced");
     assert!(decode.starts_with("vp09.01."), "the stream was announced as {decode}");
     assert_eq!(view.passed, Some(true), "the stream is wlshare's own");

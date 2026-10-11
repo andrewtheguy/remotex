@@ -615,3 +615,14 @@ password = "change-me"
 # Turning it off walks on send pressure alone, which is worth having only to pin one
 # side of a measurement.
 #render_adaptive = true
+
+# EXPERIMENTAL. A target's VP9 stream is coded with libvpx. This asks for the
+# other encoder, the one screen-vp9 has written in Rust, which is new: of this
+# gateway for a stream it encodes, and of wlshare for the one a "wlshare" target
+# passes. The stream is the same to the browser either way, 4:4:4 at
+# `video_quality`, so two targets of one host that differ in this key alone are
+# the two encoders side by side. A "wlshare" target needs a wlshare that has the
+# encoder; an older one ignores the request and codes with libvpx. A gateway
+# built without the `native-vp9` feature, the build for an amd64 machine with no
+# AVX2, has no such encoder and refuses the key on every other target.
+#experimental_native_vp9 = false

@@ -51,6 +51,19 @@ pub fn codec_string(w: u16, h: u16, fps: u64) -> Option<String> {
     screen_vp9::codec_string(w, h, fps)
 }
 
+/// The encoder a stream is coded with: libvpx, or for a plan that asks
+/// (`experimental_native_vp9`) screen-vp9's own in Rust, EXPERIMENTAL. A build
+/// without the `native-vp9` feature has libvpx alone, and its config refuses
+/// the key on every target whose stream is coded here.
+fn coder(native: bool) -> screen_vp9::Coder {
+    #[cfg(feature = "native-vp9")]
+    if native {
+        return screen_vp9::Coder::Native;
+    }
+    let _ = native;
+    screen_vp9::Coder::Libvpx
+}
+
 /// One VP9 stream over a [`Mirror`]'s picture.
 ///
 /// The picture size is fixed for the stream's whole life, and that is what makes an inter-frame
@@ -68,29 +81,26 @@ pub struct Stream {
     /// VP9 carries no parameter sets, so the string follows from the picture size, which is
     /// fixed for the stream's life.
     decode: Option<String>,
-    /// How many retunes [`Self::set_quality`] still refuses, for a test that needs the
-    /// encoder to say no.
-    #[cfg(test)]
-    refusals: u32,
 }
 
 impl Stream {
     /// A stream over a mirror of a `size` desktop, at `quality` (1–100).
     ///
     /// The refusal of a picture too large is [`check_picture`]'s.
-    pub fn new(size: (u16, u16), quality: u8) -> anyhow::Result<Self> {
+    ///
+    /// `native` is the plan's [`crate::config::RenderPlan::native_vp9`]: coded by
+    /// screen-vp9's encoder in Rust, EXPERIMENTAL, where this build has it.
+    pub fn new(size: (u16, u16), quality: u8, native: bool) -> anyhow::Result<Self> {
         check_picture(size)?;
         // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
-        let stream = screen_vp9::Stream::new(size.0, size.1, quality, crate::video::threads())
+        let stream = screen_vp9::Stream::new(size.0, size.1, quality, crate::video::threads(), coder(native))
             .with_context(|| format!("vp9 encoder for a {}x{} picture", size.0, size.1))?;
         Ok(Self {
             stream,
             size,
             keyframe_owed: false,
             decode: codec_string(size.0, size.1, ENCODED_FPS),
-            #[cfg(test)]
-            refusals: 0,
         })
     }
 
@@ -120,26 +130,15 @@ impl Stream {
         self.keyframe_owed = true;
     }
 
-    /// Make the next `count` retunes that would change the dial fail, as a libvpx refusal
-    /// would.
-    #[cfg(test)]
-    pub fn refuse_retunes(&mut self, count: u32) {
-        self.refusals = count;
-    }
-
-    /// Move the dial on the live encoder, without a keyframe.
+    /// Move the dial, without a keyframe.
     ///
     /// This is how a congested link gives up quality (the walk in `screen_vp9::walk`), and
     /// "without a keyframe" is the whole reason it is a retune rather than a rebuild — which
     /// would force a keyframe on the next frame, spending a few hundred KB at the exact moment
-    /// the link has run out of room.
-    pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
-        #[cfg(test)]
-        if quality.clamp(crate::video::QUALITY_MIN, crate::video::QUALITY_MAX) != self.stream.quality() && self.refusals > 0 {
-            self.refusals -= 1;
-            anyhow::bail!("a retune refused on the test's orders");
-        }
-        self.stream.set_quality(quality).context("retuning the VP9 encoder")
+    /// the link has run out of room. The frame coded at the dial is what takes libvpx there,
+    /// so a libvpx that will not go is that frame's error.
+    pub fn set_quality(&mut self, quality: u8) {
+        self.stream.set_quality(quality);
     }
 
     /// Encode `mirror` as it stands.
@@ -150,7 +149,7 @@ impl Stream {
     /// the picture the client holds, at the quality it holds it. A keyframe and a
     /// stream's first frame are the whole mirror whatever `changed` says.
     ///
-    /// `None` means the encoder produced no bitstream. The caller must then leave its dirty flag
+    /// `None` means libvpx made no frame of the mirror ([`screen_vp9::Error::NoFrame`]). The caller must then leave its dirty flag
     /// set, so those pixels ride on the next frame — which is what keeps a frame that produced
     /// nothing from becoming pixels the client never gets. With no lag and no dropped frames it
     /// should be unreachable; it is a return value rather than an assertion because the caller
@@ -158,8 +157,8 @@ impl Stream {
     pub fn encode(&mut self, mirror: &Mirror, changed: Option<&[Rect]>) -> anyhow::Result<Option<AccessUnit>> {
         self.read(mirror, changed.filter(|_| !self.keyframe_owed))?;
         let mut data = Vec::new();
-        let keyframe = self.stream.encode(self.keyframe_owed, &mut data).context("encoding a VP9 frame")?;
-        Ok(self.unit(keyframe, data))
+        let encoded = self.stream.encode(self.keyframe_owed, &mut data);
+        self.unit(encoded, data).context("encoding a VP9 frame")
     }
 
     /// Settle `mirror` at `quality`: encode it whole and at that quality, as one
@@ -167,13 +166,12 @@ impl Stream {
     ///
     /// What a desktop that went quiet while the link had it coarse is sent once
     /// ([`crate::encode`]): every block sharpened, and the rounds after it at what
-    /// the link bears again. `None` is as [`Self::encode`] has it. An encoder that would not move its dial back is an
-    /// error: it stays at the [`Self::quality`] it reports.
+    /// the link bears again. `None` is as [`Self::encode`] has it.
     pub fn settle(&mut self, mirror: &Mirror, quality: u8) -> anyhow::Result<Option<AccessUnit>> {
         self.read(mirror, None)?;
         let mut data = Vec::new();
-        let keyframe = self.stream.settle(quality, self.keyframe_owed, &mut data).context("settling a VP9 stream")?;
-        Ok(self.unit(keyframe, data))
+        let encoded = self.stream.settle(quality, self.keyframe_owed, &mut data);
+        self.unit(encoded, data).context("settling a VP9 stream")
     }
 
     /// Read `mirror` into the stream where it `changed`, or whole.
@@ -192,13 +190,17 @@ impl Stream {
     }
 
     /// The access unit an encode produced, if it produced one.
-    fn unit(&mut self, keyframe: Option<bool>, data: Vec<u8>) -> Option<AccessUnit> {
-        // Cleared only when something came out: a frame that produced no bitstream still
-        // owes its keyframe, and the caller's dirty flag is what brings it back.
-        keyframe.map(|keyframe| {
-            self.keyframe_owed = false;
-            AccessUnit { data, keyframe }
-        })
+    fn unit(&mut self, encoded: Result<bool, screen_vp9::Error>, data: Vec<u8>) -> Result<Option<AccessUnit>, screen_vp9::Error> {
+        match encoded {
+            Ok(keyframe) => {
+                self.keyframe_owed = false;
+                Ok(Some(AccessUnit { data, keyframe }))
+            }
+            // Nothing came out, so the keyframe is still owed, and the caller's
+            // dirty flag is what brings the pixels back.
+            Err(screen_vp9::Error::NoFrame) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -219,7 +221,7 @@ mod tests {
     /// A mirror and the stream over it.
     fn whole(w: u16, h: u16, quality: u8) -> (Mirror, Stream) {
         let mirror = Mirror::new(w, h).expect("a mirror");
-        let stream = Stream::new(mirror.size(), quality).expect("a stream");
+        let stream = Stream::new(mirror.size(), quality, false).expect("a stream");
         (mirror, stream)
     }
 
@@ -253,25 +255,18 @@ mod tests {
         assert_eq!(frame_header(&after.data), Some(FrameHeader { profile: 1, keyframe: false }));
     }
 
-    /// The dial reaches the running encoder without a keyframe, and the test's refusal
-    /// hook stands in for libvpx's.
+    /// The dial reaches the running encoder without a keyframe.
     #[test]
-    fn the_quality_moves_on_a_live_encoder_and_a_refusal_leaves_it_where_it_was() {
+    fn the_quality_moves_on_a_live_encoder() {
         let (mut mirror, mut stream) = whole(320, 240, 90);
         assert_eq!(stream.quality(), 90);
         moving(&mut mirror, &mut stream, 0);
         let fine: usize = (1..5).map(|step| moving(&mut mirror, &mut stream, step).data.len()).sum();
-        stream.set_quality(crate::video::QUALITY_MIN).expect("the encoder to accept a new quantizer");
+        stream.set_quality(crate::video::QUALITY_MIN);
         assert_eq!(stream.quality(), crate::video::QUALITY_MIN);
         let coarse: Vec<_> = (5..9).map(|step| moving(&mut mirror, &mut stream, step)).collect();
         assert!(coarse.iter().map(|unit| unit.data.len()).sum::<usize>() < fine, "the quantizer did not reach the running encoder");
         assert!(!coarse.iter().any(|unit| unit.keyframe), "moving the quantizer cost a keyframe");
-
-        stream.refuse_retunes(1);
-        assert!(stream.set_quality(60).is_err(), "the refusal did not fire");
-        assert_eq!(stream.quality(), crate::video::QUALITY_MIN, "a refused retune moved the dial");
-        stream.set_quality(60).expect("the refusal was one retune's");
-        assert_eq!(stream.quality(), 60);
     }
 
     /// The string the browser is configured with is profile 1's, 4:4:4, at the rate this
@@ -294,9 +289,22 @@ mod tests {
         assert_eq!(decoder.decode(&unit.data).expect("a decode").size(), (1919, 1079));
     }
 
+    /// A plan that asks for the encoder in Rust gets the same kind of stream.
+    #[cfg(feature = "native-vp9")]
+    #[test]
+    fn the_encoder_in_rust_codes_a_stream_libvpx_decodes() {
+        let mut mirror = Mirror::new(320, 240).expect("a mirror");
+        let mut stream = Stream::new(mirror.size(), 60, true).expect("a stream");
+        mirror.blit(rect(0, 0, 320, 240), &flat(320, 240, [90, 90, 90])).expect("a full-screen blit");
+        let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
+        assert_eq!(frame_header(&unit.data).map(|header| header.profile), Some(screen_vp9::PROFILE));
+        let mut decoder = screen_vp9::Decoder::new(1).expect("a decoder");
+        assert_eq!(decoder.decode(&unit.data).expect("a decode").size(), (320, 240));
+    }
+
     #[test]
     fn a_picture_too_large_is_refused_by_name() {
-        let Err(refused) = Stream::new((5120, 2880), 60) else {
+        let Err(refused) = Stream::new((5120, 2880), 60, false) else {
             panic!("a 5K picture was accepted");
         };
         let message = format!("{refused:#}");

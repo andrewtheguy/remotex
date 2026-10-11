@@ -12,6 +12,12 @@ Linux release binaries require glibc 2.39 or newer: Debian 13, Ubuntu 24.04,
 or later releases, and RPM distributions with the same baseline. The package
 format alone does not make the binary compatible with an older distribution.
 
+Release binaries for x86-64, on Linux and Windows and in the container image,
+require a processor with AVX2. For one without it, build the gateway from
+source as
+[x86-64 CPU compatibility](../packaging/README.md#x86-64-cpu-compatibility)
+describes.
+
 ### Debian 13+ and Ubuntu 24.04+ (`.deb`)
 
 Releases provide `remotex-linux-amd64.deb` and

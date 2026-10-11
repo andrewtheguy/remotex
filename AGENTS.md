@@ -73,10 +73,9 @@ area's section before changing what it covers:
 
 ## Packaging and platforms
 
-- Linux x86-64 artifacts target the baseline x86-64 ISA and dispatch SIMD at
-  runtime. Never set a global `target-cpu`; use runtime detection and
-  per-function `#[target_feature]` when needed. Prebuilt native archives must
-  keep the same floor. See
+- amd64 builds are AVX2 by default. Code that needs a CPU flag such as AVX2
+  must sit behind a Cargo feature, so that a build with the feature off still
+  runs on a machine without it. See
   [x86-64 CPU compatibility](packaging/README.md#x86-64-cpu-compatibility).
 - The native `embedded-gateway` feature is the `remotex tui` control plane and
   its hidden `serve-embedded` workers, on Unix and Windows alike, each worker's
