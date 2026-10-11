@@ -502,8 +502,7 @@ export function createFramePainter(options: {
 
   // The browser's decoder's pictures onto the desktop's canvas, each whole and at
   // its own size with its top row at `top`, under a clip of the desktop's w×h. A
-  // picture can run past the desktop: the encoder is held to even sides and an odd
-  // desktop does not have them, and a display's last strip runs past its last
+  // picture can run past the desktop: a display's last strip runs past its last
   // row, holding nothing of the picture there. The clip is what cuts it, and not
   // a source rectangle, which WebKit's canvas does not read of a `VideoFrame`:
   // it draws the frame whole into the destination, so a last strip cut that way

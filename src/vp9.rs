@@ -10,6 +10,21 @@
 //! this module owns is the stream over the mirror: the picture limits, the keyframe
 //! owed until a frame carries it, and the WebCodecs string the browser is configured
 //! with. When a round is taken is [`crate::encode`]'s business.
+//!
+//! Every stream is 4:4:4, VP9 profile 1 ([`screen_vp9::PROFILE`]), since that is where
+//! the picture loss on a desktop stream actually is — not the quantizer. Measured
+//! 2026-09-01 on 1280×800 of rendered text, coloured on a dark terminal and black on
+//! white, encoded and decoded through libvpx: every 4:2:0 quantizer from the dial's
+//! finest to mathematically lossless lands at the same 28.5 dB with a worst pixel 135
+//! code values off, and so does the RGB→I420 conversion with no codec behind it at all.
+//! A one-pixel coloured glyph stem shares its one colour sample with three background
+//! pixels and comes back at a quarter of its saturation. The same picture at 4:4:4 and
+//! the same quantizer measures 42.8 dB with a worst pixel 33 off.
+//!
+//! No browser's hardware VP9 path takes profile 1, so the browser's own decoder takes it
+//! in software where it has one, and a page whose own decoder refuses it, as iOS and
+//! iPadOS do, decodes it in WebAssembly (`frontend/src/softwareDecoder.ts`). So there is
+//! no 4:2:0 stream to fall back on, and no browser is asked which it takes.
 
 use anyhow::Context as _;
 
@@ -27,35 +42,16 @@ pub use screen_vp9::{FrameHeader, frame_header};
 /// at its own rate ([`crate::stream::pass`]).
 pub const ENCODED_FPS: u64 = 30;
 
-/// The chroma sampling of every VP9 stream this gateway sends: 4:4:4, profile 1.
-///
-/// This is where the picture loss on a desktop stream actually is — not the
-/// quantizer. Measured 2026-09-01 on 1280×800 of rendered text, coloured on a dark
-/// terminal and black on white, encoded and decoded through libvpx: every 4:2:0
-/// quantizer from the dial's finest to mathematically lossless lands at the same
-/// 28.5 dB with a worst pixel 135 code values off, and so does the RGB→I420
-/// conversion with no codec behind it at all. A one-pixel coloured glyph stem
-/// shares its one colour sample with three background pixels and comes back at a
-/// quarter of its saturation. The same picture at 4:4:4 and the same quantizer
-/// measures 42.8 dB with a worst pixel 33 off.
-///
-/// No browser's hardware VP9 path takes profile 1, so the browser's own decoder
-/// takes it in software where it has one, and a page whose own decoder refuses
-/// it, as iOS and iPadOS do, decodes it in WebAssembly
-/// (`frontend/src/softwareDecoder.ts`). So there is no 4:2:0 stream to fall back
-/// on, and no browser is asked which it takes.
-pub const CHROMA: screen_vp9::Chroma = screen_vp9::Chroma::Full;
-
 /// The WebCodecs codec string for a `w`×`h` stream at `fps` — what
 /// `ServerMsg::VideoFormat` carries, derived here rather than in the client because VP9
 /// has no in-band parameter sets for a client to read one out of. `None` for a picture no
 /// VP9 level covers, which [`check_picture`] has already refused long before this is
 /// reached.
 pub fn codec_string(w: u16, h: u16, fps: u64) -> Option<String> {
-    screen_vp9::codec_string(w, h, CHROMA, fps)
+    screen_vp9::codec_string(w, h, fps)
 }
 
-/// One VP9 stream over a [`Mirror`]'s coded picture.
+/// One VP9 stream over a [`Mirror`]'s picture.
 ///
 /// The picture size is fixed for the stream's whole life, and that is what makes an inter-frame
 /// stream mean anything: every frame is expressed as a change from the last one. A desktop that
@@ -64,8 +60,8 @@ pub struct Stream {
     /// The encoder and the conversion in front of it, which reads the mirror whole or
     /// where it changed.
     stream: screen_vp9::Stream,
-    /// The picture encoded: the mirror's coded size, the desktop grown to even sides.
-    coded: (u16, u16),
+    /// The picture encoded: the mirror's, the desktop at its own size.
+    size: (u16, u16),
     /// Whether the next frame must be one a decoder can start from.
     keyframe_owed: bool,
     /// The WebCodecs codec string for this stream's picture, computed once at construction:
@@ -79,21 +75,20 @@ pub struct Stream {
 }
 
 impl Stream {
-    /// A stream over a mirror whose coded size is `coded`, at `quality` (1–100).
+    /// A stream over a mirror of a `size` desktop, at `quality` (1–100).
     ///
-    /// The refusal of a picture too large is [`check_picture`]'s. VP9 does not need even
-    /// sides and is held to them anyway — see the note there.
-    pub fn new(coded: (u16, u16), quality: u8) -> anyhow::Result<Self> {
-        check_picture(coded)?;
+    /// The refusal of a picture too large is [`check_picture`]'s.
+    pub fn new(size: (u16, u16), quality: u8) -> anyhow::Result<Self> {
+        check_picture(size)?;
         // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
-        let stream = screen_vp9::Stream::new(coded.0, coded.1, CHROMA, quality, crate::video::threads())
-            .with_context(|| format!("vp9 encoder for a {}x{} picture", coded.0, coded.1))?;
+        let stream = screen_vp9::Stream::new(size.0, size.1, quality, crate::video::threads())
+            .with_context(|| format!("vp9 encoder for a {}x{} picture", size.0, size.1))?;
         Ok(Self {
             stream,
-            coded,
+            size,
             keyframe_owed: false,
-            decode: codec_string(coded.0, coded.1, ENCODED_FPS),
+            decode: codec_string(size.0, size.1, ENCODED_FPS),
             #[cfg(test)]
             refusals: 0,
         })
@@ -160,8 +155,6 @@ impl Stream {
     /// nothing from becoming pixels the client never gets. With no lag and no dropped frames it
     /// should be unreachable; it is a return value rather than an assertion because the caller
     /// has to be ready for it anyway.
-    ///
-    /// The mirror must have been padded ([`Mirror::pad_edges`]), which is the caller's job.
     pub fn encode(&mut self, mirror: &Mirror, changed: Option<&[Rect]>) -> anyhow::Result<Option<AccessUnit>> {
         self.read(mirror, changed.filter(|_| !self.keyframe_owed))?;
         let mut data = Vec::new();
@@ -174,8 +167,7 @@ impl Stream {
     ///
     /// What a desktop that went quiet while the link had it coarse is sent once
     /// ([`crate::encode`]): every block sharpened, and the rounds after it at what
-    /// the link bears again. `None` and the mirror's padding are as
-    /// [`Self::encode`] has them. An encoder that would not move its dial back is an
+    /// the link bears again. `None` is as [`Self::encode`] has it. An encoder that would not move its dial back is an
     /// error: it stays at the [`Self::quality`] it reports.
     pub fn settle(&mut self, mirror: &Mirror, quality: u8) -> anyhow::Result<Option<AccessUnit>> {
         self.read(mirror, None)?;
@@ -187,14 +179,15 @@ impl Stream {
     /// Read `mirror` into the stream where it `changed`, or whole.
     fn read(&mut self, mirror: &Mirror, changed: Option<&[Rect]>) -> anyhow::Result<()> {
         anyhow::ensure!(
-            mirror.coded() == self.coded,
+            mirror.size() == self.size,
             "a {}x{} vp9 stream was handed a {}x{} mirror",
-            self.coded.0,
-            self.coded.1,
-            mirror.coded().0,
-            mirror.coded().1
+            self.size.0,
+            self.size.1,
+            mirror.size().0,
+            mirror.size().1
         );
-        let changed: Option<Vec<screen_vp9::Rect>> = changed.map(|rects| rects.iter().map(|rect| coded_rect(mirror, *rect)).collect());
+        let changed: Option<Vec<screen_vp9::Rect>> =
+            changed.map(|rects| rects.iter().map(|rect| screen_vp9::Rect { x: rect.left, y: rect.top, width: rect.w(), height: rect.h() }).collect());
         self.stream.read_rgb(mirror.picture(), changed.as_deref()).context("reading the mirror for a VP9 frame")
     }
 
@@ -206,20 +199,6 @@ impl Stream {
             self.keyframe_owed = false;
             AccessUnit { data, keyframe }
         })
-    }
-}
-
-/// `rect` of the desktop as the encoder is told of it: with the mirror's padding column
-/// or row beside it where it reaches the desktop's edge, since [`Mirror::pad_edges`]
-/// repeats that edge into the padding and a change to one is a change to the other.
-fn coded_rect(mirror: &Mirror, rect: Rect) -> screen_vp9::Rect {
-    let (size, coded) = (mirror.size(), mirror.coded());
-    let padded = |far: u16, size: u16, coded: u16| u16::from(far + 1 == size && coded != size);
-    screen_vp9::Rect {
-        x: rect.left,
-        y: rect.top,
-        width: rect.w() + padded(rect.right, size.0, coded.0),
-        height: rect.h() + padded(rect.bottom, size.1, coded.1),
     }
 }
 
@@ -240,7 +219,7 @@ mod tests {
     /// A mirror and the stream over it.
     fn whole(w: u16, h: u16, quality: u8) -> (Mirror, Stream) {
         let mirror = Mirror::new(w, h).expect("a mirror");
-        let stream = Stream::new(mirror.coded(), quality).expect("a stream");
+        let stream = Stream::new(mirror.size(), quality).expect("a stream");
         (mirror, stream)
     }
 
@@ -304,29 +283,15 @@ mod tests {
         assert_eq!(stream.decode_string(), Some("vp09.01.40.08.03.06.06.06.00"));
     }
 
-    /// The odd case, which is where a chroma plane would be half a pixel wide if the mirror
-    /// were not held at even sides.
+    /// An odd desktop is encoded at its own size.
     #[test]
-    fn an_odd_desktop_is_padded_and_still_encodes() {
+    fn an_odd_desktop_encodes_at_its_own_size() {
         let (mut mirror, mut stream) = whole(1919, 1079, 60);
         mirror.blit(rect(0, 0, 1919, 1079), &flat(1919, 1079, [90, 90, 90])).expect("a full-screen blit");
-        mirror.pad_edges();
         let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
-        assert_eq!(frame_header(&unit.data).map(|header| header.profile), Some(1));
-    }
-
-    /// A change that reaches an odd desktop's last column or row takes the mirror's
-    /// padding beside it, and no other change is widened.
-    #[test]
-    fn a_change_at_an_odd_desktops_edge_takes_the_padding_with_it() {
-        let odd = Mirror::new(319, 239).expect("a mirror");
-        let coded = |x, y, width, height| screen_vp9::Rect { x, y, width, height };
-        assert_eq!(coded_rect(&odd, rect(10, 20, 30, 40)), coded(10, 20, 30, 40));
-        assert_eq!(coded_rect(&odd, rect(300, 20, 19, 40)), coded(300, 20, 20, 40));
-        assert_eq!(coded_rect(&odd, rect(10, 230, 30, 9)), coded(10, 230, 30, 10));
-        assert_eq!(coded_rect(&odd, rect(0, 0, 319, 239)), coded(0, 0, 320, 240));
-        let even = Mirror::new(320, 240).expect("a mirror");
-        assert_eq!(coded_rect(&even, rect(0, 0, 320, 240)), coded(0, 0, 320, 240));
+        assert_eq!(frame_header(&unit.data).map(|header| header.profile), Some(screen_vp9::PROFILE));
+        let mut decoder = screen_vp9::Decoder::new(1).expect("a decoder");
+        assert_eq!(decoder.decode(&unit.data).expect("a decode").size(), (1919, 1079));
     }
 
     #[test]

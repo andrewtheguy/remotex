@@ -246,8 +246,7 @@ test("a malformed frame is dropped whole", async () => {
 });
 
 test("a frame is cropped to the desktop, drawn at the origin", async () => {
-  // The encoder is held to even sides and an odd desktop does not have them, so the
-  // decoded picture can be a pixel wider or taller than the desktop.
+  // An odd desktop is drawn at its own size from the origin.
   await announced().draw(batchFrame([{ w: 1599, h: 1015, payload: KEYFRAME }]));
   assert.deepEqual(cropped, [{ dx: 0, dy: 0, w: 1599, h: 1015 }]);
   assert.deepEqual(chunkTypes, ["key"]);
