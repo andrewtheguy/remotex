@@ -65,6 +65,86 @@ sharpens within half a second of the desktop going quiet. Measured before it is
 chosen: the cost on the LAN, where most sessions run, against the gain on the link
 it is for.
 
+### Passed streams that adapt, on Windows and the Mac
+
+The goal is a gateway that re-encodes as VP9 only for the servers that are not
+prioritized ([Other servers](architecture.md#other-servers-not-prioritized)) and
+for a browser that cannot take what the remote sends. A wlshare target is there
+already: its stream is always passed, and wlshare walks it by the browser's link.
+Windows and the Mac are not. A passed RDP pipeline follows the browser's link,
+but only by the host's own pacing, so on a slow link it is started without the
+passthrough and sent VP9
+([A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link)).
+A Mac's passed HEVC is for a LAN and stays one: its rate control is the Mac's,
+between 20 and 60 Mbit/s, and it is not to be made to hear the browser. A Mac on
+a slow link is to be served by another passed stream instead. A passed stream has
+to adapt as well as the gateway's VP9 before it can replace it. What is to be
+explored:
+
+- **Standard mode with Adaptive, passed, for a Mac on a slow link.** Standard
+  mode (`ard`), on the Mac's physical displays or on the unofficial virtual
+  display (`virtual_display = true`), is decoded here and always re-encoded
+  today ([Tier 3](architecture.md#tier-3-a-macs-standard-screen-sharing)). Apple's
+  viewer's **Adaptive** quality asks for the Mac's private encodings first, the
+  8×8 DCT tiles of `0x3f3` and the 15-bit zlib of `0x3ea`, before zlib and ZRLE
+  ([Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)).
+  Passed and decoded in the page, they are lossy encodings the Mac chooses
+  itself, and RFB is pulled, one update request at a time, so a request held
+  until the page has drawn the update before it paces the Mac by the browser's
+  link, as wlshare's held fence does. That would make it the slow-link
+  alternative to High Performance's HEVC: the virtual display where the session
+  should follow the window, the physical displays otherwise. What is to be
+  measured is whether the Mac chooses among the encodings, or refines its tiles
+  less, when the link is slow, and how such a session compares on that link with
+  ZRLE re-encoded as VP9.
+- **More of the Windows host's own adapting.** A passed pipeline gets fewer
+  frames from a page that composes slowly, and one step down in RemoteFX
+  Progressive's first pass while the host's socket backs up. H.264 takes no step:
+  its moving regions already go out at the host's coarsest quantizer, so on a
+  slow link only its frame rate drops
+  ([The connection sequence](rdp-client.md#the-connection-sequence)).
+  Network auto-detect and `connectionType` were tried and change nothing, so
+  what is left to try is in the capability advertise and the codecs it offers,
+  measured link by link against the session re-encoded as VP9. A host that draws
+  with bitmap updates (`egfx = false`) could be passed too, for the page to
+  decode.
+- **What Microsoft's iOS client is sent on a slow link.** Against the same
+  host, Microsoft's Remote Desktop client on iOS sees the whole screen soften on
+  a slow link, as video does, where a passed pipeline keeps its text sharp and
+  loses frames. That is presumably H.264 over the whole desktop with a falling
+  bitrate, which only the graphics pipeline carries, but why the host sends it
+  to that client and not to this one is not known. There are two candidates:
+  - **The UDP transport.** Microsoft's clients add an RDP-UDP transport beside
+    TCP, whose bandwidth and round-trip estimates the host's encoder may follow.
+    This client asks for no multitransport. If this is the cause, adapting the
+    same way means implementing MS-RDPEMT and MS-RDPEUDP, which are to be added
+    to ms-rdp-specs first.
+  - **The capability advertise.** The iOS client may set what this one does
+    not: `AVC_THINCLIENT`, which [MS-RDPEGFX section
+    2.2.3.6](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)
+    defines as a client preferring H.264 in YUV444 mode, or another flag or
+    version that has the host draw the desktop with H.264 alone. If this is the
+    cause, the advertise is what changes.
+
+  To be found out on the host, with the iPad on a slow link and a passed
+  session on the same link beside it:
+  - The `RemoteFX Graphics` counters (frame quality and frames skipped for
+    insufficient network, client or server resources) and the `RemoteFX
+    Network` counters (current TCP and UDP bandwidth and round trip), which say
+    what the host is doing and which transport it measures.
+  - The `RemoteDesktopServices-RdpCoreTS/Operational` event log, which records
+    the transport, the graphics version and whether AVC and AVC444 are in use.
+  - The same iOS session with the host held to TCP, by the *Select RDP transport
+    protocols* policy or a firewall rule on UDP 3389. If the whole-screen
+    softening goes, the transport was the cause; if it stays, the advertise.
+  - The iOS client's capability advertise and the codecs the host answers with,
+    read through a recording proxy such as `freerdp-proxy`, which carries TCP
+    alone and so doubles as the test above.
+
+Once a passed stream adapts as well as VP9 on the links measured, the
+passthrough is offered first at the picker, and VP9 remains for a browser that
+cannot take it.
+
 ### How wlshare's passed-through stream is doing
 
 wlshare's passed stream is coded and walked there, so the gateway knows each frame's
@@ -98,17 +178,13 @@ carry the stream.
   announced 5.1 (`L153`) at 2880×1800 and 30 Hz, and 4K at 60 needs 5.1 anyway. So
   the question is to name the level the Mac announces, measured in Chrome and
   Safari, rather than the one macwork's first capture did.
-- **The browser's queue in the reported delay.** The delay reported to the Mac
-  ends at the gateway's socket. For a passed stream, whose picture nothing here
-  re-encodes, the delay that matters runs on to the browser, which the gateway
-  knows from its paint window (`src/feedback.rs`). Adding it would let the Mac's
-  controller answer a browser link that falls behind, which today drops to the
-  next IDR instead.
 
 None of it has been measured at 4K.
 
-A slow link is not a passed stream's to answer. A browser on one is served by a
-session started without the passthrough, whose VP9 the adaptive walk lowers; a passed
+A slow link is not the passed HEVC's to answer. A browser on one is served by a
+session started without the passthrough, whose VP9 the adaptive walk lowers, and
+later by a passed Standard mode with Adaptive
+([Passed streams that adapt](#passed-streams-that-adapt-on-windows-and-the-mac)); a passed
 session is not switched to VP9 for it. A brief stall stays what it is: the Mac's
 units predict from every one
 before, so none can be dropped alone, and a full queue drops to the next IDR and

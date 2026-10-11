@@ -130,10 +130,14 @@ The host's own stream, passed through to the browser for a LAN:
   [Apple's media stream, passed through](#apples-media-stream-passed-through).
 
 The passthrough is a choice made at the picker, greyed for a browser that cannot
-take the stream. A passed stream does not adapt to a slow link: the Mac's own
-rate control keeps it between 20 and 60 Mbit/s, and a Windows host's pipeline is
-sent as drawn. A session started without it is the gateway's VP9, which does
-adapt and is the answer for a slow link. VP9 also serves a browser that cannot
+take the stream. A Windows host's passed pipeline follows the browser's link by
+the host's own pacing: fewer frames for a page that composes slowly, and smaller
+ones while its socket backs up. A Mac's passed HEVC does not: its rate control
+keeps it between 20 and 60 Mbit/s by the link to the gateway alone, so on a slow
+link a High Performance session is started without it and sent the gateway's
+VP9, which adapts. See
+[A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
+VP9 also serves a browser that cannot
 decode the Mac's stream, and a Windows host that draws with plain bitmap updates
 rather than the pipeline. On RDP the passthrough is the only way past VP9:
 without it the gateway composes the host's pipeline, or takes its bitmap updates,
@@ -1506,10 +1510,10 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   adapts to the browser.
 - **A Mac** walks its HEVC by the one-way delay to the gateway, which on a LAN is
   never behind. A browser that falls behind fills the gateway's queue, which drops
-  to the next IDR and asks the Mac for one. Adding the browser's queue to the
-  reported delay is [on the roadmap](roadmap.md#apples-passed-hevc-at-4k); until
-  then a slow link wants a session started without the passthrough, whose VP9 the
-  walk follows.
+  to the next IDR and asks the Mac for one. The passthrough is for a LAN; a slow
+  link wants a session started without it, whose VP9 the walk follows. A passed
+  Standard mode with Apple's Adaptive encodings, as the slow-link alternative, is
+  [on the roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac).
 - **Other VNC servers**, a plain `vnc` target included even when wlshare answers
   it, and a Mac in Standard mode, have no passed stream: their picture is always
   encoded here, and the walk follows the browser's link wherever `render_adaptive`
