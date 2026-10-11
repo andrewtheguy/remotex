@@ -12,7 +12,7 @@ This is a manual probe for display selection and dynamic-resolution behavior. St
         --port 52675 --target sandbox2highperf --user admin --resize \
         --viewport 1366x768 --viewport 1920x1080
 
-``--resize``, ``--sound``, ``--passthrough``, ``--software``, ``--whole`` and ``--placement`` are what the picker's
+``--resize``, ``--sound``, ``--passthrough``, ``--whole`` and ``--placement`` are what the picker's
 Start would carry: the session is started with each one named, and with none otherwise. Without
 ``--resize`` the desktop is kept at the target's size: its configured one, or the
 default.
@@ -327,12 +327,6 @@ async def main() -> int:
         "long the desktop is left at each size",
     )
     parser.add_argument(
-        "--software",
-        action="store_true",
-        help="start a High Performance Mac passed with --passthrough decoded in the "
-        "page's own HEVC decoder; the gateway must have that decoder ([hevc_wasm])",
-    )
-    parser.add_argument(
         "--whole",
         action="store_true",
         help="ask a High Performance Mac started with --passthrough for one tile, each "
@@ -343,6 +337,13 @@ async def main() -> int:
         action="store_true",
         help="state that this client decodes a High Performance Mac's HEVC and AAC-ELD, "
         "which a session started with --passthrough is served to no other",
+    )
+    parser.add_argument(
+        "--page-hevc",
+        action="store_true",
+        help="state that this client's page runs the software HEVC decoder, which takes "
+        "the Mac's picture --passthrough passes where --apple-media is not given, on a "
+        "gateway that serves that decoder ([hevc_wasm])",
     )
     parser.add_argument(
         "--rdp-graphics",
@@ -375,19 +376,20 @@ async def main() -> int:
 
     # The session socket requires the browser's answers about itself; the probe stands
     # in for a decoder that takes VP9 profile 1, as a desktop browser does, takes the
-    # Mac's stream only with --apple-media and composes an RDP pipeline only with
-    # --rdp-graphics. It decodes no H.264, so a pipeline passed to it carries none.
+    # Mac's stream only with --apple-media or --page-hevc and composes an RDP pipeline
+    # only with --rdp-graphics. It decodes no H.264, so a pipeline passed to it carries
+    # none.
     apple_media = "true" if args.apple_media else "false"
+    page_hevc = "true" if args.page_hevc else "false"
     rdp_graphics = "true" if args.rdp_graphics else "false"
     url = (
         f"ws://127.0.0.1:{args.port}/ws?session={token}"
-        f"&apple_media={apple_media}&rdp_graphics={rdp_graphics}&rdp_h264=false"
+        f"&apple_media={apple_media}&page_hevc={page_hevc}&rdp_graphics={rdp_graphics}&rdp_h264=false"
     )
     choices = {
         "size": "window" if args.resize else "target",
         "audio": args.sound,
         "passthrough": args.passthrough,
-        "software": args.software,
         "whole": args.whole,
         "placement": args.placement,
     }

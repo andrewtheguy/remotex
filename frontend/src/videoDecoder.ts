@@ -37,9 +37,9 @@ import type { VideoStrip } from "./protocol.ts";
 import {
   createSoftwareDecoder,
   type DecodedPicture,
-  MODULE_CODEC,
   type PictureStrip,
   pageModuleFor,
+  type SoftwareModule,
   type VideoDecoderLike,
   type VideoDecoderLikeInit,
 } from "./softwareDecoder.ts";
@@ -53,13 +53,13 @@ import type { PageDecoding } from "./softwareSupport.ts";
  */
 export interface VideoFormat {
   decode: string;
-  /**
-   * BETA: a Mac's HEVC is decoded in the page's software decoder for it
-   * (softwareDecoder.ts) and not in the browser's `VideoDecoder`: the session was
-   * started so, and the gateway says it to every page attached.
-   */
-  software?: boolean;
 }
+
+/** What the browser's own decoder refused, which each module stands in for. */
+const REFUSED: Record<SoftwareModule, string> = {
+  hevc: "the Mac's HEVC",
+  vp9: "the gateway's 4:4:4 VP9",
+};
 
 /** The desktop's decoder, rebuilt as the stream it decodes starts over. */
 export interface DesktopVideo {
@@ -110,12 +110,12 @@ export function createDesktopVideo(
   /**
    * How this page decodes (softwareSupport.ts, nativeVp9.ts). A stream the page
    * decodes itself in a module it cannot run is not decoded: the browser's own
-   * decoder does not stand in for a module the session chose, and refuses by
-   * name the VP9 the module was to decode.
+   * decoder has already said it does not take that stream.
    */
   decoding: PageDecoding = {
     runs: { hevc: false, vp9: false },
     nativeVp9: true,
+    nativeHevc: true,
   },
 ): DesktopVideo {
   interface Live {
@@ -152,22 +152,18 @@ export function createDesktopVideo(
   // for the browser's own. Null for one it would decode and cannot, which is said
   // and not decoded.
   const softwareDecoderFor = (format: VideoFormat) => {
-    const module = pageModuleFor(format, decoding.nativeVp9);
+    const module = pageModuleFor(format.decode, decoding);
     if (module === undefined) {
       return undefined;
     }
-    if (module !== null && decoding.runs[module]) {
+    if (decoding.runs[module]) {
       return (init: VideoDecoderLikeInit) =>
         createSoftwareDecoder(module, init);
     }
     if (!said) {
       said = true;
       handlers.onError(
-        module === null
-          ? `This session's picture is decoded by this page, which has no decoder for ${format.decode}.`
-          : module === "vp9"
-            ? "This browser's own decoder does not take the gateway's 4:4:4 VP9, and this page cannot run its own: that needs WebGL 2 and a cross-origin isolated page."
-            : `This session's picture is decoded by this page's ${MODULE_CODEC[module]} decoder, which this browser cannot run: it needs WebGL 2 and a cross-origin isolated page. End the session and start it without "Decode ${MODULE_CODEC[module]} in this page".`,
+        `This browser's own decoder does not take ${REFUSED[module]}, and this page cannot run its own: that needs WebGL 2 and a cross-origin isolated page.`,
         false,
         format.decode,
       );
@@ -247,11 +243,7 @@ export function createDesktopVideo(
       format = next;
       warned = false;
       said = false;
-      if (
-        live &&
-        (live.format.decode !== next.decode ||
-          live.format.software !== next.software)
-      ) {
+      if (live && live.format.decode !== next.decode) {
         // A stream that came back configured differently — a resize is the way this
         // happens — is a new chain, and its old decoder cannot decode it.
         dropDecoder();

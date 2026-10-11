@@ -212,10 +212,6 @@ pub struct RenderPlan {
     /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
     /// [`Self::rdp_graphics`].
     pub rdp_h264: bool,
-    /// BETA: every attached page decodes the Mac's passed HEVC in its own
-    /// software decoder, as each `videoFormat` of it then says
-    /// ([`Choices::software`], [`page_decodes`]).
-    pub software: bool,
     /// EXPERIMENTAL: what is encoded here is coded by screen-vp9's encoder in
     /// Rust rather than libvpx ([`TargetConfig::experimental_native_vp9`]), in a
     /// build that has it.
@@ -274,16 +270,6 @@ impl Passthrough {
     }
 }
 
-/// Whether a stream announced as `decode`, a WebCodecs configuration string, is
-/// decoded by every attached page in its own software decoder: a Mac's HEVC, in
-/// a session whose plan says so ([`RenderPlan::software`]). The VP9 encoded here
-/// never is: each page decodes that in the browser's own decoder where it takes
-/// profile 1 and in its WebAssembly one where it does not, which is the page's
-/// to know and no session's.
-pub fn page_decodes(software: bool, decode: &str) -> bool {
-    software && (decode.starts_with("hev1.") || decode.starts_with("hvc1."))
-}
-
 /// Which choices the picker shows under a target: what its type has to offer, from
 /// [`TargetConfig::offers`]. One that is not offered has no row there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,12 +314,6 @@ pub struct Choices {
     /// Where the second virtual display sits.
     #[serde(default)]
     pub placement: Placement,
-    /// BETA: decode a Mac's passed HEVC in the page's software decoder
-    /// (andrewtheguy/hevc-wasm, which a gateway that has its archive serves) and
-    /// not in the browser's own. Refused where the gateway has no such decoder or
-    /// the session passes no Mac's picture ([`TargetConfig::accepts_software`]).
-    #[serde(default)]
-    pub software: bool,
     /// Ask a High Performance Mac whose picture is passed for one tile, each
     /// picture the whole display, and not the four strips such a session is
     /// offered ([`crate::vnc_apple_media::Receive::Pass`]). No picker names it:
@@ -470,8 +450,10 @@ pub struct NotOffered {
 /// decoder refuses profile 1 decodes it in WebAssembly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decoders {
-    /// Whether it decodes a High Performance Mac's picture: the HEVC, Range
-    /// Extensions 4:4:4 ([`Passthrough::AppleMedia`]).
+    /// Whether it decodes a High Performance Mac's picture, the HEVC, Range
+    /// Extensions 4:4:4 ([`Passthrough::AppleMedia`]): in the browser's own
+    /// decoder, or, where that refuses it, in the page's WebAssembly one this
+    /// gateway serves (BETA, [`Self::stated`]).
     pub apple_media: bool,
     /// Whether it composes an RDP host's graphics pipeline
     /// ([`Passthrough::RdpGraphics`]): the page's compositor needs shared memory,
@@ -485,6 +467,16 @@ pub struct Decoders {
 }
 
 impl Decoders {
+    /// What a browser stated on its session socket, as this gateway reads it.
+    /// `native_hevc` is whether its own decoder takes a Mac's HEVC, and
+    /// `page_hevc` whether its page runs the software HEVC decoder, which counts
+    /// where this gateway serves that decoder (`serves_hevc`): a page whose own
+    /// decoder refuses the HEVC then decodes it there, as one whose own decoder
+    /// refuses the VP9 does in its VP9 module, and the gateway is not told which.
+    pub fn stated(native_hevc: bool, page_hevc: bool, serves_hevc: bool, rdp_graphics: bool, rdp_h264: bool) -> Self {
+        Self { apple_media: native_hevc || (page_hevc && serves_hevc), rdp_graphics, rdp_h264 }
+    }
+
     /// Whether this browser can be served `passthrough`.
     pub fn takes(self, passthrough: Passthrough) -> bool {
         match passthrough {
@@ -501,12 +493,6 @@ impl Decoders {
 }
 
 impl RenderPlan {
-    /// This plan for a session whose pages decode a Mac's passed HEVC themselves
-    /// ([`TargetConfig::software_chosen`]).
-    pub fn decoded_by_page(self, software: bool) -> Self {
-        Self { software, ..self }
-    }
-
     /// The stream this plan passes untouched, if any.
     pub fn passthrough(&self) -> Option<Passthrough> {
         if self.apple_media {
@@ -904,40 +890,14 @@ impl TargetConfig {
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
         let rdp_h264 = rdp_graphics && self.egfx_h264 && decoders.rdp_h264;
-        RenderPlan { quality, adaptive, apple_media, rdp_graphics, rdp_h264, software: false, native_vp9: self.experimental_native_vp9 }
+        RenderPlan { quality, adaptive, apple_media, rdp_graphics, rdp_h264, native_vp9: self.experimental_native_vp9 }
     }
 
-    /// BETA: whether a session on this target can have a Mac's passed HEVC
-    /// decoded in the page's software decoder, where the gateway has it
-    /// (`page_hevc`): on a target with a Mac's picture to pass.
+    /// BETA: whether a page whose own decoder refuses this target's passed HEVC
+    /// can decode it in the software decoder the gateway serves, where it serves
+    /// one (`page_hevc`): on a target with a Mac's picture to pass.
     pub fn software(&self, page_hevc: bool) -> bool {
         page_hevc && self.offers().passthrough == Some(Passthrough::AppleMedia)
-    }
-
-    /// Whether a session started with `choices` has its pages decode the Mac's
-    /// HEVC themselves: where it chose so and passes the Mac's picture.
-    pub fn software_chosen(&self, choices: Choices, page_hevc: bool) -> bool {
-        choices.software
-            && self.passthrough(choices) == Some(Passthrough::AppleMedia)
-            && self.software(page_hevc)
-    }
-
-    /// Whether `choices`' software decoding is something this target and the
-    /// gateway have for the session. One that asks where the page's decoder would
-    /// decode nothing, beside no passthrough or a passthrough of another stream
-    /// included, is refused, not started on the browser's own decoder.
-    pub fn accepts_software(&self, choices: Choices, page_hevc: bool) -> Result<(), NotOffered> {
-        if choices.software && !self.software_chosen(choices, page_hevc) {
-            return Err(NotOffered { target: self.name.clone(), choice: "decoding in the page" });
-        }
-        Ok(())
-    }
-
-    /// The passthrough a session started with `choices` runs on that `decoders`'
-    /// browser cannot take, given whether its pages decode the Mac's HEVC
-    /// themselves (`software`): such a page takes it whatever its own decoder says.
-    pub fn beyond_page(&self, choices: Choices, decoders: Decoders, software: bool) -> Option<Passthrough> {
-        self.beyond(choices, decoders).filter(|passthrough| !(software && *passthrough == Passthrough::AppleMedia))
     }
 
     /// The choices the picker shows under this target.
@@ -2804,12 +2764,11 @@ mod tests {
         }
     }
 
-    /// A session has a Mac's passed HEVC decoded by its pages' own decoder where
-    /// it chose that, passes the Mac's picture, and the gateway has the decoder.
-    /// A choice that would decode nothing in the page is refused by name: the VP9
-    /// encoded here is every page's own to decode, never the session's.
+    /// A page whose own decoder refuses a Mac's HEVC takes the Mac's passed
+    /// picture where it runs the software decoder and the gateway serves it, and
+    /// the gateway is not told which of the two decodes it.
     #[test]
-    fn a_session_is_decoded_by_the_page_where_the_gateway_and_the_target_have_the_decoder() {
+    fn a_page_takes_a_macs_picture_in_its_own_decoder_where_the_gateway_serves_it() {
         let target = |keys: &str| parse_target(keys).unwrap().targets.remove(0);
         let auto = target("");
         let mac = ConfigFile::parse(&vnc_toml(
@@ -2823,34 +2782,12 @@ mod tests {
         assert!(mac.software(true));
         assert!(!mac.software(false), "not on a gateway without the decoder");
 
-        let chosen = Choices { software: true, ..Choices::default() };
-        let passed = Choices { passthrough: true, ..chosen };
-        assert!(!mac.software_chosen(Choices { software: false, ..passed }, true), "only where chosen");
-        assert!(!mac.software_chosen(chosen, true), "its HEVC is not passed");
-        assert!(mac.software_chosen(passed, true));
-        assert!(!mac.software_chosen(passed, false));
-        assert!(!auto.software_chosen(passed, true), "a passed pipeline is no video");
-
-        assert_eq!(auto.accepts_software(Choices::default(), false), Ok(()));
-        assert_eq!(mac.accepts_software(passed, true), Ok(()));
-        for (target, choices, page_hevc) in [(&auto, chosen, true), (&mac, chosen, true), (&auto, passed, true), (&mac, passed, false)] {
-            let refused = target.accepts_software(choices, page_hevc).unwrap_err();
-            assert_eq!(refused.choice, "decoding in the page");
-            assert!(refused.to_string().contains("does not offer decoding in the page"), "{refused}");
-        }
-
-        let declines = Decoders { apple_media: false, rdp_graphics: false, rdp_h264: false };
-        let plan = mac.render_plan(passed, declines).decoded_by_page(mac.software_chosen(passed, true));
-        assert!(plan.software);
-        // A Mac's passed picture is not beyond a page that decodes it itself.
-        assert_eq!(mac.beyond_page(passed, declines, false), Some(Passthrough::AppleMedia));
-        assert_eq!(mac.beyond_page(passed, declines, true), None);
-
-        // Only the Mac's HEVC, and only under such a plan, is the page's to decode.
-        assert!(page_decodes(true, "hev1.4.10.L150.BE.8"));
-        assert!(page_decodes(true, "hvc1.4.10.L150.BE.8"));
-        assert!(!page_decodes(true, "vp09.01.40.08.03.06.06.06.00"), "the VP9 is each page's own to decode");
-        assert!(!page_decodes(false, "hev1.4.10.L150.BE.8"));
+        let stated = |native_hevc, page_hevc, serves_hevc| Decoders::stated(native_hevc, page_hevc, serves_hevc, false, false);
+        let passed = Choices { passthrough: true, ..Choices::default() };
+        assert_eq!(mac.beyond(passed, stated(true, false, false)), None, "the browser's own decoder");
+        assert_eq!(mac.beyond(passed, stated(false, true, true)), None, "the page's decoder");
+        assert_eq!(mac.beyond(passed, stated(false, true, false)), Some(Passthrough::AppleMedia), "not served");
+        assert_eq!(mac.beyond(passed, stated(false, false, true)), Some(Passthrough::AppleMedia), "cannot run it");
     }
 
     /// The VP9 is 4:4:4 and the page decodes it where the browser does not, so
@@ -3168,7 +3105,6 @@ mod tests {
                 apple_media: false,
                 rdp_graphics: false,
                 rdp_h264: false,
-                software: false,
                 native_vp9: false,
             }
         );
@@ -3185,7 +3121,6 @@ mod tests {
                 apple_media: false,
                 rdp_graphics: false,
                 rdp_h264: false,
-                software: false,
                 native_vp9: false,
             }
         );
@@ -4290,7 +4225,7 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80 · libvpx · adaptive");
     }
 
@@ -4302,7 +4237,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80 · libvpx");
     }
 

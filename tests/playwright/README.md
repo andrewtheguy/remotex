@@ -62,12 +62,13 @@ towards the display beside it is open and every outer edge still clamps the
 pointer, without judging whether a remote window visibly followed the drag.
 
 `software-hevc.spec.ts` is the BETA software HEVC decoder, in a High
-Performance session started with the Mac's stream passed and *Decode in this
-page* chosen at the picker. Against a gateway that has the decoder's archive it
-asserts that the gateway lists the target as offering the decoder, that Start
-sends both choices, that the gateway passes the HEVC and says with its format
-that this page decodes it, that the decode worker loads the decoder and nothing
-asks for it beforehand, and that the first passed keyframe's batch is
+Performance session started with the Mac's stream passed from Playwright's
+Chromium, whose own decoder refuses the Mac's HEVC. Against a gateway that has
+the decoder's archive it asserts that the gateway lists the target as offering
+the decoder, that the session socket states the browser's own decoder's "no"
+and the page's "yes", that Start sends the passthrough, that the gateway passes
+the HEVC, that the decode worker loads the decoder and nothing asks for it
+beforehand, and that the first passed keyframe's batch is
 acknowledged with no video error or repaint request before it — an ordering, not
 a timing, because a failed decoder reports before the paint worker acknowledges.
 Against a gateway without the archive it asserts the other decision, in a

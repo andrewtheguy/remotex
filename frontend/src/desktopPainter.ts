@@ -17,6 +17,7 @@
 // handlers, and only a *new* canvas element (a full remount) replaces the
 // worker — at which point the old one holds the bitmap of an element that is
 // gone, and is terminated rather than left decoding for it.
+import { decodesAppleMedia } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
@@ -163,7 +164,11 @@ export function desktopPainterFor(
       type: "init",
       canvas: offscreen,
       graphics: offscreenGraphics,
-      decoding: { runs: runnableDecoders(), nativeVp9: nativeVp9() },
+      decoding: {
+        runs: runnableDecoders(),
+        nativeVp9: nativeVp9(),
+        nativeHevc: decodesAppleMedia(),
+      },
     },
     [offscreen, offscreenGraphics],
   );

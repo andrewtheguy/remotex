@@ -170,9 +170,6 @@ enum Pending {
 /// line the task logged on its own way out would be cancelled before it printed.
 struct Shared {
     oversize: Oversize,
-    /// Whether the session's pages decode a Mac's passed HEVC themselves, which
-    /// each `VideoFormat` of it says ([`RenderPlan::software`]).
-    software: bool,
     /// Whether the desktop's picture is held — see [`Oversize`]. Decided by each
     /// `Resize` ([`VideoSink::msg`]).
     oversized: AtomicBool,
@@ -255,10 +252,9 @@ struct Shared {
 
 impl Shared {
     fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>, oversize: Oversize) -> Self {
-        let RenderPlan { quality, adaptive, software, native_vp9, .. } = plan;
+        let RenderPlan { quality, adaptive, native_vp9, .. } = plan;
         Self {
             oversize,
-            software,
             oversized: AtomicBool::new(false),
             too_many_screens: AtomicBool::new(false),
             failure: Mutex::default(),
@@ -647,8 +643,7 @@ impl VideoSink {
             self.shared.keyframe_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
         if let Some(decode) = announce {
-            let software = crate::config::page_decodes(self.shared.software, &decode);
-            self.push(Pending::Msg(ServerMsg::VideoFormat { decode, passthrough: true, software, strips })).await?;
+            self.push(Pending::Msg(ServerMsg::VideoFormat { decode, passthrough: true, strips })).await?;
         }
         let unit = VideoUnit { w, h, strip: passed.strip, keyframe: passed.keyframe, data: frame, held };
         self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
@@ -1016,8 +1011,7 @@ async fn order_loop(
         // that needs it arrives. Sent here rather than pushed, because this *is* the
         // ordered task: nothing queued behind this round can overtake it.
         if let Some(decode) = produced.format {
-            let software = crate::config::page_decodes(shared.software, &decode);
-            let msg = ServerMsg::VideoFormat { decode, passthrough: false, software, strips: 1 };
+            let msg = ServerMsg::VideoFormat { decode, passthrough: false, strips: 1 };
             if frame_tx.send(msg).await.is_err() {
                 break;
             }
@@ -1177,7 +1171,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1536,30 +1530,6 @@ mod tests {
             }
         }
         out
-    }
-
-    /// The VP9 encoded here is each page's own to decode, so its formats never say the
-    /// session's pages decode it, even in a session whose pages decode a Mac's HEVC.
-    #[tokio::test]
-    async fn the_vp9_encoded_here_is_never_the_sessions_to_decode() {
-        let plan = RenderPlan { apple_media: true, software: true, ..VIDEO };
-        let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = VideoSink::new("test", frame_tx, plan, feedback(), Oversize::Refuse);
-        sink.msg(ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED }).await.unwrap();
-        let area = rect(0, 0, 320, 64);
-        for round in 1..=2 {
-            sink.reset_render();
-            sink.damage(area, &rgb(area.w(), area.h(), round)).await.unwrap();
-            sink.frame().await.unwrap();
-            sink.flush().await;
-        }
-        let formats: Vec<_> = std::iter::from_fn(|| frame_rx.try_recv().ok())
-            .filter_map(|msg| match msg {
-                ServerMsg::VideoFormat { decode, software, .. } => Some((decode.starts_with("vp09.01."), software)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(formats, [(true, false), (true, false)]);
     }
 
     /// The `VideoFormat` contract, which is the whole of what a client needs to build a decoder:
@@ -1921,7 +1891,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2048,7 +2018,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

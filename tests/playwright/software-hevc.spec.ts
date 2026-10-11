@@ -1,11 +1,11 @@
 // BETA: the software HEVC decoder (frontend/src/softwareDecoder.ts), which a
 // gateway that has its release archive serves at /hevc/ and which decodes a High
-// Performance Mac's passed stream in a session started with "Decode HEVC in this page"
-// at the picker.
+// Performance Mac's passed stream in a page whose browser's own decoder refuses
+// it, as Playwright's Chromium does. No picker row chooses it.
 //
 // What is asserted is what the system decides: what the gateway lists the target
-// as offering, what Start sends, what the gateway then announces — the passed
-// stream, and that this page decodes it — which files the page loads, and — for
+// as offering, what the session socket states, what Start sends, what the gateway
+// then announces — the passed stream — which files the page loads, and — for
 // the one claim about decoding itself — that the first passed keyframe's batch was
 // acknowledged with no decoder failure before it. That last holds by ordering, not
 // timing: a failed decoder settles its unit and reports the failure in the same
@@ -49,9 +49,11 @@ const VIDEO_KEYFRAME = 0x01;
 interface Session {
   /** The session socket's `apple_media`: the browser's own decoder's answer. */
   appleMedia?: string;
+  /** The session socket's `page_hevc`: whether the page runs the decoder. */
+  pageHevc?: string;
   /** The `choices` of every `connect` the page sent. */
-  connects: { passthrough?: boolean; software?: boolean }[];
-  formats: { decode: string; passthrough: boolean; software: unknown }[];
+  connects: Record<string, unknown>[];
+  formats: { decode: string; passthrough: boolean }[];
   /** The sequence of the first batch that opens with a keyframe after a passed format. */
   passedKeyframe?: number;
   /** Every `paintAck` sequence the page sent. */
@@ -86,6 +88,7 @@ function watchSession(page: Page): Session {
     const url = new URL(ws.url());
     if (url.pathname === "/ws") {
       seen.appleMedia = url.searchParams.get("apple_media") ?? undefined;
+      seen.pageHevc = url.searchParams.get("page_hevc") ?? undefined;
       ws.on("framesent", ({ payload }) => {
         if (typeof payload === "string") {
           const message = JSON.parse(payload);
@@ -106,7 +109,6 @@ function watchSession(page: Page): Session {
           seen.formats.push({
             decode: message.decode,
             passthrough: message.passthrough === true,
-            software: message.software,
           });
         }
         return;
@@ -159,28 +161,25 @@ test.describe("a High Performance target and the page's software decoder", () =>
     await leaveSession(page);
   });
 
-  test("with the decoder served and chosen, the passed stream is decoded in the page", async ({
+  test("with the decoder served, a browser whose own refuses the HEVC decodes the passed stream in the page", async ({
     page,
   }) => {
     test.skip(!SERVES_DECODER, "the gateway has no decoder archive");
     const seen = watchSession(page);
     await logInAndConnectTo(page, HEVC_TARGET ?? "", "", {
       passthrough: true,
-      software: true,
     });
 
     expect(await offered(page)).toBe(true);
     expect(await page.evaluate(() => globalThis.crossOriginIsolated)).toBe(true);
-    expect(seen.connects.at(-1)).toMatchObject({
-      passthrough: true,
-      software: true,
-    });
+    expect(seen.appleMedia, "this browser's own decoder").toBe("false");
+    expect(seen.pageHevc, "this page's").toBe("true");
+    expect(seen.connects.at(-1)?.passthrough).toBe(true);
     await expect
       .poll(() => seen.formats.some((f) => f.passthrough), { timeout: 20_000 })
       .toBe(true);
     for (const format of seen.formats.filter((f) => f.passthrough)) {
       expect(format.decode).toMatch(/^hev1\./);
-      expect(format.software, "told to decode it in the page").toBe(true);
     }
 
     // The first passed keyframe, acknowledged: decoded, or failed and said so first.

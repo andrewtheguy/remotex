@@ -781,9 +781,6 @@ impl State {
 pub struct SessionManager {
     /// Every target profile the browser may pick from the picker.
     targets: Vec<TargetConfig>,
-    /// BETA: whether this gateway serves the page's HEVC decoder, for a session
-    /// to choose ([`Choices::software`]).
-    page_hevc: bool,
     spawn_engine: EngineSpawner,
     /// The slot's one link-feedback handle, shared between whichever ws bridge is
     /// attached (writer) and whichever engine is running (reader). One rather than
@@ -802,29 +799,8 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub fn new(targets: Vec<TargetConfig>, page_hevc: bool) -> Self {
-        Self { page_hevc, ..Self::with_spawner(targets, Box::new(spawn_engine)) }
-    }
-
-    /// Test seam: the manager with or without the page's HEVC decoder.
-    #[cfg(test)]
-    pub(crate) fn with_page_hevc(self, page_hevc: bool) -> Self {
-        Self { page_hevc, ..self }
-    }
-
-    /// The plan a session of `selected` runs for a browser that said `decoders`:
-    /// the target's, and decoded by the page where the session chose that.
-    fn plan(&self, selected: &Selected, decoders: Decoders) -> RenderPlan {
-        let Selected { target, choices } = selected;
-        target
-            .render_plan(*choices, decoders)
-            .decoded_by_page(target.software_chosen(*choices, self.page_hevc))
-    }
-
-    /// The passthrough of a session of `target` started with `choices` that a
-    /// browser saying `decoders` cannot take, its own decoder and the page's both.
-    fn beyond(&self, target: &TargetConfig, choices: Choices, decoders: Decoders) -> Option<Passthrough> {
-        target.beyond_page(choices, decoders, target.software_chosen(choices, self.page_hevc))
+    pub fn new(targets: Vec<TargetConfig>) -> Self {
+        Self::with_spawner(targets, Box::new(spawn_engine))
     }
 
     /// The selected target's position in the `[[targets]]` list, `None` on the picker.
@@ -838,7 +814,6 @@ impl SessionManager {
         let state = State::default();
         Self {
             targets,
-            page_hevc: false,
             spawn_engine,
             feedback: Arc::new(LinkFeedback::new()),
             selected_index: Arc::clone(&state.selected_index),
@@ -1012,7 +987,7 @@ impl SessionManager {
         // The session's passthrough, where this browser said it cannot take it:
         // nothing the engine sends could be shown here, and what to start
         // instead is a choice, which is made at the picker.
-        let beyond = st.selected.as_ref().and_then(|s| self.beyond(&s.target, s.choices, decoders));
+        let beyond = st.selected.as_ref().and_then(|s| s.target.beyond(s.choices, decoders));
         if beyond.is_some() {
             info!("session: this browser cannot take the session's passthrough; the session ends");
             st.take_engine();
@@ -1669,11 +1644,9 @@ impl SessionManager {
                     return Err(ConnectError::UnknownTarget(target_name.to_owned()));
                 }
             };
-            let offered =
-                target.accepts(choices).and_then(|()| target.accepts_software(choices, self.page_hevc));
-            let refused = match offered {
+            let refused = match target.accepts(choices) {
                 Err(not_offered) => Some(ConnectError::NotOffered(not_offered)),
-                Ok(()) => self.beyond(&target, choices, decoders).map(ConnectError::Beyond),
+                Ok(()) => target.beyond(choices, decoders).map(ConnectError::Beyond),
             };
             if let Some(refused) = refused {
                 Self::notify(st.client.as_ref(), ServerMsg::Error { message: refused.to_string() });
@@ -1755,7 +1728,7 @@ impl SessionManager {
         // Resolved once, here, and handed to the engine rather than resolved again
         // there: the card and the encoder are then the same plan by construction,
         // and cannot disagree about the colour a browser is being sent.
-        let plan = self.plan(&selected, decoders);
+        let plan = target.render_plan(*choices, decoders);
         let render = plan.describe();
         info!("session: connecting to target {:?} ({render})", target.name);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -2145,11 +2118,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false, placement: Placement::Right, software: false, whole: false };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false, placement: Placement::Right, whole: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false, placement: Placement::Right, software: false, whole: false };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false, placement: Placement::Right, whole: false };
     /// A session started with nothing but the target's passthrough.
-    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true, placement: Placement::Right, software: false, whole: false };
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true, placement: Placement::Right, whole: false };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -2179,7 +2152,7 @@ mod tests {
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
             let size = if self.resize { Sizing::Window } else { Sizing::Target };
-            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false, placement: Placement::Right, software: false, whole: false }
+            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false, placement: Placement::Right, whole: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -2577,42 +2550,6 @@ mod tests {
         }
     }
 
-    /// A session started with a Mac's picture passed and decoded by its pages has
-    /// the engine told so. On a gateway without the page's HEVC decoder the same
-    /// `connect` is refused by name and starts nothing.
-    #[tokio::test]
-    async fn a_session_decoded_by_the_page_is_told_to_the_engine() {
-        let chosen = Choices { passthrough: true, software: true, ..Choices::default() };
-        let manager = |page_hevc| {
-            let (hook_tx, hook_rx) = std_mpsc::channel();
-            let spawner: EngineSpawner = Box::new(
-                move |_target, _choices, plan, _display, _input_rx, _frame_tx, _audio, _camera, _feedback| {
-                    hook_tx.send(plan).unwrap();
-                },
-            );
-            let targets = vec![mac_target("mac")];
-            (Arc::new(SessionManager::with_spawner(targets, spawner).with_page_hevc(page_hevc)), hook_rx)
-        };
-
-        let (mgr, plans) = manager(true);
-        let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, DECLINES).await.unwrap();
-        expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "mac", None, chosen).await.unwrap();
-        let plan = plans.try_recv().unwrap();
-        assert!(plan.apple_media && plan.software);
-
-        let (mgr, plans) = manager(false);
-        let token = mgr.claim(false, None, "login").unwrap();
-        let mut att = mgr.attach(&token, None, TAKES).await.unwrap();
-        expect_picker(&mut att.events).await;
-        match mgr.connect(att.id, "mac", None, chosen).await {
-            Err(ConnectError::NotOffered(refused)) => assert_eq!(refused.choice, "decoding in the page"),
-            other => panic!("expected a refusal, got {other:?}"),
-        }
-        assert!(plans.try_recv().is_err(), "a refused connect started an engine");
-    }
-
     /// A High Performance Mac, which offers its media stream to pass.
     fn mac_target(name: &str) -> TargetConfig {
         TargetConfig { subtype: Some(Subtype::ArdHighPerformance), ..video_target(name) }
@@ -2699,7 +2636,7 @@ mod tests {
                 },
             );
             let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true, placement: Placement::Right, software: false, whole: false };
+            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true, placement: Placement::Right, whole: false };
 
             let token_a = mgr.claim(false, None, "login").unwrap();
             let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();

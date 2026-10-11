@@ -116,7 +116,6 @@ test.describe("the picker's options", () => {
         audio: "off",
         passthrough: false,
         placement: "right",
-        software: false,
       },
     ]);
     const connected = seen.statuses.at(-1);

@@ -1339,8 +1339,8 @@ the offer's, whatever the display's size.
   own, in the decoding order, under the display's size, with its number and
   whether it is the last of its frame, which the gateway knows as it knows when
   to show a frame it decodes, and the page puts the display together and shows
-  it at each frame's last strip: in its own decoder, in a session started with
-  *Decode HEVC in this page*, and otherwise from the pictures the browser's
+  it at each frame's last strip: in its own decoder, where the browser's own
+  refuses the HEVC, and otherwise from the pictures the browser's
   `VideoDecoder` outputs, one a strip, each drawn whole under a clip of the
   display: WebKit's canvas reads no source rectangle of a `VideoFrame`, and a
   last strip cut by one came squeezed, with the rows past the display in it.

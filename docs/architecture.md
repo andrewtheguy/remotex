@@ -453,7 +453,7 @@ that selects the stream. See
 - The passthrough on `ard-high-performance` passes the Mac's picture
   unaltered, for a LAN: HEVC access units on the display socket. It is offered
   at the picker to a browser that said it decodes the HEVC, or whose page
-  decodes it ([Decoded in the page](#decoded-in-the-page)); a session started
+  can decode it ([Decoded in the page](#decoded-in-the-page)); a session started
   without it is sent VP9. The sound is not part of the choice: AAC-ELD units go
   on `/ws/audio` either way. Decoded or passed, the
   stream is the only picture. Until its first picture, at connect and
@@ -881,15 +881,13 @@ Three controls with similar names therefore remain separate:
   gateway reads it once at start-up and refuses to start unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
   worker calls that build's exports. A gateway that serves
   it says so of each High Performance target in `GET /api/targets`
-  (`software`), and the picker then shows *Decode HEVC in this page* under a
-  target whose picture is ticked to pass
-  ([Decoded in the page](#decoded-in-the-page)). A session started with it has
-  the page decode the picture with the decoder, in a worker of its own, on a page
-  that runs shared-memory SIMD WebAssembly and holds a WebGL 2 canvas that takes
-  the stream's primaries to present on. A browser whose `VideoDecoder` refuses
-  the picture can tick the passthrough only so, and the row is then held ticked,
-  so Chrome on a GPU without HEVC Range Extensions is passed the whole stream:
-  its own decoder for the sound, the page's for the picture. The software decoder is shaped as a `VideoDecoder`
+  (`software`). A page whose browser's `VideoDecoder` refuses the picture then
+  decodes it with the decoder, in a worker of its own, where the page runs
+  shared-memory SIMD WebAssembly and holds a WebGL 2 canvas that takes the
+  stream's primaries to present on
+  ([Decoded in the page](#decoded-in-the-page)). Such a page can tick the
+  passthrough, so Chrome on a GPU without HEVC Range Extensions is passed the
+  whole stream: its own decoder for the sound, the page's for the picture. The software decoder is shaped as a `VideoDecoder`
   (`frontend/src/softwareDecoder.ts`, which the page's VP9 decoder
   shares: [Decoded in the page](#decoded-in-the-page)), so the paint
   worker's stream runs it as it runs the browser's (`frontend/src/videoDecoder.ts`).
@@ -1228,67 +1226,46 @@ streams a browser's `VideoDecoder` may not take:
 | Stream | Decoder | Who decides | Where |
 |---|---|---|---|
 | The gateway's VP9, 4:4:4, profile 1 | [vp9-wasm](https://github.com/andrewtheguy/vp9-wasm), in the bundle (`frontend/wasm/vp9`) | each page, from its own decoder's answer | wherever the browser's own decoder does not take profile 1 |
-| BETA: a High Performance Mac's passed HEVC | [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), served at `/hevc/` | the session, at the picker | a gateway that read the release archive ([Apple's media stream, passed through](#apples-media-stream-passed-through)), on `ard-high-performance` while the Mac's picture is passed |
+| BETA: a High Performance Mac's passed HEVC | [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), served at `/hevc/` | each page, from its own decoder's answer | wherever the browser's own decoder does not take the Mac's HEVC, on a gateway that read the release archive ([Apple's media stream, passed through](#apples-media-stream-passed-through)) |
 
 Both are written for the one shape of stream they decode and compiled with
 SIMD128 and threads.
 
-**The VP9 is each page's to decode however it can.** Every browser is sent the
-same 4:4:4 stream, and the gateway is told nothing about which decoder takes
-it. The page asks its own `VideoDecoder` once, at load, about the profile 1
-configuration the gateway announces (`frontend/src/nativeVp9.ts`). Where it
-says yes, the browser's own decoder decodes the stream, as Chromium, Firefox and
-Safari on macOS do in software; where it says a definite no, as Safari on iOS
-and iPadOS does, which decodes VP9 in hardware alone, the page builds the
-WebAssembly decoder for every profile 1 format instead
-(`pageModuleFor` in `frontend/src/softwareDecoder.ts`). Only a definite no
-hands the stream to the page: `isConfigSupported` has answered the same
-question differently on the same browser, so a yes, an answer with no verdict
-and an exception all keep the browser's own decoder, whose refusal at
-`configure` is then by name. No picker row offers the choice, and two pages of
-one session, a desktop and an iPad after a takeover say, may decode it
-differently. A page that would decode it itself and cannot run the module
+**Each stream is each page's to decode however it can.** Every browser is sent
+the same stream, and the gateway is not told which decoder takes it. The page
+asks its own `VideoDecoder` once, at load, about each: the profile 1
+configuration the gateway announces for its VP9 (`frontend/src/nativeVp9.ts`),
+and the Mac's HEVC (`frontend/src/appleMedia.ts`). Where it says yes, the
+browser's own decoder decodes the stream; where it says no, the page builds its
+WebAssembly decoder for that stream instead (`pageModuleFor` in
+`frontend/src/softwareDecoder.ts`). No picker row offers the choice, and two
+pages of one session, a desktop and an iPad after a takeover say, may decode it
+differently. A page that would decode a stream itself and cannot run the module
 (below) says so in the video banner and decodes nothing.
 
-**The Mac's HEVC is the session's to decide, and the gateway tells every page
-of it.** `connect` carries the choice (`Choices::software`), the slot keeps it
-with the others, and the plan the engine runs says so (`RenderPlan::software`).
-Every `videoFormat` says whether its stream is the page's to decode
-(`software`): true for the Mac's HEVC under such a plan, false for anything
-else, the VP9 included. A repaint announces the format again, so a page that
-attaches later is told as the first was, and the session's page, the same page
-reloaded and a second display's tab decode the Mac's picture with the same
-kind of decoder.
+The two questions read a doubt in opposite directions. The VP9 is what every
+page here decodes, so only a definite no hands it to the page: Chromium, Firefox
+and Safari on macOS decode profile 1 in software, while Safari on iOS and
+iPadOS, which decodes VP9 in hardware alone, refuses it by name.
+`isConfigSupported` has answered the same question differently on the same
+browser, so a yes, an answer with no verdict and an exception all keep the
+browser's own decoder, whose refusal at `configure` is then by name. The Mac's
+HEVC has the page's decoder behind it, and the VP9 behind that, so only a
+definite yes keeps it in the browser's own decoder, and anything else hands it
+to the page's.
+
+**The gateway passes the Mac's picture to a page that can decode it either way.**
+The session socket states both answers about the HEVC: `apple_media`, the
+browser's own decoder's, and `page_hevc`, whether the page runs the software
+decoder (`Decoders::stated` in `src/config.rs`). A gateway that serves the
+decoder counts either as taking the passthrough, and one that does not counts
+the first alone, so a page that comes back unable to take its session's picture
+is sent to the picker as before. `GET /api/targets` says of each target whether
+it has the decoder served (`software`), which is what lets the picker offer the
+passthrough to a browser whose own decoder refuses the HEVC.
 
 The Info card's Video row, and a display tab's menu, end with which decoder a
 stream has: the browser's native decoder, or this page's WebAssembly decoder.
-
-**Nothing stands in for a decoder that was chosen.** A `connect` that asks for
-the Mac's HEVC decoded in the page where the gateway has no such decoder, or
-where the session passes no Mac's picture, is refused by name, `target "…" does
-not offer decoding in the page`, and starts nothing. A page told to decode a
-stream in a decoder it cannot run says so in the video banner and decodes
-nothing: the browser's own decoder is not tried in its place, since the picture
-would then pass for the page's.
-
-**The picker's row** (`softwareRow` in `frontend/src/targetChoices.ts`), BETA,
-for the Mac's HEVC alone:
-
-- `GET /api/targets` says of each target whether a session on it can have it
-  (`software`). The row, *Decode HEVC in this page*, is there while the Mac's
-  picture is ticked to pass.
-- It is greyed, with the reason, where this page cannot run the decoder:
-  shared-memory SIMD WebAssembly on the cross-origin isolated page and a WebGL 2
-  canvas that can be given the stream's primaries to present on
-  (`frontend/src/softwareSupport.ts`).
-- Where the browser's own decoder takes the HEVC it is a choice, unticked until
-  somebody ticks it, and remembered for the target as the others are.
-- Where only the page decodes it, the row is ticked and held: that is what let
-  the passthrough be ticked. The socket's `apple_media` is still the browser's
-  own decoder's "no"; it is the choice in `connect` that tells the gateway this
-  page takes the stream, and the gateway refuses the passthrough from a browser
-  that has neither (`TargetConfig::beyond_page`). An owner that comes back to
-  such a session is not sent to the picker for that "no".
 
 **How a decoder runs.** One wrapper, one decode worker implementation and one
 pool thread serve both modules (`frontend/src/softwareDecoder.ts`,

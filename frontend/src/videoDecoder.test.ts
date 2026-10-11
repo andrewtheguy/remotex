@@ -245,7 +245,7 @@ test("a new picture size replaces the decoder", async () => {
   assert.equal(tagOf(await resized), 0xb2);
 });
 
-test("a stream is decoded by the page where the session or the browser says so, by the module that decodes it", async () => {
+test("a stream is decoded by the page where the browser's own decoder does not take it, by the module that decodes it", async () => {
   // The decode workers made, by name: a software decoder starts its module's.
   const workers: string[] = [];
   const globals = globalThis as unknown as { Worker: unknown };
@@ -266,42 +266,52 @@ test("a stream is decoded by the page where the session or the browser says so, 
   try {
     // The format, how the page decodes, then the worker started, or "browser"
     // for its own decoder, or null for a stream said and not decoded.
-    const cases: [
-      { decode: string; software?: boolean },
-      PageDecoding,
-      string | null,
-    ][] = [
+    const cases: [{ decode: string }, PageDecoding, string | null][] = [
       // The VP9 is the page's where the browser's own decoder does not take it.
-      [{ decode: VP9_444 }, { runs: BOTH, nativeVp9: true }, "browser"],
-      [{ decode: VP9_444 }, { runs: BOTH, nativeVp9: false }, "vp9-decoder"],
-      // A profile its module does not decode stays the browser's.
-      [{ decode: VP9_420 }, { runs: BOTH, nativeVp9: false }, "browser"],
-      // A Mac's HEVC is the page's where the session says so.
       [
-        { decode: HEVC, software: true },
-        { runs: BOTH, nativeVp9: true },
+        { decode: VP9_444 },
+        { runs: BOTH, nativeVp9: true, nativeHevc: true },
+        "browser",
+      ],
+      [
+        { decode: VP9_444 },
+        { runs: BOTH, nativeVp9: false, nativeHevc: true },
+        "vp9-decoder",
+      ],
+      // A profile its module does not decode stays the browser's.
+      [
+        { decode: VP9_420 },
+        { runs: BOTH, nativeVp9: false, nativeHevc: false },
+        "browser",
+      ],
+      // A Mac's HEVC is the page's where the browser's own decoder does not take it.
+      [
+        { decode: HEVC },
+        { runs: BOTH, nativeVp9: true, nativeHevc: false },
         "hevc-decoder",
       ],
       [
-        { decode: HEVC, software: false },
-        { runs: BOTH, nativeVp9: false },
+        { decode: HEVC },
+        { runs: BOTH, nativeVp9: false, nativeHevc: true },
         "browser",
       ],
       // The page's to decode with a module it cannot run: no other stands in.
       [
         { decode: VP9_444 },
-        { runs: { hevc: true, vp9: false }, nativeVp9: false },
+        {
+          runs: { hevc: true, vp9: false },
+          nativeVp9: false,
+          nativeHevc: true,
+        },
         null,
       ],
       [
-        { decode: HEVC, software: true },
-        { runs: { hevc: false, vp9: true }, nativeVp9: true },
-        null,
-      ],
-      // Said of a stream no module decodes.
-      [
-        { decode: VP9_420, software: true },
-        { runs: BOTH, nativeVp9: true },
+        { decode: HEVC },
+        {
+          runs: { hevc: false, vp9: true },
+          nativeVp9: true,
+          nativeHevc: false,
+        },
         null,
       ],
     ];
@@ -347,18 +357,18 @@ test("a stream is decoded by the page where the session or the browser says so, 
   }
 });
 
-test("a format that says otherwise of the same stream replaces the decoder", async () => {
+test("a format that names another stream replaces the decoder", async () => {
   const table = createDesktopVideo(
     { onError: () => {}, onNeedsKeyframe: () => {} },
     STALL_MS,
   );
   const decode = "hev1.4.10.L150.BE.8";
-  table.setFormat({ decode, software: false });
+  table.setFormat({ decode });
   void table.decode(size, unit(1), true);
   const first = built[built.length - 1];
-  table.setFormat({ decode, software: false });
+  table.setFormat({ decode });
   assert.equal(first.closes, 0, "the same format cost a decoder");
-  table.setFormat({ decode, software: true });
+  table.setFormat({ decode: "hev1.4.10.L153.BE.8" });
   assert.equal(first.closes, 1);
   table.close();
 });
