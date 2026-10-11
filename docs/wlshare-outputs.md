@@ -85,10 +85,11 @@ before the wire.
   by its logical size and scale: `1728×883 at 2x` or `1920×1080 at 1x`. This is
   the same representation used by the Apple display picker.
 - **Selection acknowledgement.** A click sends `SelectOutput`, but the checkmark
-  changes only when the next `OutputList` names that output as active. If the
-  compositor refuses the selection, the active ID remains unchanged and the menu
-  continues to describe the canvas actually being shown. Unknown IDs are rejected
-  before a request is sent.
+  changes only when the next `OutputList` names that output as active. If the ID
+  is no longer selectable when wlshare handles it, wlshare sends the current list
+  without switching, so the menu continues to describe the canvas actually being
+  shown. The gateway rejects IDs absent from its most recent list before sending a
+  request.
 - **Density declaration.** Once an `OutputList` confirms a switch, the gateway
   repeats the browser's density declaration for the new output when the session
   follows the window or when a touch client declares density at a kept size. A
@@ -101,13 +102,16 @@ before the wire.
   `ExtendedDesktopSize` rectangle whether or not the session lets the browser
   request resizes. The gateway advertises both RFB size pseudo-encodings on every
   VNC target so wlshare has a negotiated way to change the framebuffer geometry.
-  wlshare's policy for a client that advertised neither is to close instead of
-  continuing with dimensions the client cannot learn; that is an implementation
-  refusal, not a general RFB-server requirement.
+  After a server-side size change, wlshare disconnects at the next update if the
+  client advertised neither, rather than sending pixels with dimensions the
+  client cannot learn. That is wlshare's implementation policy, not a general
+  RFB-server requirement.
 - **Empty lists.** If the compositor loses its last output, the gateway forwards
   an empty list so a newly attached browser removes stale display choices.
-- **Resize permission.** On a physical monitor, wlshare answers client resize
-  requests as prohibited. Switching back to a headless output enables them again.
+- **Resize permission.** Even when the session permits browser-driven resize,
+  wlshare answers a request on a physical monitor as prohibited: it reconfigures
+  headless outputs only. Switching to a headless output makes resizing eligible
+  again, but it still requires wlr-output-management and compositor acceptance.
 
 ## Two outputs at once
 

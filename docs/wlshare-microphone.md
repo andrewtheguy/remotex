@@ -61,10 +61,11 @@ its redirected recording device exists for the entire session.
 Plug and unplug commands use an unbounded control queue. PCM uses a separate queue
 of sixteen 20 ms buffers; when it is full, the oldest buffer is removed so the
 stream resumes near the live edge. The engine always takes a pending control
-command before PCM. Unplugging, replacing the microphone, or closing the bridge
-clears queued PCM so it cannot enter a later recording. The engine loop writes
-these client messages, while its read loop converts wlshare Start and Stop messages
-to the bridge's `micOpen` and `micClose` signals.
+command before PCM. An unplug clears queued PCM before its command is queued; a
+recording reset clears it when Stop closes the bridge stream. A replacement plug
+closes the active recording in the wire state but does not itself empty the PCM
+queue. The engine loop writes these client messages, while its read loop converts
+wlshare Start and Stop messages to the bridge's `micOpen` and `micClose` signals.
 
 What reaches the wire is `vnc_mic::Device`'s decision, taken under the uplink so two
 decisions leave in the order they were made:

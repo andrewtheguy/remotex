@@ -67,9 +67,9 @@ Traffic reaches the engine through two queues:
    an old stream under the new device state.
 4. A sample larger than wlshare's 4 MiB limit, or one submitted while the sample
    queue is full, opens a gap. That sample and subsequent non-keyframes are
-   dropped; the bridge asks the browser for a keyframe once for that gap, and new
-   submissions resume at a keyframe. Samples already in the queue keep their
-   order.
+   dropped. The bridge asks for a keyframe when the gap opens, and asks again if
+   a keyframe itself cannot be queued. Submissions resume only after a keyframe
+   is queued successfully. Samples already in the queue keep their order.
 
 The engine loop writes plug, unplug and sample messages. Its read loop converts
 wlshare's start, stop and keyframe requests into `cameraStart`, `cameraStop` and
