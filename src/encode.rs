@@ -1842,7 +1842,12 @@ mod tests {
     async fn coarse_round(sink: &VideoSink, frame_rx: &mut mpsc::Receiver<ServerMsg>, seed: u8) {
         let area = rect(0, 0, 320, 64);
         sink.damage(area, &rgb(area.w(), area.h(), seed)).await.unwrap();
+        // A walk that coarsened the stream slowed it as well, so the round is
+        // due when the last one's interval is out, not a frame after it.
         tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        if let Some(due) = sink.due_at().await {
+            tokio::time::sleep_until(due).await;
+        }
         sink.frame().await.unwrap();
         sink.flush().await;
         drain_units(frame_rx, 1).await;
