@@ -16,7 +16,7 @@
 // the HEVC. Each test notes in the report which decoder it saw (`decoder`).
 //
 // software-hevc-faked.spec.ts runs the same test in any browser with the answer
-// faked (`fakeOwnDecoder`), so both sides run on every machine: a "no", after
+// faked (`fakeOwnDecoder`, ownDecoder.ts), so both sides run on every machine: a "no", after
 // which everything is real, and a "yes", with a stand-in for the browser's
 // decoder where the page would build it, so a machine without HEVC passes too.
 //
@@ -268,83 +268,4 @@ export async function expectDecodedAsTheBrowserSays(page: Page): Promise<void> {
   expect(seen.decoderFiles.filter((file) => file.startsWith("HEAD"))).toEqual(
     [],
   );
-}
-
-/// The paint worker's script, as the build names it (desktopPainter.ts).
-const PAINT_WORKER = "**/desktopPainter.worker-*.js";
-
-/// Put ahead of the paint worker's script: a `VideoDecoder` that takes a Mac's
-/// HEVC and outputs a grey picture for each unit, as many as the stream's own
-/// decoder would, and builds the browser's own decoder for anything else. The
-/// paint worker uses `state`, `configure`, `decode` and `close` and reads no
-/// size off a picture.
-const STAND_IN_DECODER = `(() => {
-  const Real = globalThis.VideoDecoder;
-  const hevc = (codec) => /^(hev1|hvc1)\\./.test(codec);
-  globalThis.VideoDecoder = class {
-    #init;
-    #real = null;
-    #state = "unconfigured";
-    #picture = null;
-    constructor(init) {
-      this.#init = init;
-    }
-    get state() {
-      return this.#real ? this.#real.state : this.#state;
-    }
-    configure(config) {
-      if (!hevc(config.codec)) {
-        this.#real = new Real(this.#init);
-        this.#real.configure(config);
-        return;
-      }
-      this.#picture = new OffscreenCanvas(64, 64);
-      const context = this.#picture.getContext("2d");
-      context.fillStyle = "#808080";
-      context.fillRect(0, 0, 64, 64);
-      this.#state = "configured";
-    }
-    decode(chunk) {
-      if (this.#real) {
-        this.#real.decode(chunk);
-        return;
-      }
-      const frame = new VideoFrame(this.#picture, { timestamp: chunk.timestamp });
-      queueMicrotask(() => {
-        if (this.#state === "configured") {
-          this.#init.output(frame);
-        } else {
-          frame.close();
-        }
-      });
-    }
-    close() {
-      this.#real?.close();
-      this.#state = "closed";
-    }
-  };
-})();
-`;
-
-/// Make this page's browser one whose own decoder does or does not take the
-/// Mac's HEVC: its answer to the page's one question (appleMedia.ts), and, where
-/// it does, a stand-in for that decoder in the paint worker, which builds it.
-export async function fakeOwnDecoder(page: Page, takes: boolean): Promise<void> {
-  await page.addInitScript((takes) => {
-    const ask = VideoDecoder.isConfigSupported.bind(VideoDecoder);
-    VideoDecoder.isConfigSupported = (config) =>
-      /^(hev1|hvc1)\./.test(config.codec)
-        ? Promise.resolve({ supported: takes, config })
-        : ask(config);
-  }, takes);
-  if (!takes) {
-    return;
-  }
-  await page.context().route(PAINT_WORKER, async (route) => {
-    const response = await route.fetch();
-    await route.fulfill({
-      response,
-      body: STAND_IN_DECODER + (await response.text()),
-    });
-  });
 }

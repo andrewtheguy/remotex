@@ -90,7 +90,8 @@ both on any machine, in the default browser: it fakes the browser's answer to th
 page's one question, once "no", after which everything is real, and once "yes",
 with a stand-in for the browser's decoder put ahead of the paint worker's script,
 which outputs a grey picture for each unit, so a browser with no HEVC decoder
-passes it too.
+passes it too. Both fakes are `ownDecoder.ts`'s, which the VP9 spec uses for its
+browser that refuses profile 1.
 
 `software-vp9.spec.ts` is the page's software VP9 decoder, the vp9-wasm module
 in the bundle, which a page uses where the browser's own decoder refuses the

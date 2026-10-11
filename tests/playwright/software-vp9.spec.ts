@@ -14,7 +14,7 @@
 // (framePainter.ts, useRemoteDesktop.ts). Which canvas the page shows says which
 // path presented: the module's planes are drawn on the one over the desktop's.
 // Playwright's Chromium decodes profile 1 itself, so a browser that does not is
-// made by answering the page's one question of it with a no.
+// made by answering the page's one question of it with a no (ownDecoder.ts).
 //
 // It needs a gateway whose local config has a live target that sends VP9:
 //
@@ -27,6 +27,7 @@
 //     bun run test:vp9
 import { expect, type Page, test } from "@playwright/test";
 
+import { fakeOwnDecoder } from "./ownDecoder";
 import {
   leaveSession,
   logIn,
@@ -135,18 +136,6 @@ function watchSession(page: Page): Session {
   return seen;
 }
 
-/// Make the page's browser one whose own decoder refuses profile 1, as far as the
-/// page's one question of it goes.
-async function refuseProfile1(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    const ask = VideoDecoder.isConfigSupported.bind(VideoDecoder);
-    VideoDecoder.isConfigSupported = (config) =>
-      config.codec.startsWith("vp09.01.")
-        ? Promise.resolve({ supported: false, config })
-        : ask(config);
-  });
-}
-
 /// The newest display socket's first keyframe, acknowledged: decoded, or failed
 /// and said so first.
 async function firstKeyframeAcknowledged(page: Page, seen: Session) {
@@ -232,7 +221,7 @@ test.describe("a VP9 target and the page's software decoder", () => {
   test("a browser whose own decoder refuses profile 1 is sent the same stream and decodes it in the module, and again when it comes back", async ({
     page,
   }) => {
-    await refuseProfile1(page);
+    await fakeOwnDecoder(page, "vp9", false);
     const seen = watchSession(page);
     await logInAndConnectTo(page, VP9_TARGET ?? "");
 

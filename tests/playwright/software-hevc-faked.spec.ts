@@ -5,11 +5,8 @@
 // asserted, and how to run it, is softwareHevc.ts's.
 import { test } from "@playwright/test";
 
-import {
-  expectDecodedAsTheBrowserSays,
-  fakeOwnDecoder,
-  HEVC_TARGET,
-} from "./softwareHevc";
+import { fakeOwnDecoder } from "./ownDecoder";
+import { expectDecodedAsTheBrowserSays, HEVC_TARGET } from "./softwareHevc";
 import { leaveSession } from "./support";
 
 test.describe("a High Performance target, its HEVC decoded as a faked browser's own decoder says", () => {
@@ -24,14 +21,14 @@ test.describe("a High Performance target, its HEVC decoded as a faked browser's 
   test("a browser whose own decoder takes the HEVC keeps it", async ({
     page,
   }) => {
-    await fakeOwnDecoder(page, true);
+    await fakeOwnDecoder(page, "hevc", true);
     await expectDecodedAsTheBrowserSays(page);
   });
 
   test("a browser whose own decoder refuses the HEVC falls back", async ({
     page,
   }) => {
-    await fakeOwnDecoder(page, false);
+    await fakeOwnDecoder(page, "hevc", false);
     await expectDecodedAsTheBrowserSays(page);
   });
 });
