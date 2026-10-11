@@ -80,8 +80,9 @@ the implementation checks.
 The socket comes from `engine::tcp_connect`, so an RDP host that goes silent is
 noticed on the same keepalive schedule as every other engine's.
 
-`ConnectionType` is declared a LAN rather than probed, because a server's estimate
-of the hop between it and a nearby gateway throttled updates in testing. The
+`ConnectionType` is declared a LAN rather than detected: the socket is the hop
+between the host and a gateway near it, which is not the link a person is on, and
+neither the declaration nor the detection changes what the host draws (below). The
 client requests neither an MCS message channel nor multitransport, and it does not
 advertise or implement network-characteristics detection. This is a deliberate
 protocol boundary, not a general claim about what Windows will send. In particular,
@@ -90,6 +91,46 @@ protocol boundary, not a general claim about what Windows will send. In particul
 says that advertising the graphics-pipeline flag also requires network-detection
 support. The tested Windows 10 and 11 hosts accept the client's smaller
 combination; an auto-detect PDU outside that observed traffic is unsupported.
+
+A Windows host does draw the graphics pipeline for a slow link, but for the one it
+finds for itself and not for the one it is told of. Measured against a Windows 11
+host without a GPU, with the pipeline passed and one full-screen moving picture at
+1280×800, which over a LAN is about 34 frames a second at 114 KB each in RemoteFX
+Progressive, and about 32 a second at 9 KB each where H.264 is taken:
+
+- **Told, nothing changes.** A client that took the detection of [MS-RDPBCGR
+  section 2.2.14](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
+  and reported every bandwidth window as 2 Mbit/s, or as 200 kbit/s, was sent the
+  same frames as one that declared a LAN, and so was one that took no detection
+  and declared `connectionType` a modem or low-speed broadband. The host's
+  detection over TCP was only a Bandwidth Measure Start and Stop around each few
+  kilobytes it sent: no round-trip request, no connect-time phase, and never a
+  Network Characteristics Result.
+- **Acknowledged late, only the rate changes.** With each frame's acknowledgement
+  held 200 ms the host drew 20 frames a second, and held 1.5 s about 3, every one
+  still 114 KB.
+- **Read slowly, the frames get smaller.** Behind a relay that read the host's
+  socket at 8 Mbit/s the host drew 8 frames a second at 115 KB for about fifteen
+  seconds and then 15.6 a second at 62 KB, and stayed there; at 2 Mbit/s it took
+  the same one step, to 3.8 a second at 63 KB, and no second one in ninety
+  seconds. Taking the detection as well changed neither the step nor when it came.
+  H.264 took no step, and has none to take. Its regions state their quantization
+  parameter ([MS-RDPEGFX section
+  2.2.4.4.2](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)),
+  and what moves is sent at 41, the coarsest of the three the host uses, over a
+  LAN already; 33 and 25 are what it refines a still region to. Read at 1 Mbit/s
+  it drew 12 frames a second at 10 KB, and at 500 kbit/s under 3 at 23 KB, each
+  carrying more of the motion, all still at 41.
+
+So what makes this host spend fewer bytes on a Progressive frame is its own socket
+backing up, and the regions say what it does then ([MS-RDPEGFX section
+2.2.4.2.1.5](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)):
+the first pass of each tile goes out at the progressive stage of quality 25 where
+over a LAN it is the stage of quality 50, under the same quantization tables. Ten
+seconds after the socket is read freely again the host is back at 50. Through a
+2 MiB receive buffer the same relay showed the host nothing, and its frames stayed
+full size. A session that passes its pipeline is built on this ([The pipeline,
+passed on](#the-pipeline-passed-on)).
 
 ## The two threads
 
@@ -256,6 +297,46 @@ acknowledged for each composed; below it, two; and once nothing waits,
 everything is. A caller that keeps up is acknowledged at once, and no
 acknowledgement outlasts the frames in front of it.
 
+Late acknowledgements slow the host's frames and leave each one full size: a host
+sends smaller frames only to a client its own socket backs up behind ([Opening a
+session](#opening-a-session)), and a session that read the socket as it came would
+hide a slow caller from it. So while two frames wait to be composed
+(`PASSED_HELD`) the socket goes unread, through a receive buffer of 32 KB
+(`PASSED_RECEIVE_BUFFER`), and what the host sends next stays at the host. The
+host is then held by its socket, and `PASSED_AHEAD`, which two waiting never
+reaches, has nothing to do. Everything else on the connection waits with the
+frames while it is unread — the pointer, the sound, the clipboard — as it does
+behind a slow link to any client.
+
+Only frames of 32 KB or more are waited on that way (`PASSED_HELD_BYTES`). The
+host stops at eleven unacknowledged frames whatever their size, so small ones
+never fill its socket, and leaving it unread shows the host nothing and takes
+`PASSED_AHEAD` away: with H.264 frames of 9 KB and a caller composing twenty a
+second, a socket left at two waiting kept the caller half a second behind the
+desktop, and read as it came, under `PASSED_AHEAD`, a sixth of one.
+
+Measured against a Windows 11 host drawing one full-screen moving picture at
+1280×800, with a caller that took the frames as a link of a given rate would
+(`tests/rdp_link_probe.rs`):
+
+| The caller's link | Socket read as it came | Socket left while two wait |
+| --- | --- | --- |
+| Unlimited | 34 frames/s of 114 KB, 20 ms behind | the same |
+| 27 Mbit/s | 30 frames/s of 114 KB, 140 ms behind | 30 frames/s of 114 KB, 160 ms behind |
+| 8 Mbit/s | 8.6 frames/s of 116 KB, 474 ms behind | 16 frames/s of 62 KB, 454 ms behind |
+| 2 Mbit/s | 2.0 frames/s of 118 KB, 1.9 s behind | 4.0 frames/s of 63 KB, 2.0 s behind |
+
+At 20 Mbit/s the host stayed at full-size frames either way. The buffer and the
+count were chosen on that picture: at one frame waiting and 16 KB the 8 Mbit/s
+caller was 394 ms behind at 15 frames a second, and the 27 Mbit/s caller lost a
+seventh of its frames to the wait for each read; at 128 KB the 8 Mbit/s caller
+was 640 ms behind. The receive buffer bounds what the host can send in one round
+trip, so a gateway far from its host is limited by it: 32 KB carries the 31 Mbit/s
+of that picture only while the round trip is under 8 ms. So the socket has that
+buffer only while the host has a graphics pipeline open (`PassedSocket`): a host
+that draws with bitmap updates instead, or has closed the pipeline, has no frames
+to be held for, and keeps the buffer the socket came with.
+
 With `Connect::h264` the session tells the host it takes H.264, which nothing
 here decodes: the advertise is every set from version 8 to 10.4, and 10.7, none
 with `AVC_DISABLED`. 10.5 and 10.6 are left out and 10.7 carries
@@ -270,7 +351,11 @@ AVC420 in the same frames — a Main-profile stream for the surface, about fifte
 access units a second, Annex B with the parameter sets at each keyframe, each
 unit behind a metablock naming the rectangles of the picture to show
 (`proto/avc.rs`). With `AVC_THINCLIENT` the same host drew the whole desktop
-with AVC444v2 and nothing else, every unit a luma view alone.
+with AVC444v2 and nothing else, every unit a luma view alone. That is not a finer
+picture of what moves: its regions stated a quantization parameter of 38 while
+moving and 30 and then 22 once still, three below the 41, 33 and 25 of the
+AVC420 it draws otherwise, in frames of the same 9 KB, and the text of the
+desktop goes through H.264 with them.
 
 The access units ride in the commands handed on, and the caller composes a run
 that has any in three steps (`avc.rs`): `avc::scan` finds the units and the

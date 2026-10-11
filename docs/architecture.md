@@ -1113,6 +1113,18 @@ the pipeline.
   four to a batch and showed 8 a second of the 28 it composed, a quarter of a
   second and then two thirds behind; paced this way it shows 28 a second, each
   35 ms after the last, a tenth of a second behind.
+- **The host finds a slow page for itself.** A Windows host sends smaller frames
+  to a client its own socket backs up behind, and to no other: not for late
+  acknowledgements, and not for a link it is told of. The gateway reads that
+  socket at the speed of its own network, which would hide the page's link from
+  the host. So while two large frames wait for the page's `paintAck`, the RDP
+  client leaves the socket unread through a small receive buffer, and the host
+  finds the page's pace in its own writes
+  ([The pipeline, passed on](rdp-client.md#the-pipeline-passed-on)). Measured
+  with a stand-in page on an 8 Mbit/s link, the host halved its RemoteFX
+  Progressive frames and the page showed 16 a second where it had shown 8.6, no
+  further behind. The host's sound and pointer share that socket and wait with
+  the frames.
 - **A pipeline is announced where it starts.** `graphicsStart` goes out when the
   host confirms the pipeline, ahead of its first command, and again if the host
   closes the channel and opens another. It says the pipeline starts from nothing,
