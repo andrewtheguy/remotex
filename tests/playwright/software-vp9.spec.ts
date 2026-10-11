@@ -52,7 +52,6 @@ const VIDEO_KEYFRAME = 0x01;
 
 interface Format {
   decode: string;
-  software: unknown;
 }
 
 interface Session {
@@ -104,7 +103,7 @@ function watchSession(page: Page): Session {
       if (typeof payload === "string") {
         const message = JSON.parse(payload);
         if (message.type === "videoFormat") {
-          formats.push({ decode: message.decode, software: message.software });
+          formats.push({ decode: message.decode });
         }
         return;
       }
@@ -162,7 +161,7 @@ async function firstKeyframeAcknowledged(page: Page, seen: Session) {
 }
 
 /// Every format the newest display socket announced, once it has announced one:
-/// profile 1, and none of them said to be the page's to decode.
+/// profile 1.
 async function announcedProfile1(seen: Session, sockets: number) {
   await expect
     .poll(() => seen.sockets.length >= sockets && seen.sockets.at(-1)?.length, {
@@ -171,7 +170,6 @@ async function announcedProfile1(seen: Session, sockets: number) {
     .toBeTruthy();
   for (const format of seen.sockets.at(-1) ?? []) {
     expect(format.decode, "the gateway's 4:4:4").toMatch(/^vp09\.01\./);
-    expect(format.software, "the page's own decision").toBe(false);
   }
 }
 

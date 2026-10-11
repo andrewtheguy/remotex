@@ -61,20 +61,36 @@ drag crosses the edge between two virtual displays. It checks that the edge
 towards the display beside it is open and every outer edge still clamps the
 pointer, without judging whether a remote window visibly followed the drag.
 
-`software-hevc.spec.ts` is the BETA software HEVC decoder, in a High
-Performance session started with the Mac's stream passed from Playwright's
-Chromium, whose own decoder refuses the Mac's HEVC. Against a gateway that has
-the decoder's archive it asserts that the gateway lists the target as offering
-the decoder, that the session socket states the browser's own decoder's "no"
-and the page's "yes", that Start sends the passthrough, that the gateway passes
-the HEVC, that the decode worker loads the decoder and nothing asks for it
-beforehand, and that the first passed keyframe's batch is
-acknowledged with no video error or repaint request before it — an ordering, not
-a timing, because a failed decoder reports before the paint worker acknowledges.
-Against a gateway without the archive it asserts the other decision, in a
-browser whose own decoder refuses the Mac's HEVC, which Playwright's Chromium
-is: the target offers no such decoder, the session starts without the
-passthrough and is sent VP9, and nothing under `/hevc/` is asked for.
+`software-hevc-chrome.spec.ts`, `software-hevc-firefox.spec.ts` and
+`software-hevc-faked.spec.ts` are the BETA software HEVC decoder, which a page
+falls back to by itself where the browser's own decoder refuses a High
+Performance Mac's HEVC. Whether it refuses is the machine's to say: Chrome takes
+the HEVC on a Mac and refuses it on a PC whose GPU does not decode HEVC Range
+Extensions 4:4:4. So all three run one test (`softwareHevc.ts`), which asks the
+browser itself, apart from the page, and asserts the decision that answer calls
+for:
+
+- The browser's own decoder takes it: the session socket says so, the passed
+  HEVC is decoded there, and nothing under `/hevc/` is asked for.
+- It does not, on a gateway with the decoder's archive: the target is listed as
+  offering the decoder, the page states it runs it, the passthrough is sent, and
+  the decode worker loads the decoder, with nothing asking for it beforehand.
+- It does not, on a gateway without: the target offers no such decoder, the
+  session starts without the passthrough and is sent VP9, and nothing under
+  `/hevc/` is asked for.
+
+A passed stream's first keyframe batch must be acknowledged with no video error
+or repaint request before it — an ordering, not a timing, because a failed
+decoder reports before the paint worker acknowledges. Each test notes in the
+report which decoder it saw (`decoder`). The Chrome spec runs the installed
+Google Chrome (`channel: "chrome"`), since Playwright's bundled Chromium has no
+HEVC decoder at all, and the Firefox spec Playwright's Firefox, whose own decoder
+refuses the HEVC, so a Mac sees both sides of the fallback. The faked spec sees
+both on any machine, in the default browser: it fakes the browser's answer to the
+page's one question, once "no", after which everything is real, and once "yes",
+with a stand-in for the browser's decoder put ahead of the paint worker's script,
+which outputs a grey picture for each unit, so a browser with no HEVC decoder
+passes it too.
 
 `software-vp9.spec.ts` is the page's software VP9 decoder, the vp9-wasm module
 in the bundle, which a page uses where the browser's own decoder refuses the
@@ -245,7 +261,8 @@ REMOTEX_PLAYWRIGHT_DRAG_TARGET='win2' \
 bunx playwright test '/display-drag\.spec\.ts$'
 ```
 
-The software HEVC spec needs a gateway whose config has an
+The software HEVC specs need Google Chrome installed, Playwright's Firefox
+(`bunx playwright install firefox`), and a gateway whose config has an
 `ard-high-performance` target, with the pinned
 release archive beside the config (where a gateway run from a Cargo build looks
 for it), and names that target with
@@ -266,8 +283,7 @@ REMOTEX_PLAYWRIGHT_HEVC_TARGET='macvmhevc' \
 bun run test:hevc
 ```
 
-Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`,
-which runs the test that the target offers no such decoder instead.
+Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`.
 
 The software VP9 spec needs a gateway with a live target that sends VP9, named
 by `REMOTEX_PLAYWRIGHT_VP9_TARGET`:
