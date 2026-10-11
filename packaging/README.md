@@ -213,13 +213,29 @@ libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built
 archive selected with `LIBVPX_PREBUILT_DIR`, not a source-build fallback.
 
-The one C library built from source is jemalloc, through `tikv-jemallocator`,
-the global allocator on every Unix build. It needs only a C compiler and `make`,
-which every Unix builder already has. glibc's malloc is not an option: it keeps
-freed memory in per-thread arenas, and the gateway's per-session threads grew it
-with every session. jemalloc fixes its page size at build time, and a 4K build
-will not start on the 16K and 64K kernels arm64 boards ship, so the linux-arm64
-release sets `JEMALLOC_SYS_WITH_LG_PAGE=16`. Windows keeps the system heap.
+The one C library built from source is jemalloc, through `tikv-jemallocator`.
+It is the global allocator on Unix and is linked with unprefixed `malloc` symbols,
+so allocations in libvpx and libopus use it as well as Rust allocations. The build
+environment must provide a C compiler and `make`. Windows continues to use its
+system heap.
+
+The choice is based on a 2026-09-12 comparison of six consecutive motion-heavy
+sessions against one RDP target. The observed process footprint reached 289 MB
+with glibc malloc and stayed between 27 and 34 MB with jemalloc. The measurement
+record in this repository does not preserve the exact process-memory metric or
+command, so these values justify the allocator choice but are not a reproducible
+cross-platform benchmark.
+The suspected cause was glibc's per-thread arenas accumulating across each
+session's engine and encode-worker threads.
+
+jemalloc's build-time page-size setting also matters on Linux arm64. Release CI
+sets `JEMALLOC_SYS_WITH_LG_PAGE=16` for that target, selecting a 2^16-byte
+allocator page. The `tikv-jemalloc-sys` version locked here documents that this
+configured size must be at least the system page size and may be larger, so 64 KiB
+covers the 4, 16 and 64 KiB kernel page sizes in scope. The current workflow builds
+the native artifact on an arm64 CI runner but does not execute it on each
+non-4-KiB kernel. Release validation on 16- and 64-KiB systems remains the check
+for compatibility of the complete binary.
 
 ## Releases
 

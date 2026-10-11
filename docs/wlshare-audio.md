@@ -137,9 +137,12 @@ announces late is still taken.
   ([Audio frames](architecture.md#audio-frames)) ahead of the next batch, and
   the player resets its Opus decoder there. FLAC frames decode alone, and its
   player takes no notice.
-- A frame length past 64 KiB is read past rather than allocated: a frame is
-  3840 bytes of samples before compression, and FLAC adds a few header bytes at
-  worst, so anything larger is a server that has lost its framing.
+- The gateway accepts at most 64 KiB for one encoded frame and skips a larger
+  announced frame instead of allocating it. Current negotiation produces 20 ms
+  of 48 kHz stereo 16-bit PCM, or 3,840 uncompressed bytes, so the cap is well
+  above output observed from the current Opus and FLAC encoders. It is an
+  implementation limit, not a formal maximum for every possible FLAC frame or a
+  proof that the server lost framing.
 
 So the gateway needs no codec for wlshare's sound.
 wlshare's FLAC encoder is libFLAC, through

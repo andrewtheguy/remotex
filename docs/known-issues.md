@@ -1,13 +1,15 @@
 # Known issues
 
-Faults that are reproducible, understood well enough to recognise, and not
-understood well enough to fix. Each entry says what it looks like, what has been
-ruled out, and what would move it — so hitting one costs a lookup rather than an
-investigation.
+Reproducible limitations and defects that a user may encounter in a supported
+configuration. Each entry describes the symptom, the evidence collected so far,
+and the available workaround or condition that changes it. Entries can cover the
+remote server, the browser, or remotex itself; knowing which component is at fault
+does not make the user-visible issue disappear.
 
-An issue leaves this file in one of two ways: it is fixed, or it turns out to be
-something remotex is doing wrong, in which case it becomes work rather than a
-note.
+Remove an entry when the symptom is fixed or no longer applies to a supported
+configuration. If a confirmed remotex defect has separate tracking, keep the
+user-facing description here until the fix ships, with a link to that tracking
+when it is public.
 
 ## Blurry text after dragging the window to a new size, on an RDP host's graphics pipeline
 

@@ -81,35 +81,33 @@ through — and moves the checkmark only when a list comes back saying the serve
 moved it. A selection that named an output the list does not have is dropped
 before the wire.
 
-- **Labels.** `DP-2`, and under it the points that output occupies with the
-  density that earns it more pixels: `1728×883 at 2x`, `1920×1080` at 1x. The
-  same wording the Apple picker uses, because it means the same thing.
-- **Nothing is optimistic.** The panel is a list plus a checkmark, both from the
-  server. A switch the compositor refuses leaves the menu agreeing with what is on
-  the canvas rather than with what was clicked.
-- **Density follows the switch.** The browser's density was declared to the
-  output left behind, so the gateway declares it again when a list says the
-  shared output moved — in a session started with resize, or for a pinch-zoom
-  phone or tablet at a kept size; a pointer client at a kept size declares none
-  — and wlshare answers with an `OutputScale` as it always does:
-  applying it on a headless output, and reporting the output as it is on a
-  monitor whose mode belongs to the person in front of it. The declaration
-  carries the window in pixels, even when the scale is the one already
-  reported: the output arrives at its own size, not the window's, and takes the
-  window's in the same configuration. A switch that lands while a
-  declaration is still out waits for that one's answer, as a density change does.
-- **The size is announced whether or not the session resizes.** A switch to a differently
-  sized output is an `ExtendedDesktopSize` rectangle, and a server with nothing
-  negotiated to send one in has no choice but to close the connection. So both
-  size pseudo-encodings are listed on every `vnc` target; the session's resize
-  decides only whether the window asks for sizes of its own.
-- **An emptied list is still a list.** A browser attaching after the compositor
-  lost its last output is told the list is empty rather than left with the menu
-  it had.
-- **Resize follows the same rule.** Switching to a real monitor means resize
-  requests are answered *prohibited* from then on; switching back to a headless
-  output makes them work again. Neither is new: it is the rule wlshare already
-  had, now reachable in one session.
+- **Labels.** Each menu entry shows the compositor name, such as `DP-2`, followed
+  by its logical size and scale: `1728×883 at 2x` or `1920×1080 at 1x`. This is
+  the same representation used by the Apple display picker.
+- **Selection acknowledgement.** A click sends `SelectOutput`, but the checkmark
+  changes only when the next `OutputList` names that output as active. If the
+  compositor refuses the selection, the active ID remains unchanged and the menu
+  continues to describe the canvas actually being shown. Unknown IDs are rejected
+  before a request is sent.
+- **Density declaration.** Once an `OutputList` confirms a switch, the gateway
+  repeats the browser's density declaration for the new output when the session
+  follows the window or when a touch client declares density at a kept size. A
+  pointer client at a kept size declares none. The declaration includes the
+  browser window's pixel size even when the scale is unchanged: a headless output
+  can adopt that size, while a physical monitor retains its user-owned mode and
+  reports the resulting `OutputScale`. If an earlier density request is still
+  outstanding, the new declaration waits for its response.
+- **Framebuffer size.** A differently sized output is announced with an
+  `ExtendedDesktopSize` rectangle whether or not the session lets the browser
+  request resizes. The gateway advertises both RFB size pseudo-encodings on every
+  VNC target so wlshare has a negotiated way to change the framebuffer geometry.
+  wlshare's policy for a client that advertised neither is to close instead of
+  continuing with dimensions the client cannot learn; that is an implementation
+  refusal, not a general RFB-server requirement.
+- **Empty lists.** If the compositor loses its last output, the gateway forwards
+  an empty list so a newly attached browser removes stale display choices.
+- **Resize permission.** On a physical monitor, wlshare answers client resize
+  requests as prohibited. Switching back to a headless output enables them again.
 
 ## Two outputs at once
 
@@ -192,16 +190,16 @@ Three more, measured the same way:
   **new** id: the global is unique for as long as that output exists, not across
   its life.
 
-A switch on an idle desk arrives without input. Measured by reconstructing the
-canvas from the gateway's batches, with no pointer movement at all: after
-`selectDisplay`, the new output's `resize` and a fully painted screen — nothing
-unpainted, nothing black — land inside five seconds. Against a wlshare built
-before its capture took a blank framebuffer whole, the same probe on the same
-desk got no resize and no frames at all: the canvas stayed at the old output's
-size showing the old output's picture, and the new screen only arrived once the
-pointer was nudged. It is worth knowing which side that fault sat on, because it
-looks exactly like a gateway that dropped a repaint: the gateway asks for its
-non-incremental update, and there is simply nothing to answer it with.
+An idle-output switch does not depend on later input. In the 2026-09-09 probe,
+`selectDisplay` was followed by the new output's resize and a complete framebuffer
+update without any pointer event. The run completed within five seconds, but that
+duration was an observation, not a protocol or scheduler bound.
+
+The same probe against an older wlshare build received neither a resize nor a
+frame until the pointer moved. That server waited for damage instead of capturing
+the selected output once in full. The regression condition is therefore the event
+sequence — selection, resize when needed, then a complete update without input —
+rather than a pixel colour or the five-second timing from one run.
 
 The choice outlives the client. wlshare keeps the output the last client asked
 for — a reconnect opens on that one, not on the configured default — until the

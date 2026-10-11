@@ -603,12 +603,15 @@ size can still answer past it; what happens then is
 
 Five rules hold the stream up, and each is a rule somewhere:
 
-- **`Shadow::accept` is a promise.** It records source pixels as delivered the
-  moment it accepts them, and nothing re-sends them, so the encoder may never drop a
-  frame (`rc_dropframe_thresh = 0`) and an encode that yields no bitstream leaves the
-  stream dirty for the next frame to carry rather than clearing it. The shadow earns
-  its keep all the same: RDP repaints regions that did not change, and a VNC server
-  re-sends unchanged pixels, and those never reach the mirror at all.
+- **Accepted source pixels remain pending until an encoded access unit contains
+  them.** `Shadow::accept` records new source pixels and returns only the regions
+  that differ from the accepted source state. Those regions are copied to the
+  mirror and marked dirty. Because the remote is not required to resend them, VP9
+  frame dropping is disabled (`rc_dropframe_thresh = 0`); if an encode produces no
+  bitstream, the dirty state is retained for the next attempt. This invariant is
+  about source damage accepted by the encoder. It does not prohibit the later
+  transport queues from dropping an already encoded unit under their documented
+  backpressure rules.
 - **The stream is fed rectangles, not frames.** `VideoSink::damage` is called once
   per damage *rectangle*, and VNC's pixels can only be cropped out of the rect just
   decoded, so the stream keeps its own whole-framebuffer RGB copy — the mirror — to
@@ -616,19 +619,17 @@ Five rules hold the stream up, and each is a rule somewhere:
   `Refresh` arm, which `continue`s past that) and at VNC's `FramebufferUpdate` end.
   It is a no-op when nothing was blitted, because RDP's loop turns once per PDU and
   most redraw nothing.
-- **A frame boundary is a proposal, not a frame rate.** Those boundaries occur at
-  whatever rate the remote reports damage — 126 a second, measured, on a busy RDP
-  desktop against a 30 Hz stream and a 60 Hz screen — and a full encode at every
-  one of them had a session carrying under 800 kbit/s spend 88% of itself inside
-  the encoder. `VIDEO_FRAME_INTERVAL` caps it at one access unit per
-  33 ms; damage in between accumulates in the mirror and rides the next one, which
-  is cheaper than coding the same movement four times over. A forced keyframe skips
-  the cap, because a repaint, reattach or resize is a client with nothing
-  on screen. And because a deferral leaves pixels the shadow has already promised,
-  `VideoSink::due_at` tells the engines when to come back for them whether or not
-  more damage arrives — RDP in a `select!` arm beside its layout retry, VNC raced
-  against its next message read, at a message boundary so a flush cannot split a
-  `FramebufferUpdate`.
+- **Remote frame boundaries trigger encode attempts; they do not set the output
+  rate.** A busy RDP desktop was measured reporting 126 boundaries per second to a
+  30 Hz stream on a 60 Hz display. Encoding at every boundary made a session under
+  800 kbit/s spend 88% of its time in the encoder. `VIDEO_FRAME_INTERVAL` therefore
+  limits ordinary output to one access unit per 33 ms. Damage received during that
+  interval remains dirty in the mirror and is included in the next attempt. Forced
+  keyframes for repaint, reattach and resize bypass the interval. When an attempt is
+  deferred, `VideoSink::due_at` schedules another attempt even if no further remote
+  damage arrives: RDP waits in a `select!` beside layout retry, while VNC races the
+  deadline against its next message and flushes only at a message boundary so it
+  cannot split a `FramebufferUpdate`.
 - **The encode is pipelined, and serial.** A round takes the mirror and the encoder
   to a blocking worker; the spare mirror takes the blits meanwhile and the order task
   puts the round back when it lands, signalling `round_returned` if pixels arrived
@@ -1296,19 +1297,26 @@ so a 1080p desktop was converted with one matrix and displayed with another, eve
 saturated colour a little off. Nothing on the wire carries it; the decoder reads it
 from the bitstream.
 
-The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
-The walk is shared with wlshare — `QualityWalk` in the `screen-vp9` crate, the one walk both
-run, driven from `src/encode.rs`. It watches one local signal — how long queueing an
-access unit blocked — and walks the 1–100 dial down to its floor of 20 when the link is
-behind, then the frame rate, and back up towards the configured quality when it is
-not; never past it. It moves the
-dial rather than a quantizer because a quantizer is the codec module's own scale
-and never leaves it. What TCP hides is
-*headroom*, and this never needs headroom, because exceeding the operator's setting
-was never a goal. "Am I behind?" is the whole question, and the outbound queue
-answers it. Quality moves through `Stream::set_quality`, which re-tunes the running
-encoder rather than rebuilding it: a rebuild would force a keyframe per adjustment,
-spending a few hundred KB exactly when bytes are scarce.
+The configured dial is the maximum quality the controller may use. The controller
+does not estimate link capacity or try to consume unused capacity above that setting;
+its job is to reduce queued picture age under pressure and then recover toward the
+configured maximum.
+
+The walk is `QualityWalk` in the `screen-vp9` crate, shared with wlshare and driven
+from `src/encode.rs`. Every target supplies the local pressure signal: the time an
+encoded access unit waits for outbound capacity, including a wait for the byte
+budget. With `render_adaptive` enabled, the client acknowledgement path adds a
+second signal for picture lag, described below. This is necessary because a client
+can fall behind while each local queue remains shallow. Neither signal attempts to
+separate propagation delay from transmission time or to predict available headroom;
+the baseline and thresholds only classify whether delivered pictures are
+accumulating additional delay.
+
+When pressure persists, the walk lowers quality to its floor of 20 and then lowers
+the frame rate. Clear observations recover frame rate first and quality second,
+never above the configured value. It adjusts the public 1–100 dial rather than
+exposing the codec's quantizer scale. `Stream::set_quality` retunes the running
+encoder; rebuilding it would force a large keyframe at each adjustment.
 
 The walk has two knobs in a fixed order. Quality goes first, to the floor, and
 by more the further behind the link is: ten points for a frame 60 ms behind, twenty
@@ -2531,11 +2539,11 @@ elsewhere, and held to two ([Roadmap](roadmap.md#more-than-two-virtual-displays-
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
 the 16 ms coalescer demoted to a 100 ms safety net — and answers a monitor layout
-with a graphics reset. Its decoders cover what a current Windows host draws with —
-ClearCodec and the NSCodec inside it, RemoteFX Progressive, planar, uncompressed —
-and its compositor carries the copies and caches between them, so the desktop is
-lit and sharp; a rectangle that will not decode is left for the host to draw again,
-not made the end of the session. H.264 is refused in the capability advertise: a
+with a graphics reset. The implemented and observed decoder set is ClearCodec and
+its NSCodec subcodec, RemoteFX Progressive, planar and uncompressed rectangles.
+The compositor carries the corresponding copies and caches between updates. A
+rectangle that cannot be decoded is left unchanged and logged; malformed PDU
+framing still ends the session. H.264 is refused in the capability advertise: a
 host would hand the parts of the desktop that move like video to it, and a lossy
 video codec would lose detail before the gateway ever encodes the picture. In a
 session started with the passthrough the same channel is answered and acknowledged here and
@@ -2549,8 +2557,8 @@ not offered beside it, because an RDP resize is the pipeline's graphics reset.
 On either path the pointer travels as its own shape rather than in the framebuffer.
 
 Read [The RDP client, written here](rdp-client.md) for the whole of it: the
-connection sequence, the channels and the chunk flags a Windows host silently
-requires, the codec and damage path, resize and density, the clipboard, and sound.
+connection sequence, the measured channel-flag interoperability, the codec and
+damage path, resize and density, the clipboard, and sound.
 It also covers camera and microphone redirection.
 
 [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
@@ -2761,42 +2769,36 @@ reads *AAC-ELD not supported*. What
 remains reportable mid-session is a *codec* a decoder refuses, which is a different
 sentence and arrives from the decoder itself.
 
-There are two ways for this page to be given the six Command chords a browser
-otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R. A **Chrome app window** (`appWindow.ts`:
-*Install page as app…*, or `--app=`) reserves no keys at all, so they arrive as
-ordinary keydowns and `preventDefault` is the whole of it; that is the configuration
-the client is meant to be run in. A plain tab gets the same from **immersive full
-screen** plus `navigator.keyboard.lock` (`fullscreen.ts`, `keyboardLock.ts`), which
-asks for every key rather than a list: ⌘Q, and the keys no window of any kind is
-otherwise given — the Super key, Alt+Tab — so Super+E reaches the guest instead of
-opening a local file manager over it. The lock is not a control of its own; it follows
-the full screen, and the full screen is the menu button.
+Keyboard delivery depends on the window mode and on which component normally owns a
+shortcut. The six Command chords translated for a Windows guest are ⌘W, ⌘T, ⌘N,
+⌘L, ⌘O and ⌘R; Super and window-manager shortcuts are a separate class.
 
-Which full screen is the whole of it, and the distinction is invisible from the
-outside. Chromium activates a lock in `WebContentsImpl::RequestKeyboardLock` only
-while `IsFullscreenForTabOrPending` holds — *element* full screen, entered through
-`requestFullscreen()`, which is what **Menu → Immersive full screen** calls on
-`documentElement`. Chrome's own full screen (the ⛶ beside the zoom row, or F11) hides
-the frame and nothing else: `document.fullscreenElement` stays null, no lock is
-activated, and the host keeps every key it reserves behind a remote desktop that fills
-the screen. A page cannot promote one into the other, so the client offers its own
-button and `keyboardLock.ts` deliberately does not watch `(display-mode: fullscreen)`
-— arming on that took a lock Chromium never made active, which is the failure it
-looked like a fix for. The way out of the mode is that button again, or holding
-Escape, which is Chromium's own exit from a locked full screen.
+| Chromium context | Browser-reserved Command chords | Super and Alt+Tab |
+| --- | --- | --- |
+| Normal tab | Chrome may consume them before the page receives a `keydown`. | Not delivered to the page. |
+| Installed app window (`appWindow.ts`) | The six chords above were delivered as ordinary key events in testing, so `preventDefault` and the translation table can forward them. | Still require Keyboard Lock. |
+| Element full screen with an active `navigator.keyboard.lock` | Delivered on the tested Chromium platforms, in both a tab and an app window. | Delivered on those platforms; for example, Super+E can reach the guest. |
 
-The Command translation table itself is always complete and never changes with
-fullscreen. App windows therefore send every chord in windowed and fullscreen use
-alike, while a normal windowed tab remains subject to the shortcuts Chrome consumes
-before the page sees them — and an app window still needs immersive full screen for
-the Super key, which no browser window is handed without the lock. The window kind moves in one
-direction only: *Install page as app…* reparents the live document into the new window
-instead of reloading it, so `appWindow.ts` latches its answer true and notifies rather
-than answering once at load — and full screen, which reports `display-mode: fullscreen`
-and would otherwise unmake an app window mid-session, is what the latch defends
-against. A close chord the page never sees — and Alt+F4, which no window catches —
-ends the session without asking: the client raises no leave-site dialog, because a
-dialog on every deliberate window close is worse than the session it saves.
+This table does not include shortcuts the operating system retains. Alt+F4, for
+example, closes the window rather than reaching the page, and holding Escape is
+Chromium's escape route from locked full screen.
+
+Keyboard Lock is tied to **element full screen**, entered by
+`documentElement.requestFullscreen()`. **Menu → Immersive full screen** requests that
+mode and `keyboardLock.ts` then asks Chromium to lock all keys. Chrome's own window
+full screen, selected with F11 or the browser menu, only hides the browser frame:
+`document.fullscreenElement` remains null and no Keyboard Lock becomes active. A
+page cannot promote that browser mode to element full screen, so the client provides
+its own button and does not use `(display-mode: fullscreen)` as evidence that keys
+are locked.
+
+The Command translation table itself does not change with window mode; the mode
+only determines which events reach it. *Install page as app…* reparents the live
+document instead of reloading it, so `appWindow.ts` latches the transition to an app
+window and notifies current listeners. That latch also prevents element full screen's
+`display-mode: fullscreen` result from being mistaken for leaving the app window. If
+a window-close shortcut is retained by Chrome or the operating system, the session
+ends with the window; the client intentionally does not show a leave-site dialog.
 
 A key held on the remote is let go by the page while the page is there to do it. A
 page that goes away cannot: its keyups die with its socket, and the page that comes
@@ -3035,121 +3037,119 @@ never on TCP, and the thing terminating the proxy is the TUI master, which the
 browser reaches over loopback TCP and which forwards each connection to that
 endpoint.
 
+### Branding
+
 `[branding]` is a top-level table rather than `[server]` keys: it names the
 deployment rather than the server, and one value with two spellings is one of
 them going stale. There is one place to write it and no second spelling. `text`
 is the display name; `logo` is the image the gateway serves at `GET /api/logo`
 and the page sets as its tab icon.
 
-A logo is written either as a path to an image file or as a `data:` URL holding
-the image itself, and the value decides which — nothing else begins `data:`, so
-one key covers both and no config can set two. Either way the content type is
-settled at resolution, from the extension or from the URL's own media type
-against the same closed list of what a tab can show; a `data:` URL is decoded
-there too, so `check-config` refuses an icon the browser would have. A file is
-then read per request, which is what lets an operator swap the image without a
-restart; an inline one is held in the resolved config as `Bytes`, cheap to clone
-with the state around it.
+A `logo` value is either an image-file path or an image `data:` URL. At config
+load, the gateway checks the file extension or URL media type against the
+supported tab-icon formats and decodes inline data. `check-config` therefore
+rejects an unsupported media type or malformed inline image. A path is read on
+each request, so replacing that file changes the served logo without restarting
+the gateway.
 
-`[meter]` is top-level for the same reason and records the throughput of the
-browser's four WebSockets in an SQLite database, one row per target, socket and
-timeframe, so targets can be compared, and measures the rate they move at.
-`enabled` is what turns it on and a table must carry it, so the file says which
-it is rather than leaving it to be inferred from the table's presence: a table
-can then hold its settings while it is off, and the other keys are checked as
-written either way, so `check-config` refuses an unusable database before it is
-ever switched on. The
-database is `meter.sqlite3` in the
-gateway's state directory unless `database` names another, and a relative
-`database` is taken from there as well: the installation's state directory beside
-its config and web paths when `serve` reads the installed config, the config
-file's own directory when `--config` names one, and the instance directory under
-`remotex tui`. Each socket counts the frames it writes and
-reads — text and binary frames with their headers, never the heartbeat's pings and
-pongs, so an idle connection records nothing — into the counters of the target
-the session has selected at that moment, which the session manager publishes in
-an atomic beside its state so a frame never takes the session lock; bytes moved
-on the picker count under no target. Once a second the counters are taken as a
-sample: what moved in that second, over the seconds since the last sample, is the
-rate right now, and it is added to the open timeframe, which also keeps the
-busiest second per direction it has seen and the second itself where it moved
-anything. A sample the runtime delayed is that rate in each of the seconds behind
-it rather than in one of them: what moved over five seconds is drawn as five
-seconds at a fifth of it, not as one busy second beside four the graph would read
-as idle. Every minute the open timeframe is closed and each target's socket that
-moved data gains a row holding its bytes, its peaks and its seconds. The second is
-the meter's resolution and the minute is only how often it reaches the disk;
-neither is a configuration key. The seconds travel as one blob of unsigned LEB128
-triples — the second of the timeframe it is, counted from the second the timeframe
-begins, then the sent rate and the received rate — and a second that
-moved nothing is not among them, so a socket busy through a whole minute costs
-some four hundred bytes and one that moved in three of its seconds costs a dozen.
-A trickle that rounds to nothing a second is in the row's bytes but is no second
-of the graph's. The rows wait in memory for a separate writer task, so
-a slow write or SQLite's busy wait never delays a sample; the writer adds them
-and deletes the rows past `max_records` per target and socket oldest first, all
-in one transaction, so a crash leaves the timeframe written or not at all. The
-default keeps a week of minutes per target and socket. It is
-best effort by design: the open timeframe dies with the process, and a failed
-write is retried at the next close. A file that is not this gateway's throughput
-database — not SQLite, SQLite without its application id, or another schema
-version — is refused at startup before anything is written to it. The page reads
-two things and draws one graph from them. `GET /api/throughput/live` is the last
-sample, per target and socket, which the "Throughput" view polls once a second
-while it is open and not paused, one poll out at a time, keeps for the last five
-minutes, and shows the way a network meter does: the rate now over a graph of the
-chosen range, one per direction on its own scale, narrowed to a target or a socket
-by its filters. Four grid lines carry the scale and its rates, and a dashed line in
-the direction's own colour crosses the plot at the range's average rate — its bytes
-over the seconds something moved in, so an idle stretch does not pull it down — the
-same average the tile beside the graph names, so the line carries no rate of its
-own. The tile names the busiest second of the range too, but the graph does not mark
-it: a line at the peak lets one busy second set the graph's mark, where a line at
-the average shows that second as the outlier it is. The scale fits what is drawn —
-the highest step, or the average line where a step's quiet seconds put that above
-every step — and not the busiest second: second by second the two are one number,
-but a recorded step is an average over its timeframe and the busiest second inside
-it stands above that, and a scale fitted to it would flatten the graph under a
-number it does not draw. A range that moved nothing gets no line, since one at zero
-only traces the axis.
-`GET /api/throughput?within=<seconds>` is the recorded rows, counted
-back from the gateway's clock the rows were stamped with rather than the
-browser's, with the gateway's clock at the read and the open timeframe as it
-stands; `?from=<unix>&to=<unix>` reads a range that names its own ends instead,
-and a query that carries both forms, or ends where it begins, is refused as the
-nonsense it is. The range is one select — the last 60 seconds up to the last 30
-days, everything kept, any whole number of seconds, minutes, hours or days, or
-"Between…", two times typed in the browser's own zone and sent as the seconds
-they come to. A range that ends now decides which of the two sources the graph is
-drawn from: one no longer than the five
-minutes of samples kept is drawn from them second by second, with a gap for a
-second not read, its right edge following the gateway's clock rather than the last
-sample so a failing poll leaves gaps. A longer one, and every range between two
-times however short — the seconds kept are the view's own, not any clock's — is
-drawn from the recorded rows. A read whose range is an hour or less is answered
-with the seconds that moved in it, says so in the read itself rather than leaving
-the page to guess from rows a quiet range has none of, and is drawn a point per
-second, or per as many seconds as keep the graph within 600 points, each the average over its own
-length with the quiet seconds counted as the zeroes they are; a read that is
-answered without them is drawn
-a point per timeframe instead: the average over one, or over as many as keep the
-graph within 600 points, a row's bytes shared between the points it overlaps and a
-timeframe with no row drawn as zero. The rows are read when the range is chosen and
-again every ten seconds while the read carries the seconds, or as each timeframe
-closes while it does not, since a graph of timeframe averages has nothing new to say until
-one of them ends. The peak beside the rate now, which the graph's scale and its
-dashed line both sit at, is the busiest second any one row in the range carries.
-A range between two times is drawn between them, and stops at the read where it
-reaches past it, since nothing is recorded ahead of the clock; its axis stands at
-the times themselves where the others stand at how far back they reach. That read
-takes the open timeframe and the rows still waiting for the writer together under
-one lock before it queries the database, then counts a row the database has
-meanwhile once, from the database, so a timeframe closed during the read is never
-missing from it nor counted twice. Both are behind the login, and `/api/config` says whether there is a
-database to offer. The gateway stores bytes, peaks and times; the page divides
-for an average where it is given no seconds, and shows every rate in decimal bits
-per second, as a network meter does. What an
-engine exchanges with its remote is a different link and is not counted.
+### Throughput meter
+
+#### Scope and configuration
+
+`[meter]` records traffic on the browser-to-gateway hop for the session, audio,
+camera and microphone WebSockets. It does not measure the separate connection
+between an engine and its remote server. `enabled` explicitly controls recording;
+the remaining settings are validated even while it is false, so a bad database
+path is found before the meter is enabled.
+
+The default database is `meter.sqlite3` in the gateway's state directory. A
+relative `database` setting is resolved from that directory: the installed state
+directory for an installed `serve` config, the config file's directory with
+`--config`, or the instance directory under `remotex tui`.
+
+#### Collection
+
+Each WebSocket counts text and binary data frames, including their headers but
+excluding heartbeat pings and pongs. Bytes are assigned to the target selected
+when the frame moves; picker traffic has no target. Once a second the sampler
+takes each counter. For an interval of `n` elapsed seconds containing `b` bytes,
+the sampled rate is `round(b / n)` bytes per second. If the runtime delays a
+sample for five seconds, the same averaged rate is assigned to each of those five
+seconds instead of creating one spike.
+
+#### Storage
+
+Every minute closes the current timeframe. A target/socket pair that moved data
+gets one SQLite row containing total bytes, the largest sampled rate in each
+direction, and the nonzero sampled seconds. A second is stored as an unsigned
+LEB128 triple `(offset, sent_per_second, received_per_second)`; omitted seconds
+mean zero. Total bytes remain exact even when a very small multi-second sample
+rounds to zero and therefore has no stored second.
+
+Closed rows wait in memory for a separate writer. The insert and removal of rows
+beyond `max_records` are one transaction, ordered oldest first per target and
+socket. The default retention is one week of minute rows. Recording is best
+effort: the open timeframe is lost if the process stops, and a failed write is
+retried at the next close. Startup refuses a non-SQLite file, a database without
+the remotex application ID, or an unsupported schema version before modifying it.
+
+#### APIs and source selection
+
+Both meter endpoints require login. `/api/config` tells the page whether a meter
+database is available. `GET /api/throughput/live` returns the latest sample for
+each target and socket. The open Throughput view polls it once per second, with at
+most one request outstanding, and retains five minutes in memory. A range ending
+at the present and no longer than five minutes uses this live history. Its right
+edge follows the gateway clock; a failed poll is a gap, not a zero sample.
+
+`GET /api/throughput?within=<seconds>` reads recorded data ending at the gateway's
+current time. `?from=<unix>&to=<unix>` reads a fixed interval; the browser converts
+the user's local times to Unix seconds. Mixing the two query forms or specifying
+an empty interval is rejected. Fixed intervals always use recorded data, as do
+ranges ending now that exceed five minutes.
+
+Recorded responses include the open timeframe and committed or pending closed
+rows. For a span of at most one hour, the response includes its nonzero seconds.
+Longer spans omit them and use timeframe totals. The page limits either form to
+600 plotted points: detailed points average one or more seconds, including quiet
+seconds as zero; coarse points average one or more timeframes and treat a missing
+row as an idle timeframe. A query that intersects only part of a row uses only
+that intersection; without second detail, the row's bytes are distributed evenly
+over its timeframe. Detailed reads refresh every ten seconds. Coarse reads refresh
+when a timeframe closes.
+
+#### Displayed statistics
+
+Each direction has its own graph and filter by target or socket. Values are stored
+in bytes per second and displayed as decimal bits per second.
+
+- **Now** is the most recent live sample.
+- A **point** is `bytes in the step / seconds in the step`. Quiet seconds within
+  the step are zero and remain in the denominator. A missing live poll is a gap
+  (`null`), whereas an idle recorded step is zero.
+- **Average** is `bytes moved / active seconds`. With detailed data, active seconds
+  are the stored nonzero seconds. Without it, they are the portions of plotted
+  steps that contain data. Deliberate idle time therefore does not lower this
+  value. The dashed graph line and the tile show the same average.
+- **Peak** is the highest aggregate one-second point for live data. For a recorded
+  range it is the larger of the highest plotted aggregate point and the largest
+  per-second peak stored by any selected target/socket row. Stored row peaks are
+  not added to one another, because the database does not retain enough timing
+  information to prove that they coincided. The peak is shown in the tile but is
+  not drawn as a graph line.
+- The vertical scale covers the larger of the highest plotted point and the
+  average line. It does not expand to an unplotted peak inside an averaged row.
+
+For example, if a delayed sample observes 500 bytes over five seconds, storage
+records five seconds at 100 B/s. If the following two seconds are idle, a single
+seven-second graph step is `500 / 7 = 71.4 B/s`; the displayed active-time average
+and peak are both 100 B/s. This distinction is why a graph point, average and peak
+can legitimately show three different values.
+
+A recorded read snapshots the open and not-yet-written rows before querying
+SQLite, then reconciles rows by their closure sequence. A timeframe that closes
+or is committed during the query is therefore included once, rather than omitted
+or counted from both memory and the database.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
