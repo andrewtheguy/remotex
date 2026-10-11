@@ -114,8 +114,13 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   seconds and then 15.6 a second at 62 KB, and stayed there; at 2 Mbit/s it took
   the same one step, to 3.8 a second at 63 KB, and no second one in ninety
   seconds. Taking the detection as well changed neither the step nor when it came.
-  H.264 took no step: read at 1 Mbit/s its frames stayed near 10 KB and came 12 a
-  second.
+  H.264 took no step, and has none to take. Its regions state their quantization
+  parameter ([MS-RDPEGFX section
+  2.2.4.4.2](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)),
+  and what moves is sent at 41, the coarsest of the three the host uses, over a
+  LAN already; 33 and 25 are what it refines a still region to. Read at 1 Mbit/s
+  it drew 12 frames a second at 10 KB, and at 500 kbit/s under 3 at 23 KB, each
+  carrying more of the motion, all still at 41.
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
 backing up, and the regions say what it does then ([MS-RDPEGFX section

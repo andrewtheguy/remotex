@@ -31,7 +31,8 @@
 //! What is printed, each [`WINDOW`], is how many frames the host drew and the bytes
 //! of their commands by codec; what its RemoteFX Progressive regions say of
 //! themselves ([MS-RDPEGFX] 2.2.4.2.1.5), where a host that has found the client
-//! slow sends its first passes at a lower quality; and how far behind the desktop
+//! slow sends its first passes at a lower quality; the quantization parameter and
+//! quality its H.264 regions state (2.2.4.4.2); and how far behind the desktop
 //! the frames were composed. Nothing but a drawing host is asserted: the rest is
 //! the measurement.
 
@@ -141,6 +142,8 @@ struct Tally {
     codecs: BTreeMap<u16, u64>,
     /// What the Progressive regions said of themselves.
     progressive: Progressive,
+    /// What the H.264 regions said of themselves.
+    avc: Avc,
     /// The host's clock at the last StartFrame, in milliseconds of its day.
     began: Option<i64>,
     /// For each frame, the page's clock when it was composed less the host's when
@@ -162,6 +165,42 @@ struct Progressive {
     qualities: BTreeMap<u8, u64>,
     /// Regions by the `quantVals` they carry.
     quants: BTreeMap<Vec<u8>, u64>,
+}
+
+/// What AVC420 regions state ([MS-RDPEGFX] 2.2.4.4.1, 2.2.4.4.2): the
+/// quantization parameter and the quality level the host encoded each at.
+#[derive(Default)]
+struct Avc {
+    /// Regions by their `qp`.
+    quantizers: BTreeMap<u8, u64>,
+    /// Regions by their `qualityVal`.
+    qualities: BTreeMap<u8, u64>,
+}
+
+impl Avc {
+    fn add(&mut self, data: &[u8]) -> Result<(), Malformed> {
+        let mut r = Reader::new("an AVC420 metablock", data);
+        let rects = usize::try_from(r.u32_le()?).unwrap_or(usize::MAX);
+        r.skip(rects.saturating_mul(8))?;
+        for said in r.bytes(rects.saturating_mul(2))?.chunks(2) {
+            *self.quantizers.entry(said[0] & 0x3F).or_default() += 1;
+            *self.qualities.entry(said[1]).or_default() += 1;
+        }
+        Ok(())
+    }
+
+    fn line(&self) -> String {
+        format!("h264 qp {:?}; quality {:?}", self.quantizers, self.qualities)
+    }
+
+    fn merge(&mut self, other: &Avc) {
+        for (qp, regions) in &other.quantizers {
+            *self.quantizers.entry(*qp).or_default() += regions;
+        }
+        for (quality, regions) in &other.qualities {
+            *self.qualities.entry(*quality).or_default() += regions;
+        }
+    }
 }
 
 impl Progressive {
@@ -264,6 +303,9 @@ impl Tally {
             if matches!(codec, gfx::CODEC_CAPROGRESSIVE | gfx::CODEC_CAPROGRESSIVE_V2) {
                 self.progressive.add(data).expect("the Progressive blocks parse");
             }
+            if codec == gfx::CODEC_AVC420 {
+                self.avc.add(data).expect("the AVC420 metablock parses");
+            }
         }
     }
 
@@ -290,6 +332,7 @@ impl Tally {
             *self.codecs.entry(*codec).or_default() += bytes;
         }
         self.progressive.merge(&other.progressive);
+        self.avc.merge(&other.avc);
     }
 }
 
@@ -416,6 +459,7 @@ async fn a_real_host_draws_for_a_slow_client() {
             Err(_) => {
                 println!("  {:5.1}s {}", started.elapsed().as_secs_f32(), window.line(window_started.elapsed()));
                 println!("         {}", window.progressive.line());
+                println!("         {}", window.avc.line());
                 let mut behind: Vec<i64> = window.behind.iter().map(|offset| offset - nearest).collect();
                 behind.sort_unstable();
                 if let (Some(median), Some(most)) = (behind.get(behind.len() / 2), behind.last()) {
