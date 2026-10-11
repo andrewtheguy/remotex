@@ -77,6 +77,12 @@ const only = (traffic: Traffic[], path: string): Traffic => {
   return matches[0];
 };
 
+/// The control types on the socket open at `path`, none before it opens. For
+/// `expect.poll`, which fails at once when its callback throws rather than polling
+/// again: `only` in its place fails a socket that opens a moment after the click.
+const pending = (traffic: Traffic[], path: string): string[] =>
+  traffic.find((t) => t.url === path && !t.closed)?.controlTypes ?? [];
+
 test.describe("the audio socket", () => {
   test.skip(
     !AUDIO_TARGET,
@@ -121,7 +127,7 @@ test.describe("the audio socket", () => {
     // The format is what configures a decoder, and it must arrive on the socket that
     // will carry the packets — not on the one that carries pixels.
     await expect
-      .poll(() => only(traffic, "/ws/audio").controlTypes, { timeout: 20_000 })
+      .poll(() => pending(traffic, "/ws/audio"), { timeout: 20_000 })
       .toContain("audioFormat");
     expect(
       only(traffic, "/ws").controlTypes,
@@ -248,10 +254,9 @@ test.describe("the audio socket", () => {
 
       await unmute.click();
       await expect
-        .poll(() => only(traffic, "/ws/audio").controlTypes, {
-          timeout: 20_000,
-        })
+        .poll(() => pending(traffic, "/ws/audio"), { timeout: 20_000 })
         .toContain("audioFormat");
+      expect(only(traffic, "/ws/audio").controlTypes).toContain("audioFormat");
     });
   });
 });
