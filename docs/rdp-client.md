@@ -80,8 +80,9 @@ the implementation checks.
 The socket comes from `engine::tcp_connect`, so an RDP host that goes silent is
 noticed on the same keepalive schedule as every other engine's.
 
-`ConnectionType` is declared a LAN rather than probed, because a server's estimate
-of the hop between it and a nearby gateway throttled updates in testing. The
+`ConnectionType` is declared a LAN rather than detected: the socket is the hop
+between the host and a gateway near it, which is not the link a person is on, and
+neither the declaration nor the detection changes what the host draws (below). The
 client requests neither an MCS message channel nor multitransport, and it does not
 advertise or implement network-characteristics detection. This is a deliberate
 protocol boundary, not a general claim about what Windows will send. In particular,
@@ -90,6 +91,36 @@ protocol boundary, not a general claim about what Windows will send. In particul
 says that advertising the graphics-pipeline flag also requires network-detection
 support. The tested Windows 10 and 11 hosts accept the client's smaller
 combination; an auto-detect PDU outside that observed traffic is unsupported.
+
+A Windows host does draw the graphics pipeline for a slow link, but for the one it
+finds for itself and not for the one it is told of. Measured against a Windows 11
+host without a GPU, with the pipeline passed and one full-screen moving picture at
+1280×800, which over a LAN is about 34 frames a second at 114 KB each in RemoteFX
+Progressive, and about 32 a second at 9 KB each where H.264 is taken:
+
+- **Told, nothing changes.** A client that took the detection of [MS-RDPBCGR
+  section 2.2.14](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
+  and reported every bandwidth window as 2 Mbit/s, or as 200 kbit/s, was sent the
+  same frames as one that declared a LAN, and so was one that took no detection
+  and declared `connectionType` a modem or low-speed broadband. The host's
+  detection over TCP was only a Bandwidth Measure Start and Stop around each few
+  kilobytes it sent: no round-trip request, no connect-time phase, and never a
+  Network Characteristics Result.
+- **Acknowledged late, only the rate changes.** With each frame's acknowledgement
+  held 200 ms the host drew 20 frames a second, and held 1.5 s about 3, every one
+  still 114 KB.
+- **Read slowly, the frames get smaller.** Behind a relay that read the host's
+  socket at 8 Mbit/s the host drew 8 frames a second at 115 KB for about fifteen
+  seconds and then 15.6 a second at 62 KB, and stayed there; at 2 Mbit/s it took
+  the same one step, to 3.8 a second at 63 KB, and no second one in ninety
+  seconds. Taking the detection as well changed neither the step nor when it came.
+  H.264 took no step: read at 1 Mbit/s its frames stayed near 10 KB and came 12 a
+  second.
+
+So what makes this host spend fewer bytes on a Progressive frame is its own socket
+backing up. A gateway that reads that socket at LAN speed hides a slow page from
+it: the page's late acknowledgements slow the host's frames ([The pipeline, passed
+on](#the-pipeline-passed-on)) and leave each one full size.
 
 ## The two threads
 
