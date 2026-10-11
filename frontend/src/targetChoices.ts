@@ -15,13 +15,13 @@
 // - The size a session will have is always shown, and is a choice only where
 //   there are two: see `sizeOptions`.
 // - An option the target's type does not offer has no row.
-// - One it offers that cannot be had here is greyed, with the reason: sound in
+// - One it offers that cannot be had here is greyed, with the reason: Opus in
 //   a browser with no audio decoder, a passthrough this browser cannot take, or
 //   one that is the only way this gateway can serve the target, which is then
 //   shown ticked.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
-//   or lossless: see `soundRow`. In a browser with no audio decoder it is greyed
-//   and unticked, and Start sends it off.
+//   or lossless: see `soundRow`. In a browser with no audio decoder only the
+//   lossless one plays, which the page decodes itself, so ticking takes it.
 // - Where the second display sits is a choice on a target that asks its host for
 //   two and tells it where each is: see `PLACEMENTS`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
@@ -30,8 +30,6 @@
 //   has the page's decoder for it: see `softwareRow`. The VP9 is no choice: the
 //   page decodes it in WebAssembly wherever the browser's own decoder does not
 //   take it (nativeVp9.ts).
-
-import { NO_AUDIO_DECODER } from "./preflight.ts";
 
 /** The stream a target can pass untouched, as `/api/targets` names it. */
 export type Passthrough = "rdp-graphics" | "apple-media";
@@ -119,7 +117,10 @@ export interface Abilities {
    */
   appleMedia: boolean;
   rdpGraphics: boolean;
-  /** Whether this browser has an audio decoder to play a remote's sound with. */
+  /**
+   * Whether this browser has an audio decoder, which Opus and a Mac's AAC-ELD
+   * need. FLAC does not: the page decodes it itself (flacDecoder.ts).
+   */
   audio: boolean;
   /** Whether this page can run its software HEVC decoder (softwareSupport.ts). */
   runsHevc: boolean;
@@ -143,17 +144,18 @@ export interface SizeOption {
 export interface SoundFormat {
   value: Exclude<Sound, "off">;
   label: string;
-  /** What choosing it does. */
+  /** What choosing it does, or why it cannot be chosen here. */
   note: string;
+  disabled: boolean;
 }
 
 /** Whether a target's sound is taken, and the formats a ticked one chooses between. */
 export interface SoundRow {
   label: string;
-  /** What ticking it does, or why it cannot be ticked here. */
   note: string;
   checked: boolean;
-  disabled: boolean;
+  /** What ticking it takes: the first format this browser plays. */
+  ticks: Exclude<Sound, "off">;
   /** Opus first, then lossless. */
   formats: SoundFormat[];
 }
@@ -396,8 +398,9 @@ function sizeOptions(
 /**
  * `target`'s sound as the picker shows it: nothing where it offers none, and
  * otherwise a tick and, under a ticked one, Opus or FLAC. Ticking it takes
- * Opus. In a browser that cannot play sound the tick is greyed and empty, and
- * what was remembered stays remembered for a browser that can.
+ * Opus. A browser with no audio decoder plays FLAC alone, so there Opus is
+ * greyed and ticking takes FLAC; an Opus remembered from before is not sent,
+ * and stays remembered for a browser that can.
  */
 function soundRow(
   target: TargetInfo,
@@ -411,26 +414,30 @@ function soundRow(
     {
       value: "opus",
       label: "Opus",
-      note: "Compressed, at a rate that follows the link.",
+      note: plays
+        ? "Compressed, at a rate that follows the link."
+        : "This browser has no WebCodecs AudioDecoder to play it with.",
+      disabled: !plays,
     },
     {
       value: "flac",
       label: "FLAC",
       note: "Lossless, about a megabit a second of music. For a LAN.",
+      disabled: false,
     },
   ];
-  // What was chosen last time.
-  const audio = plays
-    ? (formats.find((format) => format.value === remembered)?.value ?? "off")
-    : "off";
+  // What was chosen last time, where it plays here.
+  const audio =
+    formats.find((format) => format.value === remembered && !format.disabled)
+      ?.value ?? "off";
   return {
     row: {
       label: "Sound",
       note: plays
         ? "Take the remote's sound and play it here."
-        : NO_AUDIO_DECODER,
+        : "Take the remote's sound and play it here, lossless: this browser has no decoder for Opus.",
       checked: audio !== "off",
-      disabled: !plays,
+      ticks: plays ? "opus" : "flac",
       formats,
     },
     audio,

@@ -243,7 +243,7 @@ test.describe("a browser with no audio decoder", () => {
     await leaveSession(page);
   });
 
-  test("starts, with sound greyed at the picker and in the menu", async ({
+  test("starts, and plays FLAC, which the page decodes itself", async ({
     page,
   }) => {
     // Safari 16.4 to 18 as the page sees it: a video decoder and no audio one.
@@ -251,30 +251,48 @@ test.describe("a browser with no audio decoder", () => {
       Reflect.deleteProperty(globalThis, "AudioDecoder");
     });
     const seen = watchSession(page);
+    // The codec of every `audioFormat` the audio socket announced.
+    const formats: string[] = [];
+    page.on("websocket", (ws) => {
+      if (new URL(ws.url()).pathname !== "/ws/audio") {
+        return;
+      }
+      ws.on("framereceived", ({ payload }) => {
+        if (typeof payload !== "string") {
+          return;
+        }
+        const message: Record<string, unknown> = JSON.parse(payload);
+        if (message.type === "audioFormat") {
+          formats.push(String(message.codec));
+        }
+      });
+    });
     await logIn(page);
 
-    // The sound is offered and cannot be had here, so it is greyed, with the
-    // reason, and the target still starts.
+    // The sound is a choice, and ticking it takes FLAC: Opus is greyed, with the
+    // reason.
     const item = await openTarget(page);
-    const sound = item.getByRole("checkbox", { name: SOUND });
-    await expect(sound).toBeDisabled();
-    await expect(sound).not.toBeChecked();
+    await item.getByRole("checkbox", { name: SOUND }).check();
+    await expect(item.getByRole("radio", { name: /^FLAC/ })).toBeChecked();
+    const opus = item.getByRole("radio", { name: /^Opus/ });
+    await expect(opus).toBeDisabled();
+    await expect(opus).not.toBeChecked();
     await expect(item).toContainText("no WebCodecs AudioDecoder");
+
     await item.getByRole("button", { name: "Start", exact: true }).click();
     await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
       timeout: 20_000,
     });
-    expect(seen.connects.at(-1)).toMatchObject({ audio: "off" });
+    expect(seen.connects.at(-1)).toMatchObject({ audio: "flac" });
     expect(seen.statuses.at(-1)).toMatchObject({
       type: "connected",
-      audio: false,
+      audio: true,
     });
+    await expect.poll(() => formats, { timeout: 10_000 }).toEqual(["flac"]);
 
-    // The menu keeps its Audio row, greyed, rather than omitting it.
+    // And the menu offers Mute, not a greyed reason.
     await page.getByRole("button", { name: "Open menu" }).click();
-    await expect(
-      page.getByRole("button", { name: "Audio not supported" }),
-    ).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Mute" })).toBeEnabled();
     await page.getByRole("button", { name: "Close menu" }).click();
     await returnToPicker(page);
   });

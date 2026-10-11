@@ -356,7 +356,7 @@ export default function TargetPicker({
 }
 
 // A target's sound under it: ticked or not, and under a ticked one the format it
-// is sent as. Greyed, with the reason, in a browser that cannot play it.
+// is sent as. A format this browser cannot play is greyed, with the reason.
 function SoundChoice({
   target,
   row,
@@ -372,14 +372,12 @@ function SoundChoice({
 }) {
   return (
     <>
-      <label
-        className={`picker-option${row.disabled ? " picker-option-unavailable" : ""}`}
-      >
+      <label className="picker-option">
         <input
           type="checkbox"
           checked={row.checked}
-          disabled={row.disabled || locked}
-          onChange={(e) => choose(e.target.checked ? "opus" : "off")}
+          disabled={locked}
+          onChange={(e) => choose(e.target.checked ? row.ticks : "off")}
         />
         <span className="picker-option-text">
           <span>{row.label}</span>
@@ -393,12 +391,15 @@ function SoundChoice({
           aria-label="Sound format"
         >
           {row.formats.map((format) => (
-            <label key={format.value} className="picker-option">
+            <label
+              key={format.value}
+              className={`picker-option${format.disabled ? " picker-option-unavailable" : ""}`}
+            >
               <input
                 type="radio"
                 name={`picker-sound-${target}`}
                 checked={chosen === format.value}
-                disabled={locked}
+                disabled={format.disabled || locked}
                 onChange={() => choose(format.value)}
               />
               <span className="picker-option-text">

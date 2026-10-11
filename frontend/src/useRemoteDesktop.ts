@@ -6,6 +6,7 @@ import {
   createAudioContext,
   createAudioPlayer,
   decodeAudioHead,
+  FLAC_CODEC,
 } from "./audioPlayer.ts";
 import { type CameraSender, startCameraSender } from "./cameraSender.ts";
 import { connectionLabel } from "./connectionLabel.ts";
@@ -641,9 +642,10 @@ export function useRemoteDesktop(
   // menu's Mute and Unmute leave it (`seedAudioForAttachment`), except that a
   // browser that needs a click for every AudioContext always comes back muted.
   const [audioEnabled, setAudioEnabled] = useState(false);
-  // Why this browser cannot play this session's sound at all, decided at `connected`
-  // before any socket opens: no audio decoder, or a High Performance Mac's AAC-ELD
-  // in a browser that decoded it in neither form. The menu greys its Audio button
+  // Why this browser cannot play this session's sound at all: no audio decoder for
+  // what it is sent, or a High Performance Mac's AAC-ELD in a browser that decoded
+  // it in neither form. Decided at `connected` where it can be, before any socket
+  // opens, and otherwise when the format arrives. The menu greys its Audio button
   // with it, and the audio socket stays shut.
   const [audioBlock, setAudioBlock] = useState<AudioBlock | null>(null);
   // Why there is no sound, when there should be. One string, and what is behind it is
@@ -1710,6 +1712,21 @@ export function useRemoteDesktop(
       return true;
     };
 
+    // A format only an audio decoder plays, in a browser with none: not one its
+    // picker offers, so a session started elsewhere with Opus. Said as what it is
+    // rather than as the decoder's absence surfacing as an error.
+    const blockedWithoutDecoder = (
+      msg: Extract<ControlMsg, { type: "audioFormat" }>,
+    ): boolean => {
+      if (msg.codec === FLAC_CODEC || decodesAudio()) {
+        return false;
+      }
+      setAudioBlock("decoder");
+      closeAudioSocket();
+      setAudioEnabled(false);
+      return true;
+    };
+
     // Build the decoder the format describes, around the context the click made.
     //
     // A *second* format on the same socket is a new desktop — the audio socket
@@ -1720,7 +1737,7 @@ export function useRemoteDesktop(
       if (audioPlayerRef.current) {
         releaseAudio();
       }
-      if (heldForAppleSound(msg)) {
+      if (blockedWithoutDecoder(msg) || heldForAppleSound(msg)) {
         return;
       }
       // The click's context when there is one, which is the first format after the
@@ -1919,9 +1936,10 @@ export function useRemoteDesktop(
     // Whether this browser can play the sound of the session `msg` announces, set
     // as `audioBlock` and returned. A High Performance Mac's sound is always its
     // AAC-ELD, passed as it came whatever was chosen (src/session.rs), so whether
-    // this browser decodes it is known before a format arrives — from the question
-    // asked at load, which the page does not mount behind and may still be out.
-    // Then the session starts as playable, and a "no" closes what it opened.
+    // this browser decodes it is known before a format arrives: not at all without
+    // an audio decoder, and otherwise from the question asked at load, which the
+    // page does not mount behind and may still be out. Then the session starts as
+    // playable, and a "no" closes what it opened.
     let connectedSeq = 0;
     // The Mac's sound question answered after `connected`: a "no" for the session
     // it was asked for closes what that session opened.
@@ -1938,11 +1956,13 @@ export function useRemoteDesktop(
       msg: Extract<ControlMsg, { type: "connected" }>,
       seq: number,
     ): AudioBlock | null => {
-      if (!decodesAudio()) {
-        return "decoder";
-      }
+      // Any other session's sound is Opus or FLAC, as chosen at this browser's
+      // picker, which offers only FLAC where there is no audio decoder.
       if (!msg.audio || msg.subtype !== "ard-high-performance") {
         return null;
+      }
+      if (!decodesAudio()) {
+        return "decoder";
       }
       const probed = appleSoundProbed();
       if (probed) {

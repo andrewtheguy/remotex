@@ -21,10 +21,12 @@
 //
 // The **audio decoder** is the one exception, and it is not a refusal: Safari from
 // 16.4 to 18 has `VideoDecoder` and no `AudioDecoder`, and the desktop is the whole
-// of a session where sound is not. Such a browser starts, and every sound option is
-// greyed with `NO_AUDIO_DECODER` as the reason: the picker's Sound row
-// (targetChoices.ts) and the menu's Audio button (FloatingMenu.tsx). Asked here, by
-// `decodesAudio`, so that the question has one answer and one place.
+// of a session where sound is not. Such a browser starts, and plays the one sound
+// that needs no audio decoder, FLAC, which the page decodes itself (flacDecoder.ts).
+// What does need one is greyed with the reason: Opus at the picker
+// (targetChoices.ts), and a High Performance Mac's AAC-ELD in the menu's Audio
+// button (FloatingMenu.tsx). Asked here, by `decodesAudio`, so that the question has
+// one answer and one place.
 //
 // The gateway speaks plain HTTP and always has — it has no TLS listener and is not
 // getting one. A secure context therefore comes from where the page is reached, not
@@ -77,7 +79,7 @@ export function decodesAudio(): boolean {
   return typeof AudioDecoder !== "undefined";
 }
 
-/** Why every sound option is greyed in a browser where `decodesAudio` says no. */
+/** Why a sound that needs an audio decoder is greyed where `decodesAudio` says no. */
 export const NO_AUDIO_DECODER =
   "This browser has no WebCodecs AudioDecoder, so it cannot play the remote's sound.";
 

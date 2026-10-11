@@ -204,8 +204,8 @@ passed.
   web root.
 - The page requires a secure context plus `VideoDecoder` and refuses startup in
   `frontend/src/preflight.ts` without them. A browser without `AudioDecoder`
-  starts, with every sound option greyed and the reason given. Do not add
-  fallback browser paths.
+  starts and plays FLAC, which the page decodes itself; what needs the decoder
+  is greyed with the reason. Do not add fallback browser paths.
 
 ### Sessions
 
@@ -2740,13 +2740,15 @@ any `.localhost` label), or a TLS-terminating reverse proxy. A LAN address over
 plain `http://` is the case this refuses,
 by name. `AudioDecoder` is not part of the gate. Safari from 16.4 to 18 has
 `VideoDecoder` without it, and a desktop without sound is still the session somebody
-came for. Such a browser starts, and its answer (`decodesAudio`) greys sound
-everywhere it is offered, with one reason: the picker's Sound row, which Start then
-sends as off, and the menu's Audio button, which reads *Audio not supported* in
-every session — a High Performance Mac's included, whose sound comes whatever was
-chosen and whose audio socket this browser therefore never opens. A browser with
-`AudioDecoder` that decodes that Mac's AAC-ELD in neither form (`appleMedia.ts`) is
-told the same way, at `connected`: the button reads *AAC-ELD not supported*. What
+came for. Such a browser starts, and still plays the one sound that needs no audio
+decoder: FLAC, which the page decodes in a WebAssembly module of its own
+(`flacDecoder.ts`). Its answer (`decodesAudio`) greys what does need one, with the
+reason: Opus under the picker's Sound row, whose tick there takes FLAC, and a High
+Performance Mac's AAC-ELD, whose sound comes whatever was chosen. On such a Mac the
+menu's Audio button reads *Audio not supported* and this browser never opens the
+audio socket. A browser with `AudioDecoder` that decodes that Mac's AAC-ELD in
+neither form (`appleMedia.ts`) is told the same way, at `connected`: the button
+reads *AAC-ELD not supported*. What
 remains reportable mid-session is a *codec* a decoder refuses, which is a different
 sentence and arrives from the decoder itself.
 

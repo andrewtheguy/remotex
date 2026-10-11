@@ -711,9 +711,8 @@ function displaysShown(
 // closes the browser's subscription to it.
 //
 // Sound this browser cannot play keeps the row, greyed, saying why in a few words:
-// a browser with no audio decoder in every session (the picker greyed its sound
-// too), and a High Performance Mac's AAC-ELD where this browser decodes neither of
-// its forms.
+// a High Performance Mac's AAC-ELD in a browser with no audio decoder, or with one
+// that decodes neither of its forms, and Opus in a browser with no audio decoder.
 function AudioSection({
   available,
   blocked,
