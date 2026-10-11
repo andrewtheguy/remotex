@@ -579,8 +579,11 @@ for the browsers whose own decoder does not take it.
   own quantizer threshold, and the settle sharpens a quiet desktop back at the
   dial. Turned off, the walk is the pressure-only one.
 
-None of them reaches a passed stream: a session started with the passthrough
-sends the Mac's HEVC, or the RDP host's pipeline, as it came.
+Neither reaches a stream passed at the picker's choice: a session started with
+the passthrough sends the Mac's HEVC, or the RDP host's pipeline, as it came.
+wlshare's stream, passed on every `wlshare` target, is told both and walks
+itself. Which passed streams follow the browser's link, and how, is in
+[A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
 
 The engines never see the config keys. They and the session's choices collapse
 to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `rdp_graphics`,
@@ -1020,6 +1023,9 @@ the gateway the connection, the channel's bulk compression and the frame
 acknowledgements, a few percent of a core whatever the desktop is doing. What it
 costs is the browser's work, and the quality walk: what the host draws with is
 sent as it is, so `video_quality` and `render_adaptive` reach nothing of it.
+The host still follows the browser's link by its own pacing, as *The page
+paces the host* and *The host finds a slow page for itself* below describe
+([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
 
 The compositor the page runs is the gateway's own, unit tested
 as it is there, and the module built from it is tested as the page loads it.
@@ -1469,6 +1475,45 @@ a decoder that exists and refuses this *configuration*, which no keyframe repair
 That is *said* rather than logged, because the stream is all a target sends and the
 alternative is a desktop that never paints and never explains itself: a banner that stays up, naming the configuration the browser
 would not take.
+
+#### A passed stream and the browser's link
+
+The walk above follows the browser's link only for VP9 the gateway encodes. A
+passed stream is coded by the remote, so it can follow that link only if the
+remote is told how the link is doing. Today two of the three passthroughs are:
+
+| Passed stream | Who adapts it | What it hears of the browser's link | Target keys that reach it |
+|---|---|---|---|
+| wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`, the same walk as here: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
+| An RDP host's graphics pipeline (passthrough) | The Windows host's own pacing: frame rate by acknowledgements, frame size by its socket | Frames are acknowledged once the page has composed them, and while two large frames wait the host's socket goes unread through a small receive buffer | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
+| A High Performance Mac's HEVC (passthrough) | The Mac's rate controller, 20–60 Mbit/s | Nothing: the delay in its rate reports ends at the gateway | None |
+
+- **wlshare** walks its encoder exactly as the gateway walks its own, so a passed
+  stream there is a peer of one encoded here: quality goes down to the floor, then
+  the frame rate, and both come back as the link clears. See
+  [wlshare's stream, passed through](#wlshares-stream-passed-through).
+- **A Windows host** has no quality dial for a client to turn. It adapts in the
+  two ways it has. It draws no more than about eleven frames ahead of its
+  acknowledgements, so a page that composes slowly sets the frame rate. It sends
+  smaller frames only when its own socket backs up, so the gateway lets the socket
+  fill while the page is behind. Measured against a Windows 11 host with a stand-in
+  page on an 8 Mbit/s link, its RemoteFX Progressive frames halved and the page
+  showed 16 frames a second where it had shown 8.6. See
+  [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)
+  and [The pipeline, passed on](rdp-client.md#the-pipeline-passed-on). Composed
+  here instead, the host is acknowledged as each frame is decoded and its socket
+  is read at the gateway's own speed: it adapts to the gateway, and the VP9 walk
+  adapts to the browser.
+- **A Mac** walks its HEVC by the one-way delay to the gateway, which on a LAN is
+  never behind. A browser that falls behind fills the gateway's queue, which drops
+  to the next IDR and asks the Mac for one. Adding the browser's queue to the
+  reported delay is [on the roadmap](roadmap.md#apples-passed-hevc-at-4k); until
+  then a slow link wants a session started without the passthrough, whose VP9 the
+  walk follows.
+- **Other VNC servers**, a plain `vnc` target included even when wlshare answers
+  it, and a Mac in Standard mode, have no passed stream: their picture is always
+  encoded here, and the walk follows the browser's link wherever `render_adaptive`
+  is on.
 
 #### The codec
 

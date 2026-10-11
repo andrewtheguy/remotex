@@ -79,8 +79,10 @@ config key.
   supported* in one that cannot decode the Mac's AAC-ELD.
 - **Passthrough.** Sends the remote's own stream to the browser as it came, for
   a LAN, instead of VP9 encoded by the gateway. It is greyed where the browser
-  cannot take the stream. A passed stream does not follow the browser's link:
-  on a slow one, start the session without it.
+  cannot take the stream. A passed RDP pipeline follows the browser's link: the
+  Windows host draws fewer and smaller frames for a browser that falls behind. A
+  passed Mac's HEVC does not: on a slow link, start that session without it.
+  See [A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link).
 
 One gateway holds one session. A reload or a dropped connection normally
 resumes it; a passed RDP graphics pipeline instead reconnects the engine,
