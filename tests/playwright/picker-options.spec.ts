@@ -233,6 +233,53 @@ test.describe("the picker's options", () => {
   });
 });
 
+test.describe("a browser with no audio decoder", () => {
+  test.skip(
+    !PICKER_TARGET,
+    "set REMOTEX_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
+  );
+
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
+  test("starts, with sound greyed at the picker and in the menu", async ({
+    page,
+  }) => {
+    // Safari 16.4 to 18 as the page sees it: a video decoder and no audio one.
+    await page.addInitScript(() => {
+      Reflect.deleteProperty(globalThis, "AudioDecoder");
+    });
+    const seen = watchSession(page);
+    await logIn(page);
+
+    // The sound is offered and cannot be had here, so it is greyed, with the
+    // reason, and the target still starts.
+    const item = await openTarget(page);
+    const sound = item.getByRole("checkbox", { name: SOUND });
+    await expect(sound).toBeDisabled();
+    await expect(sound).not.toBeChecked();
+    await expect(item).toContainText("no WebCodecs AudioDecoder");
+    await item.getByRole("button", { name: "Start", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    expect(seen.connects.at(-1)).toMatchObject({ audio: "off" });
+    expect(seen.statuses.at(-1)).toMatchObject({
+      type: "connected",
+      audio: false,
+    });
+
+    // The menu keeps its Audio row, greyed, rather than omitting it.
+    await page.getByRole("button", { name: "Open menu" }).click();
+    await expect(
+      page.getByRole("button", { name: "Audio not supported" }),
+    ).toBeDisabled();
+    await page.getByRole("button", { name: "Close menu" }).click();
+    await returnToPicker(page);
+  });
+});
+
 test.describe("the picker on a phone", () => {
   test.skip(
     !PICKER_TARGET,

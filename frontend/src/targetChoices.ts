@@ -15,12 +15,13 @@
 // - The size a session will have is always shown, and is a choice only where
 //   there are two: see `sizeOptions`.
 // - An option the target's type does not offer has no row.
-// - One it offers that cannot be had here is greyed, with the reason: a lossless
-//   sound this gateway cannot code, a passthrough this browser cannot take, or
+// - One it offers that cannot be had here is greyed, with the reason: sound in
+//   a browser with no audio decoder, a passthrough this browser cannot take, or
 //   one that is the only way this gateway can serve the target, which is then
 //   shown ticked.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
-//   or lossless: see `soundRow`.
+//   or lossless: see `soundRow`. In a browser with no audio decoder it is greyed
+//   and unticked, and Start sends it off.
 // - Where the second display sits is a choice on a target that asks its host for
 //   two and tells it where each is: see `PLACEMENTS`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
@@ -29,6 +30,8 @@
 //   has the page's decoder for it: see `softwareRow`. The VP9 is no choice: the
 //   page decodes it in WebAssembly wherever the browser's own decoder does not
 //   take it (nativeVp9.ts).
+
+import { NO_AUDIO_DECODER } from "./preflight.ts";
 
 /** The stream a target can pass untouched, as `/api/targets` names it. */
 export type Passthrough = "rdp-graphics" | "apple-media";
@@ -116,6 +119,8 @@ export interface Abilities {
    */
   appleMedia: boolean;
   rdpGraphics: boolean;
+  /** Whether this browser has an audio decoder to play a remote's sound with. */
+  audio: boolean;
   /** Whether this page can run its software HEVC decoder (softwareSupport.ts). */
   runsHevc: boolean;
   /**
@@ -145,8 +150,10 @@ export interface SoundFormat {
 /** Whether a target's sound is taken, and the formats a ticked one chooses between. */
 export interface SoundRow {
   label: string;
+  /** What ticking it does, or why it cannot be ticked here. */
   note: string;
   checked: boolean;
+  disabled: boolean;
   /** Opus first, then lossless. */
   formats: SoundFormat[];
 }
@@ -389,11 +396,13 @@ function sizeOptions(
 /**
  * `target`'s sound as the picker shows it: nothing where it offers none, and
  * otherwise a tick and, under a ticked one, Opus or FLAC. Ticking it takes
- * Opus.
+ * Opus. In a browser that cannot play sound the tick is greyed and empty, and
+ * what was remembered stays remembered for a browser that can.
  */
 function soundRow(
   target: TargetInfo,
   remembered: Sound | undefined,
+  plays: boolean,
 ): { row: SoundRow | null; audio: Sound } {
   if (!target.audio) {
     return { row: null, audio: "off" };
@@ -411,13 +420,17 @@ function soundRow(
     },
   ];
   // What was chosen last time.
-  const audio =
-    formats.find((format) => format.value === remembered)?.value ?? "off";
+  const audio = plays
+    ? (formats.find((format) => format.value === remembered)?.value ?? "off")
+    : "off";
   return {
     row: {
       label: "Sound",
-      note: "Take the remote's sound and play it here.",
+      note: plays
+        ? "Take the remote's sound and play it here."
+        : NO_AUDIO_DECODER,
       checked: audio !== "off",
+      disabled: !plays,
       formats,
     },
     audio,
@@ -447,7 +460,7 @@ export function targetOptions(
   const size =
     sizes.find((option) => option.value === remembered?.size)?.value ??
     sizes[0].value;
-  const sound = soundRow(target, remembered?.audio);
+  const sound = soundRow(target, remembered?.audio, abilities.audio);
   const rows: OptionRow[] = [];
   let blocked: string | null = null;
   if (target.passthrough) {
@@ -487,8 +500,10 @@ export function targetOptions(
     rows,
     choices,
     // High Performance's sound comes with its picture, so it has no row and is
-    // always there.
-    sound: choices.audio !== "off" || target.passthrough === "apple-media",
+    // always there, for a browser that can play it.
+    sound:
+      choices.audio !== "off" ||
+      (target.passthrough === "apple-media" && abilities.audio),
     blocked,
   };
 }

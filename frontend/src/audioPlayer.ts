@@ -7,8 +7,8 @@
 // the same way.
 //
 // AudioContext creation stays in the enabling click wherever the browser needs one
-// (AUDIO_NEEDS_GESTURE). That WebCodecs exists at all is
-// not a question asked here: it is the client's entry condition (preflight.ts).
+// (AUDIO_NEEDS_GESTURE). That `AudioDecoder` exists at all is not a question asked
+// here: a browser without one never builds a player (preflight.ts, `decodesAudio`).
 
 import { APPLE_ELD_CODEC, appleEldConfig } from "./appleMedia.ts";
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";

@@ -278,6 +278,7 @@ export default function RemoteDesktop({
     connection,
     canAudio,
     audioEnabled,
+    audioBlock,
     audioError,
     videoError,
     audioStream,
@@ -425,6 +426,7 @@ export default function RemoteDesktop({
             oversize={oversize}
             canAudio={canAudio}
             audioEnabled={audioEnabled}
+            audioBlock={audioBlock}
             audioError={audioError}
             audioStream={audioStream}
             videoStream={videoStream}

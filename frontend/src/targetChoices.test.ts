@@ -17,12 +17,14 @@ import {
 const ABLE: Abilities = {
   appleMedia: true,
   rdpGraphics: true,
+  audio: true,
   runsHevc: true,
   follows: "window",
 };
 const UNABLE: Abilities = {
   appleMedia: false,
   rdpGraphics: false,
+  audio: false,
   runsHevc: false,
   follows: "window",
 };
@@ -224,6 +226,31 @@ test("High Performance's sound has no row and is always carried", () => {
   assert.equal(options.soundRow, null);
   assert.equal(options.choices.audio, "off");
   assert.equal(options.sound, true);
+});
+
+test("a browser with no audio decoder greys the sound and sends it off", () => {
+  const MUTE: Abilities = { ...ABLE, audio: false };
+  // Remembered as ticked, from a browser that could: kept, and not sent.
+  for (const remembered of ["opus", "flac"] as const) {
+    const options = targetOptions(RDP, { audio: remembered }, MUTE);
+    assert.equal(options.soundRow?.disabled, true);
+    assert.equal(options.soundRow?.checked, false);
+    assert.match(options.soundRow?.note ?? "", /AudioDecoder/);
+    assert.equal(options.choices.audio, "off");
+    assert.equal(options.sound, false);
+  }
+  // The same target in a browser that can is as it was left.
+  const able = targetOptions(RDP, { audio: "flac" }, ABLE);
+  assert.equal(able.soundRow?.disabled, false);
+  assert.equal(able.choices.audio, "flac");
+  // High Performance's sound comes whatever was chosen, and nothing here can
+  // play it, so Start spends no click on an audio context.
+  assert.equal(targetOptions(HIGH_PERFORMANCE, undefined, MUTE).sound, false);
+  // The desktop itself is untouched: a passthrough this browser takes is offered.
+  assert.equal(
+    targetOptions(HIGH_PERFORMANCE, undefined, MUTE).rows[0]?.disabled,
+    false,
+  );
 });
 
 test("a passthrough this browser cannot take is greyed, with the reason", () => {

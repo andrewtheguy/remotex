@@ -25,8 +25,10 @@ import {
 } from "./fullscreen.ts";
 import { keyboardLockSupported } from "./keyboardLock.ts";
 import {
+  type AudioBlock,
   type AudioRow,
   type AudioStreamInfo,
+  audioBlockCopy,
   audioLabel,
   renderLabel,
   type VideoStreamInfo,
@@ -707,17 +709,40 @@ function displaysShown(
 // Mute and Unmute because that is all it reaches: whether the remote's sound is
 // taken was chosen at the picker before the session started, and this opens or
 // closes the browser's subscription to it.
+//
+// Sound this browser cannot play keeps the row, greyed, saying why in a few words:
+// a browser with no audio decoder in every session (the picker greyed its sound
+// too), and a High Performance Mac's AAC-ELD where this browser decodes neither of
+// its forms.
 function AudioSection({
   available,
+  blocked,
   enabled,
   error,
   onChange,
 }: {
   available: boolean;
+  blocked: AudioBlock | null;
   enabled: boolean;
   error: string | null;
   onChange: (enabled: boolean) => void;
 }) {
+  if (blocked) {
+    const copy = audioBlockCopy(blocked);
+    return (
+      <div className="toolbar-section">
+        <span className="toolbar-label">Audio</span>
+        <button
+          type="button"
+          className="toolbar-btn"
+          disabled
+          title={copy.reason}
+        >
+          {copy.button}
+        </button>
+      </div>
+    );
+  }
   if (!available) {
     return null;
   }
@@ -977,6 +1002,7 @@ export default function FloatingMenu({
   oversize,
   canAudio,
   audioEnabled,
+  audioBlock,
   audioError,
   audioStream,
   videoStream,
@@ -1045,7 +1071,9 @@ export default function FloatingMenu({
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining sound
   // that is not there to unmute: a plain VNC server and a Mac in Standard mode
-  // carry none, and a session started without it asked the remote for none.
+  // carry none, and a session started without it asked the remote for none. The
+  // exception is `audioBlock`, sound this browser cannot play, where it is greyed
+  // and says why (`AudioSection`).
   //
   // `audioEnabled` is what this browser has asked for, not proof that sound is
   // arriving: a quiet remote and one that will never redirect are the same thing
@@ -1053,6 +1081,7 @@ export default function FloatingMenu({
   // browser that cannot decode Opus. See useRemoteDesktop and audioPlayer.ts.
   canAudio: boolean;
   audioEnabled: boolean;
+  audioBlock: AudioBlock | null;
   audioError: string | null;
   // The two the card reads and the drawer does not: what the sound turned out to
   // be, and what the video decoder was configured with. Both null until a format
@@ -1293,6 +1322,7 @@ export default function FloatingMenu({
           <AudioSection
             available={canAudio}
             enabled={audioEnabled}
+            blocked={audioBlock}
             error={audioError}
             onChange={onAudioChange}
           />
@@ -1385,6 +1415,7 @@ export default function FloatingMenu({
             renderPlan={renderPlan}
             oversize={oversize}
             audio={{
+              blocked: audioBlock,
               available: canAudio,
               enabled: audioEnabled,
               error: audioError,

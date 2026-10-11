@@ -1,10 +1,11 @@
 // The gate every other file in this client depends on not having to check.
 //
 // Worth its own test precisely because nothing else tests it: once this returns true
-// the rest of the client assumes a secure context and a pair of WebCodecs decoders
+// the rest of the client assumes a secure context and a WebCodecs video decoder
 // everywhere, with no branch left to exercise. If it ever returned true without them
-// the failure would surface as the clipboard, the keyboard, the picture and the sound
-// going missing separately, which is the state this exists to make impossible.
+// the failure would surface as the clipboard, the keyboard and the picture going
+// missing separately, which is the state this exists to make impossible. The audio
+// decoder is the one it lets through, and answers about instead (`decodesAudio`).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -45,7 +46,7 @@ globals.window = {
 };
 globals.document = { createElement: element };
 
-const { startupPermitted } = await import("./preflight.ts");
+const { decodesAudio, startupPermitted } = await import("./preflight.ts");
 
 /** A browser with everything, which each test then takes something away from. */
 function capable(): void {
@@ -101,35 +102,35 @@ test("an insecure context refuses, and says where and how", () => {
   assert.equal(root.children[0]?.className, "boot-refusal");
 });
 
-test("a missing decoder refuses, and names which one", () => {
-  for (const missing of ["VideoDecoder", "AudioDecoder"] as const) {
+test("a missing video decoder refuses, and says so", () => {
+  for (const audio of [class {}, undefined]) {
     capable();
-    globals[missing] = undefined;
+    globals.VideoDecoder = undefined;
+    globals.AudioDecoder = audio;
     const root = element("div");
 
-    assert.equal(startupPermitted(asRoot(root)), false, missing);
+    assert.equal(startupPermitted(asRoot(root)), false);
     const rendered = text(root);
-    assert.match(rendered, /WebCodecs/);
-    assert.match(
-      rendered,
-      missing === "VideoDecoder" ? /\bvideo\b/ : /\baudio\b/,
-      `${missing} went missing and the message did not say so`,
-    );
+    assert.match(rendered, /WebCodecs video decoder/);
+    // Not the origin: the address is the one thing that is fine here, and naming
+    // it sends the reader to fix the deployment instead of the browser.
+    assert.ok(!rendered.includes("http://10.0.0.4:52380"));
   }
 });
 
-test("a browser with neither decoder is told about both, once", () => {
+test("a missing audio decoder starts the client, and is answered for", () => {
+  // Safari 16.4 to 18: a desktop with no sound, rather than no desktop.
   capable();
-  globals.VideoDecoder = undefined;
   globals.AudioDecoder = undefined;
   const root = element("div");
+  root.children = [element("existing")];
 
-  assert.equal(startupPermitted(asRoot(root)), false);
-  const rendered = text(root);
-  assert.match(rendered, /video or audio/);
-  // Not the origin: the address is the one thing that is fine here, and naming it
-  // sends the reader to fix the deployment instead of the browser.
-  assert.ok(!rendered.includes("http://10.0.0.4:52380"));
+  assert.equal(startupPermitted(asRoot(root)), true);
+  assert.equal(root.children.length, 1);
+  assert.equal(decodesAudio(), false);
+
+  capable();
+  assert.equal(decodesAudio(), true);
 });
 
 test("an insecure context is the reason given, even with no decoders either", () => {

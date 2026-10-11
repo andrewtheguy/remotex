@@ -13,7 +13,29 @@
 // and "which decoder is this browser running" were answerable only by reading the
 // console.
 
+import { NO_AUDIO_DECODER } from "./preflight.ts";
 import type { HoldCause } from "./protocol.ts";
+
+/**
+ * Why this browser cannot play a session's sound at all, decided at `connected`
+ * (useRemoteDesktop): it has no audio decoder, or the session is a High
+ * Performance Mac's, whose sound is always its AAC-ELD, and this browser decoded
+ * that in neither form at load (appleMedia.ts).
+ */
+export type AudioBlock = "decoder" | "aac-eld";
+
+/** What the menu's greyed Audio button reads, and the reason behind it. */
+export function audioBlockCopy(block: AudioBlock): {
+  button: string;
+  reason: string;
+} {
+  return block === "decoder"
+    ? { button: "Audio not supported", reason: NO_AUDIO_DECODER }
+    : {
+        button: "AAC-ELD not supported",
+        reason: "This browser cannot decode the Mac's AAC-ELD sound.",
+      };
+}
 
 /**
  * The wire fields of `audioFormat`, minus the `OpusHead` bytes and the samples in
@@ -34,6 +56,8 @@ export interface AudioStreamInfo {
 
 /** Everything the Audio row is derived from. See `useRemoteDesktop`. */
 export interface AudioRow {
+  /** Why this browser cannot play the session's sound, or null where it can. */
+  blocked: AudioBlock | null;
   /** The session carries sound at all (`audio` on `connected`). */
   available: boolean;
   /** This browser asked for it. Never proof that any is arriving. */
@@ -77,6 +101,14 @@ function streamLabel(stream: AudioStreamInfo): string {
  * here that is *wrong* rather than merely off.
  */
 export function audioLabel(row: AudioRow): string {
+  // Asked first: a session started here has no sound to be "None in" because this
+  // browser could not have asked for any.
+  if (row.blocked === "decoder") {
+    return "Not supported by this browser";
+  }
+  if (row.blocked === "aac-eld") {
+    return "AAC-ELD, not supported by this browser";
+  }
   if (!row.available) {
     return "None in this session";
   }
