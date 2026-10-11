@@ -83,18 +83,12 @@ pub struct AccessUnit {
     pub keyframe: bool,
 }
 
-/// The whole framebuffer as packed RGB888, and the copy the stream reads.
-///
-/// Held at the desktop size rounded up to even sides. Only an encoder ever sees those
-/// extra pixels — a client is told the true size and crops — and they are filled from
-/// their neighbours rather than left black, because a hard black edge beside content is
-/// a strong feature an encoder would pay for in every frame.
+/// The whole framebuffer as packed RGB888, and the copy the stream reads: the
+/// desktop at its own size, odd sides included, which is the picture encoded.
 #[derive(Clone)]
 pub struct Mirror {
     /// The desktop as the client knows it, and as a record header reports it.
     size: (u16, u16),
-    /// The picture actually held: [`Self::size`] rounded up to even sides.
-    coded: (u16, u16),
     rgb: Vec<u8>,
 }
 
@@ -102,23 +96,12 @@ impl Mirror {
     /// A mirror for a `w`×`h` desktop. ~6 MB at 1080p.
     pub fn new(w: u16, h: u16) -> anyhow::Result<Self> {
         anyhow::ensure!(w > 0 && h > 0, "a video mirror cannot hold a {w}x{h} desktop");
-        // Saturating rather than wrapping: a 65535-wide desktop is not real, but
-        // wrapping to 0 here would hand an encoder a zero-sized picture, and the point
-        // of this constructor is that nothing invalid gets that far.
-        let coded = (w.saturating_add(w % 2), h.saturating_add(h % 2));
-        let (cw, ch) = (usize::from(coded.0), usize::from(coded.1));
-        Ok(Self { size: (w, h), coded, rgb: vec![0; cw * ch * 3] })
+        Ok(Self { size: (w, h), rgb: vec![0; usize::from(w) * usize::from(h) * 3] })
     }
 
     /// The desktop this mirror is for.
     pub fn size(&self) -> (u16, u16) {
         self.size
-    }
-
-    /// The picture actually held: up to one pixel wider and one taller than
-    /// [`Self::size`].
-    pub fn coded(&self) -> (u16, u16) {
-        self.coded
     }
 
     /// Copy `rgb` — packed RGB888 for `rect` — into the mirror.
@@ -143,7 +126,7 @@ impl Mirror {
             self.size.1
         );
 
-        let stride = usize::from(self.coded.0) * 3;
+        let stride = usize::from(self.size.0) * 3;
         for row in 0..h {
             let at = (usize::from(rect.top) + row) * stride + usize::from(rect.left) * 3;
             self.rgb[at..at + w * 3].copy_from_slice(&rgb[row * w * 3..(row + 1) * w * 3]);
@@ -152,21 +135,20 @@ impl Mirror {
     }
 
     /// `rect`'s pixels as packed RGB888, into a buffer the caller reuses — for the
-    /// tests asserting what landed where. Bounded by [`Self::coded`], so it can read
-    /// the padding too.
+    /// tests asserting what landed where.
     #[cfg(test)]
     pub fn crop_into(&self, rect: Rect, out: &mut Vec<u8>) -> anyhow::Result<()> {
         anyhow::ensure!(
-            rect.right < self.coded.0 && rect.bottom < self.coded.1,
+            rect.right < self.size.0 && rect.bottom < self.size.1,
             "a video crop of {}x{} at ({},{}) falls outside a {}x{} mirror",
             rect.w(),
             rect.h(),
             rect.left,
             rect.top,
-            self.coded.0,
-            self.coded.1
+            self.size.0,
+            self.size.1
         );
-        let stride = usize::from(self.coded.0) * 3;
+        let stride = usize::from(self.size.0) * 3;
         let (w, h) = (usize::from(rect.w()), usize::from(rect.h()));
         out.clear();
         out.reserve(w * h * 3);
@@ -186,11 +168,11 @@ impl Mirror {
     /// session can reach — asserted in debug, clamped to a no-op in release, where
     /// the worst outcome is a stale region the next damage repaints.
     pub fn adopt(&mut self, src: &Mirror, rect: Rect) {
-        debug_assert_eq!(self.coded, src.coded, "a mirror adopted from a differently sized twin");
-        if self.coded != src.coded || rect.right >= self.coded.0 || rect.bottom >= self.coded.1 {
+        debug_assert_eq!(self.size, src.size, "a mirror adopted from a differently sized twin");
+        if self.size != src.size || rect.right >= self.size.0 || rect.bottom >= self.size.1 {
             return;
         }
-        let stride = usize::from(self.coded.0) * 3;
+        let stride = usize::from(self.size.0) * 3;
         let (w, h) = (usize::from(rect.w()), usize::from(rect.h()));
         for row in 0..h {
             let at = (usize::from(rect.top) + row) * stride + usize::from(rect.left) * 3;
@@ -198,37 +180,13 @@ impl Mirror {
         }
     }
 
-    /// The whole coded picture as one packed RGB888 slice — what the stream encodes.
+    /// The whole picture as one packed RGB888 slice — what the stream encodes.
     pub fn picture(&self) -> &[u8] {
         &self.rgb
     }
-
-    /// Fill the at-most-one padding column and row from their neighbours.
-    ///
-    /// Only an odd-sized desktop has any. Called before every encode, because a blit
-    /// can overwrite the edge the pad repeats.
-    pub fn pad_edges(&mut self) {
-        let stride = usize::from(self.coded.0) * 3;
-        if self.coded.0 != self.size.0 {
-            let last = usize::from(self.size.0 - 1) * 3;
-            for row in 0..usize::from(self.size.1) {
-                let at = row * stride + last;
-                self.rgb.copy_within(at..at + 3, at + 3);
-            }
-        }
-        if self.coded.1 != self.size.1 {
-            let last = usize::from(self.size.1 - 1) * stride;
-            self.rgb.copy_within(last..last + stride, last + stride);
-        }
-    }
 }
 
-/// Refuse a coded picture the encoder will not take.
-///
-/// The coded picture is the mirror's: the desktop grown to even sides. Neither the
-/// 4:4:4 stream nor VP9 itself needs them, and the stream is held to them anyway,
-/// as wlshare's is: the mirror's padding supplies the column or row an odd desktop
-/// is short of, and the two ends code one geometry.
+/// Refuse a picture the encoder will not take.
 ///
 /// That cannot be a config-time refusal — only the remote knows its own size, and it
 /// may change mid-session — so the message has to carry the whole explanation to
@@ -277,9 +235,9 @@ fn threads_for(cores: usize) -> usize {
 
 #[cfg(test)]
 impl Mirror {
-    /// The pixel at `(x, y)`, for the tests about blitting and padding.
+    /// The pixel at `(x, y)`, for the tests about blitting.
     pub(crate) fn pixel(&self, x: u16, y: u16) -> [u8; 3] {
-        let at = (usize::from(y) * usize::from(self.coded.0) + usize::from(x)) * 3;
+        let at = (usize::from(y) * usize::from(self.size.0) + usize::from(x)) * 3;
         [self.rgb[at], self.rgb[at + 1], self.rgb[at + 2]]
     }
 
@@ -395,7 +353,7 @@ mod tests {
             for quality in qualities {
                 let mut mirror = Mirror::new(w, h).expect("a mirror");
                 let mut stream =
-                    crate::vp9::Stream::new(mirror.coded(), quality)
+                    crate::vp9::Stream::new(mirror.size(), quality)
                         .expect("a stream");
                 let mut total = 0usize;
                 let mut keyframe_bytes = 0usize;
@@ -418,7 +376,7 @@ mod tests {
 
                 // The conversion on its own, over the same pixels: it is inside the
                 // encode timing above, and this is what says how much of it it was.
-                let mut picture = screen_vp9::Picture::new(mirror.coded().0, mirror.coded().1, crate::vp9::CHROMA, threads()).expect("a picture");
+                let mut picture = screen_vp9::Picture::new(mirror.size().0, mirror.size().1, threads()).expect("a picture");
                 let crop = mirror.picture().to_vec();
                 let started = std::time::Instant::now();
                 for _ in 0..FRAMES {
@@ -510,23 +468,12 @@ mod tests {
     }
 
     #[test]
-    fn the_pad_repeats_the_edge_rather_than_leaving_it_black() {
-        let mut mirror = Mirror::new(1919, 1079).expect("an odd-sized mirror");
-        mirror
-            .blit(rect(0, 0, 1919, 1079), &flat(1919, 1079, [255, 255, 255]))
-            .expect("a full-screen blit");
-        mirror.pad_edges();
-        assert_eq!(mirror.pixel(1919, 0), [255, 255, 255], "the pad column is a black seam");
-        assert_eq!(mirror.pixel(0, 1079), [255, 255, 255], "the pad row is a black seam");
-        assert_eq!(mirror.pixel(1919, 1079), [255, 255, 255], "the pad corner is black");
-    }
-
-    #[test]
-    fn an_odd_desktop_is_held_at_even_sides_and_still_reports_its_true_size() {
-        let mirror = Mirror::new(1919, 1079).expect("a mirror");
-        assert_eq!(mirror.size(), (1919, 1079), "a client is told the real desktop");
-        assert_eq!(mirror.coded(), (1920, 1080), "an encoder is given even sides");
-        assert_eq!(mirror.len(), 1920 * 1080 * 3);
+    fn an_odd_desktop_is_held_at_its_own_size() {
+        let mut mirror = Mirror::new(1919, 1079).expect("a mirror");
+        assert_eq!(mirror.size(), (1919, 1079));
+        assert_eq!(mirror.len(), 1919 * 1079 * 3);
+        mirror.blit(rect(1918, 1078, 1, 1), &[1, 2, 3]).expect("a blit of the last pixel");
+        assert_eq!(mirror.pixel(1918, 1078), [1, 2, 3]);
     }
 
     #[test]

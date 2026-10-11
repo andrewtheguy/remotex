@@ -136,7 +136,7 @@ impl DesktopStream {
             let mirror = Mirror::new(w, h)?;
             // Refused here rather than when the encoder is built, so a desktop the
             // stream will not take fails the blit that first asked for it.
-            crate::video::check_picture(mirror.coded())?;
+            crate::video::check_picture(mirror.size())?;
             self.mirror = Some(mirror);
         }
         Ok(self.mirror.as_mut().expect("just built"))
@@ -215,10 +215,10 @@ impl DesktopStream {
         let live = match self.live.take() {
             Some(live) => live,
             None => {
-                let coded = self.mirror.as_ref().expect("owed pixels mean a mirror").coded();
+                let size = self.mirror.as_ref().expect("owed pixels mean a mirror").size();
                 self.owed = false;
                 Live {
-                    stream: Stream::new(coded, self.quality)?,
+                    stream: Stream::new(size, self.quality)?,
                     quality: self.quality,
                     // Its whole picture is owed: nothing has carried these pixels yet.
                     dirty: true,
@@ -411,7 +411,6 @@ impl Round {
     /// keyframe, so those pixels ride the next round — which is what stops a frame
     /// that produced nothing from becoming pixels the client never gets.
     pub fn encode(&mut self) -> anyhow::Result<Produced> {
-        self.mirror.pad_edges();
         let live = &mut self.live;
         if live.keyframe_owed {
             live.stream.force_keyframe();
@@ -497,18 +496,16 @@ const PASSED_FPS: u64 = 60;
 /// Check a `w`×`h` frame of wlshare's VP9 encoding, which is the stream this gateway
 /// would otherwise have encoded from the same pixels: 4:4:4, BT.601 at studio swing,
 /// declared in its keyframes. The profile is read and held to 4:4:4's
-/// ([`crate::vp9::CHROMA`]), so the configuration announced for it is the one the
+/// ([`screen_vp9::PROFILE`]), so the configuration announced for it is the one the
 /// frame needs.
 pub fn pass(w: u16, h: u16, frame: &[u8]) -> anyhow::Result<Passed> {
     let header = crate::vp9::frame_header(frame)
         .ok_or_else(|| anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header"))?;
-    let asked = crate::vp9::CHROMA;
     anyhow::ensure!(
-        header.profile == asked.profile(),
-        "the server's VP9 frame is profile {}, not the {} profile {} this gateway streams",
+        header.profile == screen_vp9::PROFILE,
+        "the server's VP9 frame is profile {}, not the 4:4:4 profile {} this gateway streams",
         header.profile,
-        asked.name(),
-        asked.profile()
+        screen_vp9::PROFILE
     );
     crate::video::check_picture((w, h))?;
     let decode = crate::vp9::codec_string(w, h, PASSED_FPS)
@@ -564,13 +561,13 @@ mod tests {
     /// A round encodes where the mirror changed since the round before and leaves
     /// the rest of the client's picture as it stands, at the quality it stands at; a
     /// settle's round is the whole picture. Read back through a decoder, on an odd
-    /// desktop, whose padding beside a changed edge is part of the change.
+    /// desktop, whose last column is encoded where it changed.
     #[test]
     fn a_round_encodes_where_the_mirror_changed_and_a_settle_the_whole_picture() {
         let (w, h) = (319u16, 239u16);
         let mut stream = stream(w, h);
         let decoder = std::cell::RefCell::new(screen_vp9::Decoder::new(1).expect("a decoder"));
-        let mut picture = vec![0u8; 320 * 240 * 4];
+        let mut picture = vec![0u8; 319 * 239 * 4];
         // One round: what it was to encode, how coarse it left the picture, and the
         // picture a client then holds.
         let round = |stream: &mut DesktopStream, picture: &mut [u8]| {
@@ -578,10 +575,10 @@ mod tests {
             let (changed, coarsest) = (round.changed.clone(), round.coarsest());
             let unit = round.encode().expect("an encode").unit.expect("a unit");
             stream.put_back(round);
-            decoder.borrow_mut().decode(&unit.data).expect("a decode").write_bgrx(picture, 320 * 4).expect("a picture that fits");
+            decoder.borrow_mut().decode(&unit.data).expect("a decode").write_bgrx(picture, 319 * 4).expect("a picture that fits");
             (changed, coarsest, unit.keyframe)
         };
-        let at = |picture: &[u8], x: usize, y: usize| picture[(y * 320 + x) * 4 + 1];
+        let at = |picture: &[u8], x: usize, y: usize| picture[(y * 319 + x) * 4 + 1];
         let near = |got: u8, want: u8| got.abs_diff(want) <= 24;
 
         stream.blit(placed(0, 0, w, h), &flat(w, h, 40)).expect("a blit");
@@ -595,11 +592,11 @@ mod tests {
         assert!(!keyframe && coarsest == 60);
         assert!(near(at(&picture, 32, 32), 220) && near(at(&picture, 100, 100), 40) && near(at(&picture, 32, 200), 40), "the change is not where it was made");
 
-        // The edge of an odd desktop, with the padding column the mirror repeats it into.
+        // The last column of an odd desktop.
         let edge = placed(300, 100, 19, 10);
         stream.blit(edge, &flat(19, 10, 250)).expect("a blit");
         round(&mut stream, &mut picture);
-        assert!(near(at(&picture, 318, 105), 250) && near(at(&picture, 319, 105), 250), "the padding beside a changed edge was not encoded with it");
+        assert!(near(at(&picture, 318, 105), 250), "a changed edge was not encoded");
 
         // A link that coarsens the stream coarsens what a round encodes, and a round
         // back at the dial sharpens only what it encodes.
@@ -620,7 +617,7 @@ mod tests {
         let unit = over.encode().expect("an encode").unit.expect("a unit");
         assert_eq!(over.left(), 60, "every coarse block was encoded again at the dial");
         stream.put_back(over);
-        decoder.borrow_mut().decode(&unit.data).expect("a decode").write_bgrx(&mut picture, 320 * 4).expect("a picture that fits");
+        decoder.borrow_mut().decode(&unit.data).expect("a decode").write_bgrx(&mut picture, 319 * 4).expect("a picture that fits");
         stream.set_quality(20).expect("a retune");
         stream.blit(first, &flat(32, 32, 120)).expect("a blit");
         assert_eq!(round(&mut stream, &mut picture).1, 20);

@@ -388,9 +388,8 @@ export type ControlMsg =
 // One link in a chain, where losing any link decodes wrongly until the next
 // keyframe — so none may be dropped, reordered, or decoded twice.
 //
-// `(w, h)` is the true desktop size. A gateway-encoded VP9 picture may be a pixel
-// wider or taller, because that encoder is held to even sides and an odd desktop does
-// not have them: draw the top-left w×h of it. A size that differs from the last unit's
+// `(w, h)` is the true desktop size, which a VP9 picture is exactly, odd sides
+// included: draw the top-left w×h of what is decoded. A size that differs from the last unit's
 // means the stream started over on a differently sized picture.
 //
 // `keyframe` comes from the record's flags byte, decided by the source path.

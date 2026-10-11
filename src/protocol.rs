@@ -732,10 +732,9 @@ impl Strip {
 ///   derive it from payloads: VP9 has no parameter sets, while the gateway has already parsed a
 ///   passed HEVC stream's sequence parameters.
 /// - `keyframe` is on the wire, as bit 0 of the record's flags. The source path decides it.
-/// - `(w, h)` is the **true desktop size**, in framebuffer pixels. A gateway-encoded VP9 picture
-///   may be one pixel wider and/or taller, because that encoder is held to even sides and an odd
-///   desktop does not have them: a client draws the top-left `w`×`h` of what it decodes and
-///   ignores the rest. A record whose size differs from the last one means the decoder is
+/// - `(w, h)` is the **true desktop size**, in framebuffer pixels, which a VP9 picture, passed or
+///   gateway-encoded, is exactly, odd sides included: a client draws the top-left `w`×`h` of what
+///   it decodes and ignores anything past it. A record whose size differs from the last one means the decoder is
 ///   starting over on a differently sized picture, and a fresh `VideoFormat` precedes it.
 /// - Every access unit matters and their order matters: each is a link in a chain, where
 ///   losing any link decodes wrongly until the next keyframe.

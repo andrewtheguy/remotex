@@ -635,11 +635,9 @@ Five rules hold the stream up, and each is a rule somewhere:
   frames would decode wrongly. A resize while a round is out drops that round on its
   return (its epoch is stale), and the pixels the new desktop blitted meanwhile are
   owed a stream of their own.
-- **The picture may be a pixel larger than the desktop.** Neither VP9 nor its
-  4:4:4 conversion needs even sides, and the stream is held to them anyway, as
-  wlshare's is — so the mirror is padded up with its edge repeated (black would be a seam
-  the encoder paid for every frame). The record header carries the *true* desktop
-  size and the client crops.
+- **The picture is the desktop, odd sides included.** Neither VP9 nor its 4:4:4
+  conversion needs even sides, so the mirror is the desktop's size and the record
+  header carries it.
 
 `video_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
 0–63 (the floor is where screen content goes visually lossless — mapping past it
@@ -668,7 +666,7 @@ encoded and decoded through the same libvpx:
 
 Every 4:2:0 row is the conversion's own floor; speed, loop filter, tuning and
 adaptive quantization moved nothing either. So every stream is VP9 profile 1
-(`vp9::CHROMA`) — a colour sample per pixel, the same quantizer, a keyframe a
+(`screen_vp9::PROFILE`) — a colour sample per pixel, the same quantizer, a keyframe a
 third larger, inter frames no larger, about a third more encode time — and the
 codec string it announces is `vp09.01.…`. The cost is the decoder: no browser's
 hardware VP9 path takes profile 1 — Intel's media engines from Ice Lake on
