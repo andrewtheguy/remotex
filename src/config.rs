@@ -216,6 +216,10 @@ pub struct RenderPlan {
     /// software decoder, as each `videoFormat` of it then says
     /// ([`Choices::software`], [`page_decodes`]).
     pub software: bool,
+    /// EXPERIMENTAL: what is encoded here is coded by screen-vp9's encoder in
+    /// Rust rather than libvpx ([`TargetConfig::experimental_native_vp9`]), in a
+    /// build that has it.
+    pub native_vp9: bool,
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
@@ -781,10 +785,12 @@ pub struct TargetConfig {
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub render_adaptive: Option<bool>,
-    /// EXPERIMENTAL. Have a `wlshare` target code its VP9 stream with
-    /// the encoder `screen-vp9` has written in Rust, in place of libvpx.
-    /// Refused on every other target: only wlshare has the two encoders, and
-    /// what this gateway codes itself is libvpx's.
+    /// EXPERIMENTAL. Code the target's VP9 stream with the encoder
+    /// `screen-vp9` has written in Rust, in place of libvpx: here, for a stream
+    /// this gateway encodes, and in wlshare, for the one a `wlshare` target
+    /// passes. A build without the `native-vp9` feature has no such encoder and
+    /// refuses the key on every target but a `wlshare` one, which is still
+    /// asked for its own.
     ///
     /// The stream is the same to a decoder either way — 4:4:4 at the dial — so
     /// nothing else of a session changes with it, which is what the key is
@@ -894,7 +900,7 @@ impl TargetConfig {
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
         let rdp_h264 = rdp_graphics && self.egfx_h264 && decoders.rdp_h264;
-        RenderPlan { quality, adaptive, apple_media, rdp_graphics, rdp_h264, software: false }
+        RenderPlan { quality, adaptive, apple_media, rdp_graphics, rdp_h264, software: false, native_vp9: self.experimental_native_vp9 }
     }
 
     /// BETA: whether a session on this target can have a Mac's passed HEVC
@@ -1780,12 +1786,12 @@ impl ConfigFile {
                  vnc target with subtype = \"wlshare\". Remove the key.",
                 target.name
             );
-            // wlshare alone has a second VP9 encoder to ask for.
+            // Without the encoder in Rust, wlshare alone has a second one to ask for.
             anyhow::ensure!(
-                !target.experimental_native_vp9 || target.wlshare(),
-                "target {:?} is {kind} and sets experimental_native_vp9, which asks wlshare \
-                 for its experimental VP9 encoder: only a vnc target with subtype = \"wlshare\" \
-                 has one. Remove the key.",
+                !target.experimental_native_vp9 || target.wlshare() || cfg!(feature = "native-vp9"),
+                "target {:?} is {kind} and sets experimental_native_vp9, and this gateway was \
+                 built without the native-vp9 feature, so it has no experimental VP9 encoder: \
+                 only a vnc target with subtype = \"wlshare\" can ask for wlshare's. Remove the key.",
                 target.name
             );
             // The bitrate keys and the adaptive switch tune the Opus encoder, for the
@@ -3159,6 +3165,7 @@ mod tests {
                 rdp_graphics: false,
                 rdp_h264: false,
                 software: false,
+                native_vp9: false,
             }
         );
     }
@@ -3175,6 +3182,7 @@ mod tests {
                 rdp_graphics: false,
                 rdp_h264: false,
                 software: false,
+                native_vp9: false,
             }
         );
     }
@@ -3906,10 +3914,11 @@ vnc_password = \"x\"")).unwrap();
         assert!(!config.targets[2].camera, "the camera is opt-in");
     }
 
-    /// wlshare's experimental VP9 encoder is asked for by a `wlshare` target's key,
-    /// off unless set, and refused where there is no second encoder to ask for.
+    /// The experimental VP9 encoder is asked for by a target's key, off unless
+    /// set: wlshare's on a `wlshare` target in any build, and this gateway's on
+    /// every target in a build that has it, refused in one that has not.
     #[test]
-    fn the_experimental_vp9_encoder_is_wlshares_alone() {
+    fn the_experimental_vp9_encoder_is_asked_for_by_key() {
         let parse = |target: &str| {
             ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
                 .and_then(|file| file.resolve())
@@ -3925,8 +3934,14 @@ vnc_password = \"x\"")).unwrap();
             "name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\nexperimental_native_vp9 = true",
             "name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"\nexperimental_native_vp9 = true",
         ] {
-            let rendered = format!("{:#}", parse(target).unwrap_err());
-            assert!(rendered.contains("sets experimental_native_vp9"), "{rendered}");
+            let parsed = parse(target);
+            if cfg!(feature = "native-vp9") {
+                let config = parsed.expect("this build has the encoder");
+                assert!(config.targets[0].render_plan(Choices::default(), Decoders::ALL).native_vp9);
+            } else {
+                let rendered = format!("{:#}", parsed.unwrap_err());
+                assert!(rendered.contains("sets experimental_native_vp9"), "{rendered}");
+            }
         }
     }
 
@@ -4268,7 +4283,7 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80 · adaptive");
     }
 
@@ -4280,7 +4295,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80");
     }
 

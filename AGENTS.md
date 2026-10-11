@@ -73,10 +73,20 @@ area's section before changing what it covers:
 
 ## Packaging and platforms
 
-- Linux x86-64 artifacts target the baseline x86-64 ISA and dispatch SIMD at
-  runtime. Never set a global `target-cpu`; use runtime detection and
-  per-function `#[target_feature]` when needed. Prebuilt native archives must
-  keep the same floor. See
+- x86-64 builds are AVX2 by default: `.cargo/config.toml` sets it for the
+  default `native-vp9` feature, screen-vp9's experimental encoder in Rust,
+  whose kernels need it. A machine without AVX2 is the supported fallback, and
+  stays one toggle each way: the feature off and `RUSTFLAGS` and `RUSTDOCFLAGS`
+  set to `-C target-feature=-avx2`.
+- A Cargo feature may need a CPU flag of the machine, AVX2 or another, as that
+  one does: the flag goes in `.cargo/config.toml` beside it, and the fallback
+  is that feature off and its flag taken back out. The fallback build goes
+  without what the feature does, whatever that is: were libvpx dropped, VP9
+  encoding itself could be a feature a machine without AVX2 has not. What no
+  feature gates may
+  not need one: use runtime detection and per-function `#[target_feature]`
+  there, never set a global `target-cpu`, and keep prebuilt native archives at
+  the baseline x86-64 ISA with their own dispatch. See
   [x86-64 CPU compatibility](packaging/README.md#x86-64-cpu-compatibility).
 - The native `embedded-gateway` feature is the `remotex tui` control plane and
   its hidden `serve-embedded` workers, on Unix and Windows alike, each worker's

@@ -3,7 +3,8 @@
 Native packages are the release install contract. Linux ships both `.deb` and
 `.rpm`; macOS ships `.pkg`. The distro-agnostic tarball is the layout input
 for native package and container builds, and no release asset. Containers replace its native binary
-with a build that excludes the `embedded-gateway` default feature.
+with a build that excludes the `embedded-gateway` default feature and keeps
+`native-vp9`.
 
 Every artifact carries one gateway binary with the web client compiled into it
 (`src/assets.rs` embeds the bundle from Cargo's private output directory at build
@@ -66,7 +67,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
-| `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
+| `build-container-binary.sh` | build and verify a gateway with default features disabled, but with `REMOTEX_CONTAINER_FEATURES`, which is `native-vp9` unless set |
 | `publish-full-image.sh` | add Debian's libavcodec, and the pinned software HEVC decoder's archive, to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
@@ -119,22 +120,52 @@ filenames, which the container build selects by release version.
 
 ## x86-64 CPU compatibility
 
-The Linux x86-64 binary targets the baseline x86-64 ISA and dispatches SIMD at
-run time. Neither Cargo configuration nor packaging and CI set `target-cpu`, and
-the prebuilt archives downloaded by the sys crates must use the same baseline
+An x86-64 gateway is built for AVX2, and a machine without it is the fallback
+build below. The default `native-vp9` feature is screen-vp9's experimental VP9
+encoder in Rust, which a target's `experimental_native_vp9` asks for; its
+kernels are AVX2 with no choosing at run time, and it refuses to build without
+them. Cargo cannot set a flag by feature, so `.cargo/config.toml` sets
+`-C target-feature=+avx2` for every x86-64 build, and every release artifact
+for x86-64, the container's binary included, needs a processor with AVX2. Arm64
+needs nothing set: NEON is in its baseline.
+
+The fallback is that feature off and the flag taken back out, which the
+environment does, since `RUSTFLAGS` replaces the configuration's:
+
+```sh
+RUSTFLAGS='-C target-feature=-avx2' RUSTDOCFLAGS='-C target-feature=-avx2' \
+  cargo build --release --no-default-features --features embedded-gateway
+```
+
+For a container's binary it is the same environment with
+`REMOTEX_CONTAINER_FEATURES=` set empty. Such a gateway has libvpx alone, says
+so in `--help` (`Features:` without `native-vp9`), and refuses
+`experimental_native_vp9` on every target but a `wlshare` one, whose encoder
+is wlshare's own.
+
+A Cargo feature may need a CPU flag of the machine this way, AVX2 or another:
+its flag goes in `.cargo/config.toml` beside it, and the fallback is the
+feature off and the flag taken back out. The fallback build goes without what
+the feature does, and nothing limits what that may be: were libvpx dropped,
+VP9 encoding itself could be a feature a machine without AVX2 has not. So that the fallback stays that
+small, code no feature gates may not need one. Neither Cargo
+configuration nor packaging and CI set `target-cpu`,
+everything outside such a feature dispatches SIMD at run time, and
+the prebuilt archives downloaded by the sys crates must use the baseline x86-64 ISA
 with their hand-written kernels selected by CPUID: libvpx's rtcd tables,
 opus's `MAY_HAVE` dispatch and libFLAC's own CPU detection. The sys crates fetch
 each dependency repository's latest release, so that release's archives—not the
 tag pinned in this repository's `Cargo.toml`—set the effective CPU floor.
 
-This policy is measured, not merely conservative. On an i5-8500T,
+Setting no `target-cpu` is measured, not merely conservative. On an i5-8500T,
 `target-cpu=x86-64-v3` made PNG encoding 1.7 times slower through changes to the
 autovectorized `png`/`fdeflate` loops. VP9 encoding was within noise of a
 v3-scalar libvpx, while an opus archive using runtime dispatch consumed 0.73% of
 a core against 0.65% with `PRESUME_AVX2`. A global v3 floor also caused `SIGILL`
-at startup on Ivy Bridge. If a Rust hot path benefits from AVX2, guard a separate
-function with `is_x86_feature_detected!` and `#[target_feature]`; never raise the
-binary's global CPU floor.
+at startup on Ivy Bridge, which is the machine the fallback build is for. If
+a Rust hot path that no feature gates benefits from AVX2, guard a separate
+function with `is_x86_feature_detected!` and `#[target_feature]`, so that the
+fallback build keeps it where the processor has it.
 
 ## Prebuilt native dependencies
 

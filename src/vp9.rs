@@ -51,6 +51,19 @@ pub fn codec_string(w: u16, h: u16, fps: u64) -> Option<String> {
     screen_vp9::codec_string(w, h, fps)
 }
 
+/// The encoder a stream is coded with: libvpx, or for a plan that asks
+/// (`experimental_native_vp9`) screen-vp9's own in Rust, EXPERIMENTAL. A build
+/// without the `native-vp9` feature has libvpx alone, and its config refuses
+/// the key on every target whose stream is coded here.
+fn coder(native: bool) -> screen_vp9::Coder {
+    #[cfg(feature = "native-vp9")]
+    if native {
+        return screen_vp9::Coder::Native;
+    }
+    let _ = native;
+    screen_vp9::Coder::Libvpx
+}
+
 /// One VP9 stream over a [`Mirror`]'s picture.
 ///
 /// The picture size is fixed for the stream's whole life, and that is what makes an inter-frame
@@ -74,11 +87,14 @@ impl Stream {
     /// A stream over a mirror of a `size` desktop, at `quality` (1–100).
     ///
     /// The refusal of a picture too large is [`check_picture`]'s.
-    pub fn new(size: (u16, u16), quality: u8) -> anyhow::Result<Self> {
+    ///
+    /// `native` is the plan's [`crate::config::RenderPlan::native_vp9`]: coded by
+    /// screen-vp9's encoder in Rust, EXPERIMENTAL, where this build has it.
+    pub fn new(size: (u16, u16), quality: u8, native: bool) -> anyhow::Result<Self> {
         check_picture(size)?;
         // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
-        let stream = screen_vp9::Stream::new(size.0, size.1, quality, crate::video::threads(), screen_vp9::Coder::Libvpx)
+        let stream = screen_vp9::Stream::new(size.0, size.1, quality, crate::video::threads(), coder(native))
             .with_context(|| format!("vp9 encoder for a {}x{} picture", size.0, size.1))?;
         Ok(Self {
             stream,
@@ -205,7 +221,7 @@ mod tests {
     /// A mirror and the stream over it.
     fn whole(w: u16, h: u16, quality: u8) -> (Mirror, Stream) {
         let mirror = Mirror::new(w, h).expect("a mirror");
-        let stream = Stream::new(mirror.size(), quality).expect("a stream");
+        let stream = Stream::new(mirror.size(), quality, false).expect("a stream");
         (mirror, stream)
     }
 
@@ -273,9 +289,22 @@ mod tests {
         assert_eq!(decoder.decode(&unit.data).expect("a decode").size(), (1919, 1079));
     }
 
+    /// A plan that asks for the encoder in Rust gets the same kind of stream.
+    #[cfg(feature = "native-vp9")]
+    #[test]
+    fn the_encoder_in_rust_codes_a_stream_libvpx_decodes() {
+        let mut mirror = Mirror::new(320, 240).expect("a mirror");
+        let mut stream = Stream::new(mirror.size(), 60, true).expect("a stream");
+        mirror.blit(rect(0, 0, 320, 240), &flat(320, 240, [90, 90, 90])).expect("a full-screen blit");
+        let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
+        assert_eq!(frame_header(&unit.data).map(|header| header.profile), Some(screen_vp9::PROFILE));
+        let mut decoder = screen_vp9::Decoder::new(1).expect("a decoder");
+        assert_eq!(decoder.decode(&unit.data).expect("a decode").size(), (320, 240));
+    }
+
     #[test]
     fn a_picture_too_large_is_refused_by_name() {
-        let Err(refused) = Stream::new((5120, 2880), 60) else {
+        let Err(refused) = Stream::new((5120, 2880), 60, false) else {
             panic!("a 5K picture was accepted");
         };
         let message = format!("{refused:#}");

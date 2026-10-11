@@ -353,7 +353,7 @@ mod tests {
             for quality in qualities {
                 let mut mirror = Mirror::new(w, h).expect("a mirror");
                 let mut stream =
-                    crate::vp9::Stream::new(mirror.size(), quality)
+                    crate::vp9::Stream::new(mirror.size(), quality, false)
                         .expect("a stream");
                 let mut total = 0usize;
                 let mut keyframe_bytes = 0usize;
