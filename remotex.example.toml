@@ -568,7 +568,9 @@ password = "change-me"
 # GPU decodes HEVC 4:4:4; Firefox's native decoder does not. Where the native
 # decoder refuses it, the optional software decoder above may supply the picture
 # path, which the page then uses by itself. Without either, the choice is greyed
-# and the browser is sent VP9.
+# and the browser is sent VP9, where this gateway can decode the Mac's picture;
+# where it cannot, the passthrough is the only way and Start says the target
+# cannot start in that browser, as above.
 # [[targets]]
 # name = "mac-high-performance"
 # protocol = "vnc"
