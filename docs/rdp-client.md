@@ -348,7 +348,11 @@ AVC420 in the same frames — a Main-profile stream for the surface, about fifte
 access units a second, Annex B with the parameter sets at each keyframe, each
 unit behind a metablock naming the rectangles of the picture to show
 (`proto/avc.rs`). With `AVC_THINCLIENT` the same host drew the whole desktop
-with AVC444v2 and nothing else, every unit a luma view alone.
+with AVC444v2 and nothing else, every unit a luma view alone. That is not a finer
+picture of what moves: its regions stated a quantization parameter of 38 while
+moving and 30 and then 22 once still, three below the 41, 33 and 25 of the
+AVC420 it draws otherwise, in frames of the same 9 KB, and the text of the
+desktop goes through H.264 with them.
 
 The access units ride in the commands handed on, and the caller composes a run
 that has any in three steps (`avc.rs`): `avc::scan` finds the units and the
