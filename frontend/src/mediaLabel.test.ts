@@ -7,7 +7,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { audioLabel, renderLabel, videoLabel } from "./mediaLabel.ts";
+import {
+  audioBlockCopy,
+  audioLabel,
+  renderLabel,
+  videoLabel,
+} from "./mediaLabel.ts";
 
 const OPUS = {
   codec: "opus",
@@ -18,19 +23,53 @@ const OPUS = {
 
 test("a session without sound says so rather than offering nothing", () => {
   assert.equal(
-    audioLabel({ available: false, enabled: false, error: null, stream: null }),
+    audioLabel({
+      blocked: null,
+      available: false,
+      enabled: false,
+      error: null,
+      stream: null,
+    }),
     "None in this session",
   );
 });
 
+test("a browser that cannot play the sound says why, whatever the session carries", () => {
+  // A High Performance Mac's session carries sound whatever was chosen, and the
+  // reason there is none here is the browser, not the session.
+  for (const available of [false, true]) {
+    const row = { available, enabled: false, error: null, stream: null };
+    assert.equal(
+      audioLabel({ ...row, blocked: "decoder" }),
+      "Not supported by this browser",
+    );
+    assert.equal(
+      audioLabel({ ...row, blocked: "aac-eld" }),
+      "AAC-ELD, not supported by this browser",
+    );
+  }
+  // And the menu's greyed button names the same reason, short enough to fit.
+  assert.equal(audioBlockCopy("decoder").button, "Audio not supported");
+  assert.equal(audioBlockCopy("aac-eld").button, "AAC-ELD not supported");
+  assert.match(audioBlockCopy("decoder").reason, /AudioDecoder/);
+  assert.match(audioBlockCopy("aac-eld").reason, /AAC-ELD/);
+});
+
 test("a muted session is distinguished from one whose sound failed", () => {
   assert.equal(
-    audioLabel({ available: true, enabled: false, error: null, stream: null }),
+    audioLabel({
+      blocked: null,
+      available: true,
+      enabled: false,
+      error: null,
+      stream: null,
+    }),
     "Muted",
   );
   // The one state here that is wrong rather than off.
   assert.equal(
     audioLabel({
+      blocked: null,
       available: true,
       enabled: false,
       error: "AudioDecoder refused opus",
@@ -42,21 +81,39 @@ test("a muted session is distinguished from one whose sound failed", () => {
 
 test("enabling is a click and the format is a round trip later", () => {
   assert.equal(
-    audioLabel({ available: true, enabled: true, error: null, stream: null }),
+    audioLabel({
+      blocked: null,
+      available: true,
+      enabled: true,
+      error: null,
+      stream: null,
+    }),
     "Waiting for the audio format",
   );
 });
 
 test("an encoded stream names its codec, its shape and whose it is", () => {
   assert.equal(
-    audioLabel({ available: true, enabled: true, error: null, stream: OPUS }),
+    audioLabel({
+      blocked: null,
+      available: true,
+      enabled: true,
+      error: null,
+      stream: OPUS,
+    }),
     "opus · 48 kHz stereo · encoded by the gateway",
   );
 });
 
 test("a lossless stream says whether it is the remote's own or coded here", () => {
   const row = (stream: typeof OPUS) =>
-    audioLabel({ available: true, enabled: true, error: null, stream });
+    audioLabel({
+      blocked: null,
+      available: true,
+      enabled: true,
+      error: null,
+      stream,
+    });
   // wlshare's frames, passed as they came.
   assert.equal(
     row({ ...OPUS, codec: "flac", passthrough: true }),
@@ -72,6 +129,7 @@ test("a lossless stream says whether it is the remote's own or coded here", () =
 test("a channel count that is neither mono nor stereo still names itself", () => {
   assert.equal(
     audioLabel({
+      blocked: null,
       available: true,
       enabled: true,
       error: null,
@@ -81,6 +139,7 @@ test("a channel count that is neither mono nor stereo still names itself", () =>
   );
   assert.equal(
     audioLabel({
+      blocked: null,
       available: true,
       enabled: true,
       error: null,

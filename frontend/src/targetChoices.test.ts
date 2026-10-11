@@ -17,12 +17,14 @@ import {
 const ABLE: Abilities = {
   appleMedia: true,
   rdpGraphics: true,
+  audio: true,
   runsHevc: true,
   follows: "window",
 };
 const UNABLE: Abilities = {
   appleMedia: false,
   rdpGraphics: false,
+  audio: false,
   runsHevc: false,
   follows: "window",
 };
@@ -224,6 +226,47 @@ test("High Performance's sound has no row and is always carried", () => {
   assert.equal(options.soundRow, null);
   assert.equal(options.choices.audio, "off");
   assert.equal(options.sound, true);
+});
+
+test("a browser with no audio decoder is offered FLAC alone", () => {
+  const MUTE: Abilities = { ...ABLE, audio: false };
+  const formats = (options: ReturnType<typeof targetOptions>) =>
+    options.soundRow?.formats.map((format) => [format.value, format.disabled]);
+
+  // The sound is a choice still, and ticking it takes the one format that plays.
+  const unticked = targetOptions(RDP, undefined, MUTE);
+  assert.equal(unticked.soundRow?.checked, false);
+  assert.equal(unticked.soundRow?.ticks, "flac");
+  assert.deepEqual(formats(unticked), [
+    ["opus", true],
+    ["flac", false],
+  ]);
+  assert.match(unticked.soundRow?.formats[0].note ?? "", /AudioDecoder/);
+
+  const lossless = targetOptions(RDP, { audio: "flac" }, MUTE);
+  assert.equal(lossless.choices.audio, "flac");
+  assert.equal(lossless.soundRow?.checked, true);
+  assert.equal(lossless.sound, true);
+
+  // An Opus remembered from before is not sent, and is kept for a browser that
+  // plays it.
+  const opus = targetOptions(RDP, { audio: "opus" }, MUTE);
+  assert.equal(opus.choices.audio, "off");
+  assert.equal(opus.soundRow?.checked, false);
+  assert.equal(opus.sound, false);
+  const able = targetOptions(RDP, { audio: "opus" }, ABLE);
+  assert.equal(able.choices.audio, "opus");
+  assert.equal(able.soundRow?.ticks, "opus");
+  assert.deepEqual(formats(able), [
+    ["opus", false],
+    ["flac", false],
+  ]);
+
+  // High Performance's sound is its AAC-ELD, which nothing here can play, so
+  // Start spends no click on an audio context. Its picture is untouched.
+  const mac = targetOptions(HIGH_PERFORMANCE, undefined, MUTE);
+  assert.equal(mac.sound, false);
+  assert.equal(mac.rows[0]?.disabled, false);
 });
 
 test("a passthrough this browser cannot take is greyed, with the reason", () => {

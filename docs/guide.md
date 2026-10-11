@@ -16,8 +16,9 @@ It needs:
   so reach it on loopback (`localhost`, `127.0.0.1`, `[::1]`, any `.localhost`
   name) or through a TLS-terminating reverse proxy. A LAN address over plain
   `http://` is refused, by name.
-- **WebCodecs**: `VideoDecoder` and `AudioDecoder`. There are no fallback paths
-  for a browser without them.
+- **WebCodecs**: `VideoDecoder`, with no fallback path for a browser without
+  it. `AudioDecoder` plays Opus and a Mac's AAC-ELD; a browser without it
+  (Safari 16.4 to 18) plays FLAC alone, which the page decodes itself.
 
 For desktop use, install the page as an app in Chrome or Edge. An app window
 hands the page the key chords a normal tab keeps for itself (⌘W, ⌘T, ⌘N and the
@@ -72,7 +73,10 @@ config key.
 - **Sound.** Opus, or FLAC, which is lossless. A session started without
   sound asks the remote for none, so the host keeps playing where it did. In the
   session, Mute and Unmute change only whether this browser listens. A phone,
-  a tablet and Safari start muted.
+  a tablet and Safari start muted. A browser without `AudioDecoder` greys Opus,
+  so ticking Sound there takes FLAC. On a High Performance Mac the menu's Audio
+  button reads *Audio not supported* in such a browser, and *AAC-ELD not
+  supported* in one that cannot decode the Mac's AAC-ELD.
 - **Passthrough.** Sends the remote's own stream to the browser as it came, for
   a LAN, instead of VP9 encoded by the gateway. It is greyed where the browser
   cannot take the stream. A passed stream does not follow the browser's link:

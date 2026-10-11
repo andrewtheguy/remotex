@@ -6,6 +6,7 @@ import {
   createAudioContext,
   createAudioPlayer,
   decodeAudioHead,
+  FLAC_CODEC,
 } from "./audioPlayer.ts";
 import { type CameraSender, startCameraSender } from "./cameraSender.ts";
 import { connectionLabel } from "./connectionLabel.ts";
@@ -31,13 +32,18 @@ import {
   APPLE_ELD_CODEC,
   appleSoundProbed,
   decodesAppleMedia,
+  decodesAppleSound,
 } from "./appleMedia.ts";
 import {
   isMacHost,
   MacKeyboardTranslator,
   type TranslatedKey,
 } from "./macKeys.ts";
-import type { AudioStreamInfo, VideoStreamInfo } from "./mediaLabel.ts";
+import type {
+  AudioBlock,
+  AudioStreamInfo,
+  VideoStreamInfo,
+} from "./mediaLabel.ts";
 import {
   type MosaicView,
   mosaicDensity,
@@ -48,6 +54,7 @@ import { nativeVp9 } from "./nativeVp9.ts";
 import { createSender } from "./outbound.ts";
 import { advancePaintGeneration, sendPaintAck } from "./paintAck.ts";
 import { createRectCache } from "./pointerRect.ts";
+import { decodesAudio } from "./preflight.ts";
 import {
   binaryFrameKind,
   type ClientMsg,
@@ -635,11 +642,18 @@ export function useRemoteDesktop(
   // menu's Mute and Unmute leave it (`seedAudioForAttachment`), except that a
   // browser that needs a click for every AudioContext always comes back muted.
   const [audioEnabled, setAudioEnabled] = useState(false);
+  // Why this browser cannot play this session's sound at all: no audio decoder for
+  // what it is sent, or a High Performance Mac's AAC-ELD in a browser that decoded
+  // it in neither form. Decided at `connected` where it can be, before any socket
+  // opens, and otherwise when the format arrives. The menu greys its Audio button
+  // with it, and the audio socket stays shut.
+  const [audioBlock, setAudioBlock] = useState<AudioBlock | null>(null);
   // Why there is no sound, when there should be. One string, and what is behind it is
-  // a decoder that refused or failed — this browser having no WebCodecs at all is not
-  // among the possibilities, because such a browser never got past preflight.ts. A
-  // refusal is reported rather than worked around: the codec is the gateway's to
-  // choose and there is no second representation to fall back to (audioPlayer.ts).
+  // a decoder that refused or failed — what `audioBlock` knows in advance is not
+  // among the possibilities, because such a session never opens the audio socket.
+  // A refusal is
+  // reported rather than worked around: the codec is the gateway's to choose and
+  // there is no second representation to fall back to (audioPlayer.ts).
   const [audioError, setAudioError] = useState<string | null>(null);
   // What the sound actually is, from `audioFormat`, for the session card: which of
   // the two audio paths this target chose and at what shape. Null whenever no
@@ -1698,6 +1712,21 @@ export function useRemoteDesktop(
       return true;
     };
 
+    // A format only an audio decoder plays, in a browser with none: not one its
+    // picker offers, so a session started elsewhere with Opus. Said as what it is
+    // rather than as the decoder's absence surfacing as an error.
+    const blockedWithoutDecoder = (
+      msg: Extract<ControlMsg, { type: "audioFormat" }>,
+    ): boolean => {
+      if (msg.codec === FLAC_CODEC || decodesAudio()) {
+        return false;
+      }
+      setAudioBlock("decoder");
+      closeAudioSocket();
+      setAudioEnabled(false);
+      return true;
+    };
+
     // Build the decoder the format describes, around the context the click made.
     //
     // A *second* format on the same socket is a new desktop — the audio socket
@@ -1708,7 +1737,7 @@ export function useRemoteDesktop(
       if (audioPlayerRef.current) {
         releaseAudio();
       }
-      if (heldForAppleSound(msg)) {
+      if (blockedWithoutDecoder(msg) || heldForAppleSound(msg)) {
         return;
       }
       // The click's context when there is one, which is the first format after the
@@ -1889,7 +1918,8 @@ export function useRemoteDesktop(
     // it; otherwise it builds one with no gesture, which a browser that needs a
     // gesture for every context (AUDIO_NEEDS_GESTURE) would leave suspended, so
     // there every attachment comes up muted and Unmute is the click. A session
-    // without sound is silent.
+    // without sound is silent, and so is one this browser cannot play
+    // (`settleAudioBlock`).
     const seedAudioForAttachment = (hasAudio: boolean) => {
       setAudioError(null);
       const playable = audioContextRef.current !== null || !AUDIO_NEEDS_GESTURE;
@@ -1903,6 +1933,53 @@ export function useRemoteDesktop(
       }
     };
 
+    // Whether this browser can play the sound of the session `msg` announces, set
+    // as `audioBlock` and returned. A High Performance Mac's sound is always its
+    // AAC-ELD, passed as it came whatever was chosen (src/session.rs), so whether
+    // this browser decodes it is known before a format arrives: not at all without
+    // an audio decoder, and otherwise from the question asked at load, which the
+    // page does not mount behind and may still be out. Then the session starts as
+    // playable, and a "no" closes what it opened.
+    let connectedSeq = 0;
+    // The Mac's sound question answered after `connected`: a "no" for the session
+    // it was asked for closes what that session opened.
+    const blockLateAacEld = (seq: number) => {
+      if (disposed || seq !== connectedSeq || decodesAppleSound()) {
+        return;
+      }
+      setAudioBlock("aac-eld");
+      releaseAudio();
+      closeAudioSocket();
+      setAudioEnabled(false);
+    };
+    const audioBlockFor = (
+      msg: Extract<ControlMsg, { type: "connected" }>,
+      seq: number,
+    ): AudioBlock | null => {
+      // Any other session's sound is Opus or FLAC, as chosen at this browser's
+      // picker, which offers only FLAC where there is no audio decoder.
+      if (!msg.audio || msg.subtype !== "ard-high-performance") {
+        return null;
+      }
+      if (!decodesAudio()) {
+        return "decoder";
+      }
+      const probed = appleSoundProbed();
+      if (probed) {
+        void probed.then(() => blockLateAacEld(seq));
+        return null;
+      }
+      return decodesAppleSound() ? null : "aac-eld";
+    };
+    const settleAudioBlock = (
+      msg: Extract<ControlMsg, { type: "connected" }>,
+    ): AudioBlock | null => {
+      connectedSeq += 1;
+      const block = audioBlockFor(msg, connectedSeq);
+      setAudioBlock(block);
+      return block;
+    };
+
     const handleConnected = (
       msg: Extract<ControlMsg, { type: "connected" }>,
     ) => {
@@ -1913,7 +1990,8 @@ export function useRemoteDesktop(
       setMode("desktop");
       setCanTouch(false);
       setCanAudio(msg.audio);
-      seedAudioForAttachment(msg.audio);
+      const block = settleAudioBlock(msg);
+      seedAudioForAttachment(msg.audio && block === null);
       // Nothing here turns a camera on: unlike sound, the session is not started
       // with one — enabling is explicit, every time. A target without one
       // ends any camera still offered. One with a camera leaves it alone: an
@@ -1976,6 +2054,8 @@ export function useRemoteDesktop(
       // No engine, so no queue to subscribe to: the row goes away rather than
       // offering a control that would be answered with a warning in the log.
       setCanAudio(false);
+      connectedSeq += 1;
+      setAudioBlock(null);
       releaseAudio();
       closeAudioSocket();
       setAudioEnabled(false);
@@ -3115,6 +3195,7 @@ export function useRemoteDesktop(
     connection,
     canAudio,
     audioEnabled,
+    audioBlock,
     audioError,
     videoError,
     // What the sound and the picture actually are, for the card's Audio and Video

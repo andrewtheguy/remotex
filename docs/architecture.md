@@ -202,9 +202,10 @@ passed.
   and is not part of the client bundle. Do not widen the decoder input to another
   file, an unpinned archive, or a directory, and do not turn the logo path into a
   web root.
-- The page requires a secure context plus `VideoDecoder` and `AudioDecoder` and
-  refuses startup in `frontend/src/preflight.ts` without them. Do not add
-  fallback browser paths.
+- The page requires a secure context plus `VideoDecoder` and refuses startup in
+  `frontend/src/preflight.ts` without them. A browser without `AudioDecoder`
+  starts and plays FLAC, which the page decodes itself; what needs the decoder
+  is greyed with the reason. Do not add fallback browser paths.
 
 ### Sessions
 
@@ -2729,7 +2730,7 @@ graphics pipeline onto it, with the gateway's compositor built to WebAssembly �
 applies incoming frames serially, and overlays mouse,
 keyboard, touch, clipboard, display, and audio controls.
 
-**It refuses to start without a secure context and both WebCodecs decoders**
+**It refuses to start without a secure context and a WebCodecs video decoder**
 (`preflight.ts`, before React mounts), and that refusal is what lets the rest of the
 client be simple: nothing downstream tests for either again or carries a fallback for
 its absence. `navigator.clipboard`, `navigator.keyboard` and WebCodecs itself all
@@ -2737,12 +2738,19 @@ require a secure context; the gateway speaks plain HTTP and has no TLS listener,
 one comes from how the page is reached — loopback (`localhost`, `127.0.0.1`, `[::1]`,
 any `.localhost` label), or a TLS-terminating reverse proxy. A LAN address over
 plain `http://` is the case this refuses,
-by name. `VideoDecoder` and `AudioDecoder` are asked for together rather than either
-alone, because audio is a target's choice and every target may fall back to video: a
-browser with one and not the other would play some targets' sound and not others, which is the
-half-working session the gate exists to prevent. What remains reportable mid-session
-is a *codec* a decoder refuses, which is a different sentence and arrives from the
-decoder itself.
+by name. `AudioDecoder` is not part of the gate. Safari from 16.4 to 18 has
+`VideoDecoder` without it, and a desktop without sound is still the session somebody
+came for. Such a browser starts, and still plays the one sound that needs no audio
+decoder: FLAC, which the page decodes in a WebAssembly module of its own
+(`flacDecoder.ts`). Its answer (`decodesAudio`) greys what does need one, with the
+reason: Opus under the picker's Sound row, whose tick there takes FLAC, and a High
+Performance Mac's AAC-ELD, whose sound comes whatever was chosen. On such a Mac the
+menu's Audio button reads *Audio not supported* and this browser never opens the
+audio socket. A browser with `AudioDecoder` that decodes that Mac's AAC-ELD in
+neither form (`appleMedia.ts`) is told the same way, at `connected`: the button
+reads *AAC-ELD not supported*. What
+remains reportable mid-session is a *codec* a decoder refuses, which is a different
+sentence and arrives from the decoder itself.
 
 There are two ways for this page to be given the six Command chords a browser
 otherwise keeps — ⌘W, ⌘T, ⌘N, ⌘L, ⌘O, ⌘R. A **Chrome app window** (`appWindow.ts`:

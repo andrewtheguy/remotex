@@ -233,6 +233,71 @@ test.describe("the picker's options", () => {
   });
 });
 
+test.describe("a browser with no audio decoder", () => {
+  test.skip(
+    !PICKER_TARGET,
+    "set REMOTEX_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
+  );
+
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
+  test("starts, and plays FLAC, which the page decodes itself", async ({
+    page,
+  }) => {
+    // Safari 16.4 to 18 as the page sees it: a video decoder and no audio one.
+    await page.addInitScript(() => {
+      Reflect.deleteProperty(globalThis, "AudioDecoder");
+    });
+    const seen = watchSession(page);
+    // The codec of every `audioFormat` the audio socket announced.
+    const formats: string[] = [];
+    page.on("websocket", (ws) => {
+      if (new URL(ws.url()).pathname !== "/ws/audio") {
+        return;
+      }
+      ws.on("framereceived", ({ payload }) => {
+        if (typeof payload !== "string") {
+          return;
+        }
+        const message: Record<string, unknown> = JSON.parse(payload);
+        if (message.type === "audioFormat") {
+          formats.push(String(message.codec));
+        }
+      });
+    });
+    await logIn(page);
+
+    // The sound is a choice, and ticking it takes FLAC: Opus is greyed, with the
+    // reason.
+    const item = await openTarget(page);
+    await item.getByRole("checkbox", { name: SOUND }).check();
+    await expect(item.getByRole("radio", { name: /^FLAC/ })).toBeChecked();
+    const opus = item.getByRole("radio", { name: /^Opus/ });
+    await expect(opus).toBeDisabled();
+    await expect(opus).not.toBeChecked();
+    await expect(item).toContainText("no WebCodecs AudioDecoder");
+
+    await item.getByRole("button", { name: "Start", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    expect(seen.connects.at(-1)).toMatchObject({ audio: "flac" });
+    expect(seen.statuses.at(-1)).toMatchObject({
+      type: "connected",
+      audio: true,
+    });
+    await expect.poll(() => formats, { timeout: 10_000 }).toEqual(["flac"]);
+
+    // And the menu offers Mute, not a greyed reason.
+    await page.getByRole("button", { name: "Open menu" }).click();
+    await expect(page.getByRole("button", { name: "Mute" })).toBeEnabled();
+    await page.getByRole("button", { name: "Close menu" }).click();
+    await returnToPicker(page);
+  });
+});
+
 test.describe("the picker on a phone", () => {
   test.skip(
     !PICKER_TARGET,

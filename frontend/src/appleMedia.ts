@@ -212,6 +212,14 @@ export function appleSoundProbed(): Promise<void> | null {
 }
 
 /**
+ * Whether this browser decoded the Mac's sound in either form at load, or
+ * undefined until `appleSoundProbed` resolves.
+ */
+export function decodesAppleSound(): boolean | undefined {
+  return soundForm === undefined ? undefined : soundForm !== null;
+}
+
+/**
  * Whether this browser's own decoder takes the Mac's picture. Only valid after
  * `chooseAppleMedia` has resolved, which `main.tsx` awaits before mounting.
  */
