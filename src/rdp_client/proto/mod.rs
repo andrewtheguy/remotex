@@ -41,6 +41,8 @@
 //! - [`input`] — keystrokes and mouse events, on the fast path back to the host.
 //! - [`license`] — the one licensing PDU a Windows host sends, which says none is
 //!   needed.
+//! - [`autodetect`] — the host measuring the link to the client, on the message
+//!   channel, for a session that claims it.
 //! - [`capabilities`] — what the two ends agree to send each other, exchanged once
 //!   before any pixel moves.
 //! - [`finalization`] — the four PDUs between a confirmed share and a desktop.
@@ -70,6 +72,7 @@
 //!
 //! [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 
+pub mod autodetect;
 pub mod capabilities;
 pub mod channel;
 pub mod cliprdr;

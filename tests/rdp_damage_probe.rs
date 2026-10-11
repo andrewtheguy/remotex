@@ -26,6 +26,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
+use remotex::rdp_client::proto::gfx::H264;
 use remotex::rdp_client::{AudioSink, Connect, Event, MouseButton, Session};
 use tokio::sync::mpsc::Receiver;
 
@@ -78,7 +79,8 @@ fn connect() -> (Session, Receiver<Event>) {
         resize: offers.resize,
         egfx: target.egfx(),
         pass_graphics: false,
-        h264: false,
+        h264: H264::Refused,
+        autodetect: false,
         audio: offers.audio.then(|| Box::new(Silence) as Box<dyn AudioSink>),
         // A camera draws nothing, and one the browser never plugs costs the host a
         // channel and nothing else.

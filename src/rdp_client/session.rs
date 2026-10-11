@@ -19,6 +19,7 @@ use remotex_rdp_graphics::gfx::{self, Graphics};
 use super::camera::{Camera, CameraCommand, CameraFeed, CameraInput, CameraQueues, CameraSink};
 use super::input::{Clipboard, Command, Input};
 use super::pointer::Cursor;
+use super::proto::autodetect::Detector;
 use super::proto::capabilities::DemandActive;
 use super::proto::channel::Chunk;
 use super::proto::fastpath::{self, Fragments, Update};
@@ -90,12 +91,17 @@ pub struct Connect {
     /// and nothing for a host that answers the offer with bitmap updates, which are
     /// decoded into the framebuffer as always.
     pub pass_graphics: bool,
-    /// Whether the host may draw with H.264 on a passed pipeline: the capability
-    /// advertise takes it ([`gfx_proto::caps_advertise`]), and the access units
-    /// ride in the commands handed on, for whoever composes them to decode.
+    /// Whether, and how, the host may draw with H.264 on a passed pipeline: the
+    /// capability advertise says so ([`gfx_proto::caps_advertise`]), and the access
+    /// units ride in the commands handed on, for whoever composes them to decode.
     /// Means nothing without [`Connect::pass_graphics`]: this client has no H.264
     /// decoder, so a pipeline it composes itself always refuses the codec.
-    pub h264: bool,
+    pub h264: gfx_proto::H264,
+    /// Whether to take part in the host's network detection (MS-RDPBCGR 2.2.14):
+    /// claimed in the core data, with the connection type left for the host to
+    /// detect, and answered on the message channel with what this connection
+    /// measures. For measuring what a host does with it, not for a session.
+    pub autodetect: bool,
     /// Where the remote's sound goes, for a target that asked for it (MS-RDPEA).
     ///
     /// Asked for, the client names the `rdpsnd` channel, takes the dynamic channel a
@@ -738,6 +744,10 @@ struct Active<'a> {
     /// This client's own MCS user, which every PDU it sends names as its source.
     user: u16,
     io_channel: u16,
+    /// The message channel network detection travels on, and the detection, for a
+    /// session that claimed it — [`Connect::autodetect`].
+    message_channel: Option<u16>,
+    detector: Detector,
     /// The static virtual channel dynamic channels are opened over, for a session
     /// that asked to be resizable or for the graphics pipeline.
     dynamic: Option<Joined>,
@@ -827,9 +837,9 @@ struct Dynamics {
     placement: Placement,
     /// Whether the Graphics channel is wanted at all — [`Connect::egfx`].
     egfx: bool,
-    /// Whether the host is told it may draw with H.264 — [`Connect::h264`], on a
-    /// pipeline that is passed.
-    h264: bool,
+    /// What the host is told of H.264 — [`Connect::h264`], on a pipeline that is
+    /// passed.
+    h264: gfx_proto::H264,
     /// Display Control, once the server has opened it.
     control: Option<u32>,
     /// What Display Control said it would lay out, which arrives after the channel
@@ -994,7 +1004,8 @@ impl<'a> Active<'a> {
         let audio = connected.channel(Channel::AUDIO);
         let devices = connected.channel(Channel::DEVICES);
         let wants_audio = sink.is_some();
-        let Connected { frames, writer, socket, user, io_channel, demand, deferred, .. } = connected;
+        let Connected { frames, writer, socket, user, io_channel, message_channel, demand, deferred, detector, .. } =
+            connected;
         Self {
             frames,
             writer,
@@ -1002,6 +1013,8 @@ impl<'a> Active<'a> {
             frame: Vec::new(),
             user,
             io_channel,
+            message_channel,
+            detector,
             dynamic,
             clipboard,
             audio,
@@ -1024,7 +1037,7 @@ impl<'a> Active<'a> {
                 resize: config.resize && config.egfx,
                 placement: config.placement,
                 egfx: config.egfx,
-                h264: config.pass_graphics && config.h264,
+                h264: if config.pass_graphics { config.h264 } else { gfx_proto::H264::Refused },
                 audio: wants_audio,
                 ..Dynamics::default()
             },
@@ -1121,6 +1134,7 @@ impl<'a> Active<'a> {
 
     async fn dispatch(&mut self, frame: &[u8]) -> Result<Option<Result<()>>> {
         // A frame with no first byte is not one [`Frames`] hands out.
+        self.detector.received(frame.len());
         if fastpath::is_output(frame[0]) {
             self.on_updates(frame).await?;
             return Ok(None);
@@ -1148,6 +1162,13 @@ impl<'a> Active<'a> {
     /// The same routing wherever a channel's PDU is read from — the main loop, or the
     /// capability exchange it was kept from.
     async fn on_channel(&mut self, channel: u16, payload: &[u8]) -> Result<()> {
+        if self.message_channel == Some(channel) {
+            if let Some(reply) = connect::detected(&mut self.detector, payload)? {
+                let frame = mcs::send_data_request(self.user, channel, &reply)?;
+                self.write(&frame).await.context("answering network detection")?;
+            }
+            return Ok(());
+        }
         if self.dynamic.is_some_and(|dynamic| dynamic.number == channel) {
             return self.on_dynamic(payload).await;
         }
@@ -2092,15 +2113,15 @@ mod tests {
         let reply = answer(dvc::Message::Create { channel: 12, name: gfx_proto::CHANNEL_NAME }, &mut dynamics).unwrap();
         assert_eq!(reply.len(), 2);
         assert_eq!(reply[0], dvc::create_response(12, dvc::ACCEPTED));
-        assert_eq!(reply[1], dvc::data(12, &gfx_proto::caps_advertise(false)).unwrap());
+        assert_eq!(reply[1], dvc::data(12, &gfx_proto::caps_advertise(gfx_proto::H264::Refused)).unwrap());
         assert_eq!(dynamics.graphics, Some(12));
 
         // Only a session that passes its pipeline to a page that decodes H.264
         // tells the host it may draw with it.
-        let mut takes = Dynamics { egfx: true, h264: true, ..Dynamics::default() };
+        let mut takes = Dynamics { egfx: true, h264: gfx_proto::H264::ByRegion, ..Dynamics::default() };
         let reply = answer(dvc::Message::Create { channel: 12, name: gfx_proto::CHANNEL_NAME }, &mut takes).unwrap();
-        assert_eq!(reply[1], dvc::data(12, &gfx_proto::caps_advertise(true)).unwrap());
-        assert_ne!(gfx_proto::caps_advertise(true), gfx_proto::caps_advertise(false));
+        assert_eq!(reply[1], dvc::data(12, &gfx_proto::caps_advertise(gfx_proto::H264::ByRegion)).unwrap());
+        assert_ne!(gfx_proto::caps_advertise(gfx_proto::H264::ByRegion), gfx_proto::caps_advertise(gfx_proto::H264::Refused));
 
         // A session that asked for neither refuses both by name.
         let mut none = Dynamics::default();

@@ -82,9 +82,14 @@ noticed on the same keepalive schedule as every other engine's.
 
 `ConnectionType` is declared a LAN rather than detected: the socket is the hop
 between the host and a gateway near it, which is not the link a person is on, and
-neither the declaration nor the detection changes what the host draws (below). The
-client requests neither an MCS message channel nor multitransport, and it does not
-advertise or implement network-characteristics detection. This is a deliberate
+neither the declaration nor the detection changes what the host draws (below). A
+session requests neither an MCS message channel nor multitransport, and it does not
+advertise network-characteristics detection. The detection is implemented
+(`proto/autodetect.rs`) behind `Connect::autodetect`, which only
+`tests/rdp_link_probe.rs` turns on, to measure what a host does with it: the client
+then claims it in the core data, leaves `connectionType` for the host to detect,
+asks for and joins the message channel, and answers each measurement with what
+arrived on its own connection. This is a deliberate
 protocol boundary, not a general claim about what Windows will send. In particular,
 [MS-RDPBCGR section
 2.2.1.3.2](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
@@ -121,6 +126,18 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   LAN already; 33 and 25 are what it refines a still region to. Read at 1 Mbit/s
   it drew 12 frames a second at 10 KB, and at 500 kbit/s under 3 at 23 KB, each
   carrying more of the motion, all still at 41.
+- **H.264 for the whole desktop, only the rate changes.** With `AVC_THINCLIENT`
+  ([The pipeline, passed on](#the-pipeline-passed-on)) a Windows 11 laptop drew a
+  full-screen video at 1280×800 in AVC444v2 alone, luma views only, 32 frames a
+  second at 9.6 KB and 2.4 Mbit/s, its regions at 22, 30 and 38. Behind a page on
+  1 Mbit/s, and behind a relay reading its socket at 1 Mbit/s, it drew 13 frames a
+  second at the same 9.6 KB and the same three quantizers. Taking the detection as
+  well, answered with what arrived through the relay — 1,854 measurements over 45
+  seconds, 1,001 kbit/s in all — changed nothing: the host bracketed its frames
+  with a Bandwidth Measure Start and Stop many times a second and still sent no
+  Network Characteristics Result. Microsoft's own clients see a whole desktop of
+  H.264 soften on a slow link; over TCP this client could not make a host do it,
+  and the UDP transport, which this client does not implement, is what is left.
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
 backing up, and the regions say what it does then ([MS-RDPEGFX section
@@ -337,14 +354,16 @@ buffer only while the host has a graphics pipeline open (`PassedSocket`): a host
 that draws with bitmap updates instead, or has closed the pipeline, has no frames
 to be held for, and keeps the buffer the socket came with.
 
-With `Connect::h264` the session tells the host it takes H.264, which nothing
-here decodes: the advertise is every set from version 8 to 10.4, and 10.7, none
+With `Connect::h264` set to `H264::ByRegion` the session tells the host it takes
+H.264, which nothing here decodes: the advertise is every set from version 8 to 10.4, and 10.7, none
 with `AVC_DISABLED`. 10.5 and 10.6 are left out and 10.7 carries
 `SCALEDMAP_DISABLE`, since from 10.5 a host may map a surface through the scaled
 mappings, which this client ignores, and only 10.7 has a flag to say so. Version
 10.1's capability data is sixteen reserved bytes where every other set's is four
 bytes of flags, in the advertise and in a confirmation of it. `AVC_THINCLIENT`,
-which asks for the whole desktop in AVC444, is not set. Measured against a
+which asks for the whole desktop in AVC444, is set only by `H264::WholeDesktop`,
+on every set from 10.3, and no session asks for that; `tests/rdp_link_probe.rs`
+does with `REMOTEX_UAT_H264=whole`. Measured against a
 Windows 11 host without a GPU: it confirms 10.7 and goes on drawing with
 ClearCodec, Progressive and the caches, and draws what moves like video with
 AVC420 in the same frames — a Main-profile stream for the surface, about fifteen
@@ -355,7 +374,11 @@ with AVC444v2 and nothing else, every unit a luma view alone. That is not a fine
 picture of what moves: its regions stated a quantization parameter of 38 while
 moving and 30 and then 22 once still, three below the 41, 33 and 25 of the
 AVC420 it draws otherwise, in frames of the same 9 KB, and the text of the
-desktop goes through H.264 with them.
+desktop goes through H.264 with them. Over a full-screen video it is the cheaper
+of the two by far: 2.4 Mbit/s at 32 frames a second, where by region the same
+video took 7.2 Mbit/s, 5.7 of it RemoteFX Progressive and 0.6 AVC420. On a slow
+link it gives up frames and keeps its quantizers
+([The connection sequence](#the-connection-sequence)).
 
 The access units ride in the commands handed on, and the caller composes a run
 that has any in three steps (`avc.rs`): `avc::scan` finds the units and the

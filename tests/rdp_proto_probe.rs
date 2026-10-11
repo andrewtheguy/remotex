@@ -154,6 +154,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             selected_protocol: protocol.bits(),
             channels: &CHANNELS,
             graphics: false,
+            autodetect: false,
         }
         .encode();
         let initial = mcs::connect_initial(&conference).expect("the conference fits a frame");

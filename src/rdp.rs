@@ -41,6 +41,7 @@ use crate::protocol::{
 use crate::rdp_camera;
 use crate::rdp_mic;
 use crate::session::Uplinks;
+use crate::rdp_client::proto::gfx::H264;
 use crate::rdp_client::proto::rdpsnd;
 use crate::rdp_client::{
     self as client, AudioSink, Connect, Event, Frame, Framebuffer, Input, MouseButton as RdpButton,
@@ -423,7 +424,8 @@ fn connect_config(
         resize: choices.resize(),
         egfx: config.egfx(),
         pass_graphics: plan.rdp_graphics,
-        h264: plan.rdp_h264,
+        h264: if plan.rdp_h264 { H264::ByRegion } else { H264::Refused },
+        autodetect: false,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
         microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),

@@ -27,12 +27,20 @@
 //!   to it for 100 ms; a third number is that buffer in kilobytes, and a fourth
 //!   how many seconds in the relay stops limiting, to see whether the host goes
 //!   back.
+//! - [`H264_ENV`] lets the host draw with H.264: `1` where it chooses, by region
+//!   beside the other codecs, and `whole` preferring it for the whole desktop
+//!   (`AVC_THINCLIENT`, [MS-RDPEGFX] 2.2.3.6).
+//! - [`AUTODETECT_ENV`] takes part in the host's network detection ([MS-RDPBCGR]
+//!   2.2.14), answering with what this connection measures, so behind
+//!   [`THROTTLE_ENV`] the host is told of the slow link as well as finding it. Run
+//!   with `RUST_LOG=info` to see what was measured and what the host concluded.
 //!
-//! What is printed, each [`WINDOW`], is how many frames the host drew and the bytes
-//! of their commands by codec; what its RemoteFX Progressive regions say of
-//! themselves ([MS-RDPEGFX] 2.2.4.2.1.5), where a host that has found the client
-//! slow sends its first passes at a lower quality; the quantization parameter and
-//! quality its H.264 regions state (2.2.4.4.2); and how far behind the desktop
+//! What is printed, for the opening paint and then each [`WINDOW`], is how many
+//! frames the host drew and the bytes of their commands by codec; what its
+//! RemoteFX Progressive regions say of themselves ([MS-RDPEGFX] 2.2.4.2.1.5), where
+//! a host that has found the client slow sends its first passes at a lower quality;
+//! the quantization parameter and quality its H.264 regions state (2.2.4.4.2), and
+//! of AVC444 which views each frame carried (2.2.4.5); and how far behind the desktop
 //! the frames were composed. Nothing but a drawing host is asserted: the rest is
 //! the measurement.
 
@@ -42,12 +50,13 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::proto::gfx::{self, Message};
+use remotex::rdp_client::proto::gfx::{self, H264, Message};
 use remotex::rdp_client::proto::wire::{Malformed, Reader};
 use remotex::rdp_client::{Connect, Event, Session};
 
 const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 const H264_ENV: &str = "REMOTEX_UAT_H264";
+const AUTODETECT_ENV: &str = "REMOTEX_UAT_AUTODETECT";
 const MOTION_ENV: &str = "REMOTEX_UAT_MOTION";
 const RUN_ENV: &str = "REMOTEX_UAT_LINK_SECS";
 const THROTTLE_ENV: &str = "REMOTEX_UAT_THROTTLE";
@@ -167,10 +176,13 @@ struct Progressive {
     quants: BTreeMap<Vec<u8>, u64>,
 }
 
-/// What AVC420 regions state ([MS-RDPEGFX] 2.2.4.4.1, 2.2.4.4.2): the
-/// quantization parameter and the quality level the host encoded each at.
+/// What H.264 regions state ([MS-RDPEGFX] 2.2.4.4.1, 2.2.4.4.2): the
+/// quantization parameter and the quality level the host encoded each at, and of
+/// AVC444 (2.2.4.5) which views each frame carried.
 #[derive(Default)]
 struct Avc {
+    /// AVC444 frames by what they carried: luma and chroma, luma alone, chroma alone.
+    views: BTreeMap<&'static str, u64>,
     /// Regions by their `qp`.
     quantizers: BTreeMap<u8, u64>,
     /// Regions by their `qualityVal`.
@@ -189,11 +201,30 @@ impl Avc {
         Ok(())
     }
 
+    /// An AVC444 or AVC444v2 bitmap stream: the first stream's metablock is read as
+    /// AVC420's is, and the views the stream says it carries are counted.
+    fn add_444(&mut self, data: &[u8]) -> Result<(), Malformed> {
+        let mut r = Reader::new("an AVC444 bitmap stream", data);
+        let said = r.u32_le()?;
+        let views = match said >> 30 {
+            0 => "luma and chroma",
+            1 => "luma",
+            2 => "chroma",
+            _ => "invalid",
+        };
+        *self.views.entry(views).or_default() += 1;
+        let first = usize::try_from(said & 0x3FFF_FFFF).unwrap_or(usize::MAX);
+        self.add(r.bytes(first)?)
+    }
+
     fn line(&self) -> String {
-        format!("h264 qp {:?}; quality {:?}", self.quantizers, self.qualities)
+        format!("h264 qp {:?}; quality {:?}; avc444 views {:?}", self.quantizers, self.qualities, self.views)
     }
 
     fn merge(&mut self, other: &Avc) {
+        for (views, frames) in &other.views {
+            *self.views.entry(views).or_default() += frames;
+        }
         for (qp, regions) in &other.quantizers {
             *self.quantizers.entry(*qp).or_default() += regions;
         }
@@ -306,6 +337,9 @@ impl Tally {
             if codec == gfx::CODEC_AVC420 {
                 self.avc.add(data).expect("the AVC420 metablock parses");
             }
+            if matches!(codec, gfx::CODEC_AVC444 | gfx::CODEC_AVC444_V2) {
+                self.avc.add_444(data).expect("the AVC444 bitmap stream parses");
+            }
         }
     }
 
@@ -343,7 +377,12 @@ async fn a_real_host_draws_for_a_slow_client() {
     let name = std::env::var(TARGET_ENV)
         .unwrap_or_else(|_| panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml"));
     let target = common::uat_target(&name);
-    let h264 = matches!(std::env::var(H264_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"));
+    let h264 = match std::env::var(H264_ENV).as_deref() {
+        Err(_) | Ok("" | "0" | "false") => H264::Refused,
+        Ok("whole") => H264::WholeDesktop,
+        Ok(_) => H264::ByRegion,
+    };
+    let autodetect = matches!(std::env::var(AUTODETECT_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"));
     let run = Duration::from_secs(std::env::var(RUN_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(60));
     let ack_delay = Duration::from_millis(std::env::var(ACK_DELAY_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(0));
     let throttled = std::env::var(THROTTLE_ENV).ok().map(|said| {
@@ -353,7 +392,7 @@ async fn a_real_host_draws_for_a_slow_client() {
         (kbps, Duration::from_millis(delay), buffer_kb as u32, (lift > 0).then(|| Duration::from_secs(lift)))
     });
     println!(
-        "rdp_link_probe: {name}, h264 {h264}, throttle {throttled:?}, acks held {ack_delay:?}, {}s",
+        "rdp_link_probe: {name}, h264 {h264:?}, autodetect {autodetect}, throttle {throttled:?}, acks held {ack_delay:?}, {}s",
         run.as_secs()
     );
     let (host, port) = match throttled {
@@ -380,6 +419,7 @@ async fn a_real_host_draws_for_a_slow_client() {
         egfx: true,
         pass_graphics: true,
         h264,
+        autodetect,
         audio: None,
         camera: None,
         microphone: None,
@@ -433,6 +473,9 @@ async fn a_real_host_draws_for_a_slow_client() {
         }
     }
     assert!(opening.frames > 0, "the host drew nothing");
+    println!("  opening {}", opening.line(Duration::from_secs(8)));
+    println!("         {}", opening.progressive.line());
+    println!("         {}", opening.avc.line());
     motion("start");
 
     let started = Instant::now();

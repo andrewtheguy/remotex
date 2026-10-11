@@ -119,6 +119,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use remotex::rdp_client::proto::gfx::H264;
 use remotex::rdp_client::proto::{rdpeai, rdpecam, rdpsnd};
 use remotex::rdp_client::{
     AudioSink, Camera, CameraSink, Compositor, Connect, Event, Fed, Input, MicrophoneSink, Session,
@@ -351,7 +352,8 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         resize: egfx(),
         egfx: egfx(),
         pass_graphics: false,
-        h264: false,
+        h264: H264::Refused,
+        autodetect: false,
         audio: sound().then(|| Box::new(Listen(Arc::clone(&ear))) as Box<dyn AudioSink>),
         camera: Some(Camera { name: "Remotex Probe Camera".to_owned(), sink: Box::new(Watch(Arc::clone(&eye))) }),
         microphone: Some(Box::new(Speak(Arc::clone(&voice)))),
@@ -1026,7 +1028,8 @@ async fn pass_the_pipeline() {
         resize: true,
         egfx: true,
         pass_graphics: true,
-        h264: false,
+        h264: H264::Refused,
+        autodetect: false,
         audio: None,
         camera: None,
         microphone: None,
@@ -1223,7 +1226,8 @@ async fn pass_h264() {
         resize: false,
         egfx: true,
         pass_graphics: true,
-        h264: true,
+        h264: H264::ByRegion,
+        autodetect: false,
         audio: None,
         camera: None,
         microphone: None,
