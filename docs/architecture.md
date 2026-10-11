@@ -739,7 +739,10 @@ sends.
   ceiling wlshare's walk never goes above, and `WLSD` for a plan without
   `render_adaptive`, which holds the dial there rather than walking it on the
   browser's lag. So the target's keys mean on a passed stream what they mean on
-  one coded here.
+  one coded here. A target that sets `experimental_native_vp9` lists `WLSX`
+  too, which has wlshare code the stream with its **experimental** encoder
+  written in Rust in place of libvpx; nothing here reads the stream any
+  differently for it.
   Pseudo-encodings rather than a client message because a server that is not
   wlshare ignores an encoding it does not know where a message it does not know
   ends the connection, and because they ride the list that names the encoding, so

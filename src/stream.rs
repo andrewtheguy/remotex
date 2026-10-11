@@ -19,11 +19,9 @@ const STAGED_CAP: usize = 32;
 /// The live encoder and what it owes.
 struct Live {
     stream: Stream,
-    /// The dial this encoder is *known* to be running at — recorded only on a
-    /// successful `set_quality`, so it can trail [`DesktopStream::quality`] after a
-    /// refusal. What [`DesktopStream::put_back`] compares against, so an unchanged
-    /// dial costs a returned stream nothing and a failed retune is retried instead of
-    /// believed.
+    /// The dial this encoder is at, which trails [`DesktopStream::quality`] while
+    /// its round is out and the walk moves on: [`DesktopStream::put_back`] brings
+    /// it there.
     quality: u8,
     /// Whether anything has been blitted since the last access unit.
     dirty: bool,
@@ -272,32 +270,23 @@ impl DesktopStream {
         }
         self.owed = false;
         // And the congestion loop may have moved the dial while the encoder was out
-        // of reach — compared against what it is *known* to run at, so an unchanged
-        // dial costs nothing here. A failure to retune keeps the quality it already
-        // has, the same answer `adjust` gives, and leaves `live.quality` alone so the
-        // next round tries again.
+        // of reach.
         if live.quality != self.quality {
-            match live.stream.set_quality(self.quality) {
-                Ok(()) => live.quality = self.quality,
-                Err(e) => log::warn!("video: a returned stream refused quality {}: {e:#}", self.quality),
-            }
+            live.stream.set_quality(self.quality);
+            live.quality = self.quality;
         }
         self.live = Some(live);
     }
 
-    /// Move the encoder's quality, for the congestion loop.
-    ///
-    /// Recorded only once the encoder has taken it, so a failure leaves one
-    /// consistent quality in force and a caller retrying sees the old one. While a
-    /// round is out there is no encoder here to refuse, and [`Self::put_back`] brings
-    /// the returning one to it.
-    pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
+    /// Move the encoder's quality, for the congestion loop. While a round is out
+    /// there is no encoder here to move, and [`Self::put_back`] brings the
+    /// returning one to it.
+    pub fn set_quality(&mut self, quality: u8) {
         if let Some(live) = &mut self.live {
-            live.stream.set_quality(quality)?;
+            live.stream.set_quality(quality);
             live.quality = quality;
         }
         self.quality = quality;
-        Ok(())
     }
 
     /// The dial the stream is encoding at, for the totals.
@@ -321,13 +310,6 @@ impl DesktopStream {
         }
     }
 
-    /// Make the live encoder refuse its next `count` retunes.
-    #[cfg(test)]
-    pub fn refuse_retunes(&mut self, count: u32) {
-        if let Some(live) = &mut self.live {
-            live.stream.refuse_retunes(count);
-        }
-    }
 
     /// Arm a keyframe. Its callers are exactly the moments a client's decoder has to
     /// be able to start over.
@@ -370,9 +352,8 @@ impl Round {
     }
 
     /// The quality this round is encoded at: the settle's for its one frame, and
-    /// otherwise what the encoder is running at — which can sit below
-    /// [`DesktopStream::quality`] while a stream that refused a retune waits for
-    /// [`DesktopStream::put_back`] to try again.
+    /// otherwise the dial the encoder was at when the round was taken, which the
+    /// walk may have left since.
     pub fn quality(&self) -> u8 {
         self.live.settle.unwrap_or(self.live.quality)
     }
@@ -417,13 +398,7 @@ impl Round {
         }
         let mut produced = Produced { format: None, unit: None };
         let encoded = match live.settle {
-            Some(quality) => {
-                let settled = live.stream.settle(&self.mirror, quality);
-                // Where the encoder says it is, which is not where it was if it
-                // would not leave the settle's quality: `put_back` then tries again.
-                live.quality = live.stream.quality();
-                settled
-            }
+            Some(quality) => live.stream.settle(&self.mirror, quality),
             None => live.stream.encode(&self.mirror, self.changed.as_deref()),
         };
         let Some(unit) = encoded? else {
@@ -600,10 +575,10 @@ mod tests {
 
         // A link that coarsens the stream coarsens what a round encodes, and a round
         // back at the dial sharpens only what it encodes.
-        stream.set_quality(20).expect("a retune");
+        stream.set_quality(20);
         stream.blit(first, &flat(32, 32, 120)).expect("a blit");
         assert_eq!(round(&mut stream, &mut picture).1, 20);
-        stream.set_quality(60).expect("a retune");
+        stream.set_quality(60);
         let second = placed(200, 160, 32, 32);
         stream.blit(second, &flat(32, 32, 200)).expect("a blit");
         let (changed, coarsest, _) = round(&mut stream, &mut picture);
@@ -618,19 +593,19 @@ mod tests {
         assert_eq!(over.left(), 60, "every coarse block was encoded again at the dial");
         stream.put_back(over);
         decoder.borrow_mut().decode(&unit.data).expect("a decode").write_bgrx(&mut picture, 319 * 4).expect("a picture that fits");
-        stream.set_quality(20).expect("a retune");
+        stream.set_quality(20);
         stream.blit(first, &flat(32, 32, 120)).expect("a blit");
         assert_eq!(round(&mut stream, &mut picture).1, 20);
-        stream.set_quality(60).expect("a retune");
+        stream.set_quality(60);
 
         // The settle: nothing changed, and the whole picture is encoded at the dial,
         // which the link has walked down and which stays there.
-        stream.set_quality(20).expect("a retune");
+        stream.set_quality(20);
         stream.settle(60);
         let (changed, coarsest, keyframe) = round(&mut stream, &mut picture);
         assert_eq!((changed, coarsest, keyframe), (None, 60, false));
         assert_eq!(stream.quality(), 20, "the settle moved the dial");
-        stream.set_quality(60).expect("a retune");
+        stream.set_quality(60);
         assert!(near(at(&picture, 32, 32), 120) && near(at(&picture, 216, 176), 200));
         // And it is the one round's: the next is told where the mirror changed again.
         stream.blit(first, &flat(32, 32, 90)).expect("a blit");

@@ -170,6 +170,11 @@ const ENCODING_WLSHARE_VP9_QUALITY_BASE: i32 = 0x574c_5100;
 /// rather than walking it on the browser's lag: `WLSD`, for a plan without
 /// `render_adaptive`.
 const ENCODING_WLSHARE_VP9_HELD: i32 = 0x574c_5344;
+/// EXPERIMENTAL. Listed beside [`ENCODING_WLSHARE_VP9`], has wlshare code the
+/// stream with its encoder written in Rust in place of libvpx: `WLSX`, for a
+/// target that sets `experimental_native_vp9`. The stream passed is the same to
+/// this gateway and to a decoder either way.
+const ENCODING_WLSHARE_VP9_NATIVE: i32 = 0x574c_5358;
 /// The largest `WLSV` frame read rather than refused. A 4:4:4 keyframe of the largest
 /// desktop the ceiling admits at the finest quantizer is a few megabytes; a length
 /// past this is a server that has lost its framing.
@@ -2523,7 +2528,7 @@ async fn rfb38_preface(
             let audio = config.sound(choices).then(|| config.lossless(choices));
             wlshare_encoding_list(audio, config.camera, config.microphone)
         };
-        let lists = Listing::new(encodings, plan);
+        let lists = Listing::new(encodings, plan, config.experimental_native_vp9);
         let listed = if lists_wlshare_vp9((server.width, server.height)) { &lists.vp9 } else { &lists.plain };
         uplink.send(&set_encodings(listed)).await?;
         Some(Arc::new(lists))
@@ -2556,8 +2561,8 @@ struct Listing {
 }
 
 impl Listing {
-    fn new(plain: Vec<i32>, plan: RenderPlan) -> Self {
-        let vp9 = with_wlshare_vp9(&plain, plan);
+    fn new(plain: Vec<i32>, plan: RenderPlan, native: bool) -> Self {
+        let vp9 = with_wlshare_vp9(&plain, plan, native);
         Self { plain, vp9 }
     }
 }
@@ -2576,11 +2581,15 @@ fn lists_wlshare_vp9((w, h): (u16, u16)) -> bool {
 /// and beside it what the stream is to be, from the plan: the dial as the ceiling
 /// wlshare's walk never goes above, and `WLSD` for a plan that holds the dial rather
 /// than walking it. So the target's keys mean on a passed
-/// stream what they mean on one encoded here.
-fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
+/// stream what they mean on one encoded here. `native` is the target's
+/// `experimental_native_vp9`: `WLSX`, wlshare's experimental encoder.
+fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan, native: bool) -> Vec<i32> {
     let mut listed = vec![ENCODING_WLSHARE_VP9, ENCODING_WLSHARE_VP9_QUALITY_BASE + i32::from(plan.quality)];
     if !plan.adaptive {
         listed.push(ENCODING_WLSHARE_VP9_HELD);
+    }
+    if native {
+        listed.push(ENCODING_WLSHARE_VP9_NATIVE);
     }
     listed.extend_from_slice(encodings);
     listed
@@ -8522,10 +8531,16 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
         let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false };
-        assert_eq!(with_wlshare_vp9(&rest, walked), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
+        assert_eq!(with_wlshare_vp9(&rest, walked, false), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
+        // The experimental encoder is asked for by name, and only by a target that sets the key.
+        assert_eq!(ENCODING_WLSHARE_VP9_NATIVE, i32::from_be_bytes(*b"WLSX"));
+        assert_eq!(
+            with_wlshare_vp9(&rest, walked, true),
+            [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_NATIVE, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
+        );
         let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false };
         assert_eq!(
-            with_wlshare_vp9(&rest, held),
+            with_wlshare_vp9(&rest, held, false),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
         );
     }
@@ -9736,7 +9751,7 @@ mod tests {
             rdp_h264: false,
             software: Default::default(),
         };
-        Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
+        Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan, false))
     }
 
     /// The same, for a session that asked for the desktop's sound: the bridge
@@ -12410,7 +12425,7 @@ mod tests {
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
         let mut shared = test_shared(uplink, shared_desktop(small, None, None), test_shadow(small));
         let encodings = wlshare_encoding_list(None, false, false);
-        let lists = Arc::new(Listing::new(encodings, plan));
+        let lists = Arc::new(Listing::new(encodings, plan, false));
         shared.passthrough = Some(Arc::clone(&lists));
         let mut wire = update(&[geometry(0, 0, big.0, big.1, ENCODING_DESKTOP_SIZE)]);
         wire.extend_from_slice(&wlshare_vp9_update(big.0, big.1, 0xa0, b"f1"));

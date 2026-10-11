@@ -430,9 +430,9 @@ impl VideoSink {
             return Ok(());
         };
         video.due_at = Some(now + video.congestion.interval());
-        // What the round's encoder really runs at, not the table: a stream that
-        // refused a retune is still coarse, and the settle it owes must not be
-        // cleared by a table that has already reached the dial. Nor by a round at
+        // What the round's encoder runs at, not the table: a round taken before
+        // the walk moved is at the dial it was taken at, and the settle it owes
+        // must not be cleared by a table that has already reached the dial. Nor by a round at
         // the dial that encodes only where the picture changed, which leaves the
         // rest as coarse as it was.
         let quality = round.quality();
@@ -537,21 +537,17 @@ impl VideoSink {
         let Some(pace) = video.congestion.observe(blocked, lag, now.into_std()) else {
             return;
         };
-        if pace.quality != before && let Err(e) = video.stream.set_quality(pace.quality) {
-            // The stream kept the quality it had, so the walk does too: its next
-            // verdict starts from what is actually in force.
-            video.congestion.stays_at(before);
-            warn!("{}: could not move the video quality to {}: {e:#}", self.engine, pace.quality);
-        } else {
-            debug!(
-                "{}: video quality now {} at {:.1} frames/s (the dial asks for {dial}; lag {}ms, blocked {}ms)",
-                self.engine,
-                pace.quality,
-                1.0 / pace.interval.as_secs_f64(),
-                lag.as_millis(),
-                blocked.as_millis()
-            );
+        if pace.quality != before {
+            video.stream.set_quality(pace.quality);
         }
+        debug!(
+            "{}: video quality now {} at {:.1} frames/s (the dial asks for {dial}; lag {}ms, blocked {}ms)",
+            self.engine,
+            pace.quality,
+            1.0 / pace.interval.as_secs_f64(),
+            lag.as_millis(),
+            blocked.as_millis()
+        );
     }
 
     /// Start the stream over for a client that has to be able to decode from here.
@@ -1822,12 +1818,24 @@ mod tests {
         );
     }
 
-    /// Stand in for the congestion walk having coarsened the stream to `quality`,
-    /// the way [`VideoSink::adjust`] leaves it.
+    /// Have the congestion walk take the stream to `quality`, the way
+    /// [`VideoSink::adjust`] leaves it: down by writes that blocked, a cooldown
+    /// apart, or back at the dial as a walk that never left it.
     async fn coarsen(sink: &VideoSink, quality: u8) {
         let mut video = sink.shared.video.lock().await;
-        video.congestion.stays_at(quality);
-        video.stream.set_quality(quality).expect("a live encoder takes a new quality");
+        if quality == video.congestion.ceiling() {
+            video.congestion = QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, video.congestion.lag_aware());
+        }
+        let mut at = tokio::time::Instant::now().into_std();
+        for _ in 0..64 {
+            if video.congestion.quality() == quality {
+                break;
+            }
+            at += Duration::from_millis(250);
+            video.congestion.observe(Duration::from_secs(1), Duration::ZERO, at);
+        }
+        assert_eq!(video.congestion.quality(), quality, "the walk never reached {quality}");
+        video.stream.set_quality(quality);
     }
 
     /// One coarse round: damage, and the frame that carries it.
@@ -1900,44 +1908,6 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
         assert!(frame_rx.try_recv().is_err(), "an idle stream at its dial was re-encoded");
-    }
-
-    /// The settle owed is judged by the quality a round's encoder really ran at, not the
-    /// table's: a stream that refused the retune back to the dial while its round was
-    /// out still encodes coarse, and must still be settled once its retry succeeds.
-    #[tokio::test(start_paused = true)]
-    async fn a_round_a_refused_retune_kept_coarse_is_still_settled() {
-        let (sink, mut frame_rx) = video_sink(320, 240).await;
-        coarse_round(&sink, &mut frame_rx, 1).await;
-        coarsen(&sink, 20).await;
-        coarse_round(&sink, &mut frame_rx, 2).await;
-
-        // The walk takes the dial back while a round is out, and the stream refuses it
-        // when the round comes home.
-        let area = rect(0, 0, 320, 64);
-        sink.damage(area, &rgb(area.w(), area.h(), 3)).await.unwrap();
-        {
-            let mut video = sink.shared.video.lock().await;
-            video.stream.refuse_retunes(1);
-            let round = video.stream.take_round().unwrap().expect("damage makes a round");
-            video.congestion.stays_at(60);
-            video.stream.set_quality(60).expect("a table with its streams out takes anything");
-            video.stream.put_back(round);
-            assert_eq!(video.stream.quality(), 60, "the table is at the dial");
-        }
-        // Encoded at the refused stream's 20; its put_back retries and succeeds.
-        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
-        sink.frame().await.unwrap();
-        sink.flush().await;
-        drain_units(&mut frame_rx, 1).await;
-        assert!(sink.due_at().await.is_none(), "the coarse round left pixels uncarried");
-
-        tokio::time::sleep(SETTLE_IDLE * 4).await;
-        assert!(sink.due_at().await.is_some(), "a round encoded below the dial was never settled");
-        sink.frame().await.unwrap();
-        sink.flush().await;
-        let units = drain_units(&mut frame_rx, 1).await;
-        assert!(!units[0].keyframe, "a settle is an inter frame, not a keyframe");
     }
 
     /// Under `render_adaptive`, the settle waits for the client's lag to clear rather

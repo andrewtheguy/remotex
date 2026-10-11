@@ -781,6 +781,18 @@ pub struct TargetConfig {
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub render_adaptive: Option<bool>,
+    /// EXPERIMENTAL. Have a `wlshare` target code its VP9 stream with
+    /// `screen-vp9-native`, an encoder written in Rust, in place of libvpx.
+    /// Refused on every other target: only wlshare has the two encoders, and
+    /// what this gateway codes itself is libvpx's.
+    ///
+    /// The stream is the same to a decoder either way — 4:4:4 at the dial — so
+    /// nothing else of a session changes with it, which is what the key is
+    /// for: two targets of one host that differ in it alone are the two
+    /// encoders side by side. A key and not a choice at the picker while it is
+    /// experimental.
+    #[serde(default)]
+    pub experimental_native_vp9: bool,
 }
 
 /// The stream quality a target streams at when [`TargetConfig::video_quality`] is
@@ -1766,6 +1778,14 @@ impl ConfigFile {
                 "target {:?} is {kind} and sets microphone, which has nowhere to go there: \
                  the microphone rides MS-RDPEAI on rdp and wlshare's microphone extension on a \
                  vnc target with subtype = \"wlshare\". Remove the key.",
+                target.name
+            );
+            // wlshare alone has a second VP9 encoder to ask for.
+            anyhow::ensure!(
+                !target.experimental_native_vp9 || target.wlshare(),
+                "target {:?} is {kind} and sets experimental_native_vp9, which asks wlshare \
+                 for its experimental VP9 encoder: only a vnc target with subtype = \"wlshare\" \
+                 has one. Remove the key.",
                 target.name
             );
             // The bitrate keys and the adaptive switch tune the Opus encoder, for the
@@ -3884,6 +3904,30 @@ vnc_password = \"x\"")).unwrap();
         assert!(config.targets[0].camera);
         assert!(config.targets[1].camera, "a wlshare target lists the extension");
         assert!(!config.targets[2].camera, "the camera is opt-in");
+    }
+
+    /// wlshare's experimental VP9 encoder is asked for by a `wlshare` target's key,
+    /// off unless set, and refused where there is no second encoder to ask for.
+    #[test]
+    fn the_experimental_vp9_encoder_is_wlshares_alone() {
+        let parse = |target: &str| {
+            ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
+                .and_then(|file| file.resolve())
+        };
+        let wlshare = parse(
+            "name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"\nexperimental_native_vp9 = true",
+        )
+        .expect("a wlshare target asks for it");
+        assert!(wlshare.targets[0].experimental_native_vp9);
+        let unset = parse("name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"").unwrap();
+        assert!(!unset.targets[0].experimental_native_vp9, "libvpx unless asked");
+        for target in [
+            "name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\nexperimental_native_vp9 = true",
+            "name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"\nexperimental_native_vp9 = true",
+        ] {
+            let rendered = format!("{:#}", parse(target).unwrap_err());
+            assert!(rendered.contains("sets experimental_native_vp9"), "{rendered}");
+        }
     }
 
     /// The microphone rides MS-RDPEAI on RDP and wlshare's microphone extension on a
