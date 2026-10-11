@@ -24,7 +24,7 @@ use super::proto::info::ClientInfo;
 use super::proto::share::{self, Pdu};
 use super::proto::x224::{ConfirmFlags, ConnectionConfirm, ConnectionRequest, Security, TPKT_HEADER};
 use super::proto::{display, fastpath, license, mcs, tls, x224};
-use super::session::Connect;
+use super::session::{Connect, PASSED_RECEIVE_BUFFER};
 use crate::engine;
 
 /// The keyboard layout the session is opened with: US English, which every Windows
@@ -104,6 +104,11 @@ impl Connected {
 pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     let dest = engine::host_port(&config.host, config.port);
     let mut tcp = engine::tcp_connect(&dest).await?;
+    if config.egfx && config.pass_graphics {
+        socket2::SockRef::from(&tcp)
+            .set_recv_buffer_size(PASSED_RECEIVE_BUFFER)
+            .context("setting the socket's receive buffer")?;
+    }
     // This end of the socket, which the Client Info PDU tells the server about.
     let client_address = tcp.local_addr().context("reading the local address")?.ip();
     // The name TLS and CredSSP are checked against. A bracketed IPv6 literal is how

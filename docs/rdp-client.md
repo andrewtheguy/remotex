@@ -118,9 +118,14 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   second.
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
-backing up. A gateway that reads that socket at LAN speed hides a slow page from
-it: the page's late acknowledgements slow the host's frames ([The pipeline, passed
-on](#the-pipeline-passed-on)) and leave each one full size.
+backing up, and the regions say what it does then ([MS-RDPEGFX section
+2.2.4.2.1.5](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)):
+the first pass of each tile goes out at the progressive stage of quality 25 where
+over a LAN it is the stage of quality 50, under the same quantization tables. Ten
+seconds after the socket is read freely again the host is back at 50. Through a
+2 MiB receive buffer the same relay showed the host nothing, and its frames stayed
+full size. A session that passes its pipeline is built on this ([The pipeline,
+passed on](#the-pipeline-passed-on)).
 
 ## The two threads
 
@@ -286,6 +291,43 @@ unacknowledged, and the host's count fills with those; at that many, one is
 acknowledged for each composed; below it, two; and once nothing waits,
 everything is. A caller that keeps up is acknowledged at once, and no
 acknowledgement outlasts the frames in front of it.
+
+Late acknowledgements slow the host's frames and leave each one full size: a host
+sends smaller frames only to a client its own socket backs up behind ([Opening a
+session](#opening-a-session)), and a session that read the socket as it came would
+hide a slow caller from it. So while two frames wait to be composed
+(`PASSED_HELD`) the socket goes unread, through a receive buffer of 32 KB
+(`PASSED_RECEIVE_BUFFER`), and what the host sends next stays at the host. The
+host is then held by its socket, and `PASSED_AHEAD`, which two waiting never
+reaches, has nothing to do. Everything else on the connection waits with the
+frames while it is unread — the pointer, the sound, the clipboard — as it does
+behind a slow link to any client.
+
+Only frames of 32 KB or more are waited on that way (`PASSED_HELD_BYTES`). The
+host stops at eleven unacknowledged frames whatever their size, so small ones
+never fill its socket, and leaving it unread shows the host nothing and takes
+`PASSED_AHEAD` away: with H.264 frames of 9 KB and a caller composing twenty a
+second, a socket left at two waiting kept the caller half a second behind the
+desktop, and read as it came, under `PASSED_AHEAD`, a sixth of one.
+
+Measured against a Windows 11 host drawing one full-screen moving picture at
+1280×800, with a caller that took the frames as a link of a given rate would
+(`tests/rdp_link_probe.rs`):
+
+| The caller's link | Socket read as it came | Socket left while two wait |
+| --- | --- | --- |
+| Unlimited | 34 frames/s of 114 KB, 20 ms behind | the same |
+| 27 Mbit/s | 30 frames/s of 114 KB, 140 ms behind | 30 frames/s of 114 KB, 160 ms behind |
+| 8 Mbit/s | 8.6 frames/s of 116 KB, 474 ms behind | 16 frames/s of 62 KB, 454 ms behind |
+| 2 Mbit/s | 2.0 frames/s of 118 KB, 1.9 s behind | 4.0 frames/s of 63 KB, 2.0 s behind |
+
+At 20 Mbit/s the host stayed at full-size frames either way. The buffer and the
+count were chosen on that picture: at one frame waiting and 16 KB the 8 Mbit/s
+caller was 394 ms behind at 15 frames a second, and the 27 Mbit/s caller lost a
+seventh of its frames to the wait for each read; at 128 KB the 8 Mbit/s caller
+was 640 ms behind. The receive buffer bounds what the host can send in one round
+trip, so a gateway far from its host is limited by it: 32 KB carries the 31 Mbit/s
+of that picture only while the round trip is under 8 ms.
 
 With `Connect::h264` the session tells the host it takes H.264, which nothing
 here decodes: the advertise is every set from version 8 to 10.4, and 10.7, none

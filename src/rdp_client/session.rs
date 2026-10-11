@@ -260,12 +260,49 @@ pub enum Event {
 /// nothing to compose often enough to show, and with three it never was.
 const PASSED_AHEAD: usize = 3;
 
+/// How many frames of a passed pipeline may wait for the caller before the host's
+/// socket goes unread, when they are frames of [`PASSED_HELD_BYTES`] or more.
+///
+/// A Windows host sends smaller frames to a client it finds slow, and what it
+/// goes by is its own socket backing up — not acknowledgements that come late,
+/// and not anything it is told (see "Opening a session" in docs/rdp-client.md).
+/// A session that read the socket as it came would hide a slow caller from the
+/// host: every frame would be read at once and wait here. So while this many wait
+/// to be composed the socket is left, through a receive buffer small enough
+/// ([`PASSED_RECEIVE_BUFFER`]) that what the host sends next stays at the host.
+/// The host is then held by its socket rather than by [`PASSED_AHEAD`], which
+/// that many waiting never reaches.
+///
+/// Two, with that buffer, measured against a Windows 11 host and a caller taking
+/// the frames at 8 Mbit/s: the host went from RemoteFX Progressive first passes at
+/// quality 50 to 25, and the caller from 8.6 frames a second to 16, no further
+/// behind the desktop. At one, a caller only a little slower than the host lost a
+/// seventh of its frames to the wait for each read.
+const PASSED_HELD: usize = 2;
+
+/// How large the frames that wait must be, each on average, for the socket to be
+/// left ([`PASSED_HELD`]).
+///
+/// The host stops at eleven unacknowledged frames whatever their size, so small
+/// ones never fill its socket: leaving it unread shows the host nothing, and
+/// takes [`PASSED_AHEAD`] away. Measured with H.264 frames of 9 KB and a caller
+/// composing twenty a second, a socket left at two waiting kept the caller half a
+/// second behind the desktop.
+const PASSED_HELD_BYTES: usize = 32 * 1024;
+
+/// The receive buffer of a session that passes its pipeline, in bytes: small, so
+/// a socket left unread ([`PASSED_HELD`]) backs up at the host rather than here.
+/// At 2 MiB the same host never found the caller slow.
+pub(super) const PASSED_RECEIVE_BUFFER: usize = 32 * 1024;
+
 /// The frames of a passed pipeline ([`Connect::pass_graphics`]), between the
 /// caller that composes them and the host that waits to hear of each.
 #[derive(Default)]
 struct PassedFrames {
     /// Handed to the caller, which has not said they are composed; oldest first.
     owed: VecDeque<u32>,
+    /// The bytes of the commands handed over since the oldest of those began.
+    owed_bytes: usize,
     /// Composed, and not acknowledged to the host yet; oldest first.
     kept: VecDeque<u32>,
     /// How many have been acknowledged, which each acknowledgement reports as
@@ -277,6 +314,18 @@ struct PassedFrames {
 }
 
 impl PassedFrames {
+    /// Whether the host's socket is left unread: [`PASSED_HELD`] frames wait for
+    /// the caller.
+    fn held(&self) -> bool {
+        self.owed.len() >= PASSED_HELD && self.owed_bytes >= self.owed.len() * PASSED_HELD_BYTES
+    }
+
+    /// A run of `bytes` was handed to the caller, ending `frame` if it ends one.
+    fn handed(&mut self, bytes: usize, frame: Option<u32>) {
+        self.owed_bytes = self.owed_bytes.saturating_add(bytes);
+        self.owed.extend(frame);
+    }
+
     /// The acknowledgements to send now that the run ending `frame` is composed,
     /// each a frame and how many are finished with it. None for a frame not waited
     /// on: one already covered by a later frame's, or one of a channel since closed.
@@ -294,6 +343,9 @@ impl PassedFrames {
             return Vec::new();
         };
         self.kept.extend(self.owed.drain(..=through));
+        // What still waits is counted from here: each frame's share of the bytes,
+        // which need not be exact to say whether the frames are large.
+        self.owed_bytes = self.owed_bytes / (through + 1 + self.owed.len()) * self.owed.len();
         let due = match self.owed.len() {
             0 => self.kept.len(),
             waiting if waiting < PASSED_AHEAD => 2,
@@ -967,7 +1019,9 @@ impl<'a> Active<'a> {
         }
         loop {
             tokio::select! {
-                read = self.frames.next(&mut self.frame) => {
+                // Not while the caller is behind on a passed pipeline: the host
+                // is to find that out from its own socket.
+                read = self.frames.next(&mut self.frame), if !self.passed.held() => {
                     read?;
                     if let Some(ended) = self.on_frame().await? {
                         return ended;
@@ -1268,7 +1322,7 @@ impl<'a> Active<'a> {
                 // Handed over, not finished: the frame a run ends is acknowledged
                 // when the caller says it has been composed.
                 gfx::Update::Passed { commands, frame } => {
-                    self.passed.owed.extend(frame);
+                    self.passed.handed(commands.len(), frame);
                     self.send(Event::Graphics { commands, frame }).await;
                     if frame.is_some() {
                         self.send(Event::Frame).await;
@@ -1911,6 +1965,33 @@ mod tests {
         assert_eq!(passed.composed(9), vec![(8, 2), (9, 3)], "8 was composed before 9 could be");
         assert_eq!(passed.composed(8), Vec::new(), "already acknowledged");
         assert_eq!(passed.composed(99), Vec::new(), "never handed over");
+    }
+
+    /// The socket is left while [`PASSED_HELD`] frames wait, and read again as soon
+    /// as the caller has composed one.
+    #[test]
+    fn the_socket_is_left_while_the_caller_is_behind() {
+        let mut passed = PassedFrames::default();
+        assert!(!passed.held());
+        passed.handed(60_000, None);
+        passed.handed(40_000, Some(1));
+        assert!(!passed.held());
+        passed.handed(100_000, Some(2));
+        assert!(passed.held());
+        passed.composed(1);
+        assert!(!passed.held());
+    }
+
+    /// Small frames never fill the host's socket, so the socket is read however
+    /// many wait, and the host is held by its acknowledgements as before.
+    #[test]
+    fn the_socket_is_read_while_small_frames_wait() {
+        let mut passed = PassedFrames::default();
+        for frame in 1..=6 {
+            passed.handed(9_000, Some(frame));
+            assert!(!passed.held());
+        }
+        assert_eq!(passed.composed(1), Vec::new(), "five wait, more than the host is kept ahead by");
     }
 
     /// A caller with more than [`PASSED_AHEAD`] frames waiting is slower than the
