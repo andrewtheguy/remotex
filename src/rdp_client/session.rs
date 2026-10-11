@@ -299,10 +299,14 @@ pub(super) const PASSED_RECEIVE_BUFFER: usize = 32 * 1024;
 /// caller that composes them and the host that waits to hear of each.
 #[derive(Default)]
 struct PassedFrames {
-    /// Handed to the caller, which has not said they are composed; oldest first.
-    owed: VecDeque<u32>,
-    /// The bytes of the commands handed over since the oldest of those began.
+    /// Handed to the caller, which has not said they are composed, each with the
+    /// bytes of its commands; oldest first.
+    owed: VecDeque<(u32, usize)>,
+    /// The bytes of all of those.
     owed_bytes: usize,
+    /// The bytes of the runs handed over since the last frame ended, which belong
+    /// to the frame that ends next.
+    begun_bytes: usize,
     /// Composed, and not acknowledged to the host yet; oldest first.
     kept: VecDeque<u32>,
     /// How many have been acknowledged, which each acknowledgement reports as
@@ -322,8 +326,12 @@ impl PassedFrames {
 
     /// A run of `bytes` was handed to the caller, ending `frame` if it ends one.
     fn handed(&mut self, bytes: usize, frame: Option<u32>) {
-        self.owed_bytes = self.owed_bytes.saturating_add(bytes);
-        self.owed.extend(frame);
+        self.begun_bytes = self.begun_bytes.saturating_add(bytes);
+        if let Some(frame) = frame {
+            let bytes = std::mem::take(&mut self.begun_bytes);
+            self.owed_bytes = self.owed_bytes.saturating_add(bytes);
+            self.owed.push_back((frame, bytes));
+        }
     }
 
     /// The acknowledgements to send now that the run ending `frame` is composed,
@@ -339,13 +347,13 @@ impl PassedFrames {
     /// everything is. So a caller that keeps up is acknowledged at once, and no
     /// acknowledgement outlasts the frames in front of it.
     fn composed(&mut self, frame: u32) -> Vec<(u32, u32)> {
-        let Some(through) = self.owed.iter().position(|owed| *owed == frame) else {
+        let Some(through) = self.owed.iter().position(|(owed, _)| *owed == frame) else {
             return Vec::new();
         };
-        self.kept.extend(self.owed.drain(..=through));
-        // What still waits is counted from here: each frame's share of the bytes,
-        // which need not be exact to say whether the frames are large.
-        self.owed_bytes = self.owed_bytes / (through + 1 + self.owed.len()) * self.owed.len();
+        for (frame, bytes) in self.owed.drain(..=through) {
+            self.owed_bytes -= bytes;
+            self.kept.push_back(frame);
+        }
         let due = match self.owed.len() {
             0 => self.kept.len(),
             waiting if waiting < PASSED_AHEAD => 2,
@@ -1959,9 +1967,10 @@ mod tests {
     #[test]
     fn a_caller_that_keeps_up_is_acknowledged_as_it_composes() {
         let mut passed = PassedFrames::default();
-        passed.owed.push_back(7);
+        passed.handed(0, Some(7));
         assert_eq!(passed.composed(7), vec![(7, 1)]);
-        passed.owed.extend([8, 9]);
+        passed.handed(0, Some(8));
+        passed.handed(0, Some(9));
         assert_eq!(passed.composed(9), vec![(8, 2), (9, 3)], "8 was composed before 9 could be");
         assert_eq!(passed.composed(8), Vec::new(), "already acknowledged");
         assert_eq!(passed.composed(99), Vec::new(), "never handed over");
@@ -1980,6 +1989,14 @@ mod tests {
         assert!(passed.held());
         passed.composed(1);
         assert!(!passed.held());
+        assert_eq!(passed.owed_bytes, 100_000, "the first frame's runs went with it, whole");
+        // A small frame beside a large one: what waits is counted by what each was.
+        passed.handed(1_000, Some(3));
+        passed.handed(200_000, Some(4));
+        assert!(passed.held());
+        passed.composed(3);
+        assert_eq!(passed.owed_bytes, 200_000);
+        assert!(!passed.held(), "one waits");
     }
 
     /// Small frames never fill the host's socket, so the socket is read however
@@ -2001,12 +2018,14 @@ mod tests {
     #[test]
     fn a_caller_that_is_behind_holds_the_host_to_a_few_frames_ahead() {
         let mut passed = PassedFrames::default();
-        passed.owed.extend(1..=6);
+        for frame in 1..=6 {
+            passed.handed(0, Some(frame));
+        }
         assert_eq!(passed.composed(1), Vec::new(), "five wait");
         assert_eq!(passed.composed(2), Vec::new(), "four wait");
         assert_eq!(passed.composed(3), vec![(1, 1)], "three wait: one for one");
         // The host draws another on that acknowledgement.
-        passed.owed.push_back(7);
+        passed.handed(0, Some(7));
         assert_eq!(passed.composed(4), vec![(2, 2)]);
         // It draws none, and the caller catches up.
         assert_eq!(passed.composed(5), vec![(3, 3), (4, 4)], "two wait");
