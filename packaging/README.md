@@ -157,13 +157,7 @@ opus's `MAY_HAVE` dispatch and libFLAC's own CPU detection. The sys crates fetch
 each dependency repository's latest release, so that release's archives—not the
 tag pinned in this repository's `Cargo.toml`—set the effective CPU floor.
 
-Setting no `target-cpu` is measured, not merely conservative. On an i5-8500T,
-`target-cpu=x86-64-v3` made PNG encoding 1.7 times slower through changes to the
-autovectorized `png`/`fdeflate` loops. VP9 encoding was within noise of a
-v3-scalar libvpx, while an opus archive using runtime dispatch consumed 0.73% of
-a core against 0.65% with `PRESUME_AVX2`. A global v3 floor also caused `SIGILL`
-at startup on Ivy Bridge, which is the machine the fallback build is for. If
-a Rust hot path that no feature gates benefits from AVX2, guard a separate
+If a Rust hot path that no feature gates benefits from AVX2, guard a separate
 function with `is_x86_feature_detected!` and `#[target_feature]`, so that the
 fallback build keeps it where the processor has it.
 
