@@ -591,7 +591,7 @@ itself. Which passed streams follow the browser's link, and how, is in
 
 The engines never see the config keys. They and the session's choices collapse
 to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `rdp_graphics`,
-`rdp_h264`, `software`) at the config boundary in
+`rdp_h264`, `native_vp9`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
@@ -836,8 +836,12 @@ Three controls with similar names therefore remain separate:
 | `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway, including every picture after local HEVC decoding; it does not reach passed HEVC |
 
 - **The browser says whether it can.** The page asks once, at load (`frontend/src/appleMedia.ts`),
-  and states the answer as `apple_media=true|false` on every session socket. The picker offers the passthrough to a page that said yes, or
-  that will decode the picture itself, and greys it for any other, and the
+  and states the answer as `apple_media=true|false` on every session socket,
+  beside `page_hevc=true|false`, whether the page runs the software HEVC decoder
+  that decodes the picture where the browser's own does not
+  ([Decoded in the page](#decoded-in-the-page)). The picker offers the
+  passthrough to a page that said yes, or that will decode the picture itself on
+  a gateway that serves the decoder, and greys it for any other, and the
   gateway holds each to it
   ([What a session is started with](#what-a-session-is-started-with)). For the picture it asks its `VideoDecoder` about the configuration
   macwork's stream announces, `hev1.4.10.L150.BE.8`. For the sound it decodes one of
@@ -1594,12 +1598,14 @@ Authentication and desktop ownership are separate:
    and `GET /api/targets`' state the gateway's version in `X-Remotex-Version`,
    and a page whose own differs, a tab left open across an upgrade, opens no
    session and lists no target: it says both versions and offers a reload.
-3. `/ws?session=<token>&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
+3. `/ws?session=<token>&apple_media=true|false&page_hevc=true|false&rdp_graphics=true|false&rdp_h264=true|false`
    attaches to the slot and reports the target picker or the current connected
-   target. `apple_media`, `rdp_graphics` and `rdp_h264` are required: whether
-   this browser decodes a High Performance Mac's HEVC, whether it composes an
+   target. `apple_media`, `page_hevc`, `rdp_graphics` and `rdp_h264` are
+   required: whether this browser's own decoder takes a High Performance Mac's
+   HEVC, whether its page runs the software HEVC decoder, whether it composes an
    RDP host's graphics pipeline, and whether it decodes the H.264 such a
    pipeline may carry; see
+   [Decoded in the page](#decoded-in-the-page),
    [Apple's media stream, passed through](#apples-media-stream-passed-through) and
    [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
    The media sockets carry the token alone.
