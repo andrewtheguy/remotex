@@ -332,7 +332,10 @@ caller was 394 ms behind at 15 frames a second, and the 27 Mbit/s caller lost a
 seventh of its frames to the wait for each read; at 128 KB the 8 Mbit/s caller
 was 640 ms behind. The receive buffer bounds what the host can send in one round
 trip, so a gateway far from its host is limited by it: 32 KB carries the 31 Mbit/s
-of that picture only while the round trip is under 8 ms.
+of that picture only while the round trip is under 8 ms. So the socket has that
+buffer only while the host has a graphics pipeline open (`PassedSocket`): a host
+that draws with bitmap updates instead, or has closed the pipeline, has no frames
+to be held for, and keeps the buffer the socket came with.
 
 With `Connect::h264` the session tells the host it takes H.264, which nothing
 here decodes: the advertise is every set from version 8 to 10.4, and 10.7, none

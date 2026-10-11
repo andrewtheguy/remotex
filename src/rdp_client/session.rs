@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use log::{debug, info, warn};
 use tokio::io::{AsyncWriteExt as _, ReadHalf, WriteHalf};
 use tokio::sync::mpsc::error::TrySendError;
@@ -290,10 +290,44 @@ const PASSED_HELD: usize = 2;
 /// second behind the desktop.
 const PASSED_HELD_BYTES: usize = 32 * 1024;
 
-/// The receive buffer of a session that passes its pipeline, in bytes: small, so
-/// a socket left unread ([`PASSED_HELD`]) backs up at the host rather than here.
-/// At 2 MiB the same host never found the caller slow.
-pub(super) const PASSED_RECEIVE_BUFFER: usize = 32 * 1024;
+/// The receive buffer of a session while it passes a pipeline, in bytes: small,
+/// so a socket left unread ([`PASSED_HELD`]) backs up at the host rather than
+/// here. At 2 MiB the same host never found the caller slow.
+const PASSED_RECEIVE_BUFFER: usize = 32 * 1024;
+
+/// The host's socket, for a session that may pass a pipeline: a second handle on
+/// it, for its receive buffer alone.
+///
+/// The buffer is [`PASSED_RECEIVE_BUFFER`] only while the host has a graphics
+/// pipeline open. It bounds what the host can send in one round trip, and a host
+/// that draws with bitmap updates instead, or has closed the pipeline, has no
+/// frames to be held for and would only be slowed by it.
+pub(super) struct PassedSocket {
+    socket: socket2::Socket,
+    /// The buffer the socket had before it was made small, while it is.
+    usual: Option<usize>,
+}
+
+impl PassedSocket {
+    pub(super) fn of(tcp: &tokio::net::TcpStream) -> std::io::Result<Self> {
+        Ok(Self { socket: socket2::SockRef::from(tcp).try_clone()?, usual: None })
+    }
+
+    /// Make the buffer small while a pipeline is `open`, and what it was otherwise.
+    fn passing(&mut self, open: bool) -> std::io::Result<()> {
+        match (open, self.usual) {
+            (true, None) => {
+                self.usual = Some(self.socket.recv_buffer_size()?);
+                self.socket.set_recv_buffer_size(PASSED_RECEIVE_BUFFER)
+            }
+            (false, Some(usual)) => {
+                self.usual = None;
+                self.socket.set_recv_buffer_size(usual)
+            }
+            _ => Ok(()),
+        }
+    }
+}
 
 /// The frames of a passed pipeline ([`Connect::pass_graphics`]), between the
 /// caller that composes them and the host that waits to hear of each.
@@ -698,6 +732,7 @@ impl Share {
 struct Active<'a> {
     frames: Frames<ReadHalf<tls::Stream>>,
     writer: WriteHalf<tls::Stream>,
+    socket: Option<PassedSocket>,
     /// The frame being read, kept across turns so the buffer is allocated once.
     frame: Vec<u8>,
     /// This client's own MCS user, which every PDU it sends names as its source.
@@ -959,10 +994,11 @@ impl<'a> Active<'a> {
         let audio = connected.channel(Channel::AUDIO);
         let devices = connected.channel(Channel::DEVICES);
         let wants_audio = sink.is_some();
-        let Connected { frames, writer, user, io_channel, demand, deferred, .. } = connected;
+        let Connected { frames, writer, socket, user, io_channel, demand, deferred, .. } = connected;
         Self {
             frames,
             writer,
+            socket,
             frame: Vec::new(),
             user,
             io_channel,
@@ -1305,6 +1341,9 @@ impl<'a> Active<'a> {
                 message => (answer(message, dynamics)?, Vec::new()),
             }
         };
+        if let Some(socket) = &mut self.socket {
+            socket.passing(self.dynamics.graphics.is_some()).context("setting the socket's receive buffer")?;
+        }
         if let Some(dynamic) = self.dynamic {
             for reply in replies {
                 self.write_channel(dynamic, &reply).await?;
