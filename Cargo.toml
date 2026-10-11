@@ -332,3 +332,13 @@ opt-level = 3
 
 [profile.dev.package.crypto-primes]
 opt-level = 3
+
+# screen-vp9, its encoder in Rust and the conversion in front of both its
+# coders (the `yuv` crate) optimised in a debug build as in release, so that a
+# debug gateway codes a desktop at the speed a released one does. A
+# dependency's own profile is ignored; only this workspace's applies.
+[profile.dev.package.screen-vp9]
+opt-level = 3
+
+[profile.dev.package.yuv]
+opt-level = 3
