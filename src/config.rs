@@ -523,7 +523,8 @@ impl RenderPlan {
     /// The resolved plan rather than the config keys: what a target *does* is the
     /// plan its keys collapse to, defaults included, and a description built from
     /// the keys would restate the file while the encoder did something the reader
-    /// has to derive. The VP9 is always 4:4:4, so the card does not say so.
+    /// has to derive. The VP9 is always 4:4:4, so the card does not say so; which
+    /// encoder codes it is the target's to choose ([`Self::native_vp9`]), so it does.
     pub fn describe(&self) -> String {
         if let Some(passthrough) = self.passthrough() {
             let h264 = if self.rdp_h264 { " with H.264" } else { "" };
@@ -532,7 +533,10 @@ impl RenderPlan {
         // The walk as a suffix: the quality named before it is a ceiling the link
         // may fall below.
         let adaptive = if self.adaptive { " · adaptive" } else { "" };
-        format!("video q{}{adaptive}", self.quality)
+        // The encoder beside the dial: the two do not draw the same picture at one
+        // quality, and nothing else a client sees says which a target asked for.
+        let encoder = if self.native_vp9 { "native VP9" } else { "libvpx" };
+        format!("video q{} · {encoder}{adaptive}", self.quality)
     }
 }
 
@@ -3202,13 +3206,16 @@ mod tests {
         let summary = |extra: &str| {
             parse_target(&format!("video_quality = 60\n{extra}")).unwrap().targets[0].render_summary()
         };
-        assert_eq!(summary(""), "video q60 · adaptive");
-        assert_eq!(summary("render_adaptive = false"), "video q60");
+        assert_eq!(summary(""), "video q60 · libvpx · adaptive");
+        assert_eq!(summary("render_adaptive = false"), "video q60 · libvpx");
         let describe = |keys: &str| {
             parse_target(keys).unwrap().targets[0].render_plan(Choices::default(), Decoders::ALL).describe()
         };
-        assert_eq!(describe("video_quality = 60"), "video q60 · adaptive");
-        assert_eq!(describe("video_quality = 60\nrender_adaptive = false"), "video q60");
+        assert_eq!(describe("video_quality = 60"), "video q60 · libvpx · adaptive");
+        assert_eq!(describe("video_quality = 60\nrender_adaptive = false"), "video q60 · libvpx");
+        let plan = parse_target("video_quality = 60").unwrap().targets[0].render_plan(Choices::default(), Decoders::ALL);
+        assert_eq!(RenderPlan { native_vp9: true, ..plan }.describe(), "video q60 · native VP9 · adaptive");
+        assert_eq!(RenderPlan { native_vp9: true, adaptive: false, ..plan }.describe(), "video q60 · native VP9");
     }
 
     // Nothing in a target says what the remote runs. The engines discover it
@@ -3495,7 +3502,7 @@ mod tests {
         assert_eq!(hp.beyond(passed, takes), None);
         assert_eq!(hp.beyond(passed, declines), Some(Passthrough::AppleMedia));
         assert_eq!(hp.beyond(Choices::default(), declines), None, "VP9 is for every browser");
-        assert_eq!(hp.render_summary(), "video q90 · adaptive", "the file chooses none");
+        assert_eq!(hp.render_summary(), "video q90 · libvpx · adaptive", "the file chooses none");
 
         // The sound comes with the picture, chosen or not, so it is not offered.
         assert!(!hp.offers().audio);
@@ -4096,7 +4103,7 @@ vnc_password = \"x\"")).unwrap();
         let cannot = Decoders { rdp_graphics: false, rdp_h264: false, ..composes };
         assert_eq!(win.beyond(passed, cannot), Some(Passthrough::RdpGraphics));
         assert!(!win.render_plan(Choices::default(), composes).rdp_graphics);
-        assert_eq!(win.render_summary(), "video q90 · adaptive");
+        assert_eq!(win.render_summary(), "video q90 · libvpx · adaptive");
 
         // H.264 on the passed pipeline is the target's key, the session's choice
         // and the browser's answer together, and none of them alone.
@@ -4284,7 +4291,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
         assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false, native_vp9: false });
-        assert_eq!(plan.describe(), "video q80 · adaptive");
+        assert_eq!(plan.describe(), "video q80 · libvpx · adaptive");
     }
 
     /// A target that turned the walk off stays exactly on its dial: the
@@ -4296,7 +4303,7 @@ vnc_password = \"x\"")).unwrap();
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
         assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, software: false, native_vp9: false });
-        assert_eq!(plan.describe(), "video q80");
+        assert_eq!(plan.describe(), "video q80 · libvpx");
     }
 
     /// The floor key is gone: a settle sharpens a quiet desktop at the dial, which

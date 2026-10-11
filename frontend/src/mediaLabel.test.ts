@@ -192,7 +192,7 @@ test("the video row waits for the format, then names it and whose stream it is",
 });
 
 test("the Render row waits for the target, then names its dial", () => {
-  const plan = "video q90 · adaptive";
+  const plan = "video q90 · libvpx · adaptive";
   assert.equal(renderLabel(""), "Waiting for the target");
   assert.equal(renderLabel(plan), plan);
 });

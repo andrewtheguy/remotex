@@ -251,7 +251,7 @@ export type ControlMsg =
       // camera's twin: enabled afresh each session by opening /ws/mic.
       microphone: boolean;
       // The render dial this session resolved to, in one line —
-      // `video q90 · adaptive`. The *resolved plan* rather than the config keys,
+      // `video q90 · libvpx · adaptive`. The *resolved plan* rather than the config keys,
       // which the reader may not have: defaults are already applied.
       render: string;
     }

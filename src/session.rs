@@ -2571,7 +2571,7 @@ mod tests {
         assert!(hooks.try_recv().is_ok(), "engine spawned on connect");
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
-                assert_eq!(render, "video q60 · adaptive")
+                assert_eq!(render, "video q60 · libvpx · adaptive")
             }
             other => panic!("expected connected, got {other:?}"),
         }

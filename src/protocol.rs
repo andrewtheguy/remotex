@@ -1907,13 +1907,13 @@ mod tests {
             passthrough: None,
             camera: false,
             microphone: false,
-            render: "video q90 · adaptive".to_owned(),
+            render: "video q90 · libvpx · adaptive".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 · adaptive"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 · libvpx · adaptive"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
