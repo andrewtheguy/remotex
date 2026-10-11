@@ -61,22 +61,35 @@ the steps share nothing but the socket and what the last one said.
 
 The security negotiation offers `HYBRID` and nothing else, so a server that cannot
 do NLA is refused rather than logged on to some other way. The TLS certificate
-chain is *not* verified; what is verified is the handshake signature, which is
-what makes the chain's absence defensible — CredSSP binds the server's TLS public
-key into the credential exchange, so an interceptor without the private key cannot
-complete the handshake it would need to replay the credentials. See
-`proto/tls.rs`, which spells out the attack that argument rests on.
+chain and host name are **not** verified, and there is no certificate prompt or
+pin. TLS therefore proves possession of the private key for the certificate the
+endpoint presented; it does not establish that the endpoint is the host the
+operator intended.
+
+CredSSP supplies a separate protection. [MS-CSSP sections 1.5 and
+3.1.5](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-CSSP.pdf)
+explicitly allow deployments without a common CA root, then bind the authenticated
+SPNEGO exchange to the public key used by TLS before the client delegates its
+credentials. A relay onto a TLS session with a different public key fails that
+binding. This does not protect a user who was directed to an unintended server
+that can itself complete authentication, or a server whose key is compromised.
+Targets therefore have to be identified by the operator's network and name
+configuration, not by this client's certificate handling. `proto/tls.rs` records
+the implementation checks.
 
 The socket comes from `engine::tcp_connect`, so an RDP host that goes silent is
 noticed on the same keepalive schedule as every other engine's.
 
-`ConnectionType` is declared a LAN rather than probed, because a server's own
-estimate of the hop between it and a gateway beside it throttled updates badly,
-and no multitransport is offered. The client requests no MCS message channel and
-does not advertise network-characteristics detection, so a conforming host has no
-channel on which to send auto-detect PDUs. Whether a current Windows host sends
-any despite that remains a live-host question in
-[`rdp-spec-audit.md`](rdp-spec-audit.md#to-settle-against-a-host).
+`ConnectionType` is declared a LAN rather than probed, because a server's estimate
+of the hop between it and a nearby gateway throttled updates in testing. The
+client requests neither an MCS message channel nor multitransport, and it does not
+advertise or implement network-characteristics detection. This is a deliberate
+protocol boundary, not a general claim about what Windows will send. In particular,
+[MS-RDPBCGR section
+2.2.1.3.2](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
+says that advertising the graphics-pipeline flag also requires network-detection
+support. The tested Windows 10 and 11 hosts accept the client's smaller
+combination; an auto-detect PDU outside that observed traffic is unsupported.
 
 ## The two threads
 
@@ -107,22 +120,25 @@ else about which is which, so `connect.rs` pairs the numbers back up with the
 names and hands the session a `Joined` — a number, and the header flags that
 channel's chunks wear.
 
-Those flags are the measured part. Each channel's chunks wear what its own
-`CS_NET` options asked for, and `CHANNEL_FLAG_SHOW_PROTOCOL` is the one that
-matters: a Windows host reads **nothing at all** off a chunk that disagrees with
-the channel it arrived on, and reports nothing about having ignored it. The
-clipboard needs the flag on every chunk and the dynamic channel must not carry it;
-set it on both and Display Control never opens, set it on neither and the
-clipboard never answers. `channel::SHOW_PROTOCOL` records both failures.
+Each channel's chunks carry the flags derived from its `CS_NET` options.
+[MS-RDPBCGR sections 2.2.1.3.4.1 and
+2.2.6.1.1](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
+say that the server ignores `CHANNEL_OPTION_SHOW_PROTOCOL`, while
+`CHANNEL_FLAG_SHOW_PROTOCOL` determines whether the channel header is delivered to
+the application endpoint. The client nevertheless keeps the option and the chunk
+flag paired. On the Windows host used for the protocol probe, omitting the flag
+from `cliprdr` made the clipboard stop responding, while adding it to `drdynvc`
+prevented Display Control from opening. `channel::SHOW_PROTOCOL` and the adjacent
+tests record those two interoperability observations; they are not asserted as a
+rule for every Windows release.
 
-A channel belongs to the connection, not to the share, and nothing on one can be
-asked for again — there is no repaint for a clipboard. So nothing on a channel is
-dropped while the share is busy with itself in the capability exchange.
-`connect::activate`
-hands back what arrived on a channel and the session acts on it once the share is
-live. A server opens the clipboard as soon as the channel is up, which can
-be mid-finalization, and a Monitor Ready read past there is a session whose
-clipboard never starts.
+Static-channel PDUs can arrive while the main share is still completing its
+capability exchange. `connect::activate` retains them and gives them to the live
+session in arrival order. This matters for messages with no generic recovery
+mechanism: for example, if the clipboard's opening Monitor Ready PDU were discarded,
+the clipboard conversation would never begin. Later clipboard data requests can
+still be retried; the invariant here is only that activation must not discard an
+already-received channel PDU.
 
 A channel PDU of any length travels either way. Half a megabyte of clipboard text
 is a megabyte of UTF-16 against a 1600-byte chunk floor, so `proto/channel.rs`
@@ -168,39 +184,44 @@ maps them onto the output at an origin, and brackets drawing in StartFrame and
 EndFrame. `gfx.rs` keeps each surface's pixels and the rectangles drawn
 into since the last frame, and at the EndFrame copies those rectangles of every
 mapped surface into the framebuffer — the shape of FreeRDP's `gdi/gfx.c`. Each
-EndFrame is acknowledged (`queueDepth` unavailable), which a Windows host requires
-or it throttles and then stops; and each surfaces to the engine as `Event::Frame`
-after the paints it covers, which is the frame boundary the engine's flush was
-built to guess at. A monitor layout is answered by ResetGraphics, which resizes the
-framebuffer and surfaces as `Event::Resize`, the channels untouched.
+EndFrame is acknowledged (`queueDepth` unavailable); on the probed Windows host,
+withholding acknowledgements first throttled and then stopped drawing. After its
+paint operations are applied, the EndFrame reaches the engine as `Event::Frame`,
+the explicit boundary that replaces the engine's timer-based flush. A monitor
+layout is answered by ResetGraphics, which resizes the framebuffer and surfaces
+as `Event::Resize` without rebuilding the channels.
 
-The compositor decodes everything a current Windows host sends, measured against
-one with `tests/rdp_client_probe.rs`, which prints the host's codec and command
-tally. Uncompressed rectangles and
-the planar codec — the same `proto/planar.rs` a bitmap update uses, with the rows
-the right way up. ClearCodec (`proto/clear.rs`), the desktop's primary codec here:
-its residual, band and glyph layers with their caches, and all three subcodecs,
-raw, RLEX and NSCodec (`proto/nsc.rs`), the last carrying most pictures and
-anti-aliased text. A ClearCodec rectangle is decoded onto the surface over what it
-already holds, as FreeRDP decodes it: the host leaves pixels no layer paints to the
-surface underneath, stores a glyph as the surface looks once its layers are done,
-and places band columns that can land beside the rectangle — so every one of those
-is invalidated with it. RemoteFX Progressive (`proto/progressive.rs`), which arrives on
-WireToSurface2 with its own rectangles: the decoder keeps every tile of every
-surface between PDUs — its coefficients and their signs — so an upgrade pass adds
-bits to what a first pass left, and only the reduce-extrapolate wavelet and RLGR1 a
-modern host uses are implemented; a region asking for the classic RemoteFX wavelet
-is refused by name. A region is painted from every tile decoded since its graphics
-frame began, clipped to its rectangles, not from its own tiles alone: [MS-RDPEGFX]
-2.2.4.2.1.5 lets a region's rectangles be covered by tiles an earlier region of the
-frame carried, in an earlier PDU even, and a Windows host relies on it when a
-minimized or dragged window uncovers the desktop. The copies and caches that make a desktop cheap are acted on:
-SurfaceToSurface reads its source whole before writing so a scroll over itself does
-not smear, SurfaceToCache and CacheToSurface keep rectangles by slot, SolidFill
-clips to the surface. A rectangle that will not decode is left unpainted with a
-warning and the session runs on, since the host draws it again; a PDU whose framing
-is wrong ends the session, as any malformed PDU does. The channel says which codecs
-and commands it carried when it ends, at `info`.
+The support boundary is the set below, not every command or codec a current
+Windows release could send. `tests/rdp_client_probe.rs` prints the codec and
+command tally for the particular host and session under test, so a newly observed
+kind is visible instead of being inferred from an earlier run.
+
+| Graphics input | Implementation and observed boundary |
+| --- | --- |
+| Uncompressed and planar rectangles | Implemented. Planar uses the same `proto/planar.rs` decoder as bitmap updates. |
+| ClearCodec | Residual, band and glyph layers are implemented with their caches, including raw, RLEX and NSCodec subcodecs (`proto/clear.rs`, `proto/nsc.rs`). These were the principal desktop updates on the probed Windows host. |
+| RemoteFX Progressive | Reduce-extrapolate wavelets and RLGR1 are implemented in `proto/progressive.rs`. A region selecting the classic RemoteFX wavelet is rejected by name. |
+| Surface commands | Surface-to-surface copy, surface-to-cache, cache-to-surface and solid fill are implemented. |
+| Unknown or malformed input | A rectangle whose supported command cannot be decoded is left unchanged and logged. Invalid PDU framing ends the session; an unsupported codec or command is reported by name. |
+
+ClearCodec draws over the surface's existing contents. Pixels not covered by a
+layer remain unchanged, glyph cache entries capture the surface after their layers
+are applied, and band columns can extend beside the nominal rectangle; all affected
+pixels are included in the invalidation.
+
+Progressive state is also retained per tile and surface between PDUs, including
+coefficients and signs, so an upgrade pass refines the earlier pass. A region is
+painted from every tile decoded since the graphics frame began and clipped to the
+region's rectangles. [MS-RDPEGFX section
+2.2.4.2.1.5](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)
+permits a region to refer to tiles carried by an earlier region or PDU in the same
+frame. The probed Windows host uses that form when a moved or minimized window
+reveals the desktop.
+
+Surface-to-surface copy reads the complete source before writing, which preserves
+overlapping scrolls. Cache commands retain rectangles by slot, and solid fills are
+clipped to their surface. When the graphics channel ends, an `info` log records the
+codecs and commands actually received during that session.
 
 ### The pipeline, passed on
 
@@ -457,12 +478,16 @@ the shape of every format list after them. The browser can be told the session i
 up before the channel is, so a copy that arrives early is held — the most recent
 one, since each advertisement replaces the last — and sent when the channel opens.
 
-Short format names are what is spoken. `CB_USE_LONG_FORMAT_NAMES` is not offered,
-which by MS-RDPECLIP 2.2.2.1.1.1 settles the form of every list in either direction;
-a server that ignores that is still read, because a list that is not a whole
-number of short entries can only be long ones. Nothing branches on what the
-server's own capabilities say: they are read for the log, where a server that
-wants something else is a line rather than a mystery.
+The client does not offer `CB_USE_LONG_FORMAT_NAMES`. Under [MS-RDPECLIP sections
+2.2.2.1.1.1 and
+2.2.3.1](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPECLIP.pdf),
+that selects fixed 36-byte short-name entries in both directions. The parser also
+has a compatibility heuristic for a peer that ignores the negotiation: a body
+whose length is not divisible by 36 is attempted as variable-length, null-terminated
+UTF-16 long-name entries. This is leniency, not an exhaustive identification; an
+ambiguous body divisible by 36 is treated as short names. A truncated ID or an
+unterminated long name is malformed and ends the session. The peer's capability
+set is logged, but it does not change this policy.
 
 Transfers are capped at 512 KiB (`protocol::MAX_CLIPBOARD_BYTES`) and refused
 rather than truncated, in both directions — a partial paste cannot be told from a
@@ -506,39 +531,37 @@ a display name, `Remotex Camera`, and the name of a device channel — and the h
 then opens that channel by name. A version the client does not speak ends the
 protocol on that channel, as MS-RDPECAM 3.2.5.2 requires.
 
-`proto/rdpecam.rs` is the whole conversation, and a pure one: every host message and
-every browser action goes in, and what to send and what it meant comes out. The
-device keeps the three states of MS-RDPECAM 3.1.1 — Deactivated, Activated with a
-count of Activate requests not yet matched by a Deactivate, and Streaming — and
-answers every request the state does not take with the error the specification
-names: `NotInitialized` before activation, `InvalidRequest` for a Sample Request with
-no stream running, `InvalidMessage` for anything malformed or of an unknown kind, and
-a Sample Request's failures in the Sample Error Response it is always owed. A response
-from the host is never answered. Version 1 is spoken too, because a client must
-speak every version below the one it claims: under it the property requests do not
-exist, and under version 2 this device has no properties to report.
+`proto/rdpecam.rs` owns the protocol state. The state rules come from
+[MS-RDPECAM section
+3.1.1](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPECAM.pdf):
 
-The measured part: a host opens the device channel more than once, under the one
-name, and keeps every instance open. Against a Windows Enterprise host the Device
-Initialization sequence runs on the first instance, and before that instance is
-deactivated or closed a second is opened for the Device Control Initialization
-sequence. A client that took the second opening for a replacement would leave the
-first unanswered, and a stream started on it would never start. The device is still
-one device, so its state is kept once, as MS-RDPECAM 3.1.1 describes it and as
-FreeRDP's client keeps it: every request is answered on the instance it came in on,
-the Activate requests of every instance nest into one count, a Deactivate on any of
-them ends a stream, and samples go out on the instance that started the stream or last
-asked for one. An instance that closes gives back the activations it made, and the
-stream if the stream was its.
+| State | Requests and transitions |
+| --- | --- |
+| Deactivated | Only Activate Device is accepted. Other requests receive `NotInitialized`. |
+| Activated | Each Activate increments a device-wide count. Start Streams enters Streaming; Deactivate decrements the count and returns to Deactivated only when it reaches zero. A Sample Request before Start Streams receives `InvalidRequest`. |
+| Streaming | Sample Requests are accepted. Stop Streams returns to Activated. Deactivate stops the stream and decrements the activation count. |
 
-The Windows Camera app leans on exactly that. It starts the stream on one instance and
-asks for samples on another it opens straight after, which it never activates: a
-client keeping a state per instance would answer those requests `NotInitialized`, and
-the stream would start and never carry a frame. The same app tears its first stream
-down a few seconds in — Deactivate, and every instance closed — then opens the device
-again and starts a second one that runs until the app closes. It also asks for samples
-more slowly than the rate the device announced, on a host without a GPU, so the queue
-fills and a second's worth of stream is dropped to the next keyframe at a time.
+Malformed and unknown requests receive `InvalidMessage`; failures of a Sample
+Request use the Sample Error Response required for that request. Messages that are
+responses rather than requests are discarded without a reply, avoiding an error
+exchange with no terminating message. Versions 1 and 2 are implemented. Version 1
+has no property requests; in version 2 this device reports no properties.
+
+The implementation keeps one device state across every dynamic-channel instance
+opened with the advertised device-channel name. Each request is answered on the
+instance that carried it. Activations from all instances contribute to the one
+count; closing an instance removes the activations it contributed and stops a stream
+owned by that instance. Samples are returned on the instance that started the stream
+or most recently requested a sample.
+
+That multi-instance policy is based on a dated interoperability observation, not a
+requirement that every host follow the same sequence. On 2026-09-13, the probed
+Windows Enterprise host kept several instances open: Device Initialization used the
+first, Device Control Initialization opened another before the first closed, and the
+Camera app started a stream on one instance but requested samples on an unactivated
+second instance. The app then tore the initial stream down, reopened the device and
+ran a second stream. On that host without a GPU, requests also arrived more slowly
+than the announced frame rate, exercising the queue's drop-to-keyframe policy.
 
 The device is one color stream in one media type: H.264 at the geometry and rate the
 browser's encoder announced, decoded on the host. The host chooses from that list of

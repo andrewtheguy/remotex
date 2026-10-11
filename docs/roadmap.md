@@ -333,13 +333,12 @@ which is not planned either.
 
 ### Multiple sessions
 
-**Concurrent sessions, shared sessions, and a session broker are outside the
-product model.** This is one user's program, and that is not a limitation waiting
-to be lifted.
+Concurrent sessions, shared sessions and a session broker are not planned. One
+gateway instance has one active session slot, as defined by the
+[session constraints](architecture.md#sessions). This keeps engine ownership,
+input state and per-session media choices attached to one browser claim.
 
-There is one active session slot: one active session per gateway instance,
-permanently. A new browser takes over and evicts the previous holder
-(`src/session.rs`), which a client offers with a Take over button — the same
-shape as Windows Remote Desktop. A reconnect and a target switch reclaim the
-slot in silence: they are the same browser coming back. A takeover ends the
-session it found and starts at the picker.
+A different browser can use **Take over** to evict the current holder. A reconnect
+or target switch by the same browser reclaims the slot without a prompt. A forced
+takeover ends the existing session and returns the new holder to the picker
+(`src/session.rs`).

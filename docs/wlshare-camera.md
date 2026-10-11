@@ -12,8 +12,8 @@ camera; until it answers, the browser's camera is never plugged.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare), which
 decodes the H.264 with the system's libavcodec and offers it to the desktop as a
-PipeWire `Video/Source` node — a camera applications reaching cameras through
-PipeWire can open. How wlshare builds that node is in its own
+PipeWire `Video/Source` node that camera applications can open. How wlshare builds
+that node is in its own
 [`docs/architecture.md`](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#the-camera-extension).
 
 ## Configuration
@@ -52,20 +52,28 @@ stream at an offset nothing recovers from.
 
 ## The gateway's half
 
-`src/vnc_camera.rs` is the VNC engine's adapter to the camera socket's
-`CameraBridge` — the same socket, bridge and browser encoder MS-RDPECAM uses, so
-the browser cannot tell the two apart. The bridge's control feeds two queues, as
-the RDP client's does: plug and unplug without limit, samples sixteen deep. A
-sample that finds the queue full, or is past the 4 MiB wlshare accepts, is dropped
-with every later one until a keyframe, and the browser is asked for it once per gap
-— the dropped unit may have been the keyframe a stream starts on. Commands go
-ahead of the samples queued behind them, so every plug and unplug starts a new
-generation and a sample carries the one current when it was sent: the old camera's
-samples still waiting when a replug is taken are dropped, never sent as the new
-camera's.
-The engine's loop writes what they carry; the read loop turns wlshare's start,
-stop and keyframe into the bridge's signals, which reach the browser as
-`cameraStart`, `cameraStop` and `cameraKeyframe`.
+`src/vnc_camera.rs` adapts the camera socket's `CameraBridge` to the VNC engine.
+It reuses the same browser-facing socket, bridge and encoder as the MS-RDPECAM
+path; only the engine-side protocol differs.
+
+Traffic reaches the engine through two queues:
+
+1. Plug and unplug commands use an unbounded control queue so a device transition
+   is not lost. Each command advances a generation number.
+2. H.264 samples use a queue of sixteen entries. Each sample is tagged with the
+   generation current when the browser submitted it.
+3. The engine checks the control queue first. After it takes a new plug or unplug,
+   it discards queued samples tagged with an older generation instead of sending
+   an old stream under the new device state.
+4. A sample larger than wlshare's 4 MiB limit, or one submitted while the sample
+   queue is full, opens a gap. That sample and subsequent non-keyframes are
+   dropped. The bridge asks for a keyframe when the gap opens, and asks again if
+   a keyframe itself cannot be queued. Submissions resume only after a keyframe
+   is queued successfully. Samples already in the queue keep their order.
+
+The engine loop writes plug, unplug and sample messages. Its read loop converts
+wlshare's start, stop and keyframe requests into `cameraStart`, `cameraStop` and
+`cameraKeyframe` signals for the browser.
 
 What reaches the wire is `vnc_camera::Device`'s decision, taken under the uplink
 so two decisions leave in the order they were made:

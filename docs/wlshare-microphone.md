@@ -52,30 +52,34 @@ client does not know is fatal: the messages share no length field.
 
 ## The gateway's half
 
-`src/vnc_mic.rs` is the VNC engine's adapter to the mic socket's `MicBridge` — the
-same socket, bridge, Opus decoder and browser encoder MS-RDPEAI uses, so the
-browser cannot tell the two apart. The bridge's control is told of the socket
-attaching and closing as a plug and an unplug, which RDP's adapter has no use for:
-a Windows host's recording device is there for the whole session, where wlshare's
-is made by the plug. Plugs and unplugs queue without limit; PCM waits sixteen
-buffers deep, dropping the oldest, and an unplug or the bridge's close drops what
-waits. The engine's loop writes what they carry; the read loop turns wlshare's
-start and stop into the bridge's open and close, which reach the browser as
-`micOpen` and `micClose`.
+`src/vnc_mic.rs` adapts the mic socket's `MicBridge` to the VNC engine. It reuses
+the same browser-facing socket, bridge, Opus decoder and encoder as MS-RDPEAI;
+only the engine-side protocol differs. For wlshare, attaching the mic socket is a
+device plug and closing it is an unplug. RDP does not need those messages because
+its redirected recording device exists for the entire session.
+
+Plug and unplug commands use an unbounded control queue. PCM uses a separate queue
+of sixteen 20 ms buffers; when it is full, the oldest buffer is removed so the
+stream resumes near the live edge. The engine always takes a pending control
+command before PCM. An unplug clears queued PCM before its command is queued; a
+recording reset clears it when Stop closes the bridge stream. A replacement plug
+closes the active recording in the wire state but does not itself empty the PCM
+queue. The engine loop writes these client messages, while its read loop converts
+wlshare Start and Stop messages to the bridge's `micOpen` and `micClose` signals.
 
 What reaches the wire is `vnc_mic::Device`'s decision, taken under the uplink so two
 decisions leave in the order they were made:
 
-- A plug the browser makes before wlshare's answer is held, and goes out with the
-  answer. A server that never answers is sent nothing at all.
-- An unplug goes out only for a microphone that was plugged on the wire.
-- A start is heard only for a microphone plugged on the wire, so one already in
-  flight when the browser unplugged opens nothing.
-- PCM goes out only between a start and a stop.
-- Unplugging or replugging a microphone something records from closes the
-  recording at the bridge, since wlshare sends no stop for a node it has removed;
-  the close is told under the device's lock, so a start for the same device is
-  never told after it.
+- Before wlshare announces availability, a browser plug is retained but no wire
+  message or PCM is sent. The announcement sends that pending plug.
+- An unplug is sent only if the plug was announced to wlshare.
+- A Start message opens the bridge only while the device is both announced and
+  plugged. A Start already in flight when the browser unplugs is ignored.
+- PCM is sent only after an accepted Start and before Stop.
+- Unplugging or replacing a microphone ends an active bridge recording immediately,
+  because wlshare removes the PipeWire node without sending a separate Stop. Plug,
+  unplug, Start and Stop update the `Device` under the same mutex, so their state
+  tests and resulting bridge notifications are ordered together.
 
 ## What is checked
 
