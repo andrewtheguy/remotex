@@ -90,6 +90,11 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a thing no check of this gateway should have to have. Do not restore a source build,
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
+#
+# Without its `native` feature, the EXPERIMENTAL encoder it has written in Rust: this
+# gateway codes with libvpx alone, and that one's kernels would need AVX2 of every amd64
+# machine the gateway runs on. A wlshare target can be asked for it
+# (`experimental_native_vp9`), which is wlshare's build and not this one.
 screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.16" }
 # YUV→RGB for the HEVC pictures High Performance's media stream decodes to
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —

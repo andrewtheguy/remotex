@@ -782,7 +782,7 @@ pub struct TargetConfig {
     #[serde(default)]
     pub render_adaptive: Option<bool>,
     /// EXPERIMENTAL. Have a `wlshare` target code its VP9 stream with
-    /// `screen-vp9-native`, an encoder written in Rust, in place of libvpx.
+    /// the encoder `screen-vp9` has written in Rust, in place of libvpx.
     /// Refused on every other target: only wlshare has the two encoders, and
     /// what this gateway codes itself is libvpx's.
     ///

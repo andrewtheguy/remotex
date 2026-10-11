@@ -349,7 +349,7 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
         container.logs()
     );
     // And coded by the encoder the run asked for.
-    let coder = if native_vp9() { "coded by screen-vp9-native (experimental)" } else { "coded by libvpx" };
+    let coder = if native_vp9() { "coded by screen-vp9's Rust coder (experimental)" } else { "coded by libvpx" };
     assert!(container.logs().contains(coder), "wlshare's VP9 was not {coder}:\n{}", container.logs());
     let decode = view.decode.as_deref().expect("a video format was announced");
     assert!(decode.starts_with("vp09.01."), "the stream was announced as {decode}");

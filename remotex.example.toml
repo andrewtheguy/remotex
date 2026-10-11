@@ -617,7 +617,7 @@ password = "change-me"
 #render_adaptive = true
 
 # EXPERIMENTAL. A "wlshare" target codes its VP9 stream with libvpx. This asks it
-# for its other encoder, screen-vp9-native, which is written in Rust and is new.
+# for its other encoder, the one screen-vp9 has written in Rust, which is new.
 # The stream is the same to the browser either way, 4:4:4 at `video_quality`, so
 # two targets of one host that differ in this key alone are the two encoders side
 # by side. It needs a wlshare that has the encoder; an older one ignores the

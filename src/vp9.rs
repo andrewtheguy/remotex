@@ -78,7 +78,7 @@ impl Stream {
         check_picture(size)?;
         // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
-        let stream = screen_vp9::Stream::new(size.0, size.1, quality, crate::video::threads())
+        let stream = screen_vp9::Stream::new(size.0, size.1, quality, crate::video::threads(), screen_vp9::Coder::Libvpx)
             .with_context(|| format!("vp9 encoder for a {}x{} picture", size.0, size.1))?;
         Ok(Self {
             stream,
