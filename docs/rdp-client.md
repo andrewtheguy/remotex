@@ -91,7 +91,8 @@ H.264 takes neither. With `Connect::autodetect` (`proto/autodetect.rs`) the
 client claims the detection in the core data, leaves `connectionType` for the
 host to detect, asks for and joins the message channel, and answers each
 measurement at the page's pace (`Paced` in `session.rs`), or with what arrived on
-its own connection when nothing waits for the page. Beside it,
+its own connection when nothing waits for the page, each round trip held for the
+page's distance either way. Beside it,
 `Connect::multitransport` claims reliable UDP with Soft-Sync in `CS_MULTITRANSPORT`
 ([MS-RDPBCGR section
 2.2.1.3.8](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf))
@@ -186,11 +187,16 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   - a bandwidth measurement says it took no less than the caller would take
     over its bytes;
   - a round trip is answered once the frames waiting for the caller would have
-    gone through at that pace.
+    gone through at that pace, and the caller's distance after them.
 
-  A caller with nothing waiting is answered with what arrived here, and
-  everything stays on TCP. Nothing waits on the host. A first version, which
-  held each reply until the caller had composed the frames before it, stalled a
+  The distance is what the frame-composed signal does not carry: the gateway
+  says it with `Input::caller_distance`, from the smallest recent round trip of
+  the browser socket's pings, and the session holds every round trip for it,
+  with frames waiting or none. Answered at once on an idle link, a round trip
+  timed only the hop to the host, and a page far from the gateway read as next to
+  the host. A bandwidth measurement for a caller with nothing waiting says what
+  arrived here, and everything stays on TCP. Nothing waits on the host. A first
+  version, which held each reply until the caller had composed the frames before it, stalled a
   host drawing H.264 by region: the host held a frame's end for the reply, and
   the reply waited for that frame.
   - **1 Mbit/s page:** the host was told about 1.2 Mbit/s. It drew 17.7 frames a
@@ -207,6 +213,15 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
     24.7 KB, 1.6 s behind. By region the desktop is mostly RemoteFX Progressive
     and ClearCodec, which this does not rate-control: 81% of Progressive first
     passes were at quality 25 either way.
+  - **On `windows-ent-sandbox`, a page 150 ms away and unlimited, with
+    whole-desktop H.264** (`REMOTEX_UAT_ACK_DELAY_MS=150` in the link probe).
+    With round trips answered at once the host concluded a base round trip of
+    0 to 2 ms and drew 10.5 frames a second at 6.8 KB. Held for the page's
+    distance, it concluded 151 ms and drew 20.2 frames a second at 6.3 KB, a
+    median 14 to 71 ms behind the desktop. It was told a median of 0.9 and
+    then 1.7 Mbit/s of bandwidth, not the page's unlimited link: the pace is
+    read while frames wait, and a page that far away keeps frames waiting for
+    its distance, not its bandwidth.
   - **The same host over a LAN, by region.** Without the change, its H.264
     regions were at 25 and 33 and its Progressive first passes mostly at quality
     50, at 7 Mbit/s. With it, every H.264 region was at 25 and every first pass

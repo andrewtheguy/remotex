@@ -123,6 +123,13 @@ impl LinkFeedback {
         self.baseline_ms.store(ms, Ordering::Relaxed);
     }
 
+    /// The link's distance, as [`Self::baseline`] last recorded it, or `None`
+    /// before the first pong.
+    pub fn distance(&self) -> Option<Duration> {
+        let baseline = self.baseline_ms.load(Ordering::Relaxed);
+        (baseline != BASELINE_UNKNOWN).then(|| Duration::from_millis(u64::from(baseline)))
+    }
+
     /// How long the queue ahead of the last frame handed over is: the oldest owed
     /// batch's wait beyond the distance, when that batch went out before the frame
     /// was handed over, and nothing when it did not — then the only batch owed

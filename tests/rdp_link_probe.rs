@@ -19,8 +19,9 @@
 //!   frame is said to be composed when the bytes passed so far would have crossed
 //!   that link. This is the case the session is built for: it leaves the host's
 //!   socket unread while frames wait, and the host finds the page slow from that.
-//! - [`ACK_DELAY_ENV`] says each frame is composed that many milliseconds late and
-//!   nothing else.
+//! - [`ACK_DELAY_ENV`] says each frame is composed that many milliseconds late, as
+//!   a page that far away would, and says that distance to the session, which
+//!   holds each round trip of the host's network detection for it.
 //! - [`THROTTLE_ENV`] makes the link to the host itself slow: `4000:100` puts a
 //!   relay in front of the host that reads from it at 4 Mbit/s, through a small
 //!   receive buffer so the host's own socket backs up, and holds everything sent
@@ -483,6 +484,11 @@ async fn a_real_host_draws_for_a_slow_client() {
         panic!("the session did not connect: {first:?}");
     };
     println!("  connected at {width}x{height}");
+    // A page that late to compose is that far away, and is said to be: once
+    // connected, because what is said before the desktop exists is dropped.
+    if !ack_delay.is_zero() {
+        session.input().caller_distance(ack_delay);
+    }
 
     // The desktop first, so the picture starts on a session that is drawing.
     let mut opening = Tally::default();

@@ -134,10 +134,14 @@ explored:
     the default under Adaptive, and H.264 by region, where the host is told the
     page's link but the desktop is mostly RemoteFX Progressive and the frame rate
     does not improve: 4.4 frames a second at 25.7 KB behind a 1 Mbit/s page,
-    where the whole desktop drew 17.5 at 6.4 KB. Still to do:
+    where the whole desktop drew 17.5 at 6.4 KB. Each round trip is held for
+    the page's distance, the browser socket's smallest recent ping, idle link or
+    not: behind a page 150 ms away the host then concluded 151 ms and drew 20
+    frames a second instead of 10.5. Still to do:
     - QA it from a browser on a really slow link;
-    - see how a round trip on an idle link should include the page's own
-      latency, which the frame-composed signal does not carry.
+    - tell a distant page's bandwidth from its distance: the pace is read while
+      frames wait for the page, and a page 150 ms away on an unlimited link kept
+      them waiting long enough to be reported at 0.9 to 1.7 Mbit/s.
 
   Measure each case against the same desktop on the bitmap path
   (`egfx = false`), re-encoded as VP9. A host that draws with bitmap updates

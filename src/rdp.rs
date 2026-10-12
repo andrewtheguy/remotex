@@ -1461,6 +1461,9 @@ async fn active_loop(
     let mut wheel = WheelRotation::default();
     // The pointer shape, on its way to the browser that draws it.
     let mut pointer = Pointer::default();
+    // The browser's distance as last said to the RDP client, for the round trips
+    // of a passed pipeline's network detection.
+    let mut told_distance = None;
     // The display shown in a tab of its own, while *All Displays* is chosen and its
     // socket is attached. One at most: a session has two columns at most.
     let mut tab: Option<Tab> = None;
@@ -1623,6 +1626,12 @@ async fn active_loop(
                     // browser has painted it, which is what the host paces its
                     // drawing by.
                     Event::Graphics { commands, frame } => {
+                        if let Some(distance) = sink.distance()
+                            && told_distance != Some(distance)
+                        {
+                            input.caller_distance(distance);
+                            told_distance = Some(distance);
+                        }
                         let frame = frame.map(|frame| {
                             let input = input.clone();
                             Painted::new(move || input.frame_composed(frame))

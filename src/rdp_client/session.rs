@@ -424,13 +424,19 @@ impl PassedFrames {
 /// - a bandwidth measurement says it took no less than the caller would take
 ///   over its bytes;
 /// - a round trip is answered once the frames waiting for the caller would have
-///   gone through at that pace.
+///   gone through at that pace, and the caller's own distance after them.
 ///
 /// Nothing waits on the host: a reply that waited for a frame to end would wait
 /// on a host that may hold the end until it has the reply. A caller with nothing
-/// waiting is not what limits the link, so then the answer says what arrived here.
+/// waiting is not what limits the link's bandwidth, so then a measurement says
+/// what arrived here. Its distance is still the link's, so a round trip is held
+/// for it on an idle link too: answered at once, it would time only the hop to
+/// this client, and a page far from the gateway would read as next to the host.
 #[derive(Default)]
 struct Paced {
+    /// The round trip to the caller with nothing queued
+    /// ([`Input::caller_distance`]); nothing until it is said.
+    distance: Duration,
     /// When the caller last composed, and whether frames still waited for it then.
     last: Option<(Instant, bool)>,
     /// What the caller composed while frames waited for it: when, how many bytes,
@@ -474,8 +480,13 @@ impl Paced {
         let pace = self.pace().filter(|_| owed > 0);
         match answer {
             Answer::Reply(reply) => {
-                let Some(pace) = pace else { return Some(reply) };
-                let due = now + Duration::from_secs_f64(owed as f64 / pace);
+                let queued = pace.map_or(Duration::ZERO, |pace| Duration::from_secs_f64(owed as f64 / pace));
+                let wait = queued + self.distance;
+                if wait.is_zero() && self.held.is_empty() {
+                    return Some(reply);
+                }
+                debug!("rdp: a network-detection round trip held {} ms for the caller", wait.as_millis());
+                let due = now + wait;
                 // In the order asked: the host matches them by sequence number, and
                 // one behind another is due no sooner.
                 let due = self.held.back().map_or(due, |(last, _)| due.max(*last));
@@ -1865,6 +1876,7 @@ impl<'a> Active<'a> {
                         }
                         Command::Clipboard(what) => self.send_clipboard(what).await?,
                         Command::FrameComposed(frame) => self.on_frame_composed(frame).await?,
+                        Command::CallerDistance(round_trip) => self.paced.distance = round_trip,
                         Command::Input(_) => unreachable!("matched above"),
                     }
                 }
@@ -2190,6 +2202,23 @@ mod tests {
         assert!(paced.due(now + Duration::from_millis(299)).is_empty());
         assert_eq!(paced.due(now + Duration::from_millis(300)), vec![b"rtt".to_vec()]);
         assert_eq!(paced.next_due(), None);
+    }
+
+    /// A round trip waits for the caller's distance as well, with frames waiting
+    /// or none; a measurement of bandwidth does not.
+    #[test]
+    fn a_round_trip_reaches_the_caller() {
+        let start = Instant::now();
+        let now = start + Duration::from_millis(200);
+        let mut paced = behind(start);
+        paced.distance = Duration::from_millis(80);
+        assert_eq!(paced.answer(autodetect::Answer::Reply(b"idle".to_vec()), 0, now), None);
+        assert_eq!(paced.next_due(), Some(now + Duration::from_millis(80)), "the distance alone");
+        assert_eq!(paced.answer(measured(50_000), 0, now), Some(b"at once".to_vec()));
+
+        assert_eq!(paced.answer(autodetect::Answer::Reply(b"behind".to_vec()), 30_000, now), None);
+        assert_eq!(paced.due(now + Duration::from_millis(80)), vec![b"idle".to_vec()]);
+        assert_eq!(paced.next_due(), Some(now + Duration::from_millis(380)), "30 KB ahead of it, then the distance");
     }
 
     /// Time the caller spent with nothing to compose is not its pace.
