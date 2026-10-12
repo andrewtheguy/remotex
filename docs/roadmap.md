@@ -103,28 +103,28 @@ explored:
   its moving regions already go out at the host's coarsest quantizer, so on a
   slow link only its frame rate drops
   ([The connection sequence](rdp-client.md#the-connection-sequence)).
-  Network auto-detect and `connectionType` were tried and change nothing, so
-  what is left to try is in the capability advertise and the codecs it offers,
-  measured link by link against the session re-encoded as VP9. A host that draws
-  with bitmap updates (`egfx = false`) could be passed too, for the page to
-  decode.
+  Network auto-detect and `connectionType = 7` were tried over a constrained TCP
+  link: the detector reported the constraint correctly, but the host made the
+  same frame-rate reduction with or without it and did not change H.264
+  quantizers. `AVC_THINCLIENT` was tried too; it moved the whole desktop to
+  AVC444v2 but still adapted by rate. That narrows the missing
+  Microsoft-client behavior without proving that UDP causes it. First complete
+  the [RDP adaptive-quality audit](rdp-adaptive-quality-audit.md), then compare
+  Microsoft's client forced to TCP on the same constrained host link before
+  implementing a second transport. Measure each case against the session
+  re-encoded as VP9. A host that draws with bitmap updates (`egfx = false`) could
+  be passed too, for the page to decode.
 - **What Microsoft's iOS client is sent on a slow link.** Against the same
   host, Microsoft's Remote Desktop client on iOS sees the whole screen soften on
   a slow link, as video does, where a passed pipeline keeps its text sharp and
-  loses frames. That is presumably H.264 over the whole desktop with a falling
-  bitrate, which only the graphics pipeline carries, but why the host sends it
-  to that client and not to this one is not known. There are two candidates:
-  - **The UDP transport.** Microsoft's clients add an RDP-UDP transport beside
-    TCP, whose bandwidth and round-trip estimates the host's encoder may follow.
-    This client asks for no multitransport. If this is the cause, adapting the
-    same way means implementing MS-RDPEMT and MS-RDPEUDP, which are to be added
-    to ms-rdp-specs first.
-  - **The capability advertise.** The iOS client may set what this one does
-    not: `AVC_THINCLIENT`, which [MS-RDPEGFX section
-    2.2.3.6](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)
-    defines as a client preferring H.264 in YUV444 mode, or another flag or
-    version that has the host draw the desktop with H.264 alone. If this is the
-    cause, the advertise is what changes.
+  loses frames. The probe now asks for the whole desktop with `AVC_THINCLIENT`;
+  the host answers in AVC444v2, but chooses fewer frames rather than coarser
+  quantizers. The remaining demonstrated difference is the UDP transport, and an
+  unrecorded capability or host policy is still possible. Microsoft's clients add
+  RDP-UDP beside TCP, whose bandwidth, loss and round-trip estimates the host's
+  encoder may follow. This client asks for no multitransport. If UDP is shown to
+  be the cause, adapting the same way means implementing MS-RDPEMT and
+  MS-RDPEUDP, which are to be added to ms-rdp-specs first.
 
   To be found out on the host, with the iPad on a slow link and a passed
   session on the same link beside it:
@@ -227,8 +227,10 @@ What is not done:
   it is not, whether a session takes a lossy source is the kind of thing the
   picker asks.
 - **AVC444 against a host.** Both layouts are implemented and tested from the
-  specification's tables. The one host tried sent AVC420 by region, and with
-  `AVC_THINCLIENT`, which this client does not set, luma views alone.
+  specification's tables. An ordinary passed session does not set
+  `AVC_THINCLIENT` and the host tried sent AVC420 by region. The link probe does
+  set it and the same host sent AVC444v2, luma views alone, over the whole
+  desktop.
 - **Large video.** Every decoded picture is copied into the compositor's memory
   and converted there, which was measured at a 1280×800 desktop and not above,
   and from a hardware decoder that copy is a readback off the GPU. Presenting a

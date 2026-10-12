@@ -170,6 +170,7 @@ removal.
 - [Known issues](docs/known-issues.md): faults worth recognising rather than re-investigating
 - [Roadmap](docs/roadmap.md): what is planned, and what is not
 - [Architecture](docs/architecture.md): the design and its constraints, the client protocol, the engines
+- [RDP adaptive-quality audit](docs/rdp-adaptive-quality-audit.md): the checkbox work list for the Windows link investigation
 - [The RDP client](docs/rdp-client.md), [Apple RFB 003.889](docs/apple-vnc-889.md): each protocol as implemented and measured
 - [Development](docs/development.md): running from a checkout, checks, end-to-end tests, builds
 - [Packaging](packaging/README.md): package layouts, build scripts, releases

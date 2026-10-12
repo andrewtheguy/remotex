@@ -133,11 +133,25 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   1 Mbit/s, and behind a relay reading its socket at 1 Mbit/s, it drew 13 frames a
   second at the same 9.6 KB and the same three quantizers. Taking the detection as
   well, answered with what arrived through the relay — 1,854 measurements over 45
-  seconds, 1,001 kbit/s in all — changed nothing: the host bracketed its frames
-  with a Bandwidth Measure Start and Stop many times a second and still sent no
-  Network Characteristics Result. Microsoft's own clients see a whole desktop of
-  H.264 soften on a slow link; over TCP this client could not make a host do it,
-  and the UDP transport, which this client does not implement, is what is left.
+  seconds, 1,001 kbit/s in all — left the quantizers unchanged. The detector did
+  not cause a further change: with or without it, the constrained link made the
+  host cut its output from 32 to 13 frames a second and hold the stream to the
+  link. That is one of the [adaptive responses Microsoft
+  documents](https://learn.microsoft.com/en-us/azure/virtual-desktop/rdp-bandwidth);
+  a quality change, a frame-rate change, and a codec change are alternatives, not
+  one required response. Nor is the absence of a Network Characteristics Result
+  evidence of failure: [MS-RDPBCGR section
+  1.3.9](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
+  does not include that message in the continuous exchange over the main TCP
+  connection. Microsoft's own clients see a whole desktop of H.264 soften on a
+  slow link. UDP is still one difference to test, but this run does not prove it
+  is the cause.
+
+The experimental detector and link probe have confirmed defects. Their single
+checkbox work list, evidence, and completion criteria are in the [RDP
+adaptive-quality audit](rdp-adaptive-quality-audit.md). Until those boxes pass,
+the probe is useful evidence of this host's constrained TCP behavior but is not
+a conforming implementation to promote into normal sessions.
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
 backing up, and the regions say what it does then ([MS-RDPEGFX section

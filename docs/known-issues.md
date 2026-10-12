@@ -57,11 +57,16 @@ the menu over the session changed nothing in the stream.
 **What would move it.** Taking `egfx_h264` off the target: its pipeline is then
 lossless, and the video is sharp at the lossless codecs' cost in bytes. Whether
 the host can be led to a finer setting is not known. It chose a finer one for
-most of a film clip at 1280×800, so content and size move it; nothing has been
-tried from the client's side, such as answering the host's network detection,
-which this client does not. It is recorded so that the rectangle is recognised
-as the host's encoding rather than investigated as a fault in the page's
-decoders or the compositor.
+most of a film clip at 1280×800, so content and size move it. The link probe has
+now answered the host's network detection over a constrained TCP connection and
+has asked for whole-desktop AVC444v2 with `AVC_THINCLIENT`: the host reduced its
+frame rate to the link and kept the same quantizers. That proves one adaptive
+response, not the softening seen with Microsoft's own client; UDP remains to be
+isolated by forcing Microsoft's client to TCP on the same constrained host link.
+The implementation defects and that comparison are tracked in one place in the
+[RDP adaptive-quality audit](rdp-adaptive-quality-audit.md). It is recorded so
+that the rectangle is recognised as the host's encoding rather than investigated
+as a fault in the page's decoders or the compositor.
 
 ## The cursor stays the arrow while a selection tool is up, on a Mac
 
