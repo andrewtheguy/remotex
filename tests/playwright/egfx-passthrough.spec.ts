@@ -1,7 +1,6 @@
-// What a session started with the graphics pipeline passed puts on the session
-// socket, and what the page says it did with it: an RDP host's graphics pipeline,
-// passed for the browser to compose, where every other session's picture is a video
-// stream.
+// What a session with the graphics pipeline puts on the session socket, and what
+// the page says it did with it: an RDP host's graphics pipeline, passed for the
+// browser to compose in every session of a target that has it on.
 //
 // Everything asserted is decided by the system and not by a machine's timing: the
 // render the gateway resolved, the order of `graphicsStart` and the records behind
@@ -11,8 +10,8 @@
 // a pixel. A GRAPHICS record is a header this
 // file parses for itself, and what is inside one is the host's.
 //
-// It needs a gateway whose local config names a live RDP host, and ticks the
-// passthrough under it at the picker. Keep that gitignored file under `tmp/`, for
+// It needs a gateway whose local config names a live RDP host with the pipeline
+// on, which the picker passes unasked. Keep that gitignored file under `tmp/`, for
 // example `tmp/qa_egfx.toml`:
 //
 //     cargo run -- serve --config tmp/qa_egfx.toml
@@ -39,8 +38,9 @@ const EGFX_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_TARGET;
 /// The same for a target whose pipeline may carry H.264.
 const EGFX_H264_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET;
 
-/// What every session here is started with: the pipeline passed, and nothing else.
-const PASSED = { passthrough: true };
+/// What every session here is started with: nothing chosen, the pipeline passed
+/// as it is in every session.
+const PASSED = {};
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;

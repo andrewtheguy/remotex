@@ -16,7 +16,8 @@
 // - One it offers that cannot be had here is greyed, with the reason: Opus in
 //   a browser with no audio decoder, a passthrough this browser cannot take, or
 //   one that is the only way this gateway can serve the target, which is then
-//   shown ticked.
+//   shown ticked. An RDP host's graphics pipeline is always that: the gateway
+//   composes none.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
 //   or lossless: see `soundRow`. In a browser with no audio decoder only the
 //   lossless one plays, which the page decodes itself, so ticking takes it.
@@ -63,9 +64,9 @@ export interface TargetInfo {
   /** The stream this target can pass, null where it has none. */
   passthrough: Passthrough | null;
   /**
-   * Whether passing it is the only way this gateway can serve the target: a High
-   * Performance Mac on a host that cannot decode its stream. Never an RDP host,
-   * whose pipeline every gateway composes itself.
+   * Whether passing it is the only way this gateway can serve the target: an RDP
+   * host's graphics pipeline, which no gateway composes, and a High Performance
+   * Mac on a host that cannot decode its stream.
    */
   passthroughOnly: boolean;
   /** Whether where the second virtual display sits is a choice. */
@@ -199,29 +200,33 @@ const PASSTHROUGH: Record<
   Passthrough,
   {
     label: string;
-    note: string;
-    cannot: string;
-    // What is said where the stream can only be passed, null for a stream every
-    // gateway can also encode itself.
-    only: { note: string; blocked: string } | null;
+    // What is said where the stream can only be passed.
+    only: { note: string; blocked: string };
+    // What is said where passing it is a choice, null for a stream that is
+    // passed in every session.
+    chosen: { note: string; cannot: string } | null;
   }
 > = {
   "rdp-graphics": {
-    label: "Pass the graphics pipeline through",
-    note: "The host's drawing is composed in this browser instead of encoded as video. For a LAN.",
-    cannot:
-      "This browser cannot compose it: that needs WebGL 2 and a cross-origin isolated page.",
-    only: null,
+    label: "The graphics pipeline, passed through",
+    only: {
+      note: "The host's drawing is composed in this browser, in every session.",
+      blocked:
+        "This browser cannot compose the host's graphics pipeline, which this target always passes: that needs WebGL 2 and a cross-origin isolated page. Use a browser that can, or a target with egfx disabled.",
+    },
+    chosen: null,
   },
   "apple-media": {
     label: "Pass the Mac's picture through",
-    note: "The Mac's own HEVC, instead of VP9 encoded by the gateway. For a LAN.",
-    cannot:
-      "This browser does not decode the Mac's HEVC, and this page cannot decode it here.",
     only: {
       note: "This gateway cannot decode the Mac's picture, so it is always passed.",
       blocked:
         "This gateway cannot decode the Mac's picture, and this browser cannot take it passed through. Use a browser that decodes it, or install FFmpeg on the gateway's host.",
+    },
+    chosen: {
+      note: "The Mac's own HEVC, instead of VP9 encoded by the gateway. For a LAN.",
+      cannot:
+        "This browser does not decode the Mac's HEVC, and this page cannot decode it here.",
     },
   },
 };
@@ -256,24 +261,24 @@ function passthroughRow(
 ): { row: OptionRow; blocked: string | null } {
   const words = PASSTHROUGH[passthrough];
   const able = takes(target, abilities, passthrough);
-  const only = target.passthroughOnly ? words.only : null;
   const row = { key: "passthrough" as const, label: words.label };
-  if (only) {
+  const chosen = target.passthroughOnly ? null : words.chosen;
+  if (!chosen) {
     return {
-      row: { ...row, note: only.note, checked: true, disabled: true },
-      blocked: able ? null : only.blocked,
+      row: { ...row, note: words.only.note, checked: true, disabled: true },
+      blocked: able ? null : words.only.blocked,
     };
   }
   if (!able) {
     return {
-      row: { ...row, note: words.cannot, checked: false, disabled: true },
+      row: { ...row, note: chosen.cannot, checked: false, disabled: true },
       blocked: null,
     };
   }
   return {
     row: {
       ...row,
-      note: words.note,
+      note: chosen.note,
       checked: remembered ?? false,
       disabled: false,
     },

@@ -69,33 +69,27 @@ pub struct Connect {
     /// [`Connect::egfx`] the channel is not taken and the desktop keeps its opening
     /// size.
     pub resize: bool,
-    /// Whether to offer the graphics pipeline (MS-RDPEGFX).
+    /// Whether to offer the graphics pipeline (MS-RDPEGFX), and hand its commands
+    /// to the caller rather than compose them here ([`Event::Graphics`]).
     ///
     /// Offered, a Windows host draws the desktop through surfaces on a dynamic
     /// channel of its own, marks every frame's end — [`Event::Frame`] — and answers a
     /// monitor layout with a graphics reset. Not offered, the host draws with bitmap
     /// updates on the share at the opening size, which is the path every other
-    /// server takes anyway.
-    pub egfx: bool,
-    /// Whether the graphics pipeline's commands are handed to the caller instead of
-    /// composed here ([`Event::Graphics`]), for a caller that has them composed
-    /// somewhere else.
+    /// server takes anyway, decoded into the framebuffer.
     ///
     /// The channel is still this client's: it unwraps the bulk compression, answers
-    /// the capability exchange and writes every frame's acknowledgement. What it
-    /// stops doing is decoding — no [`Event::Paint`] follows a command, and the
-    /// framebuffer holds nothing of what the pipeline draws — and so it no longer
-    /// knows when a frame is finished: the caller says, with
-    /// [`Input::frame_composed`], and the host is told then. Means nothing without
-    /// [`Connect::egfx`],
-    /// and nothing for a host that answers the offer with bitmap updates, which are
+    /// the capability exchange and writes every frame's acknowledgement. What it does
+    /// not do is decode — no [`Event::Paint`] follows a command, and the framebuffer
+    /// holds nothing of what the pipeline draws — and so it does not know when a
+    /// frame is finished: the caller says, with [`Input::frame_composed`], and the
+    /// host is told then. A host that answers the offer with bitmap updates has them
     /// decoded into the framebuffer as always.
-    pub pass_graphics: bool,
-    /// Whether, and how, the host may draw with H.264 on a passed pipeline: the
+    pub egfx: bool,
+    /// Whether, and how, the host may draw with H.264 on the pipeline: the
     /// capability advertise says so ([`gfx_proto::caps_advertise`]), and the access
     /// units ride in the commands handed on, for whoever composes them to decode.
-    /// Means nothing without [`Connect::pass_graphics`]: this client has no H.264
-    /// decoder, so a pipeline it composes itself always refuses the codec.
+    /// Means nothing without [`Connect::egfx`].
     pub h264: gfx_proto::H264,
     /// Whether to take part in the host's network detection (MS-RDPBCGR 2.2.14):
     /// claimed in the core data, with the connection type left for the host to
@@ -172,7 +166,7 @@ pub enum Event {
     /// the upgrade it is.
     Frame,
     /// The graphics pipeline's commands, for a session configured with
-    /// [`Connect::pass_graphics`]: whole PDUs as the host sent them, out of their
+    /// [`Connect::egfx`]: whole PDUs as the host sent them, out of their
     /// bulk compression, in order. A run ends at a frame's end or where the host's
     /// own PDU did.
     ///
@@ -342,7 +336,7 @@ impl PassedSocket {
     }
 }
 
-/// The frames of a passed pipeline ([`Connect::pass_graphics`]), between the
+/// The frames of a passed pipeline ([`Connect::egfx`]), between the
 /// caller that composes them and the host that waits to hear of each.
 #[derive(Default)]
 struct PassedFrames {
@@ -1145,14 +1139,11 @@ impl<'a> Active<'a> {
                 resize: config.resize && config.egfx,
                 placement: config.placement,
                 egfx: config.egfx,
-                h264: if config.pass_graphics { config.h264 } else { gfx_proto::H264::Refused },
+                h264: config.h264,
                 audio: wants_audio,
                 ..Dynamics::default()
             },
-            graphics: config.egfx.then(|| match config.pass_graphics {
-                true => Graphics::passing(),
-                false => Graphics::new(),
-            }),
+            graphics: config.egfx.then(Graphics::passing),
             passed: PassedFrames::default(),
             paced: Paced::default(),
             resize_ready: false,
@@ -1511,7 +1502,6 @@ impl<'a> Active<'a> {
                     self.share.height = height;
                     self.announce_desktop(width, height, monitors).await;
                 }
-                gfx::Update::Paint(rect) => self.paint(rect),
                 // Handed over, not finished: the frame a run ends is acknowledged
                 // when the caller says it has been composed.
                 gfx::Update::Passed { commands, frame } => {
@@ -1521,9 +1511,9 @@ impl<'a> Active<'a> {
                         self.send(Event::Frame).await;
                     }
                 }
-                gfx::Update::Frame { id, decoded } => {
-                    self.send(Event::Frame).await;
-                    self.acknowledge_frame(id, decoded).await?;
+                // What a pipeline composed here would report, and none is.
+                gfx::Update::Paint(_) | gfx::Update::Frame { .. } => {
+                    bail!("the graphics pipeline, passed on, composed a frame here")
                 }
             }
         }

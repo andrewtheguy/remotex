@@ -114,7 +114,7 @@ impl Connected {
 pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     let dest = engine::host_port(&config.host, config.port);
     let mut tcp = engine::tcp_connect(&dest).await?;
-    let socket = match config.egfx && config.pass_graphics {
+    let socket = match config.egfx {
         true => Some(PassedSocket::of(&tcp).context("keeping the socket for its receive buffer")?),
         false => None,
     };

@@ -5,8 +5,9 @@
 // Everything asserted is a system decision: which options the target shows, what
 // `connect` carried and what `connected` answered, read from the session socket by
 // this file's own parser, what the browser kept for the next visit, and what a
-// browser that cannot take the session's passthrough is told and shown. Nothing
-// here looks at the canvas.
+// browser that cannot take the session's passthrough is told and shown: an rdp
+// target with its pipeline on passes it in every session, so such a browser
+// cannot start it. Nothing here looks at the canvas.
 //
 // It needs a gateway with an `rdp` target that configures a size, the one type that
 // offers all three choices. The tone harness in `src/server.rs` is one, with a
@@ -91,7 +92,7 @@ async function openTarget(page: Page): Promise<Locator> {
 }
 
 const SOUND = /^Sound/;
-const PASSED = /^Pass the graphics pipeline through/;
+const PASSED = /^The graphics pipeline, passed through/;
 
 test.describe("the picker's options", () => {
   test.skip(
@@ -110,11 +111,12 @@ test.describe("the picker's options", () => {
     const seen = watchSession(page);
     await logInAndConnectTo(page, PICKER_TARGET ?? "", "", { resize: true });
 
+    // The pipeline is passed in every session of an rdp target that has it.
     expect(seen.connects).toEqual([
       {
         size: "window",
         audio: "off",
-        passthrough: false,
+        passthrough: true,
         placement: "right",
       },
     ]);
@@ -124,7 +126,7 @@ test.describe("the picker's options", () => {
       name: PICKER_TARGET,
       resize: true,
       audio: false,
-      passthrough: null,
+      passthrough: "rdp-graphics",
     });
   });
 
@@ -161,7 +163,10 @@ test.describe("the picker's options", () => {
     await expect(formats).toHaveCount(2);
     await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
     await expect(item.getByRole("radio", { name: /^FLAC/ })).not.toBeChecked();
-    await expect(item.getByRole("checkbox", { name: PASSED })).not.toBeChecked();
+    // The pipeline is shown passed, and is no choice.
+    const passed = item.getByRole("checkbox", { name: PASSED });
+    await expect(passed).toBeChecked();
+    await expect(passed).toBeDisabled();
     await expect(
       item.getByRole("button", { name: "Start", exact: true }),
     ).toBeEnabled();
@@ -183,9 +188,7 @@ test.describe("the picker's options", () => {
     browser,
   }) => {
     const first = watchSession(page);
-    await logInAndConnectTo(page, PICKER_TARGET ?? "", "", {
-      passthrough: true,
-    });
+    await logInAndConnectTo(page, PICKER_TARGET ?? "", "", {});
     expect(first.statuses.at(-1)).toMatchObject({
       type: "connected",
       passthrough: "rdp-graphics",
@@ -204,9 +207,8 @@ test.describe("the picker's options", () => {
       const second = watchSession(other);
       await logIn(other);
 
-      // It is given neither the session nor one rebuilt without the passthrough:
-      // it lands on the picker, where the choice it cannot take is greyed, with
-      // the reason, and the target still starts without it.
+      // It is given neither the session nor one encoded as VP9 in its place: it
+      // lands on the picker, where the target cannot start, with the reason.
       await expect(
         other.getByRole("heading", { name: "Pick a target" }),
       ).toBeVisible();
@@ -214,11 +216,13 @@ test.describe("the picker's options", () => {
       const item = await openTarget(other);
       const passed = item.getByRole("checkbox", { name: PASSED });
       await expect(passed).toBeDisabled();
-      await expect(passed).not.toBeChecked();
-      await expect(item).toContainText("This browser cannot compose it");
+      await expect(passed).toBeChecked();
+      await expect(item).toContainText(
+        "This browser cannot compose the host's graphics pipeline",
+      );
       await expect(
         item.getByRole("button", { name: "Start", exact: true }),
-      ).toBeEnabled();
+      ).toBeDisabled();
     } finally {
       await context.close();
     }

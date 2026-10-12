@@ -422,8 +422,8 @@ fn connect_config(
         // host keeps whatever scaling it was configured with.
         scale_percent: if stated_density { opening.density.percent() } else { 0 },
         resize: choices.resize(),
+        // Passed to the browser whenever it is on: the gateway composes none.
         egfx: config.egfx(),
-        pass_graphics: plan.rdp_graphics,
         // The whole desktop unless the target says `egfx = "adaptive_h264_region"`: the host
         // rate-controls all of it to the page's link that way, where by region most
         // of the desktop is RemoteFX Progressive, which it does not.
@@ -432,12 +432,11 @@ fn connect_config(
             (true, _) => H264::WholeDesktop,
             (false, _) => H264::Refused,
         },
-        // A passed pipeline with H.264 is drawn for the page's link: the host
+        // A pipeline with H.264 is drawn for the page's link: the host
         // rate-controls its H.264 for a client that takes its network detection
         // and claims UDP, the claim turned down when the host takes it up, and the
         // session answers the detection at the page's pace. Without H.264 there is
-        // nothing for the host to rate-control, and a pipeline drawn here has no
-        // page to measure.
+        // nothing for the host to rate-control.
         autodetect: plan.rdp_h264,
         multitransport: plan.rdp_h264,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
@@ -451,8 +450,8 @@ fn connect_config(
 /// only ever read from the same place.
 struct Flags {
     resize: bool,
-    /// Whether the host's graphics pipeline is passed to the browser rather than
-    /// composed here ([`RenderPlan::rdp_graphics`]).
+    /// Whether the host's graphics pipeline is on, and so passed to the browser
+    /// ([`RenderPlan::rdp_graphics`]): its frames are never in the framebuffer.
     pass_graphics: bool,
     /// The render dial, for the sink of a display shown in a tab ([`Tab`]).
     plan: RenderPlan,
@@ -1607,8 +1606,8 @@ async fn active_loop(
                     // never the leading-edge flush of a frame still being drawn.
                     Event::FramesMarked => {
                         frame_marks = true;
-                        // On a target that passes the pipeline this is where one
-                        // begins, and the browser composes it from here.
+                        // This is where a pipeline begins, and the browser
+                        // composes it from here.
                         if pass_graphics {
                             sink.graphics_start().await?;
                             // A tab shown before the pipeline began was painted

@@ -2,10 +2,12 @@
 //!
 //! Screen, pointer, keyboard, mouse, resize, clipboard and sound, with a camera
 //! and microphone in the other direction.
-//! There is no window and no drawing: [`Session::start`] connects, keeps a complete
-//! framebuffer up to date in memory the caller can read, and posts an [`Event`]
-//! whenever a rectangle of it changes. What the caller does with those pixels is
-//! not this module's business — [`crate::rdp`] is the caller, and it encodes them.
+//! There is no window and no drawing of the desktop's pipeline: [`Session::start`]
+//! connects and posts an [`Event`] for what the host sent — the graphics pipeline's
+//! commands, handed on for the caller to have composed, or, from a host that draws
+//! with bitmap updates, the rectangles of a framebuffer it keeps in memory the
+//! caller can read. What the caller does with either is not this module's business:
+//! [`crate::rdp`] is the caller, and it passes the one and encodes the other.
 //!
 //! [`proto`] is the wire: the connection sequence, CredSSP, TLS, fast-path and
 //! slow-path decoding, the bitmap codec, the cursor, and Display Control, all
@@ -33,11 +35,13 @@
 //! # The two graphics paths
 //!
 //! [`Connect::egfx`] chooses. With the graphics pipeline (MS-RDPEGFX), the server
-//! draws through surfaces on a dynamic channel — [`remotex_rdp_graphics::gfx`]
-//! composes them into the framebuffer — marks its frames ([`Event::Frame`]), and answers a monitor
-//! layout with a graphics reset, which surfaces here as one [`Event::Resize`].
-//! Without it, the server sends plain bitmap updates on the share and the desktop
-//! keeps its opening size: Display Control is the pipeline's alone.
+//! draws through surfaces on a dynamic channel, whose commands are handed on
+//! whole ([`Event::Graphics`]) for a [`remotex_rdp_graphics::Compositor`] somewhere
+//! else — the page's — to compose; it marks its frames ([`Event::Frame`]), and
+//! answers a monitor layout with a graphics reset, which surfaces here as one
+//! [`Event::Resize`]. Without it, the server sends plain bitmap updates on the
+//! share, decoded here into the framebuffer, and the desktop keeps its opening
+//! size: Display Control is the pipeline's alone.
 //!
 //! # The clipboard
 //!
@@ -69,10 +73,8 @@
 //! # What this does not do
 //!
 //! - **No touch.** MS-RDPEI is never asked for.
-//! - **No H.264.** The graphics pipeline is offered with AVC disabled, so a server
-//!   draws with the codecs this module decodes in Rust rather than handing part
-//!   of the desktop to a lossy video codec, which would lose detail before the
-//!   picture is ever encoded here.
+//! - **No decoding of the pipeline.** Its codecs, H.264 among them where
+//!   [`Connect::h264`] lets the host draw with it, are the compositor's.
 //! - **NLA and nothing else.** The security negotiation offers `HYBRID` alone, so a
 //!   server that cannot do CredSSP is refused rather than logged on to some other
 //!   way.

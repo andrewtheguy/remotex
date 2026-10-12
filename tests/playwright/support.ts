@@ -149,6 +149,10 @@ export function readRemoteClipboard(): string {
 // `resize` is the desktop following this window. Off, the session takes the size
 // the target keeps where the picker offers one; a target with no size configured
 // follows the window whatever is asked, since that is the one size it has here.
+//
+// `passthrough` is the Mac's, the one that is a choice: an RDP target with its
+// pipeline on (egfx not "disabled") passes it in every session, its row shown
+// ticked and locked.
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
