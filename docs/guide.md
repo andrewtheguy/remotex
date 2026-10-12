@@ -59,7 +59,7 @@ config key.
 
 | Target | Window drives the size | Sound | Passthrough | Graphics |
 |---|---|---|---|---|
-| `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | lossless or adaptive H.264 |
+| `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | high quality or adaptive H.264 |
 | `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — |
 | `vnc` | no | none | — | — |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — |
@@ -90,11 +90,11 @@ config key.
   for a browser that falls behind. A Mac's passed stream does not: on a slow link,
   start that session without it.
   See [A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link).
-- **Graphics.** How an RDP host draws its pipeline. *Lossless*, the default,
-  is the host's lossless codecs alone, for a LAN. *Adaptive* (alpha) is H.264
+- **Graphics.** How an RDP host draws its pipeline. *High quality*, the default,
+  is the pipeline's codecs without H.264, for a LAN. *Adaptive* (alpha) is H.264
   the host fits to the browser's link: coarser on a slow link, finer on a fast
   one. Under it, *H.264 full screen*, the default, draws the whole desktop in
-  H.264, and *H.264 region* only what moves like video, with the rest lossless,
+  H.264, and *H.264 region* only what moves like video, with the rest as High quality draws it,
   which keeps text sharp but adapts less. Adaptive is greyed in a browser whose
   `VideoDecoder` cannot decode the host's H.264.
 
@@ -129,7 +129,7 @@ touch.
   picture's work off the gateway. It needs WebGL 2 and a cross-origin isolated
   page, which a proxy that drops the gateway's two isolation headers undoes; a
   browser without them cannot start the target. How the host draws the
-  pipeline, lossless or adaptive H.264 (alpha), is chosen at the picker.
+  pipeline, high quality or adaptive H.264 (alpha), is chosen at the picker.
 - `egfx = false` makes the host draw with bitmap updates instead, which the
   gateway encodes as VP9: the target for a browser that cannot compose the
   pipeline. The desktop then keeps its size, since an RDP resize is the

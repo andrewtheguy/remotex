@@ -154,12 +154,12 @@ export function readRemoteClipboard(): string {
 // or its H.264, the ones that are a choice; without it the picture is VP9
 // encoded by the gateway, where the gateway can. An RDP target with its pipeline
 // on (egfx not false) passes it in every session, which is said and not offered.
-// `pipeline` is how the host draws that pipeline, lossless unless asked.
+// `pipeline` is how the host draws that pipeline, high quality unless asked.
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
   passthrough?: "apple-media" | "apple-h264" | null;
-  pipeline?: "lossless" | "adaptive-desktop" | "adaptive-region";
+  pipeline?: "high-quality" | "adaptive-desktop" | "adaptive-region";
 }
 
 // A picker button reads "<name> <protocol> · <host>", so a target is named by what
@@ -257,18 +257,18 @@ export async function startTarget(
       .getByRole("radio", { name: /^Opus/ })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
-  // How the host draws the pipeline, where the target has one: lossless, or
+  // How the host draws the pipeline, where the target has one: high quality, or
   // adaptive and then its H.264 over the full screen or by region.
   const graphics = item.getByRole("group", { name: "Graphics" });
-  const pipeline = choices.pipeline ?? "lossless";
-  if (pipeline !== "lossless" || (await graphics.count()) > 0) {
+  const pipeline = choices.pipeline ?? "high-quality";
+  if (pipeline !== "high-quality" || (await graphics.count()) > 0) {
     await graphics
       .getByRole("radio", {
-        name: pipeline === "lossless" ? /^Lossless/ : /^Adaptive/,
+        name: pipeline === "high-quality" ? /^High quality/ : /^Adaptive/,
       })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
-  if (pipeline !== "lossless") {
+  if (pipeline !== "high-quality") {
     await graphics
       .getByRole("radio", {
         name:

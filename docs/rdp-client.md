@@ -244,7 +244,7 @@ refused, a continuous measurement counts inside the framing, `timeDelta` is at
 least a millisecond, and a zero frame timestamp gives no lag. The measurements
 above were repeated with the fixes. A session started with the picker's Adaptive
 takes the detector and the claim of UDP, and answers at the page's pace; a
-Lossless session takes neither, and has no H.264 for the host to rate-control
+High quality session takes neither, and has no H.264 for the host to rate-control
 ([Roadmap](roadmap.md#an-official-way-to-have-windows-rate-control-its-h264-over-tcp)).
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
@@ -326,9 +326,9 @@ Windows host answers by opening `Microsoft::Windows::RDS::Graphics` over `drdynv
 — the same dynamic channel transport Display Control rides, so `drdynvc` is asked
 for when either key is on. The client accepts the channel and at once advertises
 its capability sets (`proto/gfx.rs::caps_advertise`). A session started
-Lossless advertises two: version 8 with the small cache, and version 10 with the
+High quality advertises two: version 8 with the small cache, and version 10 with the
 small cache and `AVC_DISABLED`, so the host never sends H.264 and draws with the
-pipeline's lossless codecs alone. `THINCLIENT` is deliberately not set. The host
+pipeline's other codecs alone. `THINCLIENT` is deliberately not set. The host
 confirms one set and then draws.
 
 A session started Adaptive advertises otherwise, with `Connect::h264`, for a

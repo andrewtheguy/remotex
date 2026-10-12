@@ -484,7 +484,7 @@ function SoundChoice({
 }
 
 /**
- * How the host draws the pipeline: lossless or adaptive, and under a chosen
+ * How the host draws the pipeline: high quality or adaptive, and under a chosen
  * adaptive one its H.264 over the full screen or by region. Choosing adaptive
  * takes the full screen.
  */
@@ -501,7 +501,7 @@ function PipelineChoice({
   locked: boolean;
   choose: (pipeline: Pipeline) => void;
 }) {
-  const adaptive = chosen !== "lossless";
+  const adaptive = chosen !== "high-quality";
   return (
     <fieldset className="picker-choice">
       <legend>Graphics</legend>
@@ -517,7 +517,7 @@ function PipelineChoice({
             disabled={mode.disabled || locked}
             onChange={() =>
               choose(
-                mode.value === "adaptive" ? "adaptive-desktop" : "lossless",
+                mode.value === "adaptive" ? "adaptive-desktop" : "high-quality",
               )
             }
           />

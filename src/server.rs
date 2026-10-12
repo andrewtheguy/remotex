@@ -688,7 +688,7 @@ struct TargetInfo {
     encoded: bool,
     /// Whether where the second virtual display sits is a choice.
     placement: bool,
-    /// Whether how the host draws the graphics pipeline, lossless or adaptive
+    /// Whether how the host draws the graphics pipeline, high quality or adaptive
     /// H.264, is a choice.
     pipeline: bool,
 }

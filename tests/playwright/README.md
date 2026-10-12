@@ -140,7 +140,7 @@ over is given none of it: it lands on a picker where a target whose pipeline it
 cannot compose has Start disabled, with the reason, and no VP9 in its place. It
 also checks that the pipeline is said to be always passed, with no box to tick,
 and that the Graphics
-group opens on Lossless and, under Adaptive, on H.264 full screen. It needs an
+group opens on High quality and, under Adaptive, on H.264 full screen. It needs an
 `rdp` target that configures a `size`, the one type that offers all three
 choices, and the tone harness is one.
 
