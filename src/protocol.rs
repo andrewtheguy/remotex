@@ -1675,7 +1675,7 @@ mod tests {
                     audio: crate::config::Sound::Off,
                     passthrough: Some(crate::config::Passthrough::AppleH264),
                     placement: crate::config::Placement::Right,
-                    pipeline: crate::config::Pipeline::Lossless,
+                    pipeline: crate::config::Pipeline::HighQuality,
                     whole: false,
                 }
             ),

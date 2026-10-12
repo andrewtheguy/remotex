@@ -176,7 +176,7 @@ test("only what the target's type offers has a row", () => {
     audio: "off",
     passthrough: null,
     placement: "right",
-    pipeline: "lossless",
+    pipeline: "high-quality",
   });
   assert.equal(standard.blocked, null);
 });
@@ -214,7 +214,7 @@ test("no sound is taken until somebody ticks it", () => {
     audio: "off",
     passthrough: null,
     placement: "right",
-    pipeline: "lossless",
+    pipeline: "high-quality",
   });
   assert.equal(rdp.sound, false);
   assert.equal(rdp.soundRow?.checked, false);
@@ -228,7 +228,7 @@ test("what was chosen last time is what Start sends", () => {
     audio: "opus",
     passthrough: null,
     placement: "right",
-    pipeline: "lossless",
+    pipeline: "high-quality",
   });
   assert.equal(options.sound, true);
   assert.equal(options.soundRow?.checked, true);
@@ -253,7 +253,7 @@ test("what was chosen last time is what Start sends", () => {
     audio: "off",
     passthrough: null,
     placement: "right",
-    pipeline: "lossless",
+    pipeline: "high-quality",
   });
   // Nor is something this page never wrote there.
   const stale = targetOptions(RDP, { audio: true as never }, ABLE);
@@ -370,13 +370,13 @@ test("an RDP host's pipeline is always passed, and needs a page that composes it
   assert.ok(unable.passed);
 });
 
-test("how the host draws the pipeline is lossless until somebody chooses adaptive", () => {
+test("how the host draws the pipeline is high quality until somebody chooses adaptive", () => {
   const options = targetOptions(RDP, undefined, ABLE);
-  assert.equal(options.choices.pipeline, "lossless");
+  assert.equal(options.choices.pipeline, "high-quality");
   assert.deepEqual(
     options.pipelineRow?.modes.map((mode) => [mode.value, mode.disabled]),
     [
-      ["lossless", false],
+      ["high-quality", false],
       ["adaptive", false],
     ],
   );
@@ -398,17 +398,21 @@ test("how the host draws the pipeline is lossless until somebody chooses adaptiv
     ABLE,
   );
   assert.equal(mac.pipelineRow, null);
-  assert.equal(mac.choices.pipeline, "lossless");
+  assert.equal(mac.choices.pipeline, "high-quality");
 });
 
-test("a browser that cannot decode the H.264 is offered lossless alone", () => {
+test("a browser that cannot decode the H.264 is offered high quality alone", () => {
   const NO_H264: Abilities = { ...ABLE, rdpH264: false };
   const options = targetOptions(RDP, { pipeline: "adaptive-region" }, NO_H264);
   const adaptive = options.pipelineRow?.modes[1];
   assert.equal(adaptive?.disabled, true);
   assert.match(adaptive?.note ?? "", /VideoDecoder/);
-  assert.equal(options.choices.pipeline, "lossless", "remembered, not sent");
-  assert.equal(options.blocked, null, "the target still starts, lossless");
+  assert.equal(
+    options.choices.pipeline,
+    "high-quality",
+    "remembered, not sent",
+  );
+  assert.equal(options.blocked, null, "the target still starts, high quality");
 });
 
 const storage = new Map<string, string>();

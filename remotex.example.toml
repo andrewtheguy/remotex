@@ -251,13 +251,13 @@ site_passwd = ""
 # its target below. A browser that cannot take a session somebody else started
 # is shown why and offered End session, not a different session.
 #
-# Graphics is how an "rdp" host draws its pipeline: Lossless, the host's lossless
-# codecs alone, for a LAN, by default; or Adaptive, ALPHA, H.264 the host fits to
+# Graphics is how an "rdp" host draws its pipeline: High quality, the pipeline's
+# codecs without H.264, for a LAN, by default; or Adaptive, ALPHA, H.264 the host fits to
 # the link the browser is on. Under Adaptive, H.264 full screen, the default, has
 # the host draw the whole desktop in H.264 (AVC_THINCLIENT, MS-RDPEGFX 2.2.3.6),
 # which a Windows host answers in AVC444v2 and rate-controls all of: behind a
 # 1 Mbit/s page, 17.5 frames a second at 6.4 KB. H.264 region keeps H.264 to
-# what moves like video, a player or a scrolling page, and the rest lossless;
+# what moves like video, a player or a scrolling page, and the rest as High quality draws it;
 # text stays sharp, but the rest, mostly RemoteFX Progressive, is not
 # rate-controlled, so the same page got 4.4 frames a second. An adaptive session
 # takes part in the host's network detection, answered at the page's pace, and
@@ -266,7 +266,7 @@ site_passwd = ""
 # finest quality on a fast one. The browser decodes the H.264 with its own
 # decoder and paints it through the same compositor; the gateway decodes
 # nothing. A browser whose VideoDecoder cannot take the host's H.264 has
-# Adaptive greyed, and a session it reaches all the same is drawn lossless.
+# Adaptive greyed, and a session it reaches all the same is drawn High quality.
 # Checked against two Windows 11 hosts without a GPU.
 [[targets]]
 name = "example"
@@ -325,7 +325,7 @@ password = "change-me"
 # it; the gateway composes none, and a browser that cannot is not sent VP9 in
 # its place. What the host draws with is sent as it is, with no quality walk
 # behind it, so the video keys further down reach only the bitmap updates of a
-# host that answers the offer with them. How the host draws it, lossless or
+# host that answers the offer with them. How the host draws it, high quality or
 # adaptive H.264, is chosen at the picker (Graphics, above). It takes the encoding
 # and the decoding off the gateway — a few percent of a core are left, whatever
 # the desktop is doing — and puts the decoding on the browser, where a desktop in

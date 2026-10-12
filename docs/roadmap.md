@@ -240,7 +240,7 @@ judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
 ### Decoding an RDP host's H.264 at the gateway
 
 The gateway composes no graphics pipeline: every pipeline is passed to the
-page, and a Lossless session refuses H.264 with `AVC_DISABLED`
+page, and a High quality session refuses H.264 with `AVC_DISABLED`
 ([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
 Decoding H.264 here only to encode VP9 would be a second lossy pass.
 

@@ -50,7 +50,7 @@ side.
   displays it reports that dynamic resolution is not available.
 - **Adaptive VP9, or the remote's own picture path.** The gateway's VP9 follows
   the browser link; wlshare's passed VP9 does too. A Windows host's graphics
-  pipeline is passed for the browser to compose, drawn lossless for a LAN or, in
+  pipeline is passed for the browser to compose, drawn in high quality for a LAN or, in
   alpha, as H.264 the host fits to the browser link. For a LAN, a High
   Performance Mac's HEVC can instead pass unchanged, or its H.264, and neither
   adapts to the browser link. The H.264 needs no HEVC decoder anywhere, in the
@@ -97,7 +97,7 @@ macOS are the common use case, so testing and optimization prioritize them.
   Both follow the window at its density and carry sound: Windows as Opus or
   FLAC, with the camera and microphone beside it; the Mac always as AAC-ELD, on
   one virtual display or two. Windows' picture is its graphics pipeline, passed
-  through, lossless or, in alpha, adaptive H.264. The Mac's is VP9 from the
+  through, high quality or, in alpha, adaptive H.264. The Mac's is VP9 from the
   gateway or, for a LAN, its HEVC or its H.264 passed through, which do not
   adapt to the browser's link. Only the H.264 needs nothing added: the VP9
   takes FFmpeg on the gateway's host, and the HEVC a browser that decodes it or

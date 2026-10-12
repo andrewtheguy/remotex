@@ -122,8 +122,8 @@ The host's own stream, passed through to the browser:
   on iOS, with sound and the clipboard beside it, and not yet with the camera or
   the microphone. A session started with the picker's Adaptive (alpha) lets the
   host draw with H.264 on that pipeline, which the browser decodes,
-  rate-controlled to the browser's link; with the default Lossless what is passed
-  is lossless. See
+  rate-controlled to the browser's link; with the default High quality the host
+  draws with the pipeline's other codecs alone. See
   [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 - **macOS Screen Sharing's High Performance mode** (`ard-high-performance`), in a
   session started with the passthrough: the Mac's HEVC picture, to a browser
@@ -339,7 +339,7 @@ only whether the page decodes that stream itself
 last of the three refuses nobody: it decides only whether a passed pipeline's host is
 told it may draw with H.264, in a session started with Adaptive; a browser that
 says no has Adaptive greyed, and a session it reaches all the same, a
-takeover's, is drawn lossless. The other two say which passthrough the browser
+takeover's, is drawn without it. The other two say which passthrough the browser
 can take. The Mac's greys its HEVC at the picker, where a browser that says
 no starts the target encoded here or passed as H.264; the pipeline's, which is no choice, disables
 Start for an RDP target with the pipeline on. No question is asked about a
@@ -525,11 +525,11 @@ display. A host that draws with bitmap updates, on a target with
 `egfx = false` or one that answers the offer of the pipeline with them, is
 encoded here as VP9.
 
-How the host draws the pipeline is chosen at the picker: Lossless, the host's
-lossless codecs alone, by default, or Adaptive (alpha), H.264 the host fits to
+How the host draws the pipeline is chosen at the picker: High quality, the
+pipeline's codecs without H.264, by default, or Adaptive (alpha), H.264 the host fits to
 the browser's link, over the whole desktop or only where it moves like video.
 The gateway has no H.264 decoder and is not given one. Adaptive reaches only a
-page that said it decodes H.264, and a session of any other is drawn lossless:
+page that said it decodes H.264, and a session of any other is drawn High quality:
 the access units ride inside the pipeline's commands, the page decodes them with
 the browser's `VideoDecoder`, and the compositor paints the pictures. It adds no
 wire format, no record and no second stream. See
@@ -1157,7 +1157,7 @@ the pipeline.
   queues each as a `GRAPHICS` record, which takes its share of `QUEUE_BUDGET`
   like an access unit.
 - **H.264, where the session chose Adaptive** (ALPHA). Otherwise the host is
-  told its client takes none, and the pipeline is lossless. With it, a session
+  told its client takes none. With it, a session
   whose page said it decodes H.264 advertises the capability sets that take it
   (`caps_advertise` in the graphics crate's `proto/gfx.rs`). Under *H.264 full
   screen*, the default, they carry `AVC_THINCLIENT` (MS-RDPEGFX 2.2.3.6), and a
@@ -1590,7 +1590,7 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   region* the desktop is mostly RemoteFX Progressive, which this does not
   rate-control: behind a 1 Mbit/s page the frame rate held, the delay fell from
   1.6 s to 0.56 s, and over a LAN every region went to the finest quality. A
-  Lossless session takes neither, and adapts only in the two ways below. See
+  High quality session takes neither, and adapts only in the two ways below. See
   [The connection sequence](rdp-client.md#the-connection-sequence). Beside that,
   the host adapts in two more ways. It draws no more than about eleven frames ahead of its
   acknowledgements, so a page that composes slowly sets the frame rate. It sends
@@ -1788,7 +1788,7 @@ and `GET /api/targets` carries it:
 
 | Target | Window drives the size | Sound | Passthrough | Graphics |
 |---|---|---|---|---|
-| `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: lossless or adaptive H.264 |
+| `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: high quality or adaptive H.264 |
 | `rdp` with `egfx = false` | no | shown | hidden | hidden |
 | `vnc` | no | hidden | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden |
@@ -1857,16 +1857,16 @@ and `GET /api/targets` carries it:
   (`ConnectError::Beyond`). Adaptive is greyed for a browser whose
   `VideoDecoder` cannot decode the host's H.264, with "This browser has no
   VideoDecoder that takes the host's H.264."; a session that chose it all the
-  same, a takeover's, is drawn lossless rather than refused.
-- **The host draws the pipeline lossless or adaptive.** `choices.pipeline` says
-  `lossless`, `adaptive-desktop` or `adaptive-region` (`Pipeline` in
+  same, a takeover's, is drawn High quality rather than refused.
+- **The host draws the pipeline high quality or adaptive.** `choices.pipeline` says
+  `high-quality`, `adaptive-desktop` or `adaptive-region` (`Pipeline` in
   `src/config.rs`), offered by an `rdp` target with the pipeline on and refused
-  elsewhere. The picker's Graphics group shows Lossless, the host's lossless
-  codecs alone, for a LAN, which is the default, and Adaptive (alpha), H.264 the
+  elsewhere. The picker's Graphics group shows High quality, the pipeline's
+  codecs without H.264, for a LAN, which is the default, and Adaptive (alpha), H.264 the
   host fits to the browser's link; under Adaptive, *H.264 full screen*, the
   default, asks for the whole desktop in H.264 (`AVC_THINCLIENT`), and *H.264
   region* for H.264 only where the desktop moves like video. An adaptive session
-  takes the host's network detection and claims UDP; a lossless one takes
+  takes the host's network detection and claims UDP; a high quality one takes
   neither ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
 - **The second display is placed once.** `choices.placement` says `right`,
   `left`, `top` or `bottom` (`Placement` in `src/config.rs`): where the second
@@ -2735,7 +2735,7 @@ where the page composes them; malformed PDU framing still ends the session. The
 compositor the page runs implements ClearCodec and its NSCodec subcodec, RemoteFX
 Progressive, planar and uncompressed rectangles, with the copies and caches
 between updates, and decodes the H.264 a session started with Adaptive (alpha)
-lets the host draw with; a Lossless session refuses H.264 in the capability
+lets the host draw with; a High quality session refuses H.264 in the capability
 advertise
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)).
 `egfx = false` is the bitmap path: the

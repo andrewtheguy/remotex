@@ -348,7 +348,7 @@ pub struct Choices {
     pub placement: Placement,
     /// How the host draws the graphics pipeline. Adaptive H.264 reaches only a
     /// browser that said it decodes it ([`Decoders::rdp_h264`]): a session of any
-    /// other is drawn lossless.
+    /// other is drawn high quality.
     #[serde(default)]
     pub pipeline: Pipeline,
     /// Ask a High Performance Mac whose picture is passed, in either codec, for one tile, each
@@ -414,9 +414,9 @@ impl Placement {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Pipeline {
-    /// With its lossless codecs alone.
+    /// With the pipeline's codecs other than H.264.
     #[default]
-    Lossless,
+    HighQuality,
     /// ALPHA. The whole desktop in H.264 (`AVC_THINCLIENT`, MS-RDPEGFX
     /// 2.2.3.6), which a Windows host answers in AVC444v2, rate-controlled by the
     /// host to the page's link.
@@ -430,7 +430,7 @@ pub enum Pipeline {
     AdaptiveDesktop,
     /// ALPHA. As [`Self::AdaptiveDesktop`], with H.264 only for the parts of
     /// the desktop that move like video, a player or a scrolling page, and the
-    /// rest lossless in the same frames. Text stays lossless, but most of what the
+    /// rest as [`Self::HighQuality`] draws it, in the same frames. Text stays sharp, but most of what the
     /// host draws is then RemoteFX Progressive, which it does not rate-control:
     /// behind a 1 Mbit/s page it drew 4.4 frames a second at 25.7 KB, 0.56 s
     /// behind, where the whole desktop drew 17.5 at 6.4 KB.
@@ -708,7 +708,7 @@ pub struct TargetConfig {
     /// every frame, and a resize is a graphics reset. The pipeline is passed to the
     /// browser in every session, for the page to compose
     /// ([`Passthrough::RdpGraphics`]): the gateway composes none, and a browser
-    /// that cannot is turned away. How the host draws it, lossless or adaptive
+    /// that cannot is turned away. How the host draws it, high quality or adaptive
     /// H.264, is chosen at the picker ([`Choices::pipeline`]).
     ///
     /// `false` is the bitmap path: the host draws with bitmap updates, decoded here
@@ -1036,7 +1036,7 @@ impl TargetConfig {
                 "a place for the second display",
                 choices.placement != Placement::default() && !offers.placement,
             ),
-            ("adaptive H.264", choices.pipeline != Pipeline::Lossless && !offers.pipeline),
+            ("adaptive H.264", choices.pipeline != Pipeline::HighQuality && !offers.pipeline),
         ];
         match refused.into_iter().find(|(_, refused)| *refused) {
             Some((choice, _)) => Err(NotOffered { target: self.name.clone(), choice }),
@@ -4065,7 +4065,7 @@ vnc_password = \"x\"")).unwrap();
         assert!(!parse("false").unwrap().resolve().unwrap().targets[0].egfx(), "the bitmap path is one key away");
         assert!(parse("true").unwrap().resolve().unwrap().targets[0].egfx());
         // How the host draws it is the session's choice, not a value of the key.
-        for value in ["\"lossless\"", "\"adaptive_h264_desktop\"", "\"disabled\""] {
+        for value in ["\"high-quality\"", "\"adaptive_h264_desktop\"", "\"disabled\""] {
             assert!(parse(value).is_err(), "{value} is not a switch");
         }
     }
@@ -4125,11 +4125,11 @@ vnc_password = \"x\"")).unwrap();
             assert!(plan.rdp_graphics && plan.rdp_h264, "{pipeline:?}");
             assert_eq!(plan.describe(), "the host's graphics pipeline with H.264, passed through");
             let cannot = Decoders { rdp_h264: false, ..decodes };
-            let lossless = win.render_plan(adaptive, cannot);
-            assert!(lossless.rdp_graphics && !lossless.rdp_h264, "a browser that cannot is passed a pipeline without it");
+            let without = win.render_plan(adaptive, cannot);
+            assert!(without.rdp_graphics && !without.rdp_h264, "a browser that cannot is passed a pipeline without it");
             assert_eq!(win.beyond(adaptive, cannot), None, "and is not turned away");
         }
-        assert!(!win.render_plan(unasked, decodes).rdp_h264, "lossless unless chosen");
+        assert!(!win.render_plan(unasked, decodes).rdp_h264, "high quality unless chosen");
 
         let bitmap = rdp("egfx = false");
         assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false });

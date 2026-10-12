@@ -169,18 +169,18 @@ test.describe("the picker's options", () => {
     await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
     await expect(item.getByRole("radio", { name: /^FLAC/ })).not.toBeChecked();
     // The pipeline is said to be passed, and is no choice. How the host draws
-    // it is, lossless until somebody chooses adaptive, whose H.264 is then over
+    // it is, high quality until somebody chooses adaptive, whose H.264 is then over
     // the full screen until somebody chooses the region.
     await expect(item).toContainText(PASSED);
     await expect(item.getByRole("checkbox", { name: /pass/i })).toHaveCount(0);
     const graphics = item.getByRole("group", { name: "Graphics" });
-    await expect(graphics.getByRole("radio", { name: /^Lossless/ })).toBeChecked();
+    await expect(graphics.getByRole("radio", { name: /^High quality/ })).toBeChecked();
     await expect(graphics.getByRole("radio", { name: /^H\.264/ })).toHaveCount(0);
     await graphics.getByRole("radio", { name: /^Adaptive \(alpha\)/ }).check();
     await expect(
       graphics.getByRole("radio", { name: /^H\.264 full screen/ }),
     ).toBeChecked();
-    await graphics.getByRole("radio", { name: /^Lossless/ }).check();
+    await graphics.getByRole("radio", { name: /^High quality/ }).check();
     await expect(
       item.getByRole("button", { name: "Start", exact: true }),
     ).toBeEnabled();

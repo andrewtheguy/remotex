@@ -28,10 +28,10 @@
 //   lossless one plays, which the page decodes itself, so ticking takes it.
 // - Where the second display sits is a choice on a target that asks its host for
 //   two and tells it where each is: see `PLACEMENTS`.
-// - How the host draws an RDP pipeline, lossless or adaptive H.264 (alpha), is a
+// - How the host draws an RDP pipeline, high quality or adaptive H.264 (alpha), is a
 //   choice on a target with the pipeline on, and under adaptive the whole desktop
 //   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
-//   offered lossless alone.
+//   offered high quality alone.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 // - Which decoder takes the picture is no choice: the page decodes the VP9, and
@@ -114,10 +114,10 @@ export type Placement = "right" | "left" | "top" | "bottom";
 
 /**
  * How the host draws an RDP session's graphics pipeline, as `connect` names it:
- * with its lossless codecs, or adaptive, in H.264 the host fits to the link, over
+ * in high quality, without H.264, or adaptive, in H.264 the host fits to the link, over
  * the whole desktop or only where it moves like video.
  */
-export type Pipeline = "lossless" | "adaptive-desktop" | "adaptive-region";
+export type Pipeline = "high-quality" | "adaptive-desktop" | "adaptive-region";
 
 /** What `connect` carries. */
 export interface Choices {
@@ -196,12 +196,12 @@ export interface PipelineOption<V> {
 }
 
 /**
- * How the host draws the pipeline: lossless or adaptive, and under an adaptive
+ * How the host draws the pipeline: high quality or adaptive, and under an adaptive
  * one, the whole desktop or by region.
  */
 export interface PipelineRow {
-  modes: PipelineOption<"lossless" | "adaptive">[];
-  h264: PipelineOption<Exclude<Pipeline, "lossless">>[];
+  modes: PipelineOption<"high-quality" | "adaptive">[];
+  h264: PipelineOption<Exclude<Pipeline, "high-quality">>[];
 }
 
 /** One place the second display can sit. */
@@ -436,7 +436,7 @@ const PLACEMENTS: PlacementOption[] = [
 
 /**
  * `target`'s pipeline as the picker shows it: nothing where it is no choice, and
- * otherwise lossless or adaptive, adaptive's H.264 over the whole desktop by
+ * otherwise high quality or adaptive, adaptive's H.264 over the whole desktop by
  * default or by region. A browser that cannot decode the H.264 has adaptive
  * greyed; an adaptive one remembered from before is not sent, and stays
  * remembered for a browser that can.
@@ -447,7 +447,7 @@ function pipelineRow(
   decodes: boolean,
 ): { row: PipelineRow | null; pipeline: Pipeline } {
   if (!target.pipeline) {
-    return { row: null, pipeline: "lossless" };
+    return { row: null, pipeline: "high-quality" };
   }
   const h264: PipelineRow["h264"] = [
     {
@@ -459,23 +459,23 @@ function pipelineRow(
     {
       value: "adaptive-region",
       label: "H.264 region",
-      note: "H.264 only where the desktop moves like video, the rest lossless, which the host does not fit to the link.",
+      note: "H.264 only where the desktop moves like video, the rest as High quality draws it, which the host does not fit to the link.",
       disabled: false,
     },
   ];
   const pipeline =
     remembered !== undefined &&
-    (remembered === "lossless" ||
+    (remembered === "high-quality" ||
       (decodes && h264.some((option) => option.value === remembered)))
       ? remembered
-      : "lossless";
+      : "high-quality";
   return {
     row: {
       modes: [
         {
-          value: "lossless",
-          label: "Lossless",
-          note: "The host's lossless codecs alone. For a LAN.",
+          value: "high-quality",
+          label: "High quality",
+          note: "The pipeline's codecs without H.264. For a LAN.",
           disabled: false,
         },
         {

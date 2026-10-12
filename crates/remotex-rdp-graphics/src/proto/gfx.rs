@@ -479,7 +479,7 @@ pub(crate) fn pdu(command: u16, body: &[u8]) -> Vec<u8> {
 /// What the host is told of H.264 ([`caps_advertise`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum H264 {
-    /// None in any shape: every pipeline is lossless.
+    /// None in any shape.
     #[default]
     Refused,
     /// Taken where the host chooses it, by region beside the other codecs.
@@ -491,7 +491,7 @@ pub enum H264 {
 /// What this client can take, in a session that takes H.264 and in one that does
 /// not.
 ///
-/// Without it — a lossless session: version 8 and version 10, the small cache,
+/// Without it — a high quality session: version 8 and version 10, the small cache,
 /// and no H.264. Version 8 alone would have a Windows host draw with RemoteFX
 /// Progressive and planar; version 10 adds nothing the page has to decode — its
 /// point is `AVC_DISABLED`, which is a version-10 flag, so that a host which would
