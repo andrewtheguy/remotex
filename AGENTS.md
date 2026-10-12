@@ -113,6 +113,9 @@ area's section before changing what it covers:
   Apple's own viewer too. Judge performance, sound quality and long sessions on
   a physical Mac, or against Apple's viewer on the same machine first. See
   [The sound](docs/apple-vnc-889.md#the-sound).
+- When a test on a Mac needs a still screen, do not rely on the desktop or the
+  lock screen for one. Put up something that is still, such as a full-screen
+  image or a full-screen Chrome window.
 - Do not infer GUI or network capabilities from an SSH attachment. A tmux server
   retains the environment and access of the user that started it. Test a
   capability once and read its error; being able to drive the GUI is still not
