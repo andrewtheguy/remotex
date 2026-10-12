@@ -2104,6 +2104,7 @@ async fn high_performance_ends_when_the_offer_brings_no_picture() {
     let started = std::time::Instant::now();
     let error = expect_error(&mut ws).await;
     assert!(error.contains("no picture came over the Mac's media stream within 10s of its offer"), "{error}");
+    assert!(error.contains("nothing reached UDP"), "{error}");
     assert!(started.elapsed() >= Duration::from_secs(9), "ended early: {:?}", started.elapsed());
     fake_mac
         .await

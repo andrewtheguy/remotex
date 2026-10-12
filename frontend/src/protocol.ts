@@ -414,7 +414,7 @@ export interface VideoStrip {
 
 /** The rows of each strip of a picture `h` rows high: `strip_rows` in src/vnc_apple_media.rs. */
 export function stripRows(h: number): number {
-  return Math.ceil(Math.ceil(h / 4) / 16) * 16;
+  return Math.ceil(Math.floor(h / 4) / 16) * 16;
 }
 
 // A run of an RDP host's graphics pipeline, as the host sent it: whole commands, out

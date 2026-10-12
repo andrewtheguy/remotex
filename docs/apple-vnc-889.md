@@ -1425,10 +1425,16 @@ sends the display in four strips. Seen on the virtual Mac, at sizes from
 the offer's, whatever the display's size.
 
 - **The strips.** Each is the display's whole width and a quarter of its
-  height rounded up to a multiple of 16: 208, 240, 256 and 272 rows for
-  displays of 800, 900, 1000 and 1080. They lie top to bottom a strip's height apart, so the last runs
-  past the display's last row, and what it holds there is not picture. The
-  parameter sets give the strip's size and declare no cropping.
+  height, in whole rows, rounded up to a multiple of 16: 208, 240, 256 and 272
+  rows for displays of 800, 900, 1000 and 1080. They lie top to bottom a
+  strip's height apart, so the last runs past the display's last row, and what
+  it holds there is not picture. The parameter sets give the strip's size and
+  declare no cropping.
+- **A height one to three rows over a multiple of 64 is cut short.** The
+  quarter is rounded down before it is rounded up to 16, so the strips of an
+  834-row display are 208 rows and those of a 1730-row one 432, and the four
+  end two rows above the display's last. A viewer that expects 224 or 448
+  there takes none of the pictures for the display's.
 - **One SSRC a strip.** A strip's pictures come under the display's SSRC plus
   the strip's number, from 0, on the display's port and under its key, each
   SSRC with sequence numbers of its own, and so a rollover counter of its own.
@@ -1439,7 +1445,7 @@ the offer's, whatever the display's size.
   encoder fails every frame (`VCPCompressionSessionEncodeFrame failed`,
   error -12902), and no picture packet is sent: seen at 80, 90 and 136 rows,
   where an offer of one tile brought the picture. By that rule the heights are
-  those under 48 rows, 65 to 95 and 129 to 143. A last strip that starts
+  those under 48 rows, 68 to 95 and 132 to 143. A last strip that starts
   exactly at the end is sent, with nothing of the display in it: 96 and 144
   rows worked, as did 64, 100, 104, 112, 120 and 128. Remotex offers one tile
   for a display of those heights.

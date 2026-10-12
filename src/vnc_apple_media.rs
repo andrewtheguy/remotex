@@ -188,16 +188,18 @@ const CODEC_ENTRIES: &[(u64, u64, Option<u64>)] = &[
 const STRIPS: usize = 4;
 
 /// The rows of each strip of a display `height` rows high: a quarter of them,
-/// rounded up to a multiple of 16.
+/// in whole rows, rounded up to a multiple of 16. The quarter is rounded down
+/// first, so a height of one to three rows over a multiple of 64 has strips
+/// that end short of its last rows: 208 at 834, 432 at 1730.
 fn strip_rows(height: u16) -> usize {
-    usize::from(height).div_ceil(STRIPS).next_multiple_of(16)
+    (usize::from(height) / STRIPS).next_multiple_of(16)
 }
 
 /// Whether a display `height` rows high is offered in strips. The rounding can
 /// leave the last strip starting past the display's last row, and offered four
 /// tiles for such a display the Mac answers, its encoder refuses every frame,
 /// and no picture comes: at 80, 90 and 136 rows, where one tile brought the
-/// picture. Those are heights under 48 rows, from 65 to 95 and from 129 to 143,
+/// picture. Those are heights under 48 rows, from 68 to 95 and from 132 to 143,
 /// which are offered one tile. A last strip that starts just at the end, as at
 /// 96 and 144 rows, is sent, with nothing of the display in it. Neither side's
 /// negotiation looks at the size: the tile count is the lesser of the two
@@ -2610,12 +2612,22 @@ impl MediaStream {
         let portless = || {
             anyhow::anyhow!("the Mac accepted the media stream but named no ports for it within {first}s")
         };
-        let firewalled = |what: &str, port: u16| {
-            anyhow::anyhow!(
-                "no {what} came over the Mac's media stream within {first}s of its offer; if \
-                 nothing reached UDP {port}, a firewall or NAT between the Mac and this gateway \
-                 is what that looks like"
-            )
+        // Whether the leg's packets arrived says which failure it is: none is
+        // the path between the two, and some is a stream this side took nothing
+        // from, which the log gives the reason for.
+        let nothing = |what: &str, port: u16, heard: bool| {
+            if heard {
+                anyhow::anyhow!(
+                    "no {what} came over the Mac's media stream within {first}s of its offer: its \
+                     packets reached UDP {port}, and none made a {what} this gateway could take"
+                )
+            } else {
+                anyhow::anyhow!(
+                    "no {what} came over the Mac's media stream within {first}s of its offer: \
+                     nothing reached UDP {port}, which is what a firewall or NAT between the Mac \
+                     and this gateway looks like"
+                )
+            }
         };
         let ports = self.receiver.as_ref().map(|(ports, _)| ports);
         let (offered, pictured) = match self.owed {
@@ -2639,7 +2651,10 @@ impl MediaStream {
             return Some(match (last, ports.and_then(|ports| ports.videos.get(leg))) {
                 (None, _) if self.pending => unanswered(),
                 (None, None) => portless(),
-                (None, Some(port)) => firewalled(&what, *port),
+                (None, Some(port)) => {
+                    let heard = self.legs.get(leg).is_some_and(|shared| heard_since(&shared.heard, offered).is_some());
+                    nothing(&what, *port, heard)
+                }
                 (Some(_), _) => {
                     anyhow::anyhow!("the Mac's media stream sent nothing on {its_leg} for {silence}s")
                 }
@@ -2650,7 +2665,9 @@ impl MediaStream {
             return Some(match (heard, ports) {
                 (None, _) if self.pending => unanswered(),
                 (None, None) => portless(),
-                (None, Some(ports)) => firewalled("sound", ports.audio),
+                (None, Some(ports)) => {
+                    nothing("sound", ports.audio, heard_since(&self.sound_heard, offered).is_some())
+                }
                 (Some(_), _) => {
                     anyhow::anyhow!("the Mac's media stream sent nothing on the sound's leg for {silence}s")
                 }
@@ -3565,7 +3582,8 @@ const STRIP_WAIT: std::time::Duration = std::time::Duration::from_millis(8);
 /// A display's picture, put together from its strips as they decode.
 struct Canvas {
     picture: Picture,
-    /// A strip's rows, the last strip's running past the display's.
+    /// A strip's rows ([`strip_rows`]): the last strip runs past the display's,
+    /// or ends short of them and leaves its last rows unpainted.
     pitch: usize,
     /// The strips placed since the canvas was made, a bit each: the display is
     /// shown once it has them all.
@@ -3594,7 +3612,9 @@ impl Canvas {
         let pitch = usize::from(part.size.1);
         let rows = usize::from(height);
         anyhow::ensure!(
-            part.size.0 == width && pitch * STRIPS >= rows && pitch * (STRIPS - 1) <= rows,
+            // Four strips hold the display's rows, or all but its last three
+            // ([`strip_rows`]), and the last strip starts within them.
+            part.size.0 == width && pitch * STRIPS + STRIPS > rows && pitch * (STRIPS - 1) <= rows,
             "a {}\u{d7}{} strip is not a quarter of the {width}\u{d7}{height} display offered",
             part.size.0,
             part.size.1
@@ -4402,7 +4422,7 @@ mod tests {
     /// for when offered four tiles.
     #[test]
     fn a_display_is_offered_in_strips_unless_its_last_would_start_past_its_end() {
-        for (height, rows) in [(64, 16), (96, 32), (120, 32), (144, 48), (600, 160), (800, 208), (900, 240), (1000, 256), (1080, 272)] {
+        for (height, rows) in [(64, 16), (96, 32), (120, 32), (144, 48), (600, 160), (800, 208), (801, 208), (833, 208), (834, 208), (835, 208), (836, 224), (900, 240), (1000, 256), (1080, 272), (1730, 432), (1800, 464)] {
             assert_eq!(strip_rows(height), rows, "{height} rows");
             assert!(in_strips(height), "{height} rows");
         }
@@ -4489,7 +4509,11 @@ mod tests {
         // A last strip that starts at the display's end has nothing to place.
         Canvas::place(&mut canvas, Some((2, 9)), 3, &part(7), false).unwrap();
         assert!(canvas.as_ref().unwrap().picture.rgb.iter().all(|&v| v == 0));
-        assert!(Canvas::place(&mut canvas, Some((2, 13)), 0, &part(1), false).is_err(), "not a quarter of 13 rows");
+        // Strips that end within three rows of the display's last are its own.
+        Canvas::place(&mut canvas, Some((2, 14)), 3, &part(7), false).unwrap();
+        let rows: Vec<u8> = canvas.as_ref().unwrap().picture.rgb.chunks(6).map(|row| row[0]).collect();
+        assert_eq!(rows, [0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 0, 0]);
+        assert!(Canvas::place(&mut canvas, Some((2, 16)), 0, &part(1), false).is_err(), "not a quarter of 16 rows");
         assert!(Canvas::place(&mut canvas, Some((2, 8)), 0, &part(1), false).is_err(), "the last strip past 8 rows");
         assert!(Canvas::place(&mut canvas, Some((4, 10)), 0, &part(1), false).is_err());
         assert!(Canvas::place(&mut canvas, None, 0, &part(1), false).is_err());
