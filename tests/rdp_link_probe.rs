@@ -34,7 +34,8 @@
 //! - [`AUTODETECT_ENV`] takes part in the host's network detection ([MS-RDPBCGR]
 //!   2.2.14), answering with what this connection measures, so behind
 //!   [`THROTTLE_ENV`] the host is told of the slow link as well as finding it. Run
-//!   with `RUST_LOG=info` to see what was measured and what the host concluded.
+//!   with `RUST_LOG=info,remotex::rdp_client=debug` to see what was measured and
+//!   what the host concluded.
 //! - [`MULTITRANSPORT_ENV`] claims reliable UDP with Soft-Sync ([MS-RDPBCGR]
 //!   2.2.1.3.8) and turns down every offer of it the host makes (2.2.15), so the
 //!   session stays on TCP: whether a host draws differently for a client that

@@ -382,7 +382,7 @@ pub(super) fn heard(detector: &mut Detector, payload: &[u8]) -> Result<Answer> {
         Answer::Measured { millis, bytes, .. } => {
             debug!("rdp: network detection measured {bytes} bytes in {millis} ms");
         }
-        Answer::Concluded(said) => info!("rdp: the host concluded {said:?}"),
+        Answer::Concluded(said) => debug!("rdp: the host concluded {said:?}"),
         _ => {}
     }
     Ok(answer)
