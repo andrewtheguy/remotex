@@ -93,16 +93,24 @@ pub struct Connect {
     pub h264: gfx_proto::H264,
     /// Whether to take part in the host's network detection (MS-RDPBCGR 2.2.14):
     /// claimed in the core data, with the connection type left for the host to
-    /// detect, and answered on the message channel: at the caller's pace while a
-    /// pipeline is passed to it ([`Paced`]), and with what this connection measures
-    /// otherwise. Taken by a session that passes its pipeline with H.264, with
-    /// [`Connect::multitransport`], so the host draws for the page's link.
+    /// detect, and answered on the message channel: at the caller's pace with
+    /// [`Connect::paced`], and with what this connection measures otherwise. Taken
+    /// by a session that passes its pipeline, with [`Connect::multitransport`].
     pub autodetect: bool,
     /// Whether to claim reliable UDP with Soft-Sync, and turn down every offer of it
     /// the host then makes ([`super::proto::multitransport`]), so the session stays on TCP.
     /// With [`Connect::autodetect`], it is what makes a Windows host rate-control its
-    /// H.264 to the link the detection reports.
+    /// H.264 to the link the detection reports, and send each RemoteFX Progressive
+    /// tile whole at its full quality over a fast one.
     pub multitransport: bool,
+    /// Whether the host is shown the caller's pace, to draw for the caller's link:
+    /// its socket left unread while frames wait for the caller ([`PASSED_HELD`]),
+    /// and its network detection answered at the pace the caller composes
+    /// ([`Paced`]). Without it the socket is read as it comes and the detection is
+    /// answered with what this connection measures, so the host draws for the link
+    /// to this client alone, and a slow caller gets fewer frames, none of them
+    /// coarser. Means nothing without [`Connect::egfx`].
+    pub paced: bool,
     /// Where the remote's sound goes, for a target that asked for it (MS-RDPEA).
     ///
     /// Asked for, the client names the `rdpsnd` channel, takes the dynamic channel a
@@ -267,12 +275,13 @@ pub enum Event {
 /// nothing to compose often enough to show, and with three it never was.
 const PASSED_AHEAD: usize = 3;
 
-/// How many frames of a passed pipeline may wait for the caller before the host's
-/// socket goes unread, when they are frames of [`PASSED_HELD_BYTES`] or more.
+/// How many frames of a pipeline passed at the caller's pace ([`Connect::paced`])
+/// may wait for the caller before the host's socket goes unread, when they are
+/// frames of [`PASSED_HELD_BYTES`] or more.
 ///
 /// A Windows host sends smaller frames to a client it finds slow, and what it
 /// goes by is its own socket backing up — not acknowledgements that come late,
-/// and not anything it is told (see "Opening a session" in docs/rdp-client.md).
+/// and not anything it is told (see "The connection sequence" in docs/rdp-client.md).
 /// A session that read the socket as it came would hide a slow caller from the
 /// host: every frame would be read at once and wait here. So while this many wait
 /// to be composed the socket is left, through a receive buffer small enough
@@ -297,13 +306,14 @@ const PASSED_HELD: usize = 2;
 /// second behind the desktop.
 const PASSED_HELD_BYTES: usize = 32 * 1024;
 
-/// The receive buffer of a session while it passes a pipeline, in bytes: small,
+/// The receive buffer of a session while it passes a pipeline at the caller's
+/// pace ([`Connect::paced`]), in bytes: small,
 /// so a socket left unread ([`PASSED_HELD`]) backs up at the host rather than
 /// here. At 2 MiB the same host never found the caller slow.
 const PASSED_RECEIVE_BUFFER: usize = 32 * 1024;
 
-/// The host's socket, for a session that may pass a pipeline: a second handle on
-/// it, for its receive buffer alone.
+/// The host's socket, for a session that may pass a pipeline at the caller's pace
+/// ([`Connect::paced`]): a second handle on it, for its receive buffer alone.
 ///
 /// The buffer is [`PASSED_RECEIVE_BUFFER`] only while the host has a graphics
 /// pipeline open. It bounds what the host can send in one round trip, and a host
@@ -948,6 +958,8 @@ struct Active<'a> {
     graphics: Option<Graphics>,
     /// The frames of a pipeline that is passed on, between the caller and the host.
     passed: PassedFrames,
+    /// Whether the host is shown the caller's pace — [`Connect::paced`].
+    caller_paced: bool,
     /// Network detection answered at the caller's pace while it is passed frames.
     paced: Paced,
     /// Whether [`Event::ResizeReady`] has gone out.
@@ -1197,6 +1209,7 @@ impl<'a> Active<'a> {
             },
             graphics: config.egfx.then(Graphics::passing),
             passed: PassedFrames::default(),
+            caller_paced: config.paced,
             paced: Paced::default(),
             resize_ready: false,
             pending_resize: None,
@@ -1228,9 +1241,9 @@ impl<'a> Active<'a> {
         }
         loop {
             tokio::select! {
-                // Not while the caller is behind on a passed pipeline: the host
-                // is to find that out from its own socket.
-                read = self.frames.next(&mut self.frame), if !self.passed.held(Instant::now()) => {
+                // Not while the caller is behind on a pipeline passed at its pace:
+                // the host is to find that out from its own socket.
+                read = self.frames.next(&mut self.frame), if !(self.caller_paced && self.passed.held(Instant::now())) => {
                     read?;
                     if let Some(ended) = self.on_frame().await? {
                         return ended;
@@ -1330,8 +1343,12 @@ impl<'a> Active<'a> {
                 None => {
                     let answer = connect::heard(&mut self.detector, payload)?;
                     let now = Instant::now();
-                    let (owed, behind) = (self.passed.owed_bytes, self.passed.behind(now));
-                    self.paced.answer(answer, owed, behind, self.passed.distance, now)
+                    // At the caller's pace, or as this connection measured it.
+                    let (owed, behind, distance) = match self.caller_paced {
+                        true => (self.passed.owed_bytes, self.passed.behind(now), self.passed.distance),
+                        false => (0, false, Duration::ZERO),
+                    };
+                    self.paced.answer(answer, owed, behind, distance, now)
                 }
             };
             if let Some(reply) = reply {

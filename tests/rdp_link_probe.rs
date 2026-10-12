@@ -40,6 +40,9 @@
 //!   2.2.1.3.8) and turns down every offer of it the host makes (2.2.15), so the
 //!   session stays on TCP: whether a host draws differently for a client that
 //!   offers UDP, apart from using it. `RUST_LOG=info` shows the offers.
+//! - [`PACED_ENV`] set to `0` is a session that does not show the host the page's
+//!   pace, as one drawn High quality: the socket is read as it comes, and the
+//!   detection answered with what this connection measures.
 //!
 //! What is printed, for the opening paint and then each [`WINDOW`], is how many
 //! frames the host drew and the bytes of their commands by codec; what its
@@ -64,6 +67,7 @@ const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 const H264_ENV: &str = "REMOTEX_UAT_H264";
 const AUTODETECT_ENV: &str = "REMOTEX_UAT_AUTODETECT";
 const MULTITRANSPORT_ENV: &str = "REMOTEX_UAT_MULTITRANSPORT";
+const PACED_ENV: &str = "REMOTEX_UAT_PACED";
 const MOTION_ENV: &str = "REMOTEX_UAT_MOTION";
 const RUN_ENV: &str = "REMOTEX_UAT_LINK_SECS";
 const THROTTLE_ENV: &str = "REMOTEX_UAT_THROTTLE";
@@ -412,6 +416,7 @@ async fn a_real_host_draws_for_a_slow_client() {
     let autodetect = matches!(std::env::var(AUTODETECT_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"));
     let multitransport =
         matches!(std::env::var(MULTITRANSPORT_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"));
+    let paced = !matches!(std::env::var(PACED_ENV).as_deref(), Ok("0" | "false"));
     let run = Duration::from_secs(std::env::var(RUN_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(60));
     let ack_delay = Duration::from_millis(std::env::var(ACK_DELAY_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(0));
     let throttled = std::env::var(THROTTLE_ENV).ok().map(|said| {
@@ -421,7 +426,7 @@ async fn a_real_host_draws_for_a_slow_client() {
         (kbps, Duration::from_millis(delay), buffer_kb as u32, (lift > 0).then(|| Duration::from_secs(lift)))
     });
     println!(
-        "rdp_link_probe: {name}, h264 {h264:?}, autodetect {autodetect}, udp offered {multitransport}, throttle {throttled:?}, acks held {ack_delay:?}, {}s",
+        "rdp_link_probe: {name}, h264 {h264:?}, autodetect {autodetect}, udp offered {multitransport}, paced {paced}, throttle {throttled:?}, acks held {ack_delay:?}, {}s",
         run.as_secs()
     );
     let (host, port) = match throttled {
@@ -449,6 +454,7 @@ async fn a_real_host_draws_for_a_slow_client() {
         h264,
         autodetect,
         multitransport,
+        paced,
         audio: None,
         camera: None,
         microphone: None,
