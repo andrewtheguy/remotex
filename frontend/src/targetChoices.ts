@@ -16,12 +16,17 @@
 // - One it offers that cannot be had here is greyed, with the reason: Opus in
 //   a browser with no audio decoder, a passthrough this browser cannot take, or
 //   one that is the only way this gateway can serve the target, which is then
-//   shown ticked.
+//   shown ticked. An RDP host's graphics pipeline is always that: the gateway
+//   composes none.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
 //   or lossless: see `soundRow`. In a browser with no audio decoder only the
 //   lossless one plays, which the page decodes itself, so ticking takes it.
 // - Where the second display sits is a choice on a target that asks its host for
 //   two and tells it where each is: see `PLACEMENTS`.
+// - How the host draws an RDP pipeline, lossless or adaptive H.264 (alpha), is a
+//   choice on a target with the pipeline on, and under adaptive the whole desktop
+//   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
+//   offered lossless alone.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 // - Which decoder takes the picture is no choice: the page decodes the VP9, and
@@ -63,13 +68,15 @@ export interface TargetInfo {
   /** The stream this target can pass, null where it has none. */
   passthrough: Passthrough | null;
   /**
-   * Whether passing it is the only way this gateway can serve the target: a High
-   * Performance Mac on a host that cannot decode its stream. Never an RDP host,
-   * whose pipeline every gateway composes itself.
+   * Whether passing it is the only way this gateway can serve the target: an RDP
+   * host's graphics pipeline, which no gateway composes, and a High Performance
+   * Mac on a host that cannot decode its stream.
    */
   passthroughOnly: boolean;
   /** Whether where the second virtual display sits is a choice. */
   placement: boolean;
+  /** Whether how the host draws the graphics pipeline is a choice. */
+  pipeline: boolean;
 }
 
 /** A desktop size in points. */
@@ -97,12 +104,20 @@ export type Sound = "off" | "opus" | "flac";
  */
 export type Placement = "right" | "left" | "top" | "bottom";
 
+/**
+ * How the host draws an RDP session's graphics pipeline, as `connect` names it:
+ * with its lossless codecs, or adaptive, in H.264 the host fits to the link, over
+ * the whole desktop or only where it moves like video.
+ */
+export type Pipeline = "lossless" | "adaptive-desktop" | "adaptive-region";
+
 /** What `connect` carries. */
 export interface Choices {
   size: Sizing;
   audio: Sound;
   passthrough: boolean;
   placement: Placement;
+  pipeline: Pipeline;
 }
 
 /** What this browser can do with a target. */
@@ -113,6 +128,8 @@ export interface Abilities {
    */
   appleMedia: boolean;
   rdpGraphics: boolean;
+  /** Whether it decodes the H.264 an RDP host may draw with (rdpH264.ts). */
+  rdpH264: boolean;
   /**
    * Whether this browser has an audio decoder, which Opus and a Mac's AAC-ELD
    * need. FLAC does not: the page decodes it itself (flacDecoder.ts).
@@ -156,10 +173,35 @@ export interface SoundRow {
   formats: SoundFormat[];
 }
 
+/** One way the host can draw the pipeline, or one way of drawing it adaptive. */
+export interface PipelineOption<V> {
+  value: V;
+  label: string;
+  /** What choosing it does, or why it cannot be chosen here. */
+  note: string;
+  disabled: boolean;
+}
+
+/**
+ * How the host draws the pipeline: lossless or adaptive, and under an adaptive
+ * one, the whole desktop or by region.
+ */
+export interface PipelineRow {
+  modes: PipelineOption<"lossless" | "adaptive">[];
+  h264: PipelineOption<Exclude<Pipeline, "lossless">>[];
+}
+
 /** One place the second display can sit. */
 export interface PlacementOption {
   value: Placement;
   label: string;
+}
+
+/** A stream that is passed in every session, said rather than offered. */
+export interface PassedNote {
+  label: string;
+  /** Why it is always passed. */
+  note: string;
 }
 
 /** One option under an open target. */
@@ -186,6 +228,10 @@ export interface TargetOptions {
    * where it is not a choice.
    */
   placements: PlacementOption[] | null;
+  /** How the host draws the pipeline, as a choice: null where it is none. */
+  pipelineRow: PipelineRow | null;
+  /** The target's stream where it is passed in every session: null otherwise. */
+  passed: PassedNote | null;
   rows: OptionRow[];
   /** What Start sends. */
   choices: Choices;
@@ -198,30 +244,34 @@ export interface TargetOptions {
 const PASSTHROUGH: Record<
   Passthrough,
   {
-    label: string;
-    note: string;
-    cannot: string;
-    // What is said where the stream can only be passed, null for a stream every
-    // gateway can also encode itself.
-    only: { note: string; blocked: string } | null;
+    // What is said where the stream can only be passed.
+    only: PassedNote & { blocked: string };
+    // What is offered where passing it is a choice, null for a stream that is
+    // passed in every session.
+    chosen: { label: string; note: string; cannot: string } | null;
   }
 > = {
   "rdp-graphics": {
-    label: "Pass the graphics pipeline through",
-    note: "The host's drawing is composed in this browser instead of encoded as video. For a LAN.",
-    cannot:
-      "This browser cannot compose it: that needs WebGL 2 and a cross-origin isolated page.",
-    only: null,
+    only: {
+      label: "Always passed through",
+      note: "egfx is on for this target, so every session passes the host's graphics pipeline through, for this browser to compose.",
+      blocked:
+        "This browser cannot compose the host's graphics pipeline, which this target always passes: that needs WebGL 2 and a cross-origin isolated page. Use a browser that can, or a target with egfx disabled.",
+    },
+    chosen: null,
   },
   "apple-media": {
-    label: "Pass the Mac's picture through",
-    note: "The Mac's own HEVC, instead of VP9 encoded by the gateway. For a LAN.",
-    cannot:
-      "This browser does not decode the Mac's HEVC, and this page cannot decode it here.",
     only: {
-      note: "This gateway cannot decode the Mac's picture, so it is always passed.",
+      label: "Always passed through",
+      note: "This gateway cannot decode the Mac's picture, so every session passes it through.",
       blocked:
         "This gateway cannot decode the Mac's picture, and this browser cannot take it passed through. Use a browser that decodes it, or install FFmpeg on the gateway's host.",
+    },
+    chosen: {
+      label: "Pass the Mac's picture through",
+      note: "The Mac's own HEVC, instead of VP9 encoded by the gateway. For a LAN.",
+      cannot:
+        "This browser does not decode the Mac's HEVC, and this page cannot decode it here.",
     },
   },
 };
@@ -244,40 +294,36 @@ function takes(
 }
 
 /**
- * The passthrough row of a target that has a stream to pass, and why the target
- * cannot start here where that stream is the only way and this browser cannot
- * take it.
+ * How a target that has a stream to pass shows it: said, where it is passed in
+ * every session, with why the target cannot start here where this browser cannot
+ * take it; otherwise a row to tick.
  */
 function passthroughRow(
   target: TargetInfo,
   passthrough: Passthrough,
   remembered: boolean | undefined,
   abilities: Abilities,
-): { row: OptionRow; blocked: string | null } {
+): { row: OptionRow } | { passed: PassedNote; blocked: string | null } {
   const words = PASSTHROUGH[passthrough];
   const able = takes(target, abilities, passthrough);
-  const only = target.passthroughOnly ? words.only : null;
-  const row = { key: "passthrough" as const, label: words.label };
-  if (only) {
-    return {
-      row: { ...row, note: only.note, checked: true, disabled: true },
-      blocked: able ? null : only.blocked,
-    };
+  const chosen = target.passthroughOnly ? null : words.chosen;
+  if (!chosen) {
+    const { label, note, blocked } = words.only;
+    return { passed: { label, note }, blocked: able ? null : blocked };
   }
+  const row = { key: "passthrough" as const, label: chosen.label };
   if (!able) {
     return {
-      row: { ...row, note: words.cannot, checked: false, disabled: true },
-      blocked: null,
+      row: { ...row, note: chosen.cannot, checked: false, disabled: true },
     };
   }
   return {
     row: {
       ...row,
-      note: words.note,
+      note: chosen.note,
       checked: remembered ?? false,
       disabled: false,
     },
-    blocked: null,
   };
 }
 
@@ -401,6 +447,65 @@ const PLACEMENTS: PlacementOption[] = [
 ];
 
 /**
+ * `target`'s pipeline as the picker shows it: nothing where it is no choice, and
+ * otherwise lossless or adaptive, adaptive's H.264 over the whole desktop by
+ * default or by region. A browser that cannot decode the H.264 has adaptive
+ * greyed; an adaptive one remembered from before is not sent, and stays
+ * remembered for a browser that can.
+ */
+function pipelineRow(
+  target: TargetInfo,
+  remembered: Pipeline | undefined,
+  decodes: boolean,
+): { row: PipelineRow | null; pipeline: Pipeline } {
+  if (!target.pipeline) {
+    return { row: null, pipeline: "lossless" };
+  }
+  const h264: PipelineRow["h264"] = [
+    {
+      value: "adaptive-desktop",
+      label: "H.264 full screen",
+      note: "The whole desktop in H.264, which the host fits to the link.",
+      disabled: false,
+    },
+    {
+      value: "adaptive-region",
+      label: "H.264 region",
+      note: "H.264 only where the desktop moves like video, the rest lossless, which the host does not fit to the link.",
+      disabled: false,
+    },
+  ];
+  const pipeline =
+    remembered !== undefined &&
+    (remembered === "lossless" ||
+      (decodes && h264.some((option) => option.value === remembered)))
+      ? remembered
+      : "lossless";
+  return {
+    row: {
+      modes: [
+        {
+          value: "lossless",
+          label: "Lossless",
+          note: "The host's lossless codecs alone. For a LAN.",
+          disabled: false,
+        },
+        {
+          value: "adaptive",
+          label: "Adaptive (alpha)",
+          note: decodes
+            ? "H.264, which the host fits to the link this browser is on."
+            : "This browser has no VideoDecoder that takes the host's H.264.",
+          disabled: !decodes,
+        },
+      ],
+      h264,
+    },
+    pipeline,
+  };
+}
+
+/**
  * The options under `target`, from what was `remembered` for it and what this
  * browser can do. A size the operator configured is the size until somebody
  * chooses another, and no remote's sound starts playing until somebody asks.
@@ -415,19 +520,25 @@ export function targetOptions(
     sizes.find((option) => option.value === remembered?.size)?.value ??
     sizes[0].value;
   const sound = soundRow(target, remembered?.audio, abilities.audio);
+  const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
   const rows: OptionRow[] = [];
+  let passed: PassedNote | null = null;
   let blocked: string | null = null;
   if (target.passthrough) {
-    const passed = passthroughRow(
+    const shown = passthroughRow(
       target,
       target.passthrough,
       remembered?.passthrough,
       abilities,
     );
-    rows.push(passed.row);
-    blocked = passed.blocked;
+    if ("row" in shown) {
+      rows.push(shown.row);
+    } else {
+      passed = shown.passed;
+      blocked = shown.blocked;
+    }
   }
-  const passthrough = rows.some((row) => row.checked);
+  const passthrough = passed !== null || rows.some((row) => row.checked);
   const placements = target.placement ? PLACEMENTS : null;
   const choices: Choices = {
     size,
@@ -436,11 +547,14 @@ export function targetOptions(
     placement:
       placements?.find((option) => option.value === remembered?.placement)
         ?.value ?? "right",
+    pipeline: drawn.pipeline,
   };
   return {
     sizes,
     soundRow: sound.row,
     placements,
+    pipelineRow: drawn.row,
+    passed,
     rows,
     choices,
     // High Performance's sound comes with its picture, so it has no row and is

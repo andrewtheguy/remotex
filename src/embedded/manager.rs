@@ -751,11 +751,15 @@ fn describe_offers(target: &TargetConfig) -> String {
     if offers.audio {
         choices.push("sound".to_owned());
     }
-    if let Some(passthrough) = offers.passthrough {
+    // One passed in every session is no choice, and the render line names it.
+    if let Some(passthrough) = offers.passthrough.filter(|passthrough| passthrough.chosen()) {
         choices.push(format!("{} passed through", passthrough.stream()));
     }
     if offers.placement {
         choices.push("where the second display sits".to_owned());
+    }
+    if offers.pipeline {
+        choices.push("lossless or adaptive H.264".to_owned());
     }
     if choices.is_empty() {
         "nothing to choose".to_owned()
@@ -1720,13 +1724,13 @@ mod tests {
             page.contains("opus ≤96 kbit/s, adaptive down to 32 kbit/s"),
             "an unset dial is named at its defaults, walk included: {page}"
         );
-        assert!(page.contains("video q70"), "the render plan describes itself: {page}");
         assert!(
-            page.contains(&spec(
-                "picker",
-                "offers resize, sound, the host's graphics pipeline passed through"
-            )),
-            "what a session's starter chooses is the type's to offer: {page}"
+            page.contains(&spec("render", "the host's graphics pipeline, passed through")),
+            "the render plan describes itself: {page}"
+        );
+        assert!(
+            page.contains(&spec("picker", "offers resize, sound, lossless or adaptive H.264")),
+            "what a session's starter chooses is the type's to offer, and the pipeline is passed unasked: {page}"
         );
         assert!(
             page.lines().any(|line| line == spec("picker", "offers resize, sound")),

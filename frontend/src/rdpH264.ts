@@ -2,7 +2,8 @@
 // pipeline: the third question about itself the gateway is told, beside the Mac's
 // stream (appleMedia.ts) and the pipeline itself (rdpGraphics.ts).
 //
-// EXPERIMENTAL, and behind a target's `egfx_h264` key. A host told its client takes
+// ALPHA, and behind the picker's adaptive choice of how the host draws the
+// pipeline (targetChoices.ts). A host told its client takes
 // H.264 hands the parts of the desktop that move like video to it. The gateway has
 // no decoder for it and passes the access units on inside the pipeline's commands;
 // this page decodes them with the browser's `VideoDecoder`, a stream for each
@@ -17,9 +18,9 @@
 // units after it gives none in time, and that is a no: a pipeline is composed in
 // command order and cannot wait on what the host has not sent yet.
 //
-// It rides every session socket this page opens (`gateway.ts`). Unlike the others
-// it turns no session away and greys no choice: a page that says no is passed a
-// pipeline the host was told to keep H.264 out of.
+// Where it is no the picker greys adaptive, and it rides every session socket this
+// page opens (`gateway.ts`). Unlike the others it turns no session away: a page
+// that says no is passed a pipeline the host was told to keep H.264 out of.
 
 import { createEgfxVideo } from "./egfxVideo.ts";
 

@@ -8,6 +8,7 @@
 //! to handle, and a `Result` on every key press would be noise.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 
@@ -25,6 +26,8 @@ pub(super) enum Command {
     Clipboard(Clipboard),
     /// A frame of a passed graphics pipeline has been composed.
     FrameComposed(u32),
+    /// The round trip between this client and the caller a pipeline is passed to.
+    CallerDistance(Duration),
     Shutdown,
 }
 
@@ -208,6 +211,18 @@ impl Input {
     /// for, and it stops drawing a dozen frames later.
     pub fn frame_composed(&self, frame: u32) {
         self.push(Command::FrameComposed(frame));
+    }
+
+    /// Say how far away the caller a pipeline is passed to is: the round trip
+    /// between this client and it when nothing is queued, which the frames it
+    /// composes do not say. A round trip of the host's network detection is
+    /// answered no sooner than that, so the host hears the whole way to the caller
+    /// and not only the hop to this client, and a frame handed over less than that
+    /// ago is on its way rather than waiting, so a distant caller is not held as a
+    /// slow one. Said again whenever it changes, and
+    /// dropped, as input is, if said before the session is connected.
+    pub fn caller_distance(&self, round_trip: Duration) {
+        self.push(Command::CallerDistance(round_trip));
     }
 
     pub(super) fn shutdown(&self) {

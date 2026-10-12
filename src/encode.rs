@@ -732,6 +732,13 @@ impl VideoSink {
         self.shared.feedback.hold(tokio::time::Instant::now())
     }
 
+    /// The browser's link's distance: its smallest recent ping round trip
+    /// ([`crate::feedback::LinkFeedback::distance`]), or `None` before the first
+    /// pong.
+    pub fn distance(&self) -> Option<Duration> {
+        self.shared.feedback.distance()
+    }
+
     /// Take `bytes` of [`QUEUE_BUDGET`], waiting for the browser's socket to make
     /// room. Counted as the engine stalling, which it is, and towards the next
     /// round's congestion verdict.

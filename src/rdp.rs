@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::{AudioBridge, PcmFormat};
-use crate::config::{Choices, Placement, RenderPlan, Sizing, TargetConfig};
+use crate::config::{Choices, Pipeline, Placement, RenderPlan, Sizing, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
@@ -41,6 +41,7 @@ use crate::protocol::{
 use crate::rdp_camera;
 use crate::rdp_mic;
 use crate::session::Uplinks;
+use crate::rdp_client::proto::gfx::H264;
 use crate::rdp_client::proto::rdpsnd;
 use crate::rdp_client::{
     self as client, AudioSink, Connect, Event, Frame, Framebuffer, Input, MouseButton as RdpButton,
@@ -421,9 +422,23 @@ fn connect_config(
         // host keeps whatever scaling it was configured with.
         scale_percent: if stated_density { opening.density.percent() } else { 0 },
         resize: choices.resize(),
+        // Passed to the browser whenever it is on: the gateway composes none.
         egfx: config.egfx(),
-        pass_graphics: plan.rdp_graphics,
-        h264: plan.rdp_h264,
+        // The whole desktop unless the session chose H.264 by region: the host
+        // rate-controls all of it to the page's link that way, where by region most
+        // of the desktop is RemoteFX Progressive, which it does not.
+        h264: match (plan.rdp_h264, choices.pipeline) {
+            (true, Pipeline::AdaptiveRegion) => H264::ByRegion,
+            (true, _) => H264::WholeDesktop,
+            (false, _) => H264::Refused,
+        },
+        // A pipeline with H.264 is drawn for the page's link: the host
+        // rate-controls its H.264 for a client that takes its network detection
+        // and claims UDP, the claim turned down when the host takes it up, and the
+        // session answers the detection at the page's pace. Without H.264 there is
+        // nothing for the host to rate-control.
+        autodetect: plan.rdp_h264,
+        multitransport: plan.rdp_h264,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
         microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),
@@ -435,8 +450,8 @@ fn connect_config(
 /// only ever read from the same place.
 struct Flags {
     resize: bool,
-    /// Whether the host's graphics pipeline is passed to the browser rather than
-    /// composed here ([`RenderPlan::rdp_graphics`]).
+    /// Whether the host's graphics pipeline is on, and so passed to the browser
+    /// ([`RenderPlan::rdp_graphics`]): its frames are never in the framebuffer.
     pass_graphics: bool,
     /// The render dial, for the sink of a display shown in a tab ([`Tab`]).
     plan: RenderPlan,
@@ -1446,6 +1461,12 @@ async fn active_loop(
     let mut wheel = WheelRotation::default();
     // The pointer shape, on its way to the browser that draws it.
     let mut pointer = Pointer::default();
+    // The browser's distance as last said to the RDP client, for the round trips
+    // of a passed pipeline's network detection, and the tick that says it on a
+    // desktop that draws nothing: the host keeps measuring a still one.
+    let mut told_distance = None;
+    let mut distance_tick = tokio::time::interval(DISTANCE_CHECK);
+    distance_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The display shown in a tab of its own, while *All Displays* is chosen and its
     // socket is attached. One at most: a session has two columns at most.
     let mut tab: Option<Tab> = None;
@@ -1502,6 +1523,13 @@ async fn active_loop(
     let mut frame_marks = false;
 
     loop {
+        if pass_graphics
+            && let Some(distance) = sink.distance()
+            && told_distance != Some(distance)
+        {
+            input.caller_distance(distance);
+            told_distance = Some(distance);
+        }
         // A display shown in a tab follows that tab's window for as long as All
         // Displays is chosen — a tab reloading keeps it — and a layout pending
         // once it is not asks for the first display's size again. Only a pending
@@ -1563,6 +1591,8 @@ async fn active_loop(
         };
 
         tokio::select! {
+            // Nothing to do here: the turn is what says the distance, above.
+            _ = distance_tick.tick(), if pass_graphics => {}
             event = events.recv() => {
                 let Some(event) = event else {
                     // The client's thread always sends `Ended` before it lets go of
@@ -1591,8 +1621,8 @@ async fn active_loop(
                     // never the leading-edge flush of a frame still being drawn.
                     Event::FramesMarked => {
                         frame_marks = true;
-                        // On a target that passes the pipeline this is where one
-                        // begins, and the browser composes it from here.
+                        // This is where a pipeline begins, and the browser
+                        // composes it from here.
                         if pass_graphics {
                             sink.graphics_start().await?;
                             // A tab shown before the pipeline began was painted
@@ -2490,6 +2520,11 @@ fn translate_input(
         ClientMsg::DisplayShown { .. } | ClientMsg::OnDisplay { .. } => Vec::new(),
     }
 }
+
+/// How often a passed pipeline's session looks for a change in the browser's
+/// distance when nothing else turns its loop. The distance is a minimum over the
+/// socket's pings, which come every few seconds, so a second loses nothing.
+const DISTANCE_CHECK: Duration = Duration::from_secs(1);
 
 /// The shortest gap between two damage flushes into the mirror, at the 60 Hz a
 /// screen actually presents; `VIDEO_FRAME_INTERVAL` paces the encodes at 30.

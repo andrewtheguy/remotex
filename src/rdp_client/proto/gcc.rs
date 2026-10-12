@@ -19,9 +19,11 @@
 //! of its own — TLS is underneath it already — and `CS_NET` names the static virtual
 //! channels. A fourth, `CS_MONITOR`, goes out only for a session that asked for more
 //! than one virtual display and a server that takes the extended blocks: it places the
-//! second monitor against the first, and the core data's desktop is their union. Nothing
-//! asks for a message channel or a multitransport tunnel, so the server has nothing
-//! to answer about them.
+//! second monitor against the first, and the core data's desktop is their union. A
+//! message channel and a claim of UDP go out only for a session that passes its
+//! pipeline with H.264 ([`ConferenceCreateRequest::autodetect`],
+//! [`ConferenceCreateRequest::multitransport`]); otherwise the server has nothing to
+//! answer about either.
 
 use super::wire::{Malformed, Reader, Writer};
 use crate::config::Placement;
@@ -58,6 +60,12 @@ const CS_NET: u16 = 0xC003;
 /// Connection Confirm carried `EXTENDED_CLIENT_DATA_SUPPORTED` — [MS-RDPBCGR]
 /// 2.2.1.3.6 has a client never send it otherwise.
 const CS_MONITOR: u16 = 0xC005;
+/// The message channel, another extended block, asked for only by a session that
+/// takes part in network detection ([`ConferenceCreateRequest::autodetect`]) or
+/// claims UDP ([`ConferenceCreateRequest::multitransport`]).
+const CS_MCS_MSGCHANNEL: u16 = 0xC006;
+/// The transports beyond TCP the client takes, another extended block.
+const CS_MULTITRANSPORT: u16 = 0xC00A;
 
 /// `TS_MONITOR_PRIMARY`, on the one monitor whose corner is the origin.
 const MONITOR_PRIMARY: u32 = 0x0000_0001;
@@ -70,6 +78,8 @@ const MONITOR_DEF: usize = 20;
 const SC_CORE: u16 = 0x0C01;
 const SC_SECURITY: u16 = 0x0C02;
 const SC_NET: u16 = 0x0C03;
+const SC_MCS_MSGCHANNEL: u16 = 0x0C04;
+const SC_MULTITRANSPORT: u16 = 0x0C08;
 
 /// A user data block's own header: type and length, the length counting itself.
 const BLOCK_HEADER: usize = 4;
@@ -107,9 +117,18 @@ const EARLY_CAPABILITIES: u16 = 0x0001 | 0x0002 | 0x0008 | 0x0020;
 /// asked for it — see [`ConferenceCreateRequest::graphics`].
 const SUPPORT_DYNVC_GFX_PROTOCOL: u16 = 0x0100;
 
+/// `RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT`: this client answers the host's network
+/// detection ([`super::autodetect`]). Claimed only when the session asked for it —
+/// see [`ConferenceCreateRequest::autodetect`].
+const SUPPORT_NETCHAR_AUTODETECT: u16 = 0x0080;
+
 /// `connectionType`: LAN. It tunes nothing on the wire; it tells the server which
 /// visual effects the user is likely to tolerate.
 const CONNECTION_TYPE_LAN: u8 = 0x06;
+
+/// `connectionType`: for the host to detect, which it does only for a client that
+/// also claims [`SUPPORT_NETCHAR_AUTODETECT`].
+const CONNECTION_TYPE_AUTODETECT: u8 = 0x07;
 
 /// `colorDepth` and `postBeta2ColorDepth`, both superseded by `highColorDepth` and
 /// both still required to be a legal value: 8 bits per pixel.
@@ -225,6 +244,16 @@ pub struct ConferenceCreateRequest<'a> {
     /// Whether to offer the graphics pipeline. A server that is offered it opens the
     /// Graphics channel over [`Channel::DYNAMIC`], which `channels` must then name.
     pub graphics: bool,
+    /// Whether to take part in network detection ([`super::autodetect`]): claimed in
+    /// the core data, with the connection type left for the host to detect, and the
+    /// message channel its PDUs travel on asked for in an extended block, which the
+    /// caller sends only to a server that reads them.
+    pub autodetect: bool,
+    /// The UDP transports to claim in `CS_MULTITRANSPORT`, for a host to offer one
+    /// on the message channel, which is then asked for too ([`super::multitransport`]).
+    /// Zero claims none and sends no block. The caller sends one only to a server
+    /// that reads the extended blocks.
+    pub multitransport: u32,
 }
 
 impl ConferenceCreateRequest<'_> {
@@ -255,6 +284,14 @@ impl ConferenceCreateRequest<'_> {
         security(&mut w);
         self.network(&mut w);
         self.monitor(&mut w);
+        if self.autodetect || self.multitransport != 0 {
+            block_header(&mut w, CS_MCS_MSGCHANNEL, 4);
+            w.u32_le(0); // flags, reserved
+        }
+        if self.multitransport != 0 {
+            block_header(&mut w, CS_MULTITRANSPORT, 4);
+            w.u32_le(self.multitransport);
+        }
         w.finish()
     }
 
@@ -305,9 +342,10 @@ impl ConferenceCreateRequest<'_> {
         w.u16_le(HIGH_COLOR_24BPP);
         w.u16_le(COLOR_DEPTHS);
         let graphics = if self.graphics { SUPPORT_DYNVC_GFX_PROTOCOL } else { 0 };
-        w.u16_le(EARLY_CAPABILITIES | graphics);
+        let autodetect = if self.autodetect { SUPPORT_NETCHAR_AUTODETECT } else { 0 };
+        w.u16_le(EARLY_CAPABILITIES | graphics | autodetect);
         w.zeros(64); // clientDigProductId: an installation identifier we do not have
-        w.u8(CONNECTION_TYPE_LAN);
+        w.u8(if self.autodetect { CONNECTION_TYPE_AUTODETECT } else { CONNECTION_TYPE_LAN });
         w.u8(0); // pad1octet
         w.u32_le(self.selected_protocol);
         // The physical size of the client's screen is not measured — a browser
@@ -420,6 +458,11 @@ pub struct ConferenceCreateResponse {
     /// `SC_CORE` — for the client to compare with what it sent, as [MS-RDPBCGR]
     /// 3.2.5.3.4 has it. `PROTOCOL_RDP`, zero, when the server leaves the field off.
     pub requested_protocols: u32,
+    /// The message channel network detection travels on, for a client that asked for
+    /// it and a server that numbered one: zero means it is not to be joined.
+    pub message_channel: Option<u16>,
+    /// `SC_MULTITRANSPORT`: the UDP transports the server takes, when it says.
+    pub multitransport: Option<u32>,
 }
 
 impl ConferenceCreateResponse {
@@ -456,6 +499,8 @@ impl ConferenceCreateResponse {
         let mut r = Reader::new(WHAT, bytes);
         let mut network = None;
         let mut requested_protocols = 0;
+        let mut message_channel = None;
+        let mut multitransport = None;
 
         while !r.is_empty() {
             let block = r.u16_le()?;
@@ -468,6 +513,8 @@ impl ConferenceCreateResponse {
                 SC_CORE => requested_protocols = Self::core(contents)?,
                 SC_SECURITY => Self::security(contents)?,
                 SC_NET => network = Some(Self::network(contents)?),
+                SC_MCS_MSGCHANNEL => message_channel = Self::message_channel(contents)?,
+                SC_MULTITRANSPORT => multitransport = Some(Self::multitransport(contents)?),
                 // A block for something this client did not ask for. The server sends
                 // them unprompted — a multitransport tunnel offer, for instance — and
                 // the connection is no worse for stepping over one.
@@ -477,7 +524,7 @@ impl ConferenceCreateResponse {
 
         let (io_channel, channels) = network
             .ok_or(Malformed::Missing { what: WHAT, field: "the channel numbers of SC_NET" })?;
-        Ok(Self { io_channel, channels, requested_protocols })
+        Ok(Self { io_channel, channels, requested_protocols, message_channel, multitransport })
     }
 
     /// `SC_CORE`: the `clientRequestedProtocols` in it. The server's version and its
@@ -509,6 +556,16 @@ impl ConferenceCreateResponse {
         Ok(())
     }
 
+    /// `SC_MCS_MSGCHANNEL`: the message channel, where zero is none.
+    fn message_channel(mut r: Reader<'_>) -> Result<Option<u16>, Malformed> {
+        Ok(Some(r.u16_le()?).filter(|&id| id != 0))
+    }
+
+    /// `SC_MULTITRANSPORT`: its flags.
+    fn multitransport(mut r: Reader<'_>) -> Result<u32, Malformed> {
+        r.u32_le()
+    }
+
     /// `SC_NET`: the I/O channel, and the numbers of the channels `CS_NET` named.
     fn network(mut r: Reader<'_>) -> Result<(u16, Vec<u16>), Malformed> {
         let io_channel = r.u16_le()?;
@@ -538,6 +595,8 @@ mod tests {
             selected_protocol: 2,
             channels: &CHANNELS,
             graphics: false,
+            autodetect: false,
+            multitransport: 0,
         }
     }
 
@@ -616,6 +675,22 @@ mod tests {
             seen.push((block, length));
         }
         assert_eq!(seen, vec![(CS_CORE, 234), (CS_SECURITY, 12), (CS_NET, 20)]);
+    }
+
+    /// A claim of UDP asks for the message channel its offers travel on, and states
+    /// the transports in a block of its own.
+    #[test]
+    fn a_claim_of_udp_asks_for_the_message_channel_too() {
+        let bytes = ConferenceCreateRequest { multitransport: 0x201, ..request() }.blocks();
+        let mut r = Reader::new("a test", &bytes);
+        let mut seen = Vec::new();
+        while !r.is_empty() {
+            let block = r.u16_le().unwrap();
+            let length = usize::from(r.u16_le().unwrap());
+            let contents = r.bytes(length - BLOCK_HEADER).unwrap();
+            seen.push((block, u32::from_le_bytes(contents[..4].try_into().unwrap())));
+        }
+        assert_eq!(seen[3..], [(CS_MCS_MSGCHANNEL, 0), (CS_MULTITRANSPORT, 0x201)]);
     }
 
     /// A session asking for two monitors sends the extended block after the three
@@ -747,6 +822,8 @@ mod tests {
             io_channel: 1003,
             channels: vec![1004, 1005],
             requested_protocols: 2,
+            message_channel: None,
+            multitransport: None,
         });
     }
 

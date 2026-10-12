@@ -1,5 +1,5 @@
-// The H.264 decoders of a passed RDP pipeline: EXPERIMENTAL, behind a target's
-// `egfx_h264` key (rdpH264.ts).
+// The H.264 decoders of a passed RDP pipeline: ALPHA, behind the picker's
+// adaptive choice (rdpH264.ts).
 //
 // A host that draws video with H.264 gives every surface it draws that way a stream
 // of its own, and each stream is a chain: an access unit means "what changed since

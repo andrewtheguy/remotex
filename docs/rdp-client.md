@@ -82,9 +82,22 @@ noticed on the same keepalive schedule as every other engine's.
 
 `ConnectionType` is declared a LAN rather than detected: the socket is the hop
 between the host and a gateway near it, which is not the link a person is on, and
-neither the declaration nor the detection changes what the host draws (below). The
-client requests neither an MCS message channel nor multitransport, and it does not
-advertise or implement network-characteristics detection. This is a deliberate
+neither the declaration nor the detection alone changes what the host draws
+(below). A session that draws the pipeline itself requests neither an MCS message
+channel nor multitransport, and does not advertise network-characteristics
+detection. A session that passes its pipeline with H.264 takes both, so the host
+rate-controls its H.264 for the page's link (below); one that passes it without
+H.264 takes neither. With `Connect::autodetect` (`proto/autodetect.rs`) the
+client claims the detection in the core data, leaves `connectionType` for the
+host to detect, asks for and joins the message channel, and answers each
+measurement at the page's pace (`Paced` in `session.rs`), or with what arrived on
+its own connection when nothing waits for the page, each round trip held for the
+page's distance either way. Beside it,
+`Connect::multitransport` claims reliable UDP with Soft-Sync in `CS_MULTITRANSPORT`
+([MS-RDPBCGR section
+2.2.1.3.8](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf))
+and answers each Initiate Multitransport Request with `E_ABORT` (2.2.15.2), so
+the session stays on TCP (`proto/multitransport.rs`). This is a deliberate
 protocol boundary, not a general claim about what Windows will send. In particular,
 [MS-RDPBCGR section
 2.2.1.3.2](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
@@ -93,7 +106,8 @@ support. The tested Windows 10 and 11 hosts accept the client's smaller
 combination; an auto-detect PDU outside that observed traffic is unsupported.
 
 A Windows host does draw the graphics pipeline for a slow link, but for the one it
-finds for itself and not for the one it is told of. Measured against a Windows 11
+finds for itself and not for the one it is told of, unless the client also offers
+UDP (the last case below). Measured against a Windows 11
 host without a GPU, with the pipeline passed and one full-screen moving picture at
 1280×800, which over a LAN is about 34 frames a second at 114 KB each in RemoteFX
 Progressive, and about 32 a second at 9 KB each where H.264 is taken:
@@ -121,6 +135,117 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   LAN already; 33 and 25 are what it refines a still region to. Read at 1 Mbit/s
   it drew 12 frames a second at 10 KB, and at 500 kbit/s under 3 at 23 KB, each
   carrying more of the motion, all still at 41.
+- **H.264 for the whole desktop, only the rate changes.** With `AVC_THINCLIENT`
+  ([The pipeline, passed on](#the-pipeline-passed-on)) a Windows 11 laptop drew a
+  full-screen video at 1280×800 in AVC444v2 alone, luma views only, 32 frames a
+  second at 9.6 KB and 2.4 Mbit/s, its regions at 22, 30 and 38. Behind a page on
+  1 Mbit/s, and behind a relay reading its socket at 1 Mbit/s, it drew 13 frames a
+  second at the same 9.6 KB and the same three quantizers. Taking the detection as
+  well, answered with what arrived through the relay — 1,854 measurements over 45
+  seconds, 1,001 kbit/s in all — left the quantizers unchanged. The detector did
+  not cause a further change: with or without it, the constrained link made the
+  host cut its output from 32 to 13 frames a second and hold the stream to the
+  link. That is one of the [adaptive responses Microsoft
+  documents](https://learn.microsoft.com/en-us/azure/virtual-desktop/rdp-bandwidth);
+  a quality change, a frame-rate change, and a codec change are alternatives, not
+  one required response. Nor is the absence of a Network Characteristics Result
+  evidence of failure: [MS-RDPBCGR section
+  1.3.9](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
+  does not include that message in the continuous exchange over the main TCP
+  connection.
+- **Offered UDP and told, the quantizers move.** The same laptop, the same video,
+  whole-desktop AVC444v2 and the detection, with the client also claiming UDP and
+  turning down the one offer of it the host made, so that everything stayed on
+  TCP. The host's detection changed at once: round-trip requests, and about a
+  hundred Network Characteristics Results in 45 seconds, the first saying 512
+  kbit/s and 400 ms before any measurement, which a client that did not claim UDP
+  was never sent. Its encoder changed with it. Over the LAN every region went out
+  at 22, in 26 KB frames, 30 a second at 6.3 Mbit/s, where a control run
+  beside it without the claim was 22, 30 and 38 in 9.6 KB frames at 2.4 Mbit/s.
+  Behind the relay at 1 Mbit/s it drew 21 frames a second at 5.6 KB, 76% of
+  its regions at 38, where without the claim it drew 12.5 at 9.5 KB with 52% at
+  38: a coarser picture at a usable rate.
+  The claim without the detection changed nothing: 22, 30 and 38 at 2.4 Mbit/s
+  over the LAN, and no results. So the host rate-controls its H.264 for a client
+  that both takes the detection and offers UDP, without the UDP being used. This
+  is one pathway, not shown to be the only one or the one Microsoft's clients
+  take. Microsoft's iPhone client, with UDP off, softens over TCP by means not yet
+  read ([Roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac)).
+- **Offered UDP behind a slow page, the wrong link is reported.** Same again, with
+  the host's link fast and a page on 1 Mbit/s behind the gateway instead, which
+  is the case of a passed pipeline. Answered from what reached this client's socket, the
+  host was told 8 to 20 Mbit/s: each measurement is a short burst that lands in
+  the receive buffer before the page's pace holds the socket back. The host
+  answered with the LAN's quality, regions at 22 and 30 in 33 KB frames, and so
+  only 3.7 frames a second, a second or two behind the desktop. Without the claim,
+  the same page got 13 frames a second at 9.6 KB. For a passed session the
+  detection has to report the page's link, not the socket's.
+- **Answered at the page's pace, the host follows the page.** So a session that
+  takes the detection answers at the caller's pace (`Paced` in `session.rs`). The
+  pace is read from how fast the caller composes while it is behind, by the
+  frame-composed signal a page already sends:
+  - a bandwidth measurement says it took no less than the caller would take
+    over its bytes;
+  - a round trip is answered once the frames waiting for the caller would have
+    gone through at that pace, and the caller's distance after them.
+
+  The distance is what the frame-composed signal does not carry: the gateway
+  says it with `Input::caller_distance`, from the smallest recent round trip of
+  the browser socket's pings, and the session holds every round trip for it,
+  with frames waiting or none. It also says when the caller is behind: while a
+  frame still waiting for it was handed over at least its distance ago. Answered at once on an idle link, a round trip
+  timed only the hop to the host, and a page far from the gateway read as next to
+  the host. A bandwidth measurement for a caller with nothing waiting says what
+  arrived here, and everything stays on TCP. Nothing waits on the host. A first
+  version, which held each reply until the caller had composed the frames before it, stalled a
+  host drawing H.264 by region: the host held a frame's end for the reply, and
+  the reply waited for that frame.
+  - **1 Mbit/s page:** the host was told about 1.2 Mbit/s. It drew 17.7 frames a
+    second at 6.4 KB, 66% of regions at 38, 0.1 to 0.25 s behind the desktop.
+  - **4 Mbit/s page:** it was told 4.3 to 5 Mbit/s and drew 20 frames a second
+    at 20.6 KB, at 22 and 30 with none at 38.
+  - **1 Mbit/s page, paced, UDP not offered:** no Network Characteristics
+    Results, and 13.1 frames a second at 9.5 KB as before.
+  - **On a second host, `windows-ent-sandbox`, with a full-screen video and a
+    1 Mbit/s page.** It was told 1.0 to 1.4 Mbit/s. With whole-desktop H.264 it
+    drew 17.5 frames a second at 6.4 KB, 70% of regions at 38, about 0.2 s
+    behind the desktop. With the H.264 by region a session may choose, it drew
+    4.4 frames a second at 25.7 KB, 0.56 s behind; without the change, 5.0 at
+    24.7 KB, 1.6 s behind. By region the desktop is mostly RemoteFX Progressive
+    and ClearCodec, which this does not rate-control: 81% of Progressive first
+    passes were at quality 25 either way.
+  - **On `windows-ent-sandbox`, a page 150 ms away and unlimited, with
+    whole-desktop H.264** (`REMOTEX_UAT_ACK_DELAY_MS=150` in the link probe).
+    With round trips answered at once the host concluded a base round trip of
+    0 to 2 ms and drew 10.5 frames a second at 6.8 KB. Held for the page's
+    distance, it concluded 151 ms and drew 20.2 frames a second at 6.3 KB, a
+    median 14 to 71 ms behind the desktop. But it was told a median of 0.9 and
+    then 1.7 Mbit/s of bandwidth, not the page's unlimited link: the pace was
+    read while any frame waited, and a page that far away keeps frames waiting
+    for its distance on any link. So the page counts as behind only while a
+    frame still waiting for it was handed over at least its distance ago. The
+    host was then told a median of 8.2 Mbit/s and drew 24.1 frames a second at
+    27.9 KB, a median 14 ms behind. Behind a 1 Mbit/s page 150 ms away it was
+    told 1.3 Mbit/s and drew 14 frames a second at 7 KB. The frames in flight
+    still counted against `PASSED_AHEAD` and `PASSED_HELD`, which held the host
+    to about three frames in each 150 ms; counted only once past the distance
+    ([The pipeline, passed on](#the-pipeline-passed-on)), the unlimited page got
+    30 frames a second at 28.6 KB, every H.264 region at 22, with the host told
+    a median of 83 Mbit/s, and the 1 Mbit/s page 16.5 a second at 6.3 KB.
+  - **The same host over a LAN, by region.** Without the change, its H.264
+    regions were at 25 and 33 and its Progressive first passes mostly at quality
+    50, at 7 Mbit/s. With it, every H.264 region was at 25 and every first pass
+    at 255, at 12 Mbit/s. So the coarse picture by region on a fast link is the
+    host's fixed-quality mode, which the detection and the claim of UDP lift.
+
+The detector's and the link probe's earlier defects are fixed: the
+connect-time count includes each payload's header, malformed requests are
+refused, a continuous measurement counts inside the framing, `timeDelta` is at
+least a millisecond, and a zero frame timestamp gives no lag. The measurements
+above were repeated with the fixes. A session started with the picker's Adaptive
+takes the detector and the claim of UDP, and answers at the page's pace; a
+Lossless session takes neither, and has no H.264 for the host to rate-control
+([Roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac)).
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
 backing up, and the regions say what it does then ([MS-RDPEGFX section
@@ -129,7 +254,7 @@ the first pass of each tile goes out at the progressive stage of quality 25 wher
 over a LAN it is the stage of quality 50, under the same quantization tables. Ten
 seconds after the socket is read freely again the host is back at 50. Through a
 2 MiB receive buffer the same relay showed the host nothing, and its frames stayed
-full size. A session that passes its pipeline is built on this ([The pipeline,
+full size. Every session with the pipeline on is built on this ([The pipeline,
 passed on](#the-pipeline-passed-on)).
 
 ## The two threads
@@ -151,7 +276,7 @@ a session that has gone out of scope has really stopped.
 ## Static virtual channels
 
 Each is asked for by what the session needs: `drdynvc` for a session started with
-resize, `egfx = true`, `camera = true`, or `microphone = true`, which is the transport Display Control,
+resize, the pipeline on (`egfx` left on), `camera = true`, or `microphone = true`, which is the transport Display Control,
 the graphics pipeline, the camera's two channels, and the microphone's channel
 ride on; `cliprdr` always, and `rdpsnd` with `rdpdr` for a session started with sound — see
 [Sound](#sound-ms-rdpea).
@@ -190,7 +315,9 @@ far end's clipboard then costs a report of its size instead of the session.
 
 ## Graphics
 
-Two paths, chosen by the target's `egfx` key, which defaults to on.
+Two paths, chosen by the target's `egfx` key, `true` by default: the graphics
+pipeline, passed to the caller in every session, and bitmap updates, decoded
+here, with `egfx = false`.
 
 ### The graphics pipeline (MS-RDPEGFX)
 
@@ -198,16 +325,14 @@ The client sets `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` in the GCC core data, and
 Windows host answers by opening `Microsoft::Windows::RDS::Graphics` over `drdynvc`
 — the same dynamic channel transport Display Control rides, so `drdynvc` is asked
 for when either key is on. The client accepts the channel and at once advertises
-two capability sets (`proto/gfx.rs::caps_advertise`): version 8 with the small
-cache, and version 10 with the small cache and `AVC_DISABLED`, so the host never
-sends H.264. A host that may send it hands the parts of the desktop that move like
-video to it, and a lossy video codec loses detail before the gateway ever encodes
-the picture; the client takes the desktop as the pipeline's other codecs carry it
-instead, and has no H.264 decoder. `THINCLIENT` is deliberately not set. The host
+its capability sets (`proto/gfx.rs::caps_advertise`). A session started
+Lossless advertises two: version 8 with the small cache, and version 10 with the
+small cache and `AVC_DISABLED`, so the host never sends H.264 and draws with the
+pipeline's lossless codecs alone. `THINCLIENT` is deliberately not set. The host
 confirms one set and then draws.
 
-One session advertises otherwise: a pipeline that is passed on with
-`Connect::h264`, for a caller that decodes H.264 itself
+A session started Adaptive advertises otherwise, with `Connect::h264`, for a
+caller that decodes H.264 itself
 ([The pipeline, passed on](#the-pipeline-passed-on)).
 
 Every PDU the host sends on the channel is wrapped in RDP 8 bulk compression
@@ -222,15 +347,17 @@ subsystem when it finds a wrapper there instead.
 
 The host does not paint the desktop; it paints *surfaces* it creates and sizes,
 maps them onto the output at an origin, and brackets drawing in StartFrame and
-EndFrame. `gfx.rs` keeps each surface's pixels and the rectangles drawn
-into since the last frame, and at the EndFrame copies those rectangles of every
-mapped surface into the framebuffer — the shape of FreeRDP's `gdi/gfx.c`. Each
-EndFrame is acknowledged (`queueDepth` unavailable); on the probed Windows host,
-withholding acknowledgements first throttled and then stopped drawing. After its
-paint operations are applied, the EndFrame reaches the engine as `Event::Frame`,
-the explicit boundary that replaces the engine's timer-based flush. A monitor
-layout is answered by ResetGraphics, which resizes the framebuffer and surfaces
-as `Event::Resize` without rebuilding the channels.
+EndFrame. The client composes none of it: the commands are passed to the caller
+([The pipeline, passed on](#the-pipeline-passed-on)), and composed by the
+graphics crate's compositor, which the page runs. There `gfx.rs` keeps each
+surface's pixels and the rectangles drawn into since the last frame, and at the
+EndFrame copies those rectangles of every mapped surface into the framebuffer —
+the shape of FreeRDP's `gdi/gfx.c`. Each EndFrame is acknowledged (`queueDepth`
+unavailable); on the probed Windows host, withholding acknowledgements first
+throttled and then stopped drawing. The EndFrame reaches the engine as
+`Event::Frame`, the explicit boundary that replaces the engine's timer-based
+flush. A monitor layout is answered by ResetGraphics, which the session
+announces as `Event::Resize` without rebuilding the channels.
 
 The support boundary is the set below, not every command or codec a current
 Windows release could send. `tests/rdp_client_probe.rs` prints the codec and
@@ -266,8 +393,8 @@ codecs and commands actually received during that session.
 
 ### The pipeline, passed on
 
-`Connect::pass_graphics` — a session started with the passthrough — has the session hand the
-pipeline's commands to its caller instead of composing them. The channel is
+`Connect::egfx` offers the pipeline and has the session hand its commands to its
+caller, which composes them: every session with the pipeline on. The channel is
 still this client's: the capability exchange and the bulk compression are as
 above, since the history is the connection's, and so is writing each frame's
 acknowledgement, which the host stops drawing without. `Graphics::passing` reads
@@ -296,6 +423,14 @@ unacknowledged, and the host's count fills with those; at that many, one is
 acknowledged for each composed; below it, two; and once nothing waits,
 everything is. A caller that keeps up is acknowledged at once, and no
 acknowledgement outlasts the frames in front of it.
+
+A frame waits only once it was handed over at least the caller's distance ago
+(`Input::caller_distance`, the browser socket's smallest recent ping). Until
+then it is on its way: a caller 150 ms away has every frame of the last 150 ms
+in flight on any link. Counted as waiting, those held the host to three frames
+in each 150 ms and left its socket unread, and a page on an unlimited link that
+far away got 24 frames a second where a near one got 30. Counted from its
+distance, it got 30. The socket below is left by the same count.
 
 Late acknowledgements slow the host's frames and leave each one full size: a host
 sends smaller frames only to a client its own socket backs up behind ([Opening a
@@ -337,14 +472,17 @@ buffer only while the host has a graphics pipeline open (`PassedSocket`): a host
 that draws with bitmap updates instead, or has closed the pipeline, has no frames
 to be held for, and keeps the buffer the socket came with.
 
-With `Connect::h264` the session tells the host it takes H.264, which nothing
-here decodes: the advertise is every set from version 8 to 10.4, and 10.7, none
-with `AVC_DISABLED`. 10.5 and 10.6 are left out and 10.7 carries
+With `Connect::h264` set to `H264::ByRegion` or `H264::WholeDesktop`, a session
+started with the picker's *H.264 region* or *H.264 full screen*, the session
+tells the host it takes H.264, which nothing here decodes: the advertise is
+every set from version 8 to 10.4, and 10.7, none with `AVC_DISABLED`. 10.5 and 10.6 are left out and 10.7 carries
 `SCALEDMAP_DISABLE`, since from 10.5 a host may map a surface through the scaled
 mappings, which this client ignores, and only 10.7 has a flag to say so. Version
 10.1's capability data is sixteen reserved bytes where every other set's is four
 bytes of flags, in the advertise and in a confirmation of it. `AVC_THINCLIENT`,
-which asks for the whole desktop in AVC444, is not set. Measured against a
+which asks for the whole desktop in AVC444 (MS-RDPEGFX 2.2.3.6), is set only by
+`H264::WholeDesktop`, on every set from 10.3; `tests/rdp_link_probe.rs` asks
+for it with `REMOTEX_UAT_H264=whole`. Measured against a
 Windows 11 host without a GPU: it confirms 10.7 and goes on drawing with
 ClearCodec, Progressive and the caches, and draws what moves like video with
 AVC420 in the same frames — a Main-profile stream for the surface, about fifteen
@@ -355,7 +493,12 @@ with AVC444v2 and nothing else, every unit a luma view alone. That is not a fine
 picture of what moves: its regions stated a quantization parameter of 38 while
 moving and 30 and then 22 once still, three below the 41, 33 and 25 of the
 AVC420 it draws otherwise, in frames of the same 9 KB, and the text of the
-desktop goes through H.264 with them.
+desktop goes through H.264 with them. Over a full-screen video it is the cheaper
+of the two by far: 2.4 Mbit/s at 32 frames a second, where by region the same
+video took 7.2 Mbit/s, 5.7 of it RemoteFX Progressive and 0.6 AVC420. On a slow
+link it gives up frames and keeps its quantizers, unless the client takes the
+network detection and offers UDP, as an Adaptive session does
+([The connection sequence](#the-connection-sequence)).
 
 The access units ride in the commands handed on, and the caller composes a run
 that has any in three steps (`avc.rs`): `avc::scan` finds the units and the
@@ -368,19 +511,23 @@ passed against a host playing a video.
 
 `Compositor` (`compositor.rs`) is the other half: the same compositor, fed the
 commands that were passed. The page's WebAssembly module is a binding around it
-(`frontend/wasm/egfx`), and `tests/rdp_client_probe.rs` composes a real host's
-passed pipeline with it. It is right only for a pipeline it has followed from
+(`frontend/wasm/egfx`), and `tests/rdp_client_probe.rs` composes what a real
+host's session passes with it, test-side (`Page`). It is right only for a
+pipeline it has followed from
 its first command, which is why `Event::FramesMarked` is where a caller starts
 one.
 
 ### Bitmap updates
 
 With `egfx = false` the pipeline is not advertised, so the server draws with bitmap
-updates, decoded by the planar bitmap codec (`proto/planar.rs`). The client
-announces no drawing orders either, so the path is bitmaps throughout. The desktop
-keeps its opening size: a resize is the pipeline's graphics reset, Display Control is
-not taken without it, and a target with `egfx = false` offers no resize at the
-picker. Every server that is not Windows takes this path whatever the key.
+updates, decoded by the planar bitmap codec (`proto/planar.rs`) into the
+client's framebuffer, the only picture it decodes, which the gateway encodes as
+VP9. The client announces no drawing orders either, so the path is bitmaps
+throughout. The desktop keeps its opening size: a resize is the pipeline's
+graphics reset, Display Control is not taken without it, and a target with
+`egfx = false` offers no resize at the picker. Every server that is not Windows
+takes this path whatever the key, as do the bitmap updates a Windows host sends
+before it confirms the pipeline.
 
 That is a deliberate narrowing, not an oversight. MS-RDPEDISP 1.3 has a server
 without the pipeline answer a monitor layout with a Deactivation-Reactivation
@@ -403,7 +550,7 @@ so `egfx = false` against it ends with *a server Bitmap capability set carries a
 colour depth 0x10*. The same host connects and paints under the pipeline, which
 negotiates its own pixel formats and ignores that limit. A Windows workstation's
 listener allows 32 bits and takes either path. Such a server is reached with
-`egfx = true`, or with its "Limit maximum color depth" setting raised to 32 bits.
+the pipeline on, or with its "Limit maximum color depth" setting raised to 32 bits.
 
 Bitmap updates carry no frame boundary, so the engine flushes damage on a guess:
 the 16 ms coalescer (`DAMAGE_INTERVAL` in `src/rdp.rs`) reconstructs boundaries by
@@ -503,14 +650,14 @@ another or stacked, in whatever order it lists them. It carries the output as
 one monitor when the definitions do not make it up: none or one, an empty one,
 two that overlap, or a union that is not the output's size. At connect, where
 there are no definitions, the caller reads the equal monitors and the placement
-it asked for off the union's size. The client composes and reports the span as
-it does any desktop. Which part of it a browser sees, and the pointer offset
-into it, is the engine's (`View` in `src/rdp.rs`), and so is *All Displays*, which two
-monitors start on and which shows the second column on a socket of its own (`Tab`): nothing of it reaches
-the RDP client, which composes the one span either way. In a session that passes
-the pipeline the span is composed in the browser instead, which is told the
-column to show (`ServerMsg::GraphicsView`) and paints the second column's tab
-from the same picture
+it asked for off the union's size. The client reports the span as it does any
+desktop. Which part of it a browser sees, and the pointer offset into it, is
+the engine's (`View` in `src/rdp.rs`), and so is *All Displays*, which two
+monitors start on and which shows the second column on a socket of its own
+(`Tab`): nothing of it reaches the RDP client, which handles the one span
+either way. Under the pipeline the span is composed in the browser, which is
+told the column to show (`ServerMsg::GraphicsView`) and paints the second
+column's tab from the same picture
 ([Two displays, one picture](architecture.md#rdps-graphics-pipeline-passed-through)).
 
 Measured 2026-10-03 against a Windows 11 host, through `tests/ws_probe.py`: a

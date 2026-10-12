@@ -202,13 +202,13 @@ pub struct RenderPlan {
     /// above reach such a picture.
     pub apple_media: bool,
     /// An RDP host's graphics pipeline passes as it came, for the browser to
-    /// compose, rather than composed here and encoded as VP9:
-    /// [`Passthrough::RdpGraphics`], chosen at the picker. The fields above reach
-    /// only the picture of a host that answers the offer of the pipeline with
-    /// bitmap updates, which is encoded here as always.
+    /// compose: [`Passthrough::RdpGraphics`], in every session of a target with the
+    /// pipeline on, which is never composed here. The fields above reach only the
+    /// picture of a host that answers the offer of the pipeline with bitmap
+    /// updates, which is encoded here as always.
     pub rdp_graphics: bool,
     /// The host may draw with H.264 on that passed pipeline, for the browser to
-    /// decode: [`TargetConfig::egfx_h264`], in a session that passes the pipeline
+    /// decode: [`Pipeline::h264`], in a session that passes the pipeline
     /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
     /// [`Self::rdp_graphics`].
     pub rdp_h264: bool,
@@ -221,7 +221,8 @@ pub struct RenderPlan {
 /// A remote's own stream, passed to the browser as it came instead of decoded
 /// here and encoded as VP9. Which one a target has to pass is its type's to say
 /// ([`TargetConfig::offers`]); whether a session passes it is chosen at the picker
-/// ([`Choices::passthrough`]).
+/// ([`Choices::passthrough`]) where [`Self::chosen`] says it is, and otherwise it
+/// passes in every session.
 ///
 /// For a LAN either way: the stream is the remote's own, with no quality walk
 /// behind it, so [`TargetConfig::video_quality`] and the adaptive keys do not
@@ -230,7 +231,9 @@ pub struct RenderPlan {
 #[serde(rename_all = "kebab-case")]
 pub enum Passthrough {
     /// An RDP host's graphics pipeline, its commands out of their bulk compression,
-    /// for the page to compose. Offered by an `rdp` target with its pipeline on.
+    /// for the page to compose. Passed in every session of an `rdp` target with its
+    /// pipeline on: the gateway composes no pipeline, so a browser that cannot is
+    /// turned away rather than sent VP9 ([`TargetConfig::beyond`]).
     ///
     /// The pipeline is drawn against what the client already holds — its surfaces,
     /// its cache slots, each codec's own caches — so a browser that comes back has
@@ -261,6 +264,16 @@ impl Passthrough {
         }
     }
 
+    /// Whether a session passes it only where it was chosen at the picker. The
+    /// Mac's HEVC is a choice beside the VP9 encoded here; an RDP host's pipeline
+    /// is not, as the gateway composes none.
+    pub fn chosen(self) -> bool {
+        match self {
+            Self::RdpGraphics => false,
+            Self::AppleMedia => true,
+        }
+    }
+
     /// What is passed, for a card and for a refusal.
     pub fn stream(self) -> &'static str {
         match self {
@@ -285,6 +298,9 @@ pub struct Offers {
     /// ([`Placement`]): on a target that asks for two of a host that is told
     /// where each is.
     pub placement: bool,
+    /// Whether how the host draws the graphics pipeline is a choice
+    /// ([`Pipeline`]): on an RDP target with the pipeline on.
+    pub pipeline: bool,
 }
 
 /// What whoever started a session chose under its target at the picker, carried by
@@ -308,12 +324,19 @@ pub struct Choices {
     /// subscribes, which is what its Mute and Unmute change.
     #[serde(default)]
     pub audio: Sound,
-    /// Pass the target's [`Passthrough`].
+    /// Pass the target's [`Passthrough`], where passing it is a choice
+    /// ([`Passthrough::chosen`]); one that passes in every session is passed
+    /// whatever this says.
     #[serde(default)]
     pub passthrough: bool,
     /// Where the second virtual display sits.
     #[serde(default)]
     pub placement: Placement,
+    /// How the host draws the graphics pipeline. Adaptive H.264 reaches only a
+    /// browser that said it decodes it ([`Decoders::rdp_h264`]): a session of any
+    /// other is drawn lossless.
+    #[serde(default)]
+    pub pipeline: Pipeline,
     /// Ask a High Performance Mac whose picture is passed for one tile, each
     /// picture the whole display, and not the four strips such a session is
     /// offered ([`crate::vnc_apple_media::Receive::Pass`]). No picker names it:
@@ -369,6 +392,41 @@ impl Placement {
             Self::Right | Self::Left => (first.0.saturating_add(second.0), first.1.max(second.1)),
             Self::Top | Self::Bottom => (first.0.max(second.0), first.1.saturating_add(second.1)),
         }
+    }
+}
+
+/// How the host draws a session's graphics pipeline (MS-RDPEGFX): [`Choices::pipeline`],
+/// on an RDP target with the pipeline on ([`Offers::pipeline`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Pipeline {
+    /// With its lossless codecs alone.
+    #[default]
+    Lossless,
+    /// ALPHA. The whole desktop in H.264 (`AVC_THINCLIENT`, MS-RDPEGFX
+    /// 2.2.3.6), which a Windows host answers in AVC444v2, rate-controlled by the
+    /// host to the page's link.
+    ///
+    /// The session takes part in the host's network detection and claims UDP,
+    /// turned down when the host takes it up, and answers the detection at the
+    /// page's pace. For such a client the host rate-controls its H.264 to the
+    /// page's link: behind a 1 Mbit/s page it drew 17.5 frames a second at 6.4 KB,
+    /// where without the detection it held 13 at 9.6 KB, and over a LAN it draws at
+    /// its finest quality.
+    AdaptiveDesktop,
+    /// ALPHA. As [`Self::AdaptiveDesktop`], with H.264 only for the parts of
+    /// the desktop that move like video, a player or a scrolling page, and the
+    /// rest lossless in the same frames. Text stays lossless, but most of what the
+    /// host draws is then RemoteFX Progressive, which it does not rate-control:
+    /// behind a 1 Mbit/s page it drew 4.4 frames a second at 25.7 KB, 0.56 s
+    /// behind, where the whole desktop drew 17.5 at 6.4 KB.
+    AdaptiveRegion,
+}
+
+impl Pipeline {
+    /// Whether the host may draw with H.264.
+    pub fn h264(self) -> bool {
+        matches!(self, Self::AdaptiveDesktop | Self::AdaptiveRegion)
     }
 }
 
@@ -444,8 +502,9 @@ pub struct NotOffered {
 /// What the attached browser said it can take, from its session socket
 /// ([`crate::ws`]): the questions the page asks once at load and states on every
 /// session socket it opens. The first two say which passthrough this browser can
-/// be served, which is what the picker greys a choice by and what ends a session
-/// whose owner comes back unable to take its own ([`TargetConfig::beyond`]). Its
+/// be served, which is what the picker greys a choice by, what keeps it from
+/// starting a target that passes in every session, and what ends a session whose
+/// owner comes back unable to take its own ([`TargetConfig::beyond`]). Its
 /// VP9 decoder is no question: every browser is sent 4:4:4, and a page whose own
 /// decoder refuses profile 1 decodes it in WebAssembly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -460,7 +519,7 @@ pub struct Decoders {
     /// so a cross-origin isolated page, and a WebGL 2 canvas to present on.
     pub rdp_graphics: bool,
     /// Whether it decodes the H.264 an RDP host may draw with on that pipeline
-    /// ([`TargetConfig::egfx_h264`]): a `VideoDecoder` that takes it and hands its
+    /// ([`Pipeline::h264`]): a `VideoDecoder` that takes it and hands its
     /// pictures into the compositor's memory. Unlike the two above it turns no
     /// session away: a browser that says no is passed a pipeline without H.264.
     pub rdp_h264: bool,
@@ -624,44 +683,27 @@ pub struct TargetConfig {
     /// media stream cannot reach it.
     #[serde(default)]
     pub virtual_display: bool,
-    /// RDP's graphics pipeline (MS-RDPEGFX), on by default. On, a Windows host
-    /// draws the desktop through the pipeline's surfaces and marks every frame,
-    /// and a resize is a graphics reset. Off, the host draws with bitmap updates
-    /// and the desktop keeps its opening size — the picker then offers neither
-    /// resize nor the pipeline's passthrough; that is the escape hatch for a host
-    /// whose pipeline this client's decoders cannot yet paint, and the path every
-    /// non-Windows server takes regardless.
+    /// Whether to offer RDP's graphics pipeline (MS-RDPEGFX); on unless set to
+    /// `false`.
+    ///
+    /// On, the host draws the desktop through the pipeline's surfaces and marks
+    /// every frame, and a resize is a graphics reset. The pipeline is passed to the
+    /// browser in every session, for the page to compose
+    /// ([`Passthrough::RdpGraphics`]): the gateway composes none, and a browser
+    /// that cannot is turned away. How the host draws it, lossless or adaptive
+    /// H.264, is chosen at the picker ([`Choices::pipeline`]).
+    ///
+    /// `false` is the bitmap path: the host draws with bitmap updates, decoded here
+    /// and encoded as VP9, and the desktop keeps its opening size, so the picker
+    /// offers no resize. That is the target for a browser that cannot compose the
+    /// pipeline, the escape hatch for a host whose pipeline the page's decoders
+    /// cannot yet paint, and the path every non-Windows server takes regardless.
     ///
     /// `Option` rather than a bare default so that setting it on a VNC target,
-    /// which has no graphics pipeline to switch, is refused at parse time
-    /// instead of accepted and left inert; `None` reads as on
-    /// ([`TargetConfig::egfx`]).
+    /// which has no graphics pipeline, is refused at parse time instead of
+    /// accepted and left inert ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
-    /// EXPERIMENTAL. Let the host draw with H.264 on a pipeline that is passed
-    /// ([`Passthrough::RdpGraphics`]), for the browser to decode. Refused on a
-    /// target that is not RDP and beside `egfx = false`, which have no pipeline to
-    /// carry it.
-    ///
-    /// A Windows host told its client takes H.264 hands the parts of the desktop
-    /// that move like video — a player, a scrolling page — to it, and goes on
-    /// drawing the rest with the lossless codecs in the same frames. That is the
-    /// host's own trade of detail for bitrate on those parts, which is why it is a
-    /// key and off unless set: without it every passed pipeline is lossless.
-    ///
-    /// It reaches only a session started with the passthrough, and only a browser
-    /// that said it decodes H.264 ([`Decoders::rdp_h264`]); every other session of
-    /// the target is told what it always was, that the client takes none. The
-    /// gateway decodes nothing: the access units ride in the commands it passes,
-    /// and the page decodes them with the browser's `VideoDecoder` and paints them
-    /// through its compositor ([`remotex_rdp_graphics::avc`]).
-    ///
-    /// A key rather than a choice at the picker while it is experimental. Checked
-    /// against one Windows 11 host without a GPU, whose stream is Main profile and
-    /// AVC420 by region; AVC444, which a host policy may select, is implemented
-    /// from the specification and has not been seen from a host.
-    #[serde(default)]
-    pub egfx_h264: bool,
     /// ALPHA. How many virtual displays the remote is asked to lay out for the
     /// session, side by side at the session's size: `virtual_displays = 2`.
     /// One, the default, is the single desktop every target has always opened;
@@ -859,7 +901,7 @@ impl TargetConfig {
         !self.apple() || self.has_virtual_display()
     }
 
-    /// RDP's graphics pipeline switch, on unless the operator turned it off.
+    /// Whether RDP's graphics pipeline is on: unless the operator turned it off.
     pub fn egfx(&self) -> bool {
         self.egfx.unwrap_or(true)
     }
@@ -881,7 +923,7 @@ impl TargetConfig {
     /// `decoders` is what the attached browser said it can take, carried on the
     /// session socket and held with its attachment
     /// ([`crate::session::SessionManager::attach`]): here, whether it decodes the
-    /// H.264 a passed pipeline may carry. `choices` is what the session was started
+    /// H.264 the pipeline may carry. `choices` is what the session was started
     /// with, whose passthrough is this target's own ([`Self::passthrough`]).
     pub fn render_plan(&self, choices: Choices, decoders: Decoders) -> RenderPlan {
         let quality = self.video_quality();
@@ -889,7 +931,7 @@ impl TargetConfig {
         let passthrough = self.passthrough(choices);
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
-        let rdp_h264 = rdp_graphics && self.egfx_h264 && decoders.rdp_h264;
+        let rdp_h264 = rdp_graphics && choices.pipeline.h264() && decoders.rdp_h264;
         RenderPlan { quality, adaptive, apple_media, rdp_graphics, rdp_h264, native_vp9: self.experimental_native_vp9 }
     }
 
@@ -916,20 +958,21 @@ impl TargetConfig {
                 audio: true,
                 passthrough: self.egfx().then_some(Passthrough::RdpGraphics),
                 placement: self.virtual_displays > 1,
+                pipeline: self.egfx(),
             },
             // Read as any VNC server, which carries no sound, and whose answer
             // to a size is not known until it is dialled.
             (Protocol::Vnc, None) => {
-                Offers { resize: false, audio: false, passthrough: None, placement: false }
+                Offers { resize: false, audio: false, passthrough: None, placement: false, pipeline: false }
             }
             // Its VP9 is the subtype's picture and not a choice.
             (Protocol::Vnc, Some(Subtype::Wlshare)) => {
-                Offers { resize: true, audio: true, passthrough: None, placement: false }
+                Offers { resize: true, audio: true, passthrough: None, placement: false, pipeline: false }
             }
             // Standard mode shares the Mac's physical displays, whose resolution
             // this gateway does not change, and never touches its sound.
             (Protocol::Vnc, Some(Subtype::Ard)) => {
-                Offers { resize: self.virtual_display, audio: false, passthrough: None, placement: false }
+                Offers { resize: self.virtual_display, audio: false, passthrough: None, placement: false, pipeline: false }
             }
             // The sound comes with the picture, so it is not a choice, and the
             // Mac places a second virtual display itself.
@@ -938,6 +981,7 @@ impl TargetConfig {
                 audio: false,
                 passthrough: Some(Passthrough::AppleMedia),
                 placement: false,
+                pipeline: false,
             },
         }
     }
@@ -960,6 +1004,7 @@ impl TargetConfig {
                 "a place for the second display",
                 choices.placement != Placement::default() && !offers.placement,
             ),
+            ("adaptive H.264", choices.pipeline != Pipeline::Lossless && !offers.pipeline),
         ];
         match refused.into_iter().find(|(_, refused)| *refused) {
             Some((choice, _)) => Err(NotOffered { target: self.name.clone(), choice }),
@@ -967,9 +1012,10 @@ impl TargetConfig {
         }
     }
 
-    /// The stream a session started with `choices` passes, if any.
+    /// The stream a session started with `choices` passes, if any: one that is
+    /// a choice where it was chosen, and one that is not in every session.
     pub fn passthrough(&self, choices: Choices) -> Option<Passthrough> {
-        self.offers().passthrough.filter(|_| choices.passthrough)
+        self.offers().passthrough.filter(|passthrough| choices.passthrough || !passthrough.chosen())
     }
 
     /// The passthrough a session started with `choices` runs on that `decoders`'
@@ -988,10 +1034,12 @@ impl TargetConfig {
     /// The render dial for a reader with no browser in front of it — the TUI's
     /// target card, which describes a config file rather than a session.
     ///
-    /// A passthrough is a session's choice and not the file's, so the card is the
-    /// VP9 one every target has.
+    /// A passthrough that is a choice is a session's and not the file's, so such a
+    /// target's card is the VP9 one. An RDP target with its pipeline on passes it
+    /// in every session, so its card says so; whether with H.264 is a session's
+    /// choice, so the card is the lossless one.
     pub fn render_summary(&self) -> String {
-        let decoders = Decoders { apple_media: false, rdp_graphics: false, rdp_h264: false };
+        let decoders = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false };
         self.render_plan(Choices::default(), decoders).describe()
     }
 
@@ -1700,14 +1748,6 @@ impl ConfigFile {
                  to switch. Remove the key.",
                 target.name,
                 target.protocol.name()
-            );
-            // H.264 rides the pipeline, so it needs one: an RDP target's, left on.
-            anyhow::ensure!(
-                !target.egfx_h264 || (target.protocol == Protocol::Rdp && target.egfx()),
-                "target {:?} sets egfx_h264, which only an rdp target with its graphics pipeline \
-                 on can take: H.264 is drawn on that pipeline. Remove the key{}.",
-                target.name,
-                if target.protocol == Protocol::Rdp { ", or egfx = false" } else { "" }
             );
             // A count of virtual displays is a count the engine asks the remote
             // for, and two remotes create them: a Windows host and a Mac in High
@@ -3306,7 +3346,7 @@ mod tests {
         // Standard mode exposes physical displays, which this gateway never resizes,
         // and never touches the Mac's sound: the picker has nothing to offer there.
         let standard = &ard("username = \"andrew\"\npassword = \"h\"").unwrap().targets[0];
-        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: None, placement: false });
+        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: None, placement: false, pipeline: false });
 
         // And it is a VNC subtype only.
         let err = ConfigFile::parse(&format!(
@@ -3352,7 +3392,7 @@ mod tests {
         assert!(target.has_virtual_display());
         assert_eq!(
             target.offers(),
-            Offers { resize: true, audio: false, passthrough: None, placement: false },
+            Offers { resize: true, audio: false, passthrough: None, placement: false, pipeline: false },
             "a display to resize, and no sound on Standard's virtual display either"
         );
         assert!(!target.media_stream());
@@ -3950,57 +3990,34 @@ vnc_password = \"x\"")).unwrap();
             assert!(rendered.contains("rdp"), "the protocol that has it is named: {rendered}");
         }
 
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            username = "u"
-            password = "p"
-            host = "10.0.0.5"
-            egfx = false
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(!config.targets[0].egfx(), "the bitmap path is one key away");
-    }
-
-    /// H.264 is drawn on the graphics pipeline, so the key is refused where there
-    /// is none: on a VNC target, and on an RDP target with the pipeline off.
-    #[test]
-    fn egfx_h264_needs_a_pipeline_to_ride() {
-        let parse = |target: &str| {
+        let parse = |value: &str| {
             ConfigFile::parse(&format!(
                 r#"
                 [server]
                 {}
 
                 [[targets]]
-                name = "nope"
+                name = "win"
+                protocol = "rdp"
+                username = "u"
+                password = "p"
                 host = "10.0.0.5"
-                {target}
-                egfx_h264 = true
+                egfx = {value}
                 "#,
                 site_passwd_line()
             ))
         };
-        let vnc = format!("{:#}", parse("protocol = \"vnc\"").unwrap_err());
-        assert!(vnc.contains("egfx_h264") && vnc.contains("rdp"), "{vnc}");
-        let rdp = "protocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"";
-        let bitmap = format!("{:#}", parse(&format!("{rdp}\negfx = false")).unwrap_err());
-        assert!(bitmap.contains("egfx_h264") && bitmap.contains("egfx = false"), "{bitmap}");
-        assert!(parse(rdp).unwrap().targets[0].egfx_h264);
+        assert!(!parse("false").unwrap().resolve().unwrap().targets[0].egfx(), "the bitmap path is one key away");
+        assert!(parse("true").unwrap().resolve().unwrap().targets[0].egfx());
+        // How the host draws it is the session's choice, not a value of the key.
+        for value in ["\"lossless\"", "\"adaptive_h264_desktop\"", "\"disabled\""] {
+            assert!(parse(value).is_err(), "{value} is not a switch");
+        }
     }
 
-    /// The pipeline is passed in a session started with the passthrough, to a page
-    /// that composes it, and offered only by a target with a pipeline to pass. So
-    /// is an RDP resize, which is a graphics reset: the bitmap path offers neither.
+    /// The pipeline is passed in every session of a target with it on, and a page
+    /// that cannot compose it is turned away. An RDP resize, which is a graphics
+    /// reset, is the pipeline's too: the bitmap path offers neither.
     #[test]
     fn an_rdp_target_offers_its_pipeline_and_resize_while_the_pipeline_is_on() {
         let rdp = |extra: &str| {
@@ -4028,7 +4045,7 @@ vnc_password = \"x\"")).unwrap();
         let win = rdp("");
         assert_eq!(
             win.offers(),
-            Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics), placement: false }
+            Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics), placement: false, pipeline: true }
         );
         let composes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false };
         let plan = win.render_plan(passed, composes);
@@ -4037,26 +4054,30 @@ vnc_password = \"x\"")).unwrap();
         assert_eq!(win.beyond(passed, composes), None);
         let cannot = Decoders { rdp_graphics: false, rdp_h264: false, ..composes };
         assert_eq!(win.beyond(passed, cannot), Some(Passthrough::RdpGraphics));
-        assert!(!win.render_plan(Choices::default(), composes).rdp_graphics);
-        assert_eq!(win.render_summary(), "video q90 · libvpx · adaptive");
+        assert!(!Passthrough::RdpGraphics.chosen(), "passing it is no choice");
+        let unasked = Choices::default();
+        assert!(win.render_plan(unasked, composes).rdp_graphics, "it is passed unasked");
+        assert_eq!(win.beyond(unasked, cannot), Some(Passthrough::RdpGraphics), "and refused to a page that cannot");
+        assert_eq!(win.render_summary(), "the host's graphics pipeline, passed through");
 
-        // H.264 on the passed pipeline is the target's key, the session's choice
-        // and the browser's answer together, and none of them alone.
-        let h264 = rdp("egfx_h264 = true");
+        // H.264 on the pipeline is the session's choice and the browser's answer
+        // together, and neither alone.
         let decodes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: true };
-        let plan = h264.render_plan(passed, decodes);
-        assert!(plan.rdp_graphics && plan.rdp_h264);
-        assert_eq!(plan.describe(), "the host's graphics pipeline with H.264, passed through");
-        assert_eq!(h264.offers(), win.offers(), "the key adds no choice to the picker");
-        let cannot = Decoders { rdp_h264: false, ..decodes };
-        let lossless = h264.render_plan(passed, cannot);
-        assert!(lossless.rdp_graphics && !lossless.rdp_h264, "a browser that cannot is passed a pipeline without it");
-        assert_eq!(h264.beyond(passed, cannot), None, "and is not turned away");
-        assert!(!h264.render_plan(Choices::default(), decodes).rdp_h264, "a composed session never takes it");
-        assert!(!win.render_plan(passed, decodes).rdp_h264, "nor a target without the key");
+        for pipeline in [Pipeline::AdaptiveDesktop, Pipeline::AdaptiveRegion] {
+            let adaptive = Choices { pipeline, ..Choices::default() };
+            assert_eq!(win.accepts(adaptive), Ok(()));
+            let plan = win.render_plan(adaptive, decodes);
+            assert!(plan.rdp_graphics && plan.rdp_h264, "{pipeline:?}");
+            assert_eq!(plan.describe(), "the host's graphics pipeline with H.264, passed through");
+            let cannot = Decoders { rdp_h264: false, ..decodes };
+            let lossless = win.render_plan(adaptive, cannot);
+            assert!(lossless.rdp_graphics && !lossless.rdp_h264, "a browser that cannot is passed a pipeline without it");
+            assert_eq!(win.beyond(adaptive, cannot), None, "and is not turned away");
+        }
+        assert!(!win.render_plan(unasked, decodes).rdp_h264, "lossless unless chosen");
 
         let bitmap = rdp("egfx = false");
-        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: None, placement: false });
+        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: None, placement: false, pipeline: false });
         assert_eq!(
             bitmap.accepts(passed),
             Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })
@@ -4064,6 +4085,10 @@ vnc_password = \"x\"")).unwrap();
         assert_eq!(
             bitmap.accepts(Choices { size: Sizing::Window, ..Choices::default() }),
             Err(NotOffered { target: "win".to_owned(), choice: "resize" })
+        );
+        assert_eq!(
+            bitmap.accepts(Choices { pipeline: Pipeline::AdaptiveDesktop, ..Choices::default() }),
+            Err(NotOffered { target: "win".to_owned(), choice: "adaptive H.264" })
         );
     }
 
@@ -4164,6 +4189,8 @@ vnc_password = \"x\"")).unwrap();
         .resolve()
     }
 
+    /// An RDP target on bitmap updates, whose picture is encoded here: the stream
+    /// keys reach no other RDP target, whose pipeline is passed.
     fn parse_target(body: &str) -> anyhow::Result<AppConfig> {
         ConfigFile::parse(&format!(
             r#"
@@ -4176,6 +4203,7 @@ vnc_password = \"x\"")).unwrap();
             username = "u"
             password = "p"
             host = "10.0.0.5"
+            egfx = false
             {body}
             "#,
             site_passwd_line()

@@ -607,9 +607,9 @@ body {
   font-size: 0.78rem;
 }
 
-/* The formats of a ticked sound, side by side under its text: Opus on the left,
-   lossless on the right. */
-.picker-sound-formats {
+/* The two ways under a chosen option, side by side under its text: a ticked
+   sound's Opus and lossless, an adaptive pipeline's full screen and region. */
+.picker-suboptions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.9rem;

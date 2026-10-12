@@ -1610,9 +1610,9 @@ impl SessionManager {
     ///
     /// `choices` is what was ticked under the target at the picker, kept beside
     /// it for the life of the session. A choice the target's type does not offer
-    /// is refused, and so is a passthrough this browser said it cannot take: the
-    /// picker shows neither as something to tick, so either is a client that did
-    /// not ask it. Both tell the browser with a [`ServerMsg::Error`] and leave the
+    /// is refused, and so is a passthrough this browser said it cannot take,
+    /// whether chosen or one the target passes in every session: the picker
+    /// starts neither, so either is a client that did not ask it. Both tell the browser with a [`ServerMsg::Error`] and leave the
     /// slot as it was.
     ///
     /// `display` is the client's screen from [`ClientMsg::Connect`], handed to
@@ -2103,7 +2103,7 @@ mod tests {
 
 
     use super::*;
-    use crate::config::{Placement, Sizing, Sound};
+    use crate::config::{Pipeline, Placement, Sizing, Sound};
     use crate::audio::PCM_CD_QUALITY;
     use crate::protocol::UNSCALED;
 
@@ -2118,11 +2118,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false, placement: Placement::Right, whole: false };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false, placement: Placement::Right, whole: false };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
     /// A session started with nothing but the target's passthrough.
-    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true, placement: Placement::Right, whole: false };
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -2136,6 +2136,8 @@ mod tests {
         audio: bool,
         camera: bool,
         microphone: bool,
+        /// An RDP target with the graphics pipeline off.
+        bitmap: bool,
     }
 
     impl Meta {
@@ -2146,13 +2148,14 @@ mod tests {
                 audio: false,
                 camera: false,
                 microphone: false,
+                bitmap: false,
             }
         }
 
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
             let size = if self.resize { Sizing::Window } else { Sizing::Target };
-            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false, placement: Placement::Right, whole: false }
+            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -2172,6 +2175,11 @@ mod tests {
 
         const fn audio(mut self) -> Self {
             self.audio = true;
+            self
+        }
+
+        const fn bitmap(mut self) -> Self {
+            self.bitmap = true;
             self
         }
     }
@@ -2195,8 +2203,7 @@ mod tests {
             vnc_password: String::new(),
             domain: None,
             size: Some((1, 1)),
-            egfx: None,
-            egfx_h264: false,
+            egfx: meta.bitmap.then_some(false),
             virtual_displays: 1,
             camera: meta.camera,
             microphone: meta.microphone,
@@ -2248,7 +2255,9 @@ mod tests {
                 subtype: Some(Subtype::Wlshare),
                 ..fake_target_with("vnc-resize", Meta::of(Protocol::Vnc))
             },
-            fake_target_with("rdp-audio", Meta::of(Protocol::Rdp)),
+            // On bitmap updates, so a reattach resumes it: a pipeline, which is
+            // passed, starts over.
+            fake_target_with("rdp-audio", Meta::of(Protocol::Rdp).bitmap()),
             fake_target_with("rdp-camera", Meta::of(Protocol::Rdp).camera()),
             fake_target_with("rdp-mic", Meta::of(Protocol::Rdp).microphone()),
             // A target that streams. Nothing refuses it: the browser capability probe
@@ -2302,7 +2311,7 @@ mod tests {
                 subtype: _,
                 resize: got_resize,
                 audio: got_audio,
-                passthrough: None,
+                passthrough: got_passthrough,
                 camera: got_camera,
                 microphone: got_microphone,
                 render: _,
@@ -2311,6 +2320,9 @@ mod tests {
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
                 assert_eq!(got_resize, meta.resize, "resize metadata for {name}");
                 assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
+                // An RDP fake with the pipeline on passes it in every session.
+                let passed = (meta.protocol == Protocol::Rdp && !meta.bitmap).then_some("rdp-graphics");
+                assert_eq!(got_passthrough, passed, "passthrough for {name}");
                 assert_eq!(got_camera, meta.camera, "camera metadata for {name}");
                 assert_eq!(got_microphone, meta.microphone, "microphone metadata for {name}");
             }
@@ -2485,7 +2497,7 @@ mod tests {
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-audio", None, SOUND).await.unwrap();
-        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio().bitmap()).await;
     }
 
     /// One resize switch on the wire, and it is what the session was started
@@ -2636,7 +2648,7 @@ mod tests {
                 },
             );
             let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true, placement: Placement::Right, whole: false };
+            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
 
             let token_a = mgr.claim(false, None, "login").unwrap();
             let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();
@@ -3401,7 +3413,7 @@ mod tests {
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "rdp-audio", None, SOUND).await.unwrap();
-        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio().bitmap()).await;
         let ends = hooks.try_recv().unwrap();
         let audio = ends
             .2
@@ -3706,7 +3718,7 @@ mod tests {
         drop(first_engine);
 
         mgr.connect(att.id, "rdp-audio", None, SOUND).await.unwrap();
-        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio().bitmap()).await;
         // Held, not dropped: letting the ends go is how a fake engine dies, and this
         // one has to outlive the assertions below.
         let second_ends = hooks.try_recv().unwrap();
@@ -3743,7 +3755,7 @@ mod tests {
         audio.wave(one_frame_of_pcm());
         let token_again = mgr.claim(false, Some(&token), "login").unwrap();
         let mut back = mgr.attach(&token_again, None, Decoders::ALL).await.unwrap();
-        expect_connected_meta(&mut back.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+        expect_connected_meta(&mut back.events, "rdp-audio", Meta::of(Protocol::Rdp).audio().bitmap()).await;
 
         // Never interrupted: one listener throughout, and the buffer sent while the
         // session socket was down still arrives.
@@ -3786,7 +3798,7 @@ mod tests {
         let mut att_b = mgr.attach(&token_b, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_b.events).await;
         mgr.connect(att_b.id, "rdp-audio", None, SOUND).await.unwrap();
-        expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
+        expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio().bitmap())
             .await;
         assert!(
             mgr.state.lock().unwrap().audio_pump.is_none(),
@@ -3832,7 +3844,7 @@ mod tests {
         let mut att_b = mgr.attach(&token_b, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att_b.events).await;
         mgr.connect(att_b.id, "rdp-audio", None, SOUND).await.unwrap();
-        expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio())
+        expect_connected_meta(&mut att_b.events, "rdp-audio", Meta::of(Protocol::Rdp).audio().bitmap())
             .await;
         let (_input_rx_b, _frame_tx_b, audio_b, _camera) =
             hooks.try_recv().expect("the new browser's connect starts a fresh engine");
@@ -3926,7 +3938,7 @@ mod tests {
         expect_listeners(&audio, 0).await;
 
         mgr.connect(att.id, "rdp-audio", None, SOUND).await.unwrap();
-        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio()).await;
+        expect_connected_meta(&mut att.events, "rdp-audio", Meta::of(Protocol::Rdp).audio().bitmap()).await;
         let revived_ends = hooks.try_recv().unwrap();
         let revived = revived_ends
             .2

@@ -35,7 +35,6 @@ async fn spawn_app() -> SocketAddr {
             domain: None,
             size: Some((1280, 800)),
             egfx: None,
-            egfx_h264: false,
             virtual_displays: 1,
             camera: false,
             microphone: false,

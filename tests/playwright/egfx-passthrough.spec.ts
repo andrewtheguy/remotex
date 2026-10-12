@@ -1,7 +1,6 @@
-// What a session started with the graphics pipeline passed puts on the session
-// socket, and what the page says it did with it: an RDP host's graphics pipeline,
-// passed for the browser to compose, where every other session's picture is a video
-// stream.
+// What a session with the graphics pipeline puts on the session socket, and what
+// the page says it did with it: an RDP host's graphics pipeline, passed for the
+// browser to compose in every session of a target that has it on.
 //
 // Everything asserted is decided by the system and not by a machine's timing: the
 // render the gateway resolved, the order of `graphicsStart` and the records behind
@@ -11,8 +10,8 @@
 // a pixel. A GRAPHICS record is a header this
 // file parses for itself, and what is inside one is the host's.
 //
-// It needs a gateway whose local config names a live RDP host, and ticks the
-// passthrough under it at the picker. Keep that gitignored file under `tmp/`, for
+// It needs a gateway whose local config names a live RDP host with the pipeline
+// on, which the picker passes unasked. Keep that gitignored file under `tmp/`, for
 // example `tmp/qa_egfx.toml`:
 //
 //     cargo run -- serve --config tmp/qa_egfx.toml
@@ -23,10 +22,11 @@
 //     REMOTEX_PLAYWRIGHT_EGFX_TARGET=win \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'
 //
-// EXPERIMENTAL: a target with `egfx_h264 = true` is told it may draw with H.264,
-// which the page decodes. That is a second opt-in, naming such a target, and it
-// needs the host to be playing a video when the spec runs: a host draws H.264
-// only for what moves like one.
+// ALPHA: a session started with the picker's adaptive choice tells the host it may
+// draw with H.264, which the page decodes. That is a second opt-in, naming the
+// target to start so, and it starts it with H.264 over the full screen, which the
+// host draws everything in: by region it draws H.264 only for what moves like
+// video, which needs one playing.
 //
 //     REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=win-h264 \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'
@@ -36,11 +36,12 @@ import { leaveSession, logInAndConnectTo, returnToPicker } from "./support";
 
 /// The opt-in, and the target name in one, as the video spec has it.
 const EGFX_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_TARGET;
-/// The same for a target whose pipeline may carry H.264.
+/// The same for a target to start with adaptive H.264.
 const EGFX_H264_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET;
 
-/// What every session here is started with: the pipeline passed, and nothing else.
-const PASSED = { passthrough: true };
+/// What every session here is started with: nothing chosen, the pipeline passed
+/// as it is in every session.
+const PASSED = {};
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
@@ -374,7 +375,7 @@ test.describe("a target that passes its graphics pipeline", () => {
 test.describe("a target whose passed pipeline may carry H.264", () => {
   test.skip(
     !EGFX_H264_TARGET,
-    "set REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=<target> against a gateway with a live RDP host that is playing a video",
+    "set REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=<target> against a gateway with a live RDP host",
   );
 
   test.afterEach(async ({ page }) => {
@@ -385,7 +386,9 @@ test.describe("a target whose passed pipeline may carry H.264", () => {
     page,
   }) => {
     const seen = watchSession(page);
-    await logInAndConnectTo(page, EGFX_H264_TARGET ?? "", "", PASSED);
+    await logInAndConnectTo(page, EGFX_H264_TARGET ?? "", "", {
+      pipeline: "adaptive-desktop",
+    });
 
     // The host is told it may draw with H.264 only for a page that said it
     // decodes it, and the session says which it is.

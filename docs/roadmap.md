@@ -71,11 +71,15 @@ The goal is a gateway that re-encodes as VP9 only for the servers that are not
 prioritized ([Other servers](architecture.md#other-servers-not-prioritized)) and
 for a browser that cannot take what the remote sends. A wlshare target is there
 already: its stream is always passed, and wlshare walks it by the browser's link.
-Windows and the Mac are not. A passed RDP pipeline follows the browser's link,
-but only by the host's own pacing, so on a slow link it is started without the
-passthrough and sent VP9
-([A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link)).
-A Mac's passed HEVC is for a LAN and stays one: its rate control is the Mac's,
+So is Windows, in part: an RDP target with the pipeline on passes it in every
+session, and VP9 is left to the bitmap path, `egfx = false` and a host that
+answers with bitmap updates. Its pipeline follows the browser's link by the
+host's own pacing, and in a session started with Adaptive (alpha) by the host's
+rate control of its H.264, which rests on host behaviour the specification does
+not promise
+([An official way](#an-official-way-to-have-windows-rate-control-its-h264-over-tcp);
+[A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link)).
+The Mac is not. A Mac's passed HEVC is for a LAN and stays one: its rate control is the Mac's,
 between 20 and 60 Mbit/s, and it is not to be made to hear the browser. A Mac on
 a slow link is to be served by another passed stream instead. A passed stream has
 to adapt as well as the gateway's VP9 before it can replace it. What is to be
@@ -103,28 +107,57 @@ explored:
   its moving regions already go out at the host's coarsest quantizer, so on a
   slow link only its frame rate drops
   ([The connection sequence](rdp-client.md#the-connection-sequence)).
-  Network auto-detect and `connectionType` were tried and change nothing, so
-  what is left to try is in the capability advertise and the codecs it offers,
-  measured link by link against the session re-encoded as VP9. A host that draws
-  with bitmap updates (`egfx = false`) could be passed too, for the page to
-  decode.
+  Network auto-detect and `connectionType = 7` were tried over a constrained TCP
+  link: the detector reported the constraint correctly, but the host made the
+  same frame-rate reduction with or without it and did not change H.264
+  quantizers. `AVC_THINCLIENT` was tried too; it moved the whole desktop to
+  AVC444v2 but still adapted by rate. That narrows the missing
+  Microsoft-client behavior. One pathway is now found: a client that takes the
+  detection *and* claims reliable UDP, then turns down the host's offer and
+  stays on TCP, gets rate-controlled H.264. It is not known to be the only one
+  or the one Microsoft's clients use. At 1 Mbit/s
+  that means coarser regions at 21 frames a second instead of 12.5, and over a
+  LAN QP 22 throughout at 6.3 Mbit/s
+  ([The connection sequence](rdp-client.md#the-connection-sequence)). Next:
+  - Repeat the UDP offer with H.264 by region and with H.264 refused, to see
+    whether RemoteFX Progressive and the mixed desktop adapt too.
+  - A passed session's detection reports the page's link. Answered from the
+    gateway's own socket, it reported the hop to the host: behind a page on
+    1 Mbit/s the host was told 8 to 20 Mbit/s, drew LAN-grade 33 KB frames and
+    fell to 3.7 frames a second. Answered at the pace the page composes (`Paced`
+    in `session.rs`), the host was told about 1.2 Mbit/s. It then drew 17.7
+    frames a second at 6.4 KB, mostly at QP 38, and behind a 4 Mbit/s page 20 a
+    second at 20.6 KB at QP 22 and 30. All of it stays on TCP, so it works with a
+    WebSocket ([The connection sequence](rdp-client.md#the-connection-sequence)).
+    An adaptive session now takes both (`src/rdp.rs`); a lossless one takes
+    neither. The picker offers the whole desktop in H.264 (`AVC_THINCLIENT`),
+    the default under Adaptive, and H.264 by region, where the host is told the
+    page's link but the desktop is mostly RemoteFX Progressive and the frame rate
+    does not improve: 4.4 frames a second at 25.7 KB behind a 1 Mbit/s page,
+    where the whole desktop drew 17.5 at 6.4 KB. Each round trip is held for
+    the page's distance, the browser socket's smallest recent ping, idle link or
+    not: behind a page 150 ms away the host then concluded 151 ms and drew 20
+    frames a second instead of 10.5. The page's pace is read only while a frame
+    has waited for it longer than its distance, so a distant page is not taken
+    for a slow one: 150 ms away on an unlimited link it was reported at a median
+    of 8.2 Mbit/s rather than 0.9 to 1.7. Nor are the frames on their way to
+    it held as a backlog: there it got 30 frames a second, as near the host.
+    Still to do: QA it from a browser on a really slow link.
+
+  Measure each case against the same desktop on the bitmap path
+  (`egfx = false`), re-encoded as VP9. A host that draws with bitmap updates
+  could be passed too, for the page to decode.
 - **What Microsoft's iOS client is sent on a slow link.** Against the same
   host, Microsoft's Remote Desktop client on iOS sees the whole screen soften on
   a slow link, as video does, where a passed pipeline keeps its text sharp and
-  loses frames. That is presumably H.264 over the whole desktop with a falling
-  bitrate, which only the graphics pipeline carries, but why the host sends it
-  to that client and not to this one is not known. There are two candidates:
-  - **The UDP transport.** Microsoft's clients add an RDP-UDP transport beside
-    TCP, whose bandwidth and round-trip estimates the host's encoder may follow.
-    This client asks for no multitransport. If this is the cause, adapting the
-    same way means implementing MS-RDPEMT and MS-RDPEUDP, which are to be added
-    to ms-rdp-specs first.
-  - **The capability advertise.** The iOS client may set what this one does
-    not: `AVC_THINCLIENT`, which [MS-RDPEGFX section
-    2.2.3.6](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)
-    defines as a client preferring H.264 in YUV444 mode, or another flag or
-    version that has the host draw the desktop with H.264 alone. If this is the
-    cause, the advertise is what changes.
+  loses frames. The iPhone client was confirmed never to have UDP turned on, so
+  its softening comes over TCP. One TCP pathway is found: the host
+  rate-controls its H.264 for a client that takes network detection and claims
+  UDP, even when it then refuses the UDP
+  ([The connection sequence](rdp-client.md#the-connection-sequence)). Whether
+  the iPhone client takes that pathway or another, such as drawing without the
+  graphics pipeline, is not known. The host-side checks below are how to find
+  out; the transport test among them is already answered (TCP).
 
   To be found out on the host, with the iPad on a slow link and a passed
   session on the same link beside it:
@@ -134,16 +167,41 @@ explored:
     what the host is doing and which transport it measures.
   - The `RemoteDesktopServices-RdpCoreTS/Operational` event log, which records
     the transport, the graphics version and whether AVC and AVC444 are in use.
-  - The same iOS session with the host held to TCP, by the *Select RDP transport
-    protocols* policy or a firewall rule on UDP 3389. If the whole-screen
-    softening goes, the transport was the cause; if it stays, the advertise.
-  - The iOS client's capability advertise and the codecs the host answers with,
-    read through a recording proxy such as `freerdp-proxy`, which carries TCP
-    alone and so doubles as the test above.
+  - The iOS client's core data and capability advertise, read through a
+    recording proxy such as `freerdp-proxy`: whether it claims UDP in
+    `CS_MULTITRANSPORT` and network detection with UDP turned off, whether the
+    host draws it with the graphics pipeline or with bitmap updates, and which
+    codecs and quantizers the host answers with on the constrained link.
 
-Once a passed stream adapts as well as VP9 on the links measured, the
-passthrough is offered first at the picker, and VP9 remains for a browser that
-cannot take it.
+On Windows the pipeline is already passed in every session, with no VP9 for a
+browser that cannot compose it. Once a passed stream for the Mac adapts as well
+as VP9 on the links measured, it is offered first at the picker, and VP9 remains
+for a browser that cannot take it.
+
+### An official way to have Windows rate-control its H.264 over TCP
+
+An adaptive session has the host rate-control its H.264 by taking the network
+detection and claiming reliable UDP in `CS_MULTITRANSPORT`, then turning the
+host's offer of UDP down (`E_ABORT`) and staying on TCP
+([The connection sequence](rdp-client.md#the-connection-sequence)). It works
+against the hosts measured, but it depends on host behaviour the specification
+does not promise: nothing in MS-RDPBCGR or MS-RDPEMT says a claim of UDP that is
+then refused changes how the host codes for TCP, and a Windows update may stop
+doing it. What is to be found out is whether there is a cleaner or official way
+to the same rate control:
+
+- What Microsoft's clients actually send: mstsc, the iOS and macOS apps, and
+  the web client over its gateway, read through a recording proxy — whether
+  they claim UDP with UDP turned off, which connection type and detection
+  results they state, and which graphics capability sets and flags they
+  advertise.
+- Whether a capability, a connection type or a detection result alone does it,
+  without the claim of UDP.
+- Whether a group policy or registry setting on the host does it, for an
+  operator who can set one.
+- What the RDP 10.x graphics capability sets (MS-RDPEGFX) and the MS-RDPBCGR and
+  MS-RDPEMT text on network detection and multitransport say of it, read from
+  the specifications rather than recalled.
 
 ### How wlshare's passed-through stream is doing
 
@@ -213,22 +271,22 @@ refused.
 
 ### H.264 in the RDP graphics pipeline
 
-A host draws with H.264 only on a passed pipeline, for the page to decode, behind
-a target's experimental `egfx_h264` key
+A host draws with H.264 only on a passed pipeline, for the page to decode, in a
+session started with the picker's Adaptive (alpha), over the whole desktop or
+by region
 ([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
 What is not done:
 
-- **The gateway does not decode it, and is not going to.** A pipeline composed
-  here refuses H.264 with `AVC_DISABLED` on purpose: a lossy video codec loses
-  detail before the gateway ever encodes the picture, and decoding it only to
-  encode VP9 is a second lossy pass. It is here so that "why not this one" has an
+- **The gateway does not decode it, and is not going to.** It composes no
+  pipeline at all: every pipeline is passed to the page, and a Lossless session
+  refuses H.264 with `AVC_DISABLED`. Decoding H.264 here only to encode VP9
+  would be a second lossy pass. It is here so that "why not this one" has an
   answer rather than being rediscovered.
-- **A choice at the picker.** It is a config key while it is experimental. Once
-  it is not, whether a session takes a lossy source is the kind of thing the
-  picker asks.
 - **AVC444 against a host.** Both layouts are implemented and tested from the
-  specification's tables. The one host tried sent AVC420 by region, and with
-  `AVC_THINCLIENT`, which this client does not set, luma views alone.
+  specification's tables. *H.264 full screen* sets `AVC_THINCLIENT`, and the
+  host tried sent AVC444v2, luma views alone, over the whole desktop; *H.264
+  region* does not, and the same host sent AVC420 by region. No host has been
+  seen to send AVC444, or AVC444v2's chroma views.
 - **Large video.** Every decoded picture is copied into the compositor's memory
   and converted there, which was measured at a 1280×800 desktop and not above,
   and from a hardware decoder that copy is a readback off the GPU. Presenting a
@@ -382,7 +440,7 @@ through is what a `wlshare` target has.
 ### `THINCLIENT` in the graphics capability advertise
 
 `caps_advertise` in the graphics crate's `proto/gfx.rs` sends versions 8 and 10 with the small cache
-and, on version 10, `AVC_DISABLED` — or, for a passed pipeline that takes H.264,
+and, on version 10, `AVC_DISABLED` — or, for an adaptive session, which takes H.264,
 every set to 10.7 without it — and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
 unset either way. A current Windows host, the only host this client targets, ignores the
 flag; the hosts that acted on it, choosing the classic RemoteFX codec over the

@@ -17,6 +17,7 @@ import {
 const ABLE: Abilities = {
   appleMedia: true,
   rdpGraphics: true,
+  rdpH264: true,
   audio: true,
   runsHevc: true,
   follows: "window",
@@ -24,6 +25,7 @@ const ABLE: Abilities = {
 const UNABLE: Abilities = {
   appleMedia: false,
   rdpGraphics: false,
+  rdpH264: false,
   audio: false,
   runsHevc: false,
   follows: "window",
@@ -47,15 +49,19 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     passthrough: null,
     passthroughOnly: false,
     placement: false,
+    pipeline: false,
     ...offers,
   };
 }
 
+// As the gateway lists an RDP target with its pipeline on: passed in every session.
 const RDP = target({
   protocol: "rdp",
   resize: true,
   audio: true,
   passthrough: "rdp-graphics",
+  passthroughOnly: true,
+  pipeline: true,
 });
 const HIGH_PERFORMANCE = target({
   subtype: "ard-high-performance",
@@ -138,7 +144,9 @@ test("a Mac sharing its physical displays is shown at their size", () => {
 
 test("only what the target's type offers has a row", () => {
   const rdp = targetOptions(RDP, undefined, ABLE);
-  assert.deepEqual(keys(rdp.rows), ["passthrough"]);
+  // Its pipeline is passed in every session, which is said rather than offered.
+  assert.deepEqual(rdp.rows, []);
+  assert.ok(rdp.passed);
   assert.deepEqual(formats(rdp), ["opus", "flac"]);
   // A plain VNC server has nothing to choose.
   const plain = targetOptions(target({}), undefined, ABLE);
@@ -161,21 +169,25 @@ test("only what the target's type offers has a row", () => {
     audio: "off",
     passthrough: false,
     placement: "right",
+    pipeline: "lossless",
   });
   assert.equal(standard.blocked, null);
 });
 
 test("nothing is ticked until somebody ticks it", () => {
-  const options = targetOptions(RDP, undefined, ABLE);
-  assert.deepEqual(options.choices, {
+  const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
+  assert.equal(options.choices.passthrough, false);
+  assert.ok(options.rows.every((row) => !row.checked && !row.disabled));
+  const rdp = targetOptions(RDP, undefined, ABLE);
+  assert.deepEqual(rdp.choices, {
     size: "window",
     audio: "off",
-    passthrough: false,
+    passthrough: true,
     placement: "right",
+    pipeline: "lossless",
   });
-  assert.equal(options.sound, false);
-  assert.ok(options.rows.every((row) => !row.checked && !row.disabled));
-  assert.equal(options.soundRow?.checked, false);
+  assert.equal(rdp.sound, false);
+  assert.equal(rdp.soundRow?.checked, false);
 });
 
 test("what was chosen last time is what Start sends", () => {
@@ -184,8 +196,9 @@ test("what was chosen last time is what Start sends", () => {
   assert.deepEqual(options.choices, {
     size: "window",
     audio: "opus",
-    passthrough: false,
+    passthrough: true,
     placement: "right",
+    pipeline: "lossless",
   });
   assert.equal(options.sound, true);
   assert.equal(options.soundRow?.checked, true);
@@ -210,6 +223,7 @@ test("what was chosen last time is what Start sends", () => {
     audio: "off",
     passthrough: false,
     placement: "right",
+    pipeline: "lossless",
   });
   // Nor is something this page never wrote there.
   const stale = targetOptions(RDP, { audio: true as never }, ABLE);
@@ -266,29 +280,26 @@ test("a browser with no audio decoder is offered FLAC alone", () => {
 });
 
 test("a passthrough this browser cannot take is greyed, with the reason", () => {
-  for (const [offered, reason] of [
-    [RDP, /WebGL 2/],
-    [HIGH_PERFORMANCE, /does not decode/],
-  ] as const) {
-    // Remembered from a browser that could: still not sent from one that cannot.
-    const options = targetOptions(offered, { passthrough: true }, UNABLE);
-    const row = options.rows.find((r) => r.key === "passthrough");
-    assert.ok(row);
-    assert.equal(row.disabled, true);
-    assert.equal(row.checked, false);
-    assert.match(row.note, reason);
-    assert.equal(options.choices.passthrough, false);
-    assert.equal(options.blocked, null, "the target still starts, encoded");
-  }
+  // Remembered from a browser that could: still not sent from one that cannot.
+  const options = targetOptions(
+    HIGH_PERFORMANCE,
+    { passthrough: true },
+    UNABLE,
+  );
+  const row = options.rows.find((r) => r.key === "passthrough");
+  assert.ok(row);
+  assert.equal(row.disabled, true);
+  assert.equal(row.checked, false);
+  assert.match(row.note, /does not decode/);
+  assert.equal(options.choices.passthrough, false);
+  assert.equal(options.blocked, null, "the target still starts, encoded");
 });
 
 test("a gateway that cannot decode the Mac's picture can only pass it", () => {
   const only = { ...HIGH_PERFORMANCE, passthroughOnly: true };
   const able = targetOptions(only, { passthrough: false }, ABLE);
-  const row = able.rows.find((r) => r.key === "passthrough");
-  assert.ok(row);
-  assert.equal(row.checked, true, "shown as the choice already made");
-  assert.equal(row.disabled, true);
+  assert.deepEqual(able.rows, [], "no choice to offer");
+  assert.match(able.passed?.note ?? "", /cannot decode the Mac's picture/);
   assert.equal(able.choices.passthrough, true);
   assert.equal(able.blocked, null);
 
@@ -298,23 +309,61 @@ test("a gateway that cannot decode the Mac's picture can only pass it", () => {
   assert.match(unable.blocked ?? "", /cannot decode the Mac's picture/);
 });
 
-test("an RDP host's pipeline is never the only way, whatever the entry says", () => {
-  // Every gateway composes the pipeline itself, so the flag means nothing here
-  // and none of the Mac's wording reaches an RDP target.
-  const flagged = { ...RDP, passthroughOnly: true };
-  const able = targetOptions(flagged, { passthrough: false }, ABLE);
-  const row = able.rows.find((r) => r.key === "passthrough");
-  assert.ok(row);
-  assert.equal(row.checked, false);
-  assert.equal(row.disabled, false, "still a choice");
+test("an RDP host's pipeline is always passed, and needs a page that composes it", () => {
+  // No gateway composes the pipeline, so it is shown as passed, whatever was
+  // remembered.
+  const able = targetOptions(RDP, { passthrough: false }, ABLE);
+  assert.deepEqual(able.rows, [], "no choice");
+  assert.equal(able.passed?.label, "Always passed through");
+  assert.match(able.passed?.note ?? "", /egfx is on/);
+  assert.equal(able.choices.passthrough, true);
   assert.equal(able.blocked, null);
 
-  const unable = targetOptions(flagged, undefined, UNABLE);
-  assert.equal(unable.blocked, null, "the target still starts, encoded");
-  assert.match(
-    unable.rows.find((r) => r.key === "passthrough")?.note ?? "",
-    /cannot compose/,
+  // A browser that cannot compose it cannot start the target: no VP9 stands in.
+  const unable = targetOptions(RDP, undefined, UNABLE);
+  assert.match(unable.blocked ?? "", /WebGL 2/);
+  assert.ok(unable.passed);
+});
+
+test("how the host draws the pipeline is lossless until somebody chooses adaptive", () => {
+  const options = targetOptions(RDP, undefined, ABLE);
+  assert.equal(options.choices.pipeline, "lossless");
+  assert.deepEqual(
+    options.pipelineRow?.modes.map((mode) => [mode.value, mode.disabled]),
+    [
+      ["lossless", false],
+      ["adaptive", false],
+    ],
   );
+  assert.match(options.pipelineRow?.modes[1].label ?? "", /alpha/);
+  assert.deepEqual(
+    options.pipelineRow?.h264.map((option) => option.value),
+    ["adaptive-desktop", "adaptive-region"],
+  );
+  for (const pipeline of ["adaptive-desktop", "adaptive-region"] as const) {
+    assert.equal(
+      targetOptions(RDP, { pipeline }, ABLE).choices.pipeline,
+      pipeline,
+    );
+  }
+  // No other target has a pipeline to draw.
+  const mac = targetOptions(
+    HIGH_PERFORMANCE,
+    { pipeline: "adaptive-desktop" },
+    ABLE,
+  );
+  assert.equal(mac.pipelineRow, null);
+  assert.equal(mac.choices.pipeline, "lossless");
+});
+
+test("a browser that cannot decode the H.264 is offered lossless alone", () => {
+  const NO_H264: Abilities = { ...ABLE, rdpH264: false };
+  const options = targetOptions(RDP, { pipeline: "adaptive-region" }, NO_H264);
+  const adaptive = options.pipelineRow?.modes[1];
+  assert.equal(adaptive?.disabled, true);
+  assert.match(adaptive?.note ?? "", /VideoDecoder/);
+  assert.equal(options.choices.pipeline, "lossless", "remembered, not sent");
+  assert.equal(options.blocked, null, "the target still starts, lossless");
 });
 
 const storage = new Map<string, string>();

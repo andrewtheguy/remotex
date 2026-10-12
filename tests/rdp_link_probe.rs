@@ -19,20 +19,34 @@
 //!   frame is said to be composed when the bytes passed so far would have crossed
 //!   that link. This is the case the session is built for: it leaves the host's
 //!   socket unread while frames wait, and the host finds the page slow from that.
-//! - [`ACK_DELAY_ENV`] says each frame is composed that many milliseconds late and
-//!   nothing else.
+//! - [`ACK_DELAY_ENV`] says each frame is composed that many milliseconds late, as
+//!   a page that far away would, and says that distance to the session, which
+//!   holds each round trip of the host's network detection for it.
 //! - [`THROTTLE_ENV`] makes the link to the host itself slow: `4000:100` puts a
 //!   relay in front of the host that reads from it at 4 Mbit/s, through a small
 //!   receive buffer so the host's own socket backs up, and holds everything sent
 //!   to it for 100 ms; a third number is that buffer in kilobytes, and a fourth
 //!   how many seconds in the relay stops limiting, to see whether the host goes
 //!   back.
+//! - [`H264_ENV`] lets the host draw with H.264: `1` where it chooses, by region
+//!   beside the other codecs, and `whole` preferring it for the whole desktop
+//!   (`AVC_THINCLIENT`, [MS-RDPEGFX] 2.2.3.6).
+//! - [`AUTODETECT_ENV`] takes part in the host's network detection ([MS-RDPBCGR]
+//!   2.2.14), answering with what this connection measures, so behind
+//!   [`THROTTLE_ENV`] the host is told of the slow link as well as finding it. Run
+//!   with `RUST_LOG=info,remotex::rdp_client=debug` to see what was measured and
+//!   what the host concluded.
+//! - [`MULTITRANSPORT_ENV`] claims reliable UDP with Soft-Sync ([MS-RDPBCGR]
+//!   2.2.1.3.8) and turns down every offer of it the host makes (2.2.15), so the
+//!   session stays on TCP: whether a host draws differently for a client that
+//!   offers UDP, apart from using it. `RUST_LOG=info` shows the offers.
 //!
-//! What is printed, each [`WINDOW`], is how many frames the host drew and the bytes
-//! of their commands by codec; what its RemoteFX Progressive regions say of
-//! themselves ([MS-RDPEGFX] 2.2.4.2.1.5), where a host that has found the client
-//! slow sends its first passes at a lower quality; the quantization parameter and
-//! quality its H.264 regions state (2.2.4.4.2); and how far behind the desktop
+//! What is printed, for the opening paint and then each [`WINDOW`], is how many
+//! frames the host drew and the bytes of their commands by codec; what its
+//! RemoteFX Progressive regions say of themselves ([MS-RDPEGFX] 2.2.4.2.1.5), where
+//! a host that has found the client slow sends its first passes at a lower quality;
+//! the quantization parameter and quality its H.264 regions state (2.2.4.4.2), and
+//! of AVC444 which views each frame carried (2.2.4.5); and how far behind the desktop
 //! the frames were composed. Nothing but a drawing host is asserted: the rest is
 //! the measurement.
 
@@ -42,12 +56,14 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::proto::gfx::{self, Message};
+use remotex::rdp_client::proto::gfx::{self, H264, Message};
 use remotex::rdp_client::proto::wire::{Malformed, Reader};
 use remotex::rdp_client::{Connect, Event, Session};
 
 const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 const H264_ENV: &str = "REMOTEX_UAT_H264";
+const AUTODETECT_ENV: &str = "REMOTEX_UAT_AUTODETECT";
+const MULTITRANSPORT_ENV: &str = "REMOTEX_UAT_MULTITRANSPORT";
 const MOTION_ENV: &str = "REMOTEX_UAT_MOTION";
 const RUN_ENV: &str = "REMOTEX_UAT_LINK_SECS";
 const THROTTLE_ENV: &str = "REMOTEX_UAT_THROTTLE";
@@ -133,6 +149,27 @@ fn motion(action: &str) {
     assert!(status.success(), "{script} {action} failed: {status}");
 }
 
+/// Milliseconds in a day, which the host's frame clock wraps at.
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// A StartFrame's timestamp as milliseconds of the host's UTC day ([MS-RDPEGFX]
+/// 2.2.2.11): milliseconds, seconds, minutes and hours. Zero says the host has no
+/// time to give, and gives no sample.
+fn time_of_day(timestamp: u32) -> Option<i64> {
+    if timestamp == 0 {
+        return None;
+    }
+    let field = |shift: u32, bits: u32| i64::from((timestamp >> shift) & ((1 << bits) - 1));
+    Some(field(0, 10) + 1000 * (field(10, 6) + 60 * (field(16, 6) + 60 * field(22, 10))))
+}
+
+/// How far behind the desktop a frame was composed, from its offset between the two
+/// clocks and the smallest offset seen: taken around the day, so a frame the host
+/// began after its midnight is not a day behind one it began before.
+fn lag(offset: i64, nearest: i64) -> i64 {
+    (offset - nearest).rem_euclid(DAY_MS)
+}
+
 /// What one stretch of the session carried.
 #[derive(Default)]
 struct Tally {
@@ -167,10 +204,13 @@ struct Progressive {
     quants: BTreeMap<Vec<u8>, u64>,
 }
 
-/// What AVC420 regions state ([MS-RDPEGFX] 2.2.4.4.1, 2.2.4.4.2): the
-/// quantization parameter and the quality level the host encoded each at.
+/// What H.264 regions state ([MS-RDPEGFX] 2.2.4.4.1, 2.2.4.4.2): the
+/// quantization parameter and the quality level the host encoded each at, and of
+/// AVC444 (2.2.4.5) which views each frame carried.
 #[derive(Default)]
 struct Avc {
+    /// AVC444 frames by what they carried: luma and chroma, luma alone, chroma alone.
+    views: BTreeMap<&'static str, u64>,
     /// Regions by their `qp`.
     quantizers: BTreeMap<u8, u64>,
     /// Regions by their `qualityVal`.
@@ -189,11 +229,30 @@ impl Avc {
         Ok(())
     }
 
+    /// An AVC444 or AVC444v2 bitmap stream: the first stream's metablock is read as
+    /// AVC420's is, and the views the stream says it carries are counted.
+    fn add_444(&mut self, data: &[u8]) -> Result<(), Malformed> {
+        let mut r = Reader::new("an AVC444 bitmap stream", data);
+        let said = r.u32_le()?;
+        let views = match said >> 30 {
+            0 => "luma and chroma",
+            1 => "luma",
+            2 => "chroma",
+            _ => "invalid",
+        };
+        *self.views.entry(views).or_default() += 1;
+        let first = usize::try_from(said & 0x3FFF_FFFF).unwrap_or(usize::MAX);
+        self.add(r.bytes(first)?)
+    }
+
     fn line(&self) -> String {
-        format!("h264 qp {:?}; quality {:?}", self.quantizers, self.qualities)
+        format!("h264 qp {:?}; quality {:?}; avc444 views {:?}", self.quantizers, self.qualities, self.views)
     }
 
     fn merge(&mut self, other: &Avc) {
+        for (views, frames) in &other.views {
+            *self.views.entry(views).or_default() += frames;
+        }
         for (qp, regions) in &other.quantizers {
             *self.quantizers.entry(*qp).or_default() += regions;
         }
@@ -290,8 +349,7 @@ impl Tally {
             let (codec, data) = match message.expect("the passed commands parse") {
                 // [MS-RDPEGFX] 2.2.2.11: milliseconds, seconds, minutes, hours.
                 Message::StartFrame { timestamp, .. } => {
-                    let field = |shift: u32, bits: u32| i64::from((timestamp >> shift) & ((1 << bits) - 1));
-                    self.began = Some(field(0, 10) + 1000 * (field(10, 6) + 60 * (field(16, 6) + 60 * field(22, 10))));
+                    self.began = time_of_day(timestamp);
                     continue;
                 }
                 Message::WireToSurface1 { codec, data, .. } | Message::WireToSurface2 { codec, data, .. } => {
@@ -305,6 +363,9 @@ impl Tally {
             }
             if codec == gfx::CODEC_AVC420 {
                 self.avc.add(data).expect("the AVC420 metablock parses");
+            }
+            if matches!(codec, gfx::CODEC_AVC444 | gfx::CODEC_AVC444_V2) {
+                self.avc.add_444(data).expect("the AVC444 bitmap stream parses");
             }
         }
     }
@@ -343,7 +404,14 @@ async fn a_real_host_draws_for_a_slow_client() {
     let name = std::env::var(TARGET_ENV)
         .unwrap_or_else(|_| panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml"));
     let target = common::uat_target(&name);
-    let h264 = matches!(std::env::var(H264_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"));
+    let h264 = match std::env::var(H264_ENV).as_deref() {
+        Err(_) | Ok("" | "0" | "false") => H264::Refused,
+        Ok("whole") => H264::WholeDesktop,
+        Ok(_) => H264::ByRegion,
+    };
+    let autodetect = matches!(std::env::var(AUTODETECT_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"));
+    let multitransport =
+        matches!(std::env::var(MULTITRANSPORT_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"));
     let run = Duration::from_secs(std::env::var(RUN_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(60));
     let ack_delay = Duration::from_millis(std::env::var(ACK_DELAY_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(0));
     let throttled = std::env::var(THROTTLE_ENV).ok().map(|said| {
@@ -353,7 +421,7 @@ async fn a_real_host_draws_for_a_slow_client() {
         (kbps, Duration::from_millis(delay), buffer_kb as u32, (lift > 0).then(|| Duration::from_secs(lift)))
     });
     println!(
-        "rdp_link_probe: {name}, h264 {h264}, throttle {throttled:?}, acks held {ack_delay:?}, {}s",
+        "rdp_link_probe: {name}, h264 {h264:?}, autodetect {autodetect}, udp offered {multitransport}, throttle {throttled:?}, acks held {ack_delay:?}, {}s",
         run.as_secs()
     );
     let (host, port) = match throttled {
@@ -378,8 +446,9 @@ async fn a_real_host_draws_for_a_slow_client() {
         placement: remotex::config::Placement::Right,
         resize: false,
         egfx: true,
-        pass_graphics: true,
         h264,
+        autodetect,
+        multitransport,
         audio: None,
         camera: None,
         microphone: None,
@@ -416,6 +485,11 @@ async fn a_real_host_draws_for_a_slow_client() {
         panic!("the session did not connect: {first:?}");
     };
     println!("  connected at {width}x{height}");
+    // A page that late to compose is that far away, and is said to be: once
+    // connected, because what is said before the desktop exists is dropped.
+    if !ack_delay.is_zero() {
+        session.input().caller_distance(ack_delay);
+    }
 
     // The desktop first, so the picture starts on a session that is drawing.
     let mut opening = Tally::default();
@@ -433,6 +507,9 @@ async fn a_real_host_draws_for_a_slow_client() {
         }
     }
     assert!(opening.frames > 0, "the host drew nothing");
+    println!("  opening {}", opening.line(Duration::from_secs(8)));
+    println!("         {}", opening.progressive.line());
+    println!("         {}", opening.avc.line());
     motion("start");
 
     let started = Instant::now();
@@ -460,7 +537,7 @@ async fn a_real_host_draws_for_a_slow_client() {
                 println!("  {:5.1}s {}", started.elapsed().as_secs_f32(), window.line(window_started.elapsed()));
                 println!("         {}", window.progressive.line());
                 println!("         {}", window.avc.line());
-                let mut behind: Vec<i64> = window.behind.iter().map(|offset| offset - nearest).collect();
+                let mut behind: Vec<i64> = window.behind.iter().map(|&offset| lag(offset, nearest)).collect();
                 behind.sort_unstable();
                 if let (Some(median), Some(most)) = (behind.get(behind.len() / 2), behind.last()) {
                     println!("         behind the desktop: median {median} ms, most {most} ms");
@@ -480,4 +557,35 @@ async fn a_real_host_draws_for_a_slow_client() {
     println!("  after the first {}s: {}", WINDOW.as_secs(), total.line(covered));
     assert!(total.frames > 0, "the host drew nothing once the picture was moving");
     drop(session);
+}
+
+/// A StartFrame timestamp, packed as 2.2.2.11 lays it out.
+fn packed(hours: u32, minutes: u32, seconds: u32, millis: u32) -> u32 {
+    (hours << 22) | (minutes << 16) | (seconds << 10) | millis
+}
+
+#[test]
+fn a_frame_with_no_timestamp_gives_no_sample() {
+    assert_eq!(time_of_day(0), None);
+}
+
+#[test]
+fn a_timestamp_reads_as_milliseconds_of_the_day() {
+    assert_eq!(time_of_day(packed(13, 45, 7, 250)), Some(((13 * 60 + 45) * 60 + 7) * 1000 + 250));
+    assert_eq!(time_of_day(packed(0, 0, 0, 1)), Some(1), "a millisecond past midnight is a time");
+}
+
+/// Two frames composed 20 ms apart on the page's clock, the host beginning the
+/// first a millisecond before its midnight and the second 19 ms after it: both
+/// equally behind, rather than the second a day behind.
+#[test]
+fn the_lag_is_taken_around_the_hosts_midnight() {
+    let before = time_of_day(packed(23, 59, 59, 999)).unwrap();
+    let after = time_of_day(packed(0, 0, 0, 19)).unwrap();
+    let first = 5_000 - before;
+    let second = 5_020 - after;
+    let nearest = first.min(second);
+    assert_eq!(lag(first, nearest), 0);
+    assert_eq!(lag(second, nearest), 0);
+    assert_eq!(lag(first + 30, nearest), 30, "a later composition is behind by what it waited");
 }

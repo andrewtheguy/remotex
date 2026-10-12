@@ -6,10 +6,13 @@ import { gatewayFetch } from "./gateway.ts";
 import { versionMismatch } from "./gatewayVersion.ts";
 import { decodesAudio } from "./preflight.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
+import { decodesRdpH264 } from "./rdpH264.ts";
 import { runnableDecoders } from "./softwareSupport.ts";
 import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 import {
   type Choices,
+  type Pipeline,
+  type PipelineRow,
   readRememberedChoices,
   rememberChoice,
   type Sound,
@@ -127,6 +130,7 @@ export default function TargetPicker({
   const abilities = {
     appleMedia: decodesAppleMedia(),
     rdpGraphics: composesRdpGraphics(),
+    rdpH264: decodesRdpH264(),
     audio: decodesAudio(),
     runsHevc: runnableDecoders().hevc,
     follows: sizeFollows(),
@@ -282,6 +286,36 @@ export default function TargetPicker({
                         </div>
                       </fieldset>
                     )}
+                    {/* A stream passed in every session is said, not
+                        offered. */}
+                    {options.passed && (
+                      <p className="picker-choice">
+                        <span className="picker-choice-heading">
+                          Passthrough
+                        </span>
+                        <span className="picker-option-text">
+                          <span>{options.passed.label}</span>
+                          <span className="picker-option-note">
+                            {options.passed.note}
+                          </span>
+                        </span>
+                      </p>
+                    )}
+                    {/* How the host draws the pipeline, on an RDP target
+                        with one. */}
+                    {options.pipelineRow && (
+                      <PipelineChoice
+                        target={t.name}
+                        row={options.pipelineRow}
+                        chosen={options.choices.pipeline}
+                        locked={pendingTarget !== null}
+                        choose={(pipeline) =>
+                          setRemembered((was) =>
+                            rememberChoice(was, t.name, "pipeline", pipeline),
+                          )
+                        }
+                      />
+                    )}
                     {/* Only what the target's type offers has a row; one that
                         cannot be had here is greyed and says why. */}
                     {options.rows.map((row) => (
@@ -386,7 +420,7 @@ function SoundChoice({
       </label>
       {row.checked && (
         <div
-          className="picker-sound-formats"
+          className="picker-suboptions"
           role="radiogroup"
           aria-label="Sound format"
         >
@@ -411,5 +445,72 @@ function SoundChoice({
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * How the host draws the pipeline: lossless or adaptive, and under a chosen
+ * adaptive one its H.264 over the full screen or by region. Choosing adaptive
+ * takes the full screen.
+ */
+function PipelineChoice({
+  target,
+  row,
+  chosen,
+  locked,
+  choose,
+}: {
+  target: string;
+  row: PipelineRow;
+  chosen: Pipeline;
+  locked: boolean;
+  choose: (pipeline: Pipeline) => void;
+}) {
+  const adaptive = chosen !== "lossless";
+  return (
+    <fieldset className="picker-choice">
+      <legend>Graphics</legend>
+      {row.modes.map((mode) => (
+        <label
+          key={mode.value}
+          className={`picker-option${mode.disabled ? " picker-option-unavailable" : ""}`}
+        >
+          <input
+            type="radio"
+            name={`picker-pipeline-${target}`}
+            checked={(mode.value === "adaptive") === adaptive}
+            disabled={mode.disabled || locked}
+            onChange={() =>
+              choose(
+                mode.value === "adaptive" ? "adaptive-desktop" : "lossless",
+              )
+            }
+          />
+          <span className="picker-option-text">
+            <span>{mode.label}</span>
+            <span className="picker-option-note">{mode.note}</span>
+          </span>
+        </label>
+      ))}
+      {adaptive && (
+        <div className="picker-suboptions" role="radiogroup" aria-label="H.264">
+          {row.h264.map((option) => (
+            <label key={option.value} className="picker-option">
+              <input
+                type="radio"
+                name={`picker-h264-${target}`}
+                checked={chosen === option.value}
+                disabled={option.disabled || locked}
+                onChange={() => choose(option.value)}
+              />
+              <span className="picker-option-text">
+                <span>{option.label}</span>
+                <span className="picker-option-note">{option.note}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
+    </fieldset>
   );
 }

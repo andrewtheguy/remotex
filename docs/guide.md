@@ -57,14 +57,15 @@ options show under it, and Start connects with them. They are chosen per
 session, held for its life, and remembered by the browser per target; none is a
 config key.
 
-| Target | Window drives the size | Sound | Passthrough |
-|---|---|---|---|
-| `rdp` | yes | off, Opus or FLAC | the graphics pipeline |
-| `vnc` | no | none | — |
-| `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) |
-| `vnc`, `ard` | no | none | — |
-| `vnc`, `ard` with `virtual_display` | yes | none | — |
-| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC |
+| Target | Window drives the size | Sound | Passthrough | Graphics |
+|---|---|---|---|---|
+| `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | lossless or adaptive H.264 |
+| `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — |
+| `vnc` | no | none | — | — |
+| `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — |
+| `vnc`, `ard` | no | none | — | — |
+| `vnc`, `ard` with `virtual_display` | yes | none | — | — |
+| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC | — |
 
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
   or 1440×900 where it sets none, or follows the window: the remote is asked to
@@ -77,15 +78,26 @@ config key.
   so ticking Sound there takes FLAC. On a High Performance Mac the menu's Audio
   button reads *Audio not supported* in such a browser, and *AAC-ELD not
   supported* in one that cannot decode the Mac's AAC-ELD.
-- **Passthrough.** Sends the remote's own stream to the browser as it came, for
-  a LAN, instead of VP9 encoded by the gateway. It is greyed where the browser
-  cannot take the stream. A passed RDP pipeline follows the browser's link: the
-  Windows host draws fewer and smaller frames for a browser that falls behind. A
-  passed Mac's HEVC does not: on a slow link, start that session without it.
+- **Passthrough.** Sends the remote's own stream to the browser as it came
+  instead of VP9 encoded by the gateway. On a Mac it is a choice, for a LAN,
+  greyed where the browser cannot take the stream. On an `rdp` target with the
+  pipeline on it is no choice: the picker says it is always passed, with no box
+  to tick, and a browser that
+  cannot compose the pipeline cannot start the target. A passed RDP pipeline
+  follows the browser's link: the Windows host draws fewer and smaller frames
+  for a browser that falls behind. A passed Mac's HEVC does not: on a slow link,
+  start that session without it.
   See [A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link).
+- **Graphics.** How an RDP host draws its pipeline. *Lossless*, the default,
+  is the host's lossless codecs alone, for a LAN. *Adaptive* (alpha) is H.264
+  the host fits to the browser's link: coarser on a slow link, finer on a fast
+  one. Under it, *H.264 full screen*, the default, draws the whole desktop in
+  H.264, and *H.264 region* only what moves like video, with the rest lossless,
+  which keeps text sharp but adapts less. Adaptive is greyed in a browser whose
+  `VideoDecoder` cannot decode the host's H.264.
 
 One gateway holds one session. A reload or a dropped connection normally
-resumes it; a passed RDP graphics pipeline instead reconnects the engine,
+resumes it; an RDP session with the graphics pipeline on instead reconnects the engine,
 because the browser's compositor state is gone. A different browser that finds
 the owner attached is asked whether to take over; one arriving during the
 owner's reattach grace may claim the slot directly. Either starts at the picker
@@ -110,16 +122,16 @@ Desktop over NLA. It carries the desktop, pointer, keyboard, mouse, resize, the
 clipboard, sound, and the browser's camera and microphone. It does not carry
 touch.
 
-- `egfx = false` makes the host draw with bitmap updates instead of the graphics
-  pipeline (MS-RDPEGFX). The desktop then keeps its size, since an RDP resize is
-  the pipeline's graphics reset.
-- The passthrough sends the pipeline to the browser, which
-  composes it. That takes nearly all of the picture's work off the gateway. It
-  needs WebGL 2 and a cross-origin isolated page, which a proxy that drops the
-  gateway's two isolation headers undoes.
-- **Experimental:** `egfx_h264 = true` lets the host draw video with H.264 on a
-  passed pipeline, which the browser decodes. Without it a passed pipeline is
-  lossless.
+- The host draws through the graphics pipeline (MS-RDPEGFX), which every
+  session passes to the browser to compose. That takes nearly all of the
+  picture's work off the gateway. It needs WebGL 2 and a cross-origin isolated
+  page, which a proxy that drops the gateway's two isolation headers undoes; a
+  browser without them cannot start the target. How the host draws the
+  pipeline, lossless or adaptive H.264 (alpha), is chosen at the picker.
+- `egfx = false` makes the host draw with bitmap updates instead, which the
+  gateway encodes as VP9: the target for a browser that cannot compose the
+  pipeline. The desktop then keeps its size, since an RDP resize is the
+  pipeline's graphics reset.
 - **Alpha:** `virtual_displays = 2` asks the host for two displays, each the
   session's size. Where the second sits against the first is chosen under the
   target at the picker, **Second display**: right, left, top or bottom, to match
@@ -141,7 +153,7 @@ touch.
   **Take**s it **over**, as a browser asks before taking a session, and the
   tab it was taken from says so and offers **Take it back**. That tab's menu
   **Disconnect**s it, and choosing one display alone closes it. Opened while it
-  is not shown, it says it is not available. With the passthrough, the browser holding the session
+  is not shown, it says it is not available. With the pipeline on, the browser holding the session
   composes both displays once and shows one; the second display's tab is painted
   from that same picture, so nothing is decoded twice. Checked against one
   Windows 11 host, the passthrough over two displays by a headless browser's

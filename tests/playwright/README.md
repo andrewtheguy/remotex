@@ -40,8 +40,8 @@ first `GRAPHICS` record, that every record is whole commands by their own
 headers' lengths, that the page acknowledges each batch once its paint worker has
 composed it, and that a page that reloads is given a pipeline from its first
 command rather than the one that was running. A compositor that refused a command
-says so in the DOM, which is what stands in for the picture here. Against a target
-with the EXPERIMENTAL `egfx_h264` key, and a host playing a video, it also asserts
+says so in the DOM, which is what stands in for the picture here. Started with
+the picker's Adaptive (ALPHA), H.264 over the full screen, it also asserts
 that the page said it decodes H.264, that the session says it carries it, and that
 a batch whose commands draw with H.264 is acknowledged: the acknowledgment follows
 the decode of every access unit in the batch, and a decoder that gave no picture
@@ -136,9 +136,13 @@ tone harness in `src/server.rs` supplies audio without a remote.
 the choices made under the target and `connected` reports them back, that a
 target opens to the size it will have and the options its type offers and the
 browser remembers what was chosen, and that a second browser taking the session
-over is given none of it: it lands on a picker where a passthrough it cannot take
-is greyed. It needs an `rdp` target that configures a `size`, the one type
-that offers all three choices, and the tone harness is one.
+over is given none of it: it lands on a picker where a target whose pipeline it
+cannot compose has Start disabled, with the reason, and no VP9 in its place. It
+also checks that the pipeline is said to be always passed, with no box to tick,
+and that the Graphics
+group opens on Lossless and, under Adaptive, on H.264 full screen. It needs an
+`rdp` target that configures a `size`, the one type that offers all three
+choices, and the tone harness is one.
 
 `clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It
 proves that unsolicited remote copies still auto-sync, while opening and
@@ -153,7 +157,8 @@ is invisible to any one of them.
 
 `support.ts` holds what the specs share: the login/target flow and the SSH hooks
 that read and write the Mac's pasteboard. A spec names what its session is started
-with — resize, sound, the target's passthrough — and the flow sets every option the
+with — resize, sound, the target's passthrough, how the host draws its
+pipeline — and the flow sets every option the
 target shows at the picker before pressing Start, so a run does not depend on what
 an earlier one left remembered in the browser. Two conventions live there. Every spec
 hands the session back to the picker in an `afterEach` through `leaveSession`,
@@ -225,9 +230,8 @@ That gateway serves the SPA compiled into its binary, so rebuild the gateway
 after a frontend change and restart it; a stale bundle is exactly what these
 specs cannot see.
 
-The passthrough spec needs a live RDP host, in a target named by
-`REMOTEX_PLAYWRIGHT_EGFX_TARGET`, and starts its sessions with the pipeline
-passed:
+The passthrough spec needs a live RDP host, in a target with the pipeline on
+named by `REMOTEX_PLAYWRIGHT_EGFX_TARGET`, whose sessions pass it unasked:
 
 ```sh
 cd tests/playwright
@@ -238,8 +242,10 @@ REMOTEX_PLAYWRIGHT_EGFX_TARGET='win' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
-Its H.264 case needs a target with `egfx_h264 = true`, named by
-`REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET`, while the host is playing a video:
+Its H.264 case, ALPHA, starts a target with the pipeline on, named by
+`REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET`, with the picker's Adaptive and H.264 over
+the full screen, which the host draws everything in; by region it would need a
+video playing:
 
 ```sh
 REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET='win-h264' \

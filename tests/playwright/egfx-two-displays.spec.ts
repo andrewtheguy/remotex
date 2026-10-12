@@ -1,8 +1,8 @@
-// A session started with the graphics pipeline passed, over two virtual displays:
-// the page that holds the session composes the span the host draws and shows one
-// display of it, and the second display's tab is painted from the same picture,
-// handed across the browser, where every other second display's tab is sent VP9
-// cut from the gateway's framebuffer.
+// A session with the graphics pipeline, over two virtual displays: the page that
+// holds the session composes the span the host draws and shows one display of it,
+// and the second display's tab is painted from the same picture, handed across the
+// browser, where a target on bitmap updates sends that tab VP9 cut from the
+// gateway's framebuffer.
 //
 // Everything asserted is decided by the system and not by a machine's timing: the
 // `graphicsView` each display socket carries beside its `resize`, which names the
@@ -12,8 +12,8 @@
 // picker moves the session's page to the other display. Nothing here looks at a
 // pixel.
 //
-// It needs a gateway whose local config names a live RDP host asked for two
-// virtual displays, and ticks the passthrough under it at the picker:
+// It needs a gateway whose local config names a live RDP host with the pipeline on,
+// asked for two virtual displays:
 //
 //     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52890/ \
 //     REMOTEX_PLAYWRIGHT_USERNAME=admin \
@@ -33,8 +33,9 @@ import {
 /// The opt-in, and the target name in one.
 const TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET;
 
-/// What every session here is started with: the pipeline passed, and nothing else.
-const PASSED = { passthrough: true };
+/// What every session here is started with: nothing chosen, the pipeline passed
+/// as it is in every session.
+const PASSED = {};
 
 /// Everything a page's display sockets carried, by the display each one named.
 interface Displays {

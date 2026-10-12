@@ -34,8 +34,8 @@ scaling fault in the gateway or the page.
 
 ## A veiled rectangle over a playing video, on an RDP pipeline passed with H.264
 
-**What it looks like.** In an RDP session whose pipeline is passed through, on a
-target with the experimental `egfx_h264` key
+**What it looks like.** In an RDP session whose host draws H.264 by region, which
+a session now asks for with the picker's Adaptive (alpha) and *H.264 region*
 ([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)),
 a rectangle over most of a playing video, or of anything else on the desktop that
 moves like one, looks as if a translucent sheet lay on it: fine detail inside it
@@ -54,14 +54,23 @@ unit carried the coarsest of the three settings that host has been seen to use
 decoder, matched FFmpeg's decode of the same access unit, and opening and closing
 the menu over the session changed nothing in the stream.
 
-**What would move it.** Taking `egfx_h264` off the target: its pipeline is then
-lossless, and the video is sharp at the lossless codecs' cost in bytes. Whether
+**What would move it.** *H.264 full screen*, the default under Adaptive, whose
+H.264 the host rate-controls to the page's link, at its finest quality on a fast
+one. Or *Lossless*: the pipeline is then lossless, and the video is sharp at the
+lossless codecs' cost in bytes. Whether
 the host can be led to a finer setting is not known. It chose a finer one for
-most of a film clip at 1280×800, so content and size move it; nothing has been
-tried from the client's side, such as answering the host's network detection,
-which this client does not. It is recorded so that the rectangle is recognised
-as the host's encoding rather than investigated as a fault in the page's
-decoders or the compositor.
+most of a film clip at 1280×800, so content and size move it. The link probe has
+now answered the host's network detection over a constrained TCP connection and
+has asked for whole-desktop AVC444v2 with `AVC_THINCLIENT`: the host reduced its
+frame rate to the link and kept the same quantizers. When the probe also claimed
+UDP, refused the host's offer of it and stayed on TCP, the host rate-controlled
+its H.264. On the LAN it went to the finest quantizer throughout, and at 1 Mbit/s
+it sent coarser regions at a higher frame rate. It was seen before a session took
+either; an adaptive session now takes both, answered at the page's pace. Whether the rectangle still shows by region on a slow link has not been looked
+at; what is left is on the
+[roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac). It is recorded so
+that the rectangle is recognised as the host's encoding rather than investigated
+as a fault in the page's decoders or the compositor.
 
 ## The cursor stays the arrow while a selection tool is up, on a Mac
 

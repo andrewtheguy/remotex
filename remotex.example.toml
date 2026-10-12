@@ -188,19 +188,20 @@ site_passwd = ""
 # profile is served; the browser picks one from a picker after login (there is
 # no --target selector).
 #
-# Three things about a session are not keys here. Whoever starts it chooses them
+# Four things about a session are not keys here. Whoever starts it chooses them
 # at the picker: picking a target opens it, its options show under it, and Start
 # connects with what is chosen. They hold for the life of the session — a browser
 # that takes it over gets it as it was started — and the browser remembers them
 # per target for the next time. Which a target shows is its type's to say:
 #
-#   target                           window   sound            passthrough
-#   rdp                              yes      shown            shown
-#   vnc                              —        —                —
-#   vnc, wlshare                     yes      shown            —
-#   vnc, ard                         —        —                —
-#   vnc, ard with virtual_display    yes      —                —
-#   vnc, ard-high-performance        yes      always carried   shown
+#   target                           window   sound            passthrough   graphics
+#   rdp                              yes      shown            always        shown
+#   rdp with egfx = false            —        shown            —             —
+#   vnc                              —        —                —             —
+#   vnc, wlshare                     yes      shown            —             —
+#   vnc, ard                         —        —                —             —
+#   vnc, ard with virtual_display    yes      —                —             —
+#   vnc, ard-high-performance        yes      always carried   shown         —
 #
 # Size is how the desktop is sized, and the picker shows it before Start. A
 # desktop either keeps one size for the session — the target's `size` below, or
@@ -242,12 +243,31 @@ site_passwd = ""
 # nothing to choose. In the session, the floating menu's Mute and Unmute change
 # only whether this browser is listening.
 #
-# Passthrough sends the remote's own stream to the browser as it came, for a LAN:
-# an "rdp" host's graphics pipeline for the page to compose, or an
-# "ard-high-performance" Mac's HEVC. Each is described with its
-# target below. The choice is greyed where the browser cannot take the stream,
-# and a browser that cannot take a session somebody else started with it is shown
-# why and offered End session, not a different session.
+# Passthrough sends the remote's own stream to the browser as it came: an
+# "ard-high-performance" Mac's HEVC, for a LAN, where it is a choice greyed for a
+# browser that cannot take it, or an "rdp" host's graphics pipeline for the page
+# to compose, which is no choice: with `egfx` on every session passes it, and a
+# browser that cannot compose it cannot start the target. Each is described with
+# its target below. A browser that cannot take a session somebody else started
+# is shown why and offered End session, not a different session.
+#
+# Graphics is how an "rdp" host draws its pipeline: Lossless, the host's lossless
+# codecs alone, for a LAN, by default; or Adaptive, ALPHA, H.264 the host fits to
+# the link the browser is on. Under Adaptive, H.264 full screen, the default, has
+# the host draw the whole desktop in H.264 (AVC_THINCLIENT, MS-RDPEGFX 2.2.3.6),
+# which a Windows host answers in AVC444v2 and rate-controls all of: behind a
+# 1 Mbit/s page, 17.5 frames a second at 6.4 KB. H.264 region keeps H.264 to
+# what moves like video, a player or a scrolling page, and the rest lossless;
+# text stays sharp, but the rest, mostly RemoteFX Progressive, is not
+# rate-controlled, so the same page got 4.4 frames a second. An adaptive session
+# takes part in the host's network detection, answered at the page's pace, and
+# claims UDP, which it turns down when the host offers it, so it stays on TCP;
+# the host then draws coarser and at a usable frame rate on a slow link, at its
+# finest quality on a fast one. The browser decodes the H.264 with its own
+# decoder and paints it through the same compositor; the gateway decodes
+# nothing. A browser whose VideoDecoder cannot take the host's H.264 has
+# Adaptive greyed, and a session it reaches all the same is drawn lossless.
+# Checked against two Windows 11 hosts without a GPU.
 [[targets]]
 name = "example"
 protocol = "rdp"           # required: "rdp" or "vnc"
@@ -291,18 +311,22 @@ password = "change-me"
 # connecting client's density whatever the size, as Apple's Screen Sharing does.
 #size = "1920x1080"
 
-# RDP graphics pipeline (MS-RDPEGFX), on by default. On, a Windows host draws the
-# desktop through the pipeline's surfaces and marks every frame, and each resize
-# is a graphics reset, cheap enough for the window to drive continuously. Off, the
-# host draws with bitmap updates and the desktop keeps its size — the
-# picker then offers neither the window nor the pipeline's passthrough; that is the
-# escape hatch for a host whose pipeline the decoders cannot paint. RDP only, and
-# refused on VNC even when set to false.
+# Whether to offer the RDP graphics pipeline (MS-RDPEGFX): on by default. With it
+# on, a Windows host draws the desktop through the pipeline's surfaces and marks
+# every frame, and each resize is a graphics reset, cheap enough for the window
+# to drive continuously. `false` is the bitmap path: the host draws with bitmap
+# updates, decoded here and encoded as VP9, and the desktop keeps its size — the
+# picker then offers neither the window nor the pipeline's rows. That is the
+# target for a browser that cannot compose the pipeline, and the escape hatch
+# for a host whose pipeline the page's decoders cannot paint. RDP only, and
+# refused on VNC whatever the value.
 #
-# With the pipeline on, the picker offers passing it to the browser, which
-# composes it, rather than composing the desktop here and encoding it as VP9. For
-# a LAN: what the host draws with is sent as it is, with no quality walk behind
-# it, so the video keys further down reach nothing of it. It takes the encoding
+# With the pipeline on, every session passes it to the browser, which composes
+# it; the gateway composes none, and a browser that cannot is not sent VP9 in
+# its place. What the host draws with is sent as it is, with no quality walk
+# behind it, so the video keys further down reach only the bitmap updates of a
+# host that answers the offer with them. How the host draws it, lossless or
+# adaptive H.264, is chosen at the picker (Graphics, above). It takes the encoding
 # and the decoding off the gateway — a few percent of a core are left, whatever
 # the desktop is doing — and puts the decoding on the browser, where a desktop in
 # ordinary use is light and a full-screen video is about as much as one browser
@@ -317,18 +341,6 @@ password = "change-me"
 # beside it have not been tried.
 #egfx = true
 
-# EXPERIMENTAL. Let the host draw with H.264 on a pipeline that is passed to the
-# browser. A Windows host then hands the parts of the desktop that move like
-# video — a player, a scrolling page — to H.264 and draws the rest as before,
-# which is its own trade of detail for bitrate on those parts: without this key
-# everything a passed pipeline carries is lossless. The gateway decodes nothing;
-# the browser decodes the video with its own decoder and paints it through the
-# same compositor. It reaches only a session started with the passthrough, in a
-# browser that decodes H.264: any other session is as it was without the key.
-# Checked against one Windows 11 host without a GPU. RDP only, and refused beside
-# `egfx = false`.
-#egfx_h264 = true
-
 # ALPHA. Ask the host for this many virtual displays, each the session's size.
 # Where the second sits against the first is chosen at the picker, on an rdp
 # target: right, left, top or bottom. The session starts on the floating menu's
@@ -337,8 +349,8 @@ password = "change-me"
 # the gateway encodes only what is shown; the host renders the other for the
 # windows left on it. 1 is the one desktop every target opens; at most 2. RDP
 # and `subtype = "ard-high-performance"` — the key is shared by the target types
-# that can create virtual displays, and refused elsewhere. On RDP the pipeline's
-# passthrough is offered beside 2 as beside 1: the browser composes the whole
+# that can create virtual displays, and refused elsewhere. On RDP the pipeline is
+# passed beside 2 as beside 1: the browser composes the whole
 # span once and shows one display of it, and the second display's tab is painted
 # from the same picture; a Mac sends each display as a stream of its own (the
 # second to UDP port 5902), passed or not. Checked against one Windows 11 host
@@ -548,8 +560,8 @@ password = "change-me"
 # EXPERIMENTAL. Decoding the picture here takes the host's FFmpeg (libavcodec 60
 # to 63), which the gateway loads when it is needed.
 # docs/high-performance-decoder.md says how to install it on Linux, macOS and
-# Windows. Without it the picture can only be passed: the picker shows the
-# passthrough as already chosen, and a browser that cannot decode the HEVC
+# Windows. Without it the picture can only be passed: the picker says so, with
+# no box to tick, and a browser that cannot decode the HEVC
 # cannot start the target, which Start says. See docs/apple-vnc-889.md, "The
 # media stream".
 #
@@ -582,8 +594,8 @@ password = "change-me"
 # How this target's VP9 stream is configured. The gateway applies the plan when it
 # encodes a desktop, and wlshare applies the same plan to the VP9 it makes and the
 # gateway passes through. A passed Mac media stream or RDP graphics pipeline keeps
-# the remote's own quality; in a session started without the passthrough, the VP9
-# plan applies. Every key below is per target, so it belongs
+# the remote's own quality; the VP9 plan applies to a Mac session started without
+# the passthrough, and on RDP only to the bitmap path. Every key below is per target, so it belongs
 # *inside* a [[targets]] table and not in a section of their own — uncommented here
 # they would attach to whichever [[targets]] block precedes them, which is the
 # "example" one at the top of this file. There is no global render setting, and

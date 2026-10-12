@@ -96,6 +96,9 @@ pub const CAPS_SMALL_CACHE: u32 = 0x0000_0002;
 pub const CAPS_AVC420_ENABLED: u32 = 0x0000_0010;
 /// The server is not to send H.264 in any of its shapes. Version 10 and later.
 pub const CAPS_AVC_DISABLED: u32 = 0x0000_0020;
+/// The client prefers H.264 in YUV444 mode ([MS-RDPEGFX] 2.2.3.6). Version 10.3
+/// and later.
+pub const CAPS_AVC_THINCLIENT: u32 = 0x0000_0040;
 /// The host is not to map surfaces to a scaled output or window, which this client
 /// would ignore. Version 10.7.
 pub const CAPS_SCALEDMAP_DISABLE: u32 = 0x0000_0080;
@@ -473,47 +476,66 @@ pub(crate) fn pdu(command: u16, body: &[u8]) -> Vec<u8> {
     w.finish()
 }
 
+/// What the host is told of H.264 ([`caps_advertise`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum H264 {
+    /// None in any shape: every pipeline is lossless.
+    #[default]
+    Refused,
+    /// Taken where the host chooses it, by region beside the other codecs.
+    ByRegion,
+    /// Preferred for the whole desktop, in YUV444 (`AVC_THINCLIENT`).
+    WholeDesktop,
+}
+
 /// What this client can take, in a session that takes H.264 and in one that does
 /// not.
 ///
-/// Without it: version 8 and version 10, the small cache, and no H.264. Version 8
-/// alone would have a Windows host draw with RemoteFX Progressive and planar;
-/// version 10 adds nothing this client has to decode — its point is
-/// `AVC_DISABLED`, which is a version-10 flag, so that a host which would otherwise
-/// hand the parts of the desktop that move like video to H.264 is told not to: a
-/// lossy video codec would lose detail before the gateway ever encodes the picture,
-/// and the gateway has no decoder for it.
+/// Without it — a lossless session: version 8 and version 10, the small cache,
+/// and no H.264. Version 8 alone would have a Windows host draw with RemoteFX
+/// Progressive and planar; version 10 adds nothing the page has to decode — its
+/// point is `AVC_DISABLED`, which is a version-10 flag, so that a host which would
+/// otherwise hand the parts of the desktop that move like video to H.264 is told
+/// not to: a lossy video codec would lose the detail the session was started to
+/// keep.
 ///
-/// With it — a passed pipeline whose page decodes the H.264 itself — every
+/// With it — an adaptive session, whose page decodes the H.264 itself — every
 /// capability set from version 8 to 10.4, and 10.7. The host confirms the newest
 /// set it knows, and what the sets add over version 8 is H.264: 8.1 with the YUV420
 /// mode flagged on, 10 implying the YUV444 mode as well, 10.1 the second YUV444
 /// layout, and 10.4 H.264 in the same frame as the other codecs — which is how a
 /// current Windows host draws a desktop with video playing on it, the video in
-/// AVC420 and the rest in ClearCodec and Progressive. `AVC_THINCLIENT`, which would
-/// ask for the whole desktop in AVC444, is not set: the host's own choice by region
-/// is the better picture for text. 10.5 and 10.6 are left out, and 10.7 carries
+/// AVC420 and the rest in ClearCodec and Progressive. `AVC_THINCLIENT`, which asks
+/// for the whole desktop in AVC444, is set only for [`H264::WholeDesktop`], on
+/// every set from 10.3, where the flag starts; [`H264::ByRegion`] leaves the
+/// choice by region to the host. 10.5 and 10.6 are left out, and 10.7 carries
 /// `SCALEDMAP_DISABLE`: from 10.5 a host may map a surface to the output through
 /// the scaled mappings, commands this client ignores, and only 10.7 has a flag to
 /// say so. A host that knows 10.5 or 10.6 but not 10.7 settles on 10.4.
 ///
 /// `THINCLIENT` is deliberately not set either way: a current host ignores it, and
 /// an older one would answer it with RemoteFX rather than the progressive form.
-pub fn caps_advertise(h264: bool) -> Vec<u8> {
-    let lossless: &[(u32, Option<u32>)] =
-        &[(CAPVERSION_8, Some(CAPS_SMALL_CACHE)), (CAPVERSION_10, Some(CAPS_SMALL_CACHE | CAPS_AVC_DISABLED))];
-    let with_h264: &[(u32, Option<u32>)] = &[
-        (CAPVERSION_8, Some(CAPS_SMALL_CACHE)),
-        (CAPVERSION_81, Some(CAPS_SMALL_CACHE | CAPS_AVC420_ENABLED)),
-        (CAPVERSION_10, Some(CAPS_SMALL_CACHE)),
-        // 10.1 carries sixteen reserved bytes in place of flags.
-        (CAPVERSION_101, None),
-        (CAPVERSION_102, Some(CAPS_SMALL_CACHE)),
-        (CAPVERSION_103, Some(0)),
-        (CAPVERSION_104, Some(CAPS_SMALL_CACHE)),
-        (CAPVERSION_107, Some(CAPS_SMALL_CACHE | CAPS_SCALEDMAP_DISABLE)),
-    ];
-    let sets = if h264 { with_h264 } else { lossless };
+pub fn caps_advertise(h264: H264) -> Vec<u8> {
+    let whole = match h264 {
+        H264::WholeDesktop => CAPS_AVC_THINCLIENT,
+        H264::Refused | H264::ByRegion => 0,
+    };
+    let sets: &[(u32, Option<u32>)] = match h264 {
+        H264::Refused => {
+            &[(CAPVERSION_8, Some(CAPS_SMALL_CACHE)), (CAPVERSION_10, Some(CAPS_SMALL_CACHE | CAPS_AVC_DISABLED))]
+        }
+        H264::ByRegion | H264::WholeDesktop => &[
+            (CAPVERSION_8, Some(CAPS_SMALL_CACHE)),
+            (CAPVERSION_81, Some(CAPS_SMALL_CACHE | CAPS_AVC420_ENABLED)),
+            (CAPVERSION_10, Some(CAPS_SMALL_CACHE)),
+            // 10.1 carries sixteen reserved bytes in place of flags.
+            (CAPVERSION_101, None),
+            (CAPVERSION_102, Some(CAPS_SMALL_CACHE)),
+            (CAPVERSION_103, Some(whole)),
+            (CAPVERSION_104, Some(CAPS_SMALL_CACHE | whole)),
+            (CAPVERSION_107, Some(CAPS_SMALL_CACHE | CAPS_SCALEDMAP_DISABLE | whole)),
+        ],
+    };
     let mut w = Writer::with_capacity(2 + sets.len() * 12 + 12);
     w.u16_le(u16::try_from(sets.len()).expect("a handful"));
     for (version, flags) in sets {
@@ -837,7 +859,7 @@ mod tests {
     /// The two PDUs this client writes, byte for byte.
     #[test]
     fn the_caps_advertise_and_the_frame_acknowledge_are_written_whole() {
-        let caps = caps_advertise(false);
+        let caps = caps_advertise(H264::Refused);
         let mut r = Reader::new("a test", &caps);
         assert_eq!(r.u16_le().unwrap(), CMD_CAPS_ADVERTISE);
         assert_eq!(r.u16_le().unwrap(), 0);
@@ -849,7 +871,7 @@ mod tests {
         assert!(r.is_empty());
 
         // With H.264: every set a host may settle on, none of them refusing it.
-        let caps = caps_advertise(true);
+        let caps = caps_advertise(H264::ByRegion);
         let mut r = Reader::new("a test", &caps);
         assert_eq!(r.u16_le().unwrap(), CMD_CAPS_ADVERTISE);
         assert_eq!(r.u16_le().unwrap(), 0);
@@ -867,6 +889,23 @@ mod tests {
         assert_eq!(set(), (CAPVERSION_104, 4, CAPS_SMALL_CACHE));
         // Not 10.5 or 10.6: they would let the host use the scaled mappings.
         assert_eq!(set(), (CAPVERSION_107, 4, CAPS_SMALL_CACHE | CAPS_SCALEDMAP_DISABLE));
+        assert!(r.is_empty());
+
+        // For the whole desktop: the same sets, the ones from 10.3 preferring it.
+        let caps = caps_advertise(H264::WholeDesktop);
+        let mut r = Reader::new("a test", &caps);
+        r.skip(8).unwrap();
+        assert_eq!(r.u16_le().unwrap(), 8);
+        let mut set = || (r.u32_le().unwrap(), r.u32_le().unwrap(), r.u32_le().unwrap());
+        assert_eq!(set(), (CAPVERSION_8, 4, CAPS_SMALL_CACHE));
+        assert_eq!(set(), (CAPVERSION_81, 4, CAPS_SMALL_CACHE | CAPS_AVC420_ENABLED));
+        assert_eq!(set(), (CAPVERSION_10, 4, CAPS_SMALL_CACHE));
+        r.skip(24).unwrap();
+        let mut set = || (r.u32_le().unwrap(), r.u32_le().unwrap(), r.u32_le().unwrap());
+        assert_eq!(set(), (CAPVERSION_102, 4, CAPS_SMALL_CACHE));
+        assert_eq!(set(), (CAPVERSION_103, 4, CAPS_AVC_THINCLIENT));
+        assert_eq!(set(), (CAPVERSION_104, 4, CAPS_SMALL_CACHE | CAPS_AVC_THINCLIENT));
+        assert_eq!(set(), (CAPVERSION_107, 4, CAPS_SMALL_CACHE | CAPS_SCALEDMAP_DISABLE | CAPS_AVC_THINCLIENT));
         assert!(r.is_empty());
 
         assert_eq!(frame_acknowledge(7, 3), vec![

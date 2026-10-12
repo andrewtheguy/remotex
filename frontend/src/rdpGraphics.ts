@@ -2,17 +2,18 @@
 // about itself the gateway is told, beside the Mac's stream (appleMedia.ts), and
 // ahead of the pipeline's H.264 (rdpH264.ts).
 //
-// A session started with the pipeline passed is composed here, by the gateway's own
-// compositor compiled to WebAssembly (egfxCompositor.ts). That needs two things of
+// An RDP target with the pipeline on passes it in every session, and it is composed
+// here, by the gateway's own compositor compiled to WebAssembly (egfxCompositor.ts):
+// the gateway composes none. That needs two things of
 // the page. A memory its threads can share, which is a page that is cross-origin
 // isolated: every gateway serves the two headers that make one, and a proxy that
 // drops them takes it away. And a WebGL 2 canvas off the page, as the paint
 // worker's is, to present the picture on (egfxPicture.ts).
 //
-// The answer greys the choice at the picker where it is no, and rides every session
-// socket this page opens (`gateway.ts`), so a page that comes back to its session
-// saying no is returned to the picker instead of being sent a stream it cannot
-// compose. Nothing is rebuilt for a page that says no.
+// Where the answer is no the picker will not start such a target, and it rides every
+// session socket this page opens (`gateway.ts`), so a page that comes back to its
+// session saying no is returned to the picker instead of being sent a stream it
+// cannot compose. Nothing is rebuilt for a page that says no, and no VP9 stands in.
 
 let answer: boolean | null = null;
 

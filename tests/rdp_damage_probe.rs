@@ -6,10 +6,16 @@
 //! framebuffer written outside a reported rectangle is a pixel that goes stale on
 //! the far end and stays stale — the leftover pieces a moving picture leaves behind.
 //!
+//! Under the graphics pipeline the gateway paints nothing: it passes the pipeline,
+//! and the page's compositor paints it and names each rectangle it painted. So
+//! under the pipeline what is probed is that compositor, fed what the session
+//! passed as the page feeds it ([`Page`]), and on the bitmap path of a target with
+//! `egfx = false` it is the client itself.
+//!
 //! This probe is the gateway's shadow with nothing else attached. It keeps a mirror
-//! of the framebuffer and refreshes it *only* inside the rectangles the client
-//! reports, exactly as `Shadow` does, then compares the mirror with the framebuffer
-//! at every frame boundary. Agreement is the contract. A disagreement that survives
+//! of the picture and refreshes it *only* inside the rectangles reported, exactly
+//! as `Shadow` does, then compares the mirror with the picture at every frame
+//! boundary. Agreement is the contract. A disagreement that survives
 //! [`STREAK`] consecutive frames is a leak rather than the race between the client's
 //! thread painting frame N+1 and this one reading frame N — that race heals on the
 //! next frame, because the paint that caused it is already on its way.
@@ -26,7 +32,10 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::{AudioSink, Connect, Event, MouseButton, Session};
+use std::collections::VecDeque;
+
+use remotex::rdp_client::proto::gfx::H264;
+use remotex::rdp_client::{AudioSink, Compositor, Connect, Event, Framebuffer, Input, MouseButton, Session};
 use tokio::sync::mpsc::Receiver;
 
 const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
@@ -51,7 +60,7 @@ fn run_secs() -> u64 {
     std::env::var(RUN_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(45)
 }
 
-fn connect() -> (Session, Receiver<Event>) {
+fn connect() -> (Session, Page) {
     let name = std::env::var(TARGET_ENV)
         .unwrap_or_else(|_| panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml"));
     let target = common::uat_target(&name);
@@ -77,15 +86,73 @@ fn connect() -> (Session, Receiver<Event>) {
         placement: remotex::config::Placement::Right,
         resize: offers.resize,
         egfx: target.egfx(),
-        pass_graphics: false,
-        h264: false,
+        h264: H264::Refused,
+        autodetect: false,
+        multitransport: false,
         audio: offers.audio.then(|| Box::new(Silence) as Box<dyn AudioSink>),
         // A camera draws nothing, and one the browser never plugs costs the host a
         // channel and nothing else.
         camera: None,
         microphone: None,
     });
-    (session, events)
+    let page = Page {
+        events,
+        input: session.input().clone(),
+        egfx: target.egfx(),
+        compositor: Compositor::new(),
+        composed: VecDeque::new(),
+    };
+    (session, page)
+}
+
+/// The session's events as the probe reads them, with the page's part played under
+/// the pipeline: each run of commands passed is composed as the browser composes
+/// it, and reported as the reset and the paints it made, ahead of the frame's end
+/// the session sends after it. The host is told each frame is composed once it is,
+/// as the page tells it.
+struct Page {
+    events: Receiver<Event>,
+    input: Input,
+    egfx: bool,
+    compositor: Compositor,
+    composed: VecDeque<Event>,
+}
+
+impl Page {
+    async fn recv(&mut self) -> Option<Event> {
+        loop {
+            if let Some(event) = self.composed.pop_front() {
+                return Some(event);
+            }
+            match self.events.recv().await? {
+                // A pipeline begins: whoever composes it starts from nothing.
+                Event::FramesMarked => self.compositor = Compositor::new(),
+                Event::Graphics { commands, frame } => {
+                    let composed = self.compositor.compose(&commands).expect("the passed commands compose");
+                    if let Some((width, height)) = composed.resized {
+                        self.composed.push_back(Event::Resize { width, height, monitors: Vec::new() });
+                    }
+                    self.composed.extend(composed.painted.into_iter().map(Event::Paint));
+                    if let Some(frame) = frame {
+                        self.input.frame_composed(frame);
+                    }
+                }
+                // Said again once the compositor has the new size.
+                Event::Resize { .. } if self.egfx => {}
+                event => return Some(event),
+            }
+        }
+    }
+
+    /// The picture the rectangles are reported against: the compositor's under the
+    /// pipeline, the session's framebuffer on the bitmap path.
+    fn picture<'a>(&'a self, session: &'a Session) -> &'a Framebuffer {
+        if self.egfx { self.compositor.framebuffer() } else { session.framebuffer() }
+    }
+
+    fn snapshot(&self, session: &Session) -> (u32, u32, Vec<u8>) {
+        self.picture(session).with(|frame| (frame.width, frame.height, frame.pixels.clone()))
+    }
 }
 
 /// Audio the probe asks for, as the gateway does, and throws away.
@@ -177,10 +244,6 @@ impl Shadow {
     }
 }
 
-fn snapshot(session: &Session) -> (u32, u32, Vec<u8>) {
-    session.framebuffer().with(|frame| (frame.width, frame.height, frame.pixels.clone()))
-}
-
 fn dump(name: &str, width: u32, height: u32, pixels: &[u8]) {
     let Ok(dir) = std::env::var(DUMP_ENV) else { return };
     std::fs::create_dir_all(&dir).expect("creating the dump directory");
@@ -217,7 +280,7 @@ async fn a_real_host_reports_every_pixel_it_paints() {
             _ => {}
         }
     }
-    let (width, height, pixels) = snapshot(&session);
+    let (width, height, pixels) = events.snapshot(&session);
     println!("  desktop {width}x{height}, mirrored whole after {frames} frames");
     let mut shadow = Shadow::new(width, height, pixels);
 
@@ -242,7 +305,7 @@ async fn a_real_host_reports_every_pixel_it_paints() {
             }
             Event::Frame => {
                 marks += 1;
-                session.framebuffer().with(|frame| {
+                events.picture(&session).with(|frame| {
                     if frame.width != shadow.width || frame.height != shadow.height {
                         return;
                     }
@@ -255,7 +318,7 @@ async fn a_real_host_reports_every_pixel_it_paints() {
                 rects.clear();
             }
             Event::Resize { width, height, .. } => {
-                let (w, h, pixels) = snapshot(&session);
+                let (w, h, pixels) = events.snapshot(&session);
                 println!("  resized to {width}x{height}; mirror restarted at {w}x{h}");
                 shadow = Shadow::new(w, h, pixels);
             }
@@ -264,7 +327,7 @@ async fn a_real_host_reports_every_pixel_it_paints() {
         }
     }
 
-    let (width, height, frame) = snapshot(&session);
+    let (width, height, frame) = events.snapshot(&session);
     println!("  {paints} paints over {marks} frames, {reported} pixels reported");
     println!(
         "  {reported} px is {:.1} whole desktops; the average rectangle is {} px",
@@ -320,7 +383,7 @@ const DOWN: (u8, bool) = (0x50, true);
 const M: (u8, bool) = (0x32, false);
 
 /// Drain events for `for_`, failing if the session ends.
-async fn pump(events: &mut Receiver<Event>, for_: Duration) {
+async fn pump(events: &mut Page, for_: Duration) {
     let until = Instant::now() + for_;
     while let Ok(Some(event)) = tokio::time::timeout_at(until.into(), events.recv()).await {
         if let Event::Ended(result) = event {
@@ -333,7 +396,7 @@ async fn pump(events: &mut Receiver<Event>, for_: Duration) {
 const QUIET: Duration = Duration::from_millis(1500);
 
 /// Drain events until none has arrived for [`QUIET`], or `cap` passes; says which.
-async fn settle(events: &mut Receiver<Event>, cap: Duration) -> (u64, bool) {
+async fn settle(events: &mut Page, cap: Duration) -> (u64, bool) {
     let until = Instant::now() + cap;
     let mut frames = 0;
     while Instant::now() < until {
@@ -371,12 +434,12 @@ fn differing_cells(width: u32, height: u32, a: &[u8], b: &[u8]) -> Vec<(u32, u32
     out
 }
 
-/// Whether the client's own decoders leave the framebuffer holding what the host drew.
+/// Whether the decoders leave the picture holding what the host drew.
 ///
 /// Damage reporting can be perfect and the picture still wrong: a Progressive tile, a
 /// ClearCodec cache or a surface copy decoded wrongly writes wrong pixels *and reports
-/// them*, and the gateway's `refresh` repaints from this framebuffer, so neither the
-/// damage probe nor a browser reload can see it. Only the host can, by drawing the
+/// them*, and a repaint from the picture repeats them, so neither the damage probe
+/// nor a repaint can see it. Only the host can, by drawing the
 /// desktop again. So: settle, snapshot what was decoded, ask the host for a redraw
 /// twice, and count the cells where the decoded picture disagrees with a redraw that
 /// agrees with itself — the second redraw is what rules out a clock or an animation.
@@ -478,7 +541,7 @@ async fn a_host_redraw_matches_what_was_decoded() {
         println!("  RESULT inconclusive: the desktop never settled after {frames} frames");
         return;
     }
-    let (width, height, decoded) = snapshot(&session);
+    let (width, height, decoded) = events.snapshot(&session);
     log::info!("PROBE-MARK decoded snapshot");
     println!("  decoded snapshot after {frames} frames; settled");
 
@@ -487,7 +550,7 @@ async fn a_host_redraw_matches_what_was_decoded() {
         log::info!("PROBE-MARK redraw {pass}");
         session.input().refresh();
         let (frames, quiet) = settle(&mut events, Duration::from_secs(20)).await;
-        let (w, h, pixels) = snapshot(&session);
+        let (w, h, pixels) = events.snapshot(&session);
         assert_eq!((w, h), (width, height), "the desktop resized during the probe");
         println!("  host redraw took {frames} frames; {}", if quiet { "settled" } else { "NEVER SETTLED" });
         // A redraw that drew nothing is the decoded picture compared with itself, and
