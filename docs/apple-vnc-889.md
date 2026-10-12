@@ -1235,16 +1235,11 @@ at 1600×1000 with one tile, for 20 s a run:
 
 | The display | H.264, after the first second | HEVC, after the first second |
 |---|---|---|
-| Still | 33 and 473 kbit/s | 15.4 and 15.5 Mbit/s |
-| Only the pointer moving | 115 and 494 kbit/s | 3.0 and 16.8 Mbit/s |
 | A 30 fps animation in a quarter of it | 9.2–11.0 Mbit/s | 19.3–21.2 Mbit/s |
 | A detailed picture panning across a window | 20.8 and 21.0 Mbit/s | 20.5 and 20.9 Mbit/s |
 
-- **The first picture:** about 110 kB of a still display in its first second,
-  where the HEVC sent 2.2 MB.
-- **Not known:** why the HEVC spends that on a still display, what made
-  repeats of a run differ, and whether the H.264 obeys the rate reports the
-  HEVC does ([Rate control](#rate-control)).
+- **Not known:** whether the H.264 obeys the rate reports the HEVC does
+  ([Rate control](#rate-control)).
 
 Passed through the gateway, which sends the rate reports, sessions were run
 with no input at 1440×900 in four strips, and what reached the browser counted
@@ -1372,8 +1367,10 @@ other failures (see [Liveness](#the-stream)).
   A 30 Hz mode sent 30.0, across resizes, and logged `viewer set refreshRate 30`.
   Remotex asks for 30 Hz, because the browser is sent 30 frames a second and
   every picture has to be decoded whether it is shown or not. A still screen
-  sends none for as long as it stays still: 75 s without a picture on macvm,
-  while the Mac's sender reports went on. The receiver's debug log reports the
+  is sent in spells: 16 to 19 pictures a second for a while, then none for 5 to
+  18 s, measured on a full-screen still page
+  ([Negotiation](#negotiation)), while the Mac's
+  sender reports go on. The receiver's debug log reports the
   pictures a second every 10 seconds.
 - **Receiving.** The Mac sends each picture as one burst at the link's speed. On
   macvm at 3200×2000, over 40 s of video with two display changes, a socket with
