@@ -1462,8 +1462,11 @@ async fn active_loop(
     // The pointer shape, on its way to the browser that draws it.
     let mut pointer = Pointer::default();
     // The browser's distance as last said to the RDP client, for the round trips
-    // of a passed pipeline's network detection.
+    // of a passed pipeline's network detection, and the tick that says it on a
+    // desktop that draws nothing: the host keeps measuring a still one.
     let mut told_distance = None;
+    let mut distance_tick = tokio::time::interval(DISTANCE_CHECK);
+    distance_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The display shown in a tab of its own, while *All Displays* is chosen and its
     // socket is attached. One at most: a session has two columns at most.
     let mut tab: Option<Tab> = None;
@@ -1520,6 +1523,13 @@ async fn active_loop(
     let mut frame_marks = false;
 
     loop {
+        if pass_graphics
+            && let Some(distance) = sink.distance()
+            && told_distance != Some(distance)
+        {
+            input.caller_distance(distance);
+            told_distance = Some(distance);
+        }
         // A display shown in a tab follows that tab's window for as long as All
         // Displays is chosen — a tab reloading keeps it — and a layout pending
         // once it is not asks for the first display's size again. Only a pending
@@ -1581,6 +1591,8 @@ async fn active_loop(
         };
 
         tokio::select! {
+            // Nothing to do here: the turn is what says the distance, above.
+            _ = distance_tick.tick(), if pass_graphics => {}
             event = events.recv() => {
                 let Some(event) = event else {
                     // The client's thread always sends `Ended` before it lets go of
@@ -1626,12 +1638,6 @@ async fn active_loop(
                     // browser has painted it, which is what the host paces its
                     // drawing by.
                     Event::Graphics { commands, frame } => {
-                        if let Some(distance) = sink.distance()
-                            && told_distance != Some(distance)
-                        {
-                            input.caller_distance(distance);
-                            told_distance = Some(distance);
-                        }
                         let frame = frame.map(|frame| {
                             let input = input.clone();
                             Painted::new(move || input.frame_composed(frame))
@@ -2514,6 +2520,11 @@ fn translate_input(
         ClientMsg::DisplayShown { .. } | ClientMsg::OnDisplay { .. } => Vec::new(),
     }
 }
+
+/// How often a passed pipeline's session looks for a change in the browser's
+/// distance when nothing else turns its loop. The distance is a minimum over the
+/// socket's pings, which come every few seconds, so a second loses nothing.
+const DISTANCE_CHECK: Duration = Duration::from_secs(1);
 
 /// The shortest gap between two damage flushes into the mirror, at the 60 Hz a
 /// screen actually presents; `VIDEO_FRAME_INTERVAL` paces the encodes at 30.
