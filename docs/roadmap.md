@@ -237,6 +237,29 @@ What is left is the residual's Rice codes and the prediction, two loops in which
 every sample waits on the one before. What has been tried, and how a change is
 judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
 
+### A lossless picture, for a session that asks for one
+
+For someone who needs every pixel exact and is on a link that can carry it. No
+session gives that today: a Windows host's graphics pipeline draws pictures with
+RemoteFX Progressive, which is lossy and takes no request to be otherwise
+([The graphics pipeline](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)), and
+every picture the gateway decodes leaves it as VP9. But some targets send the
+gateway an exact picture: an RDP host drawing bitmap updates (`egfx = false`),
+and the ZRLE of a plain VNC server or of a Mac in Standard mode.
+
+What is considered is the mode the gateway once had for them, as a choice at
+the picker for those targets alone: the regions that are changing fast are
+coded as VP9 while they move, and each is sent again as PNG once it settles, so
+what is still on the screen is exact and only what moves is not. Everything
+else is PNG throughout.
+
+It is weighed against what removing it bought. It was a second carriage beside
+the stream, with its own records, a cell grid, the detection of what moves and
+the cleanups after it, where there is now one way a decoded picture leaves the
+gateway ([Media paths](architecture.md#media-paths)). It would not reach a
+passed stream, which the gateway never decodes, so a Windows host would get it
+only with the pipeline off, and with that no resize.
+
 ## Not planned
 
 ### Decoding an RDP host's H.264 at the gateway
