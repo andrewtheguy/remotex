@@ -8,22 +8,6 @@ is the only place they can be read in context.
 
 ## Planned
 
-### Verifying an RDP host's certificate
-
-The TLS handshake accepts any certificate, for the session only, and verifies the
-handshake signature alone (`proto/tls.rs`). What stands in for the chain is
-CredSSP: the credential exchange is bound to the public key of the certificate
-that terminated this very handshake, so an interceptor holding a certificate of
-its own cannot complete it. That argument is spelled out in the module's header
-and holds only because plain TLS is never offered.
-
-What it does not give an operator is a way to say *which* host they expect. A
-Windows host's default listener certificate is self-signed and regenerated when
-the machine is renamed, so a public CA chain is the wrong check for most targets;
-a per-target pin — the certificate's public key or its SHA-256 fingerprint in the
-target's configuration, compared against what the handshake presented — is the
-one that fits. Absent a pin, today's behavior stands.
-
 ### The first keyframe on a slow link
 
 Every VP9 stream governed by the target's dial starts there, and its first
@@ -182,6 +166,22 @@ Mac, and neither has been decoded.
   answers the reports the HEVC's does, whether a browser decodes it and how it
   looks, and what a display change, a keyframe request, a loss and four tiles
   do to it.
+
+### Verifying an RDP host's certificate
+
+The TLS handshake accepts any certificate, for the session only, and verifies the
+handshake signature alone (`proto/tls.rs`). What stands in for the chain is
+CredSSP: the credential exchange is bound to the public key of the certificate
+that terminated this very handshake, so an interceptor holding a certificate of
+its own cannot complete it. That argument is spelled out in the module's header
+and holds only because plain TLS is never offered.
+
+What it does not give an operator is a way to say *which* host they expect. A
+Windows host's default listener certificate is self-signed and regenerated when
+the machine is renamed, so a public CA chain is the wrong check for most targets;
+a per-target pin — the certificate's public key or its SHA-256 fingerprint in the
+target's configuration, compared against what the handshake presented — is the
+one that fits. Absent a pin, today's behavior stands.
 
 ### Licensing on a Remote Desktop Session Host
 
