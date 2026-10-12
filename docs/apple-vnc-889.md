@@ -1246,6 +1246,32 @@ at 1600×1000 with one tile, for 20 s a run:
   repeats of a run differ, and whether the H.264 obeys the rate reports the
   HEVC does ([Rate control](#rate-control)).
 
+Passed through the gateway, which sends the rate reports, sessions were run
+with no input at 1440×900 in four strips, and what reached the browser counted
+for 40 s from 25 s into the session. Two pages in full screen held what the
+screen showed: one drawn once and never again, and one with a quarter of the
+screen in a 4 s loop, bars sliding across it.
+
+| | The still page, HEVC | The still page, H.264 | The loop, HEVC | The loop, H.264 |
+|---|---|---|---|---|
+| Runs | two | three | three | three |
+| Over the 40 s | 64 and 91 kbit/s | 257, 396 and 411 kbit/s | 843, 863 and 868 kbit/s | 1020, 1020 and 1021 kbit/s |
+| While pictures came | 77–126 kbit/s | 620–780 kbit/s | 750–1060 kbit/s | 1020–1050 kbit/s |
+| Seconds of the 40 with no picture | 11 and 3 | 21, 12 and 10 | none | none |
+| The session's first 15 s | 0.21 and 0.25 MB | 1.5–1.7 MB | 1.6 MB | 2.3–2.9 MB |
+
+- **A still page is not silent.** The Mac sent 16 to 19 pictures a second of
+  it for a while, then nothing for 5 to 18 s, then began again, in either
+  codec. No keyframe was among them and none was asked for. What sets the
+  spells off is not known.
+- **The H.264 was the heavier on both pages:** four to six times the HEVC on
+  the still page, while pictures came and in the session's first 15 s alike,
+  and a fifth more on the loop.
+- **The loop came at 30.0 pictures a second** throughout in either codec, the
+  same in each run. The HEVC's rate peaked every fourth second, with the loop.
+  The H.264's did not: it held 1020 kbit/s second after second, as an encoder
+  kept to a rate would, which was not tested.
+
 Offered 123 alone with `tilesPerFrame` 4, the Mac sends the H.264 in four
 strips, laid out as the HEVC's are ([In strips](#in-strips)). At 1600×1000 each
 was a 1600×256 picture, High profile, level 3.2, under the display's SSRC plus
