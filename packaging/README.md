@@ -148,8 +148,7 @@ is wlshare's own.
 A Cargo feature may need a CPU level of the machine this way, x86-64-v3 or another:
 its flag goes in `.cargo/config.toml` beside it, and the fallback is the
 feature off and the flag taken back out. The fallback build goes without what
-the feature does, and nothing limits what that may be: were libvpx dropped,
-VP9 encoding itself could be a feature a machine under x86-64-v3 has not. So that the fallback stays that
+the feature does, and nothing limits what that may be. So that the fallback stays that
 small, code no feature gates may not need one. Nothing but such a
 feature's flag in `.cargo/config.toml` sets `target-cpu`, in packaging and CI as well,
 everything outside such a feature dispatches SIMD at run time, and
