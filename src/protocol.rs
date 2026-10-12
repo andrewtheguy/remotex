@@ -1661,10 +1661,10 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
         // What was chosen under the target rides the same message, sound off and
-        // passthrough false unless named, and a choice this gateway does not know
-        // is refused rather than dropped.
+        // no passthrough unless one is named, and a choice this gateway does not
+        // know is refused rather than dropped.
         match serde_json::from_str::<ClientMsg>(
-            r#"{"type":"connect","target":"mac","choices":{"size":"window","passthrough":true}}"#,
+            r#"{"type":"connect","target":"mac","choices":{"size":"window","passthrough":"apple-h264"}}"#,
         )
         .unwrap()
         {
@@ -1673,7 +1673,7 @@ mod tests {
                 crate::config::Choices {
                     size: crate::config::Sizing::Window,
                     audio: crate::config::Sound::Off,
-                    passthrough: true,
+                    passthrough: Some(crate::config::Passthrough::AppleH264),
                     placement: crate::config::Placement::Right,
                     pipeline: crate::config::Pipeline::Lossless,
                     whole: false,

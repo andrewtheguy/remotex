@@ -40,7 +40,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::{Choices, RenderPlan, Sizing, Subtype, TargetConfig};
+use crate::config::{Choices, Passthrough, RenderPlan, Sizing, Subtype, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
@@ -2029,7 +2029,7 @@ async fn session(
     // passthrough all the same is told here, naming the library, before the Mac
     // is dialled rather than after its offer.
     if config.media_stream()
-        && !plan.apple_media
+        && plan.passthrough().is_none()
         && let Err(e) = apple_decoders()
     {
         warn!("vnc: refusing a session that does not pass the Mac's picture: {e:#}");
@@ -2325,11 +2325,16 @@ async fn connect(
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
             // A passed picture goes in strips, to the page's own decoder and
-            // to the browser's alike, unless the session asked for it whole.
-            let receive = if plan.apple_media {
-                vnc_apple_media::Receive::Pass { strips: !choices.whole }
-            } else {
-                vnc_apple_media::Receive::Decode
+            // to the browser's alike, unless the session asked for it whole, and
+            // in the codec the session was started with.
+            let receive = match plan.passthrough() {
+                Some(Passthrough::AppleMedia) => {
+                    vnc_apple_media::Receive::Pass { codec: vnc_apple_media::Codec::Hevc, strips: !choices.whole }
+                }
+                Some(Passthrough::AppleH264) => {
+                    vnc_apple_media::Receive::Pass { codec: vnc_apple_media::Codec::H264, strips: !choices.whole }
+                }
+                _ => vnc_apple_media::Receive::Decode,
             };
             let opening = opening_mode(config, choices.size, display);
             apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, receive).await
@@ -4051,7 +4056,7 @@ async fn blit_picture(
     sink.frame().await
 }
 
-/// Pass a unit of the Mac's HEVC to the browser, as [`show_picture`] shows a
+/// Pass a unit of the Mac's HEVC or H.264 to the browser, as [`show_picture`] shows a
 /// decoded picture: one of another size, or one that comes while a resize holds
 /// the display, is dropped, and the first one the browser shows the display at
 /// ([`shows_display`]) is its first picture of it, and brings its notice down. A dropped unit is one the next ones predict
@@ -4073,7 +4078,7 @@ async fn pass_unit(
         shows_display(&unit) && !std::mem::replace(&mut d.canvas_live, true)
     };
     if first {
-        info!("vnc: the picture is now the Mac's HEVC media stream, passed to the browser");
+        info!("vnc: the picture is now the Mac's media stream, passed to the browser as {}", unit.decode);
     }
     if shows_display(&unit) {
         stream_carries(shared).await?;
@@ -4081,7 +4086,7 @@ async fn pass_unit(
     }
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
-    if !sink.pass_hevc(w, h, unit.data, passed).await? {
+    if !sink.pass_media(w, h, unit.data, passed).await? {
         media.lock().unwrap().want_keyframe(leg);
     }
     Ok(())
@@ -4120,7 +4125,7 @@ async fn tab_picture(shared: &Shared, leg: usize, picture: &vnc_apple_media::Pic
     }
 }
 
-/// Pass the tab a unit of its display's HEVC, as [`pass_unit`] passes the
+/// Pass the tab a unit of its display's stream, as [`pass_unit`] passes the
 /// session's canvas one.
 async fn tab_unit(shared: &Shared, leg: usize, unit: PassedUnit, media: &SharedMedia) {
     let Some((sink, _)) = tab_parts(&shared.tab) else {
@@ -4136,7 +4141,7 @@ async fn tab_unit(shared: &Shared, leg: usize, unit: PassedUnit, media: &SharedM
     }
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
-    match sink.pass_hevc(w, h, unit.data, passed).await {
+    match sink.pass_media(w, h, unit.data, passed).await {
         Ok(true) => {}
         Ok(false) => media.lock().unwrap().want_keyframe(leg),
         Err(e) => tab_gone(&shared.tab, Some(media), &e),
@@ -8530,7 +8535,7 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         assert_eq!(with_wlshare_vp9(&rest, walked, false), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
         // The experimental encoder is asked for by name, and only by a target that sets the key.
         assert_eq!(ENCODING_WLSHARE_VP9_NATIVE, i32::from_be_bytes(*b"WLSX"));
@@ -8538,7 +8543,7 @@ mod tests {
             with_wlshare_vp9(&rest, walked, true),
             [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_NATIVE, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
         );
-        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         assert_eq!(
             with_wlshare_vp9(&rest, held, false),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -9747,6 +9752,7 @@ mod tests {
             quality: 60,
             adaptive: false,
             apple_media: false,
+            apple_h264: false,
             rdp_graphics: false,
             rdp_h264: false,
             native_vp9: false,
@@ -9782,6 +9788,7 @@ mod tests {
             quality: 60,
             adaptive: false,
             apple_media: false,
+            apple_h264: false,
             rdp_graphics: false,
             rdp_h264: false,
             native_vp9: false,
@@ -11421,7 +11428,7 @@ mod tests {
         let shared = test_shared(uplink, Arc::clone(&desktop), Arc::clone(&shadow));
 
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: false }, 1).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { codec: vnc_apple_media::Codec::Hevc, strips: false }, 1).0));
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, begins: true, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         assert!(sink.passing());
@@ -11467,7 +11474,7 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: false }, 1).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { codec: vnc_apple_media::Codec::Hevc, strips: false }, 1).0));
 
         // Not a keyframe: dropped for one, and the notice stays up.
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: false, strip: None, begins: true, data: vec![0; 16] };
@@ -11510,7 +11517,7 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: true }, 1).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { codec: vnc_apple_media::Codec::Hevc, strips: true }, 1).0));
         let strip = |index, ends| PassedUnit {
             size: (2, 2),
             decode: "hev1.4.10.L150.BE.8".into(),
@@ -11564,7 +11571,7 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { strips: false }, 1).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Pass { codec: vnc_apple_media::Codec::Hevc, strips: false }, 1).0));
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, begins: true, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
@@ -12419,7 +12426,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -12875,6 +12882,7 @@ mod tests {
             quality: 60,
             adaptive: false,
             apple_media: false,
+            apple_h264: false,
             rdp_graphics: false,
             rdp_h264: false,
             native_vp9: false,
@@ -13020,7 +13028,7 @@ mod tests {
     async fn all_displays_over_three_screens_is_held() {
         let (uplink, _sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), Oversize::Hold);
         let shared = test_shared(uplink, shared_desktop((1280, 800), None, None), test_shadow((1280, 800)));
         let screens: [TestScreen; 3] = [

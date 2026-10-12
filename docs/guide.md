@@ -65,7 +65,7 @@ config key.
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — |
 | `vnc`, `ard` | no | none | — | — |
 | `vnc`, `ard` with `virtual_display` | yes | none | — | — |
-| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC | — |
+| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264 | — |
 
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
   or 1440×900 where it sets none, or follows the window: the remote is asked to
@@ -80,12 +80,14 @@ config key.
   supported* in one that cannot decode the Mac's AAC-ELD.
 - **Passthrough.** Sends the remote's own stream to the browser as it came
   instead of VP9 encoded by the gateway. On a Mac it is a choice, for a LAN,
-  greyed where the browser cannot take the stream. On an `rdp` target with the
+  between its HEVC, greyed where the browser cannot take the stream, and its
+  H.264, which is offered to every browser and needs no HEVC decoder in the
+  gateway or the page. On an `rdp` target with the
   pipeline on it is no choice: the picker says it is always passed, with no box
   to tick, and a browser that
   cannot compose the pipeline cannot start the target. A passed RDP pipeline
   follows the browser's link: the Windows host draws fewer and smaller frames
-  for a browser that falls behind. A passed Mac's HEVC does not: on a slow link,
+  for a browser that falls behind. A Mac's passed stream does not: on a slow link,
   start that session without it.
   See [A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link).
 - **Graphics.** How an RDP host draws its pipeline. *Lossless*, the default,
@@ -229,7 +231,12 @@ connection with the same error as wrong credentials. See
     no release artifact contains: install it as
     [High Performance decoder](high-performance-decoder.md) says. Without it the
     picture can only be passed through.
-  - The passthrough sends the HEVC only when the page's startup probe finds a
+  - The H.264 passthrough needs nothing added, on the gateway or in the page:
+    the Mac is asked for H.264 in place of its HEVC, and the browser decodes it
+    with its own decoder, which more browsers have for H.264 than for HEVC. So
+    a default build serves the target with no FFmpeg and no software decoder,
+    and the picker offers the H.264 to every browser.
+  - The HEVC passthrough sends the HEVC only when the page's startup probe finds a
     decoder path. Support depends on the browser, platform and GPU, so the
     picker is authoritative. The gateway can also serve the optional software
     picture decoder described in [`remotex.example.toml`](../remotex.example.toml).

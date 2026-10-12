@@ -598,7 +598,7 @@ impl VideoSink {
     /// the Mac's rectangles are never encoded on a session with a media stream, so
     /// one that passes the stream builds no encoder at all. The stream coming back
     /// after a gap starts over at an IDR, announced again.
-    pub async fn pass_hevc(
+    pub async fn pass_media(
         &self,
         w: u16,
         h: u16,
@@ -1178,7 +1178,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1334,10 +1334,10 @@ mod tests {
         sink.uncover();
         let hevc = |keyframe| crate::stream::Passed { decode: "hev1.4.10.L150.BE.8".to_owned(), keyframe, strip: None };
         sink.reset_render();
-        assert!(!sink.pass_hevc(64, 48, vec![1; 30], hevc(false)).await.unwrap());
+        assert!(!sink.pass_media(64, 48, vec![1; 30], hevc(false)).await.unwrap());
         sink.flush().await;
         assert!(frame_rx.try_recv().is_err(), "dropped, so nothing follows");
-        assert!(sink.pass_hevc(64, 48, vec![2; 900], hevc(true)).await.unwrap());
+        assert!(sink.pass_media(64, 48, vec![2; 900], hevc(true)).await.unwrap());
         sink.flush().await;
         let out = drain(&mut frame_rx, 3).await;
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe), "{:?}", out[1]);
@@ -1346,7 +1346,7 @@ mod tests {
         // A stream that stopped before its unit went leaves the notice up.
         sink.uncover();
         sink.cover();
-        assert!(sink.pass_hevc(64, 48, vec![3; 900], hevc(true)).await.unwrap());
+        assert!(sink.pass_media(64, 48, vec![3; 900], hevc(true)).await.unwrap());
         sink.flush().await;
         let out = drain(&mut frame_rx, 1).await;
         assert!(matches!(&out[0], ServerMsg::Video(_)), "{:?}", out[0]);
@@ -1375,14 +1375,14 @@ mod tests {
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
 
         // The passed stream takes over at its IDR, announced.
-        assert!(!sink.pass_hevc(64, 48, vec![1; 30], hevc(false)).await.unwrap(), "dropped for a keyframe");
-        assert!(sink.pass_hevc(64, 48, vec![2; 900], hevc(true)).await.unwrap());
-        assert!(sink.pass_hevc(64, 48, vec![3; 40], hevc(false)).await.unwrap());
+        assert!(!sink.pass_media(64, 48, vec![1; 30], hevc(false)).await.unwrap(), "dropped for a keyframe");
+        assert!(sink.pass_media(64, 48, vec![2; 900], hevc(true)).await.unwrap());
+        assert!(sink.pass_media(64, 48, vec![3; 40], hevc(false)).await.unwrap());
         // A repaint while it passes encodes nothing here.
         sink.reset_render();
         sink.frame().await.unwrap();
         assert_eq!(sink.due_at().await, None);
-        assert!(sink.pass_hevc(64, 48, vec![4; 800], hevc(true)).await.unwrap());
+        assert!(sink.pass_media(64, 48, vec![4; 800], hevc(true)).await.unwrap());
         sink.flush().await;
         let out = drain(&mut frame_rx, 5).await;
         assert!(is_hevc(&out[0]), "{:?}", out[0]);
@@ -1403,8 +1403,8 @@ mod tests {
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
 
         // And the passed stream back, from an IDR, announced for the decoder VP9 displaced.
-        assert!(!sink.pass_hevc(64, 48, vec![5; 30], hevc(false)).await.unwrap());
-        assert!(sink.pass_hevc(64, 48, vec![6; 700], hevc(true)).await.unwrap());
+        assert!(!sink.pass_media(64, 48, vec![5; 30], hevc(false)).await.unwrap());
+        assert!(sink.pass_media(64, 48, vec![6; 700], hevc(true)).await.unwrap());
         sink.flush().await;
         let out = drain(&mut frame_rx, 2).await;
         assert!(is_hevc(&out[0]), "{:?}", out[0]);
@@ -1898,7 +1898,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2025,7 +2025,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

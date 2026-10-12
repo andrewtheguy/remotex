@@ -565,7 +565,7 @@ password = "change-me"
 # cannot start the target, which Start says. See docs/apple-vnc-889.md, "The
 # media stream".
 #
-# The passthrough, chosen at the picker, sends the Mac's picture to the browser as
+# The HEVC passthrough, chosen at the picker, sends the Mac's picture to the browser as
 # the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded
 # here from decoded pictures. Every picture the
 # Mac sends goes, up to 30 a second, at the Mac's own quality. Its ZRLE rectangles
@@ -579,10 +579,15 @@ password = "change-me"
 # Safari's native decoders, desktop and mobile, were measured taking it where the
 # GPU decodes HEVC 4:4:4; Firefox's native decoder does not. Where the native
 # decoder refuses it, the optional software decoder above may supply the picture
-# path, which the page then uses by itself. Without either, the choice is greyed
-# and the browser is sent VP9, where this gateway can decode the Mac's picture;
-# where it cannot, the passthrough is the only way and Start says the target
-# cannot start in that browser, as above.
+# path, which the page then uses by itself. Without either, that choice is greyed
+# and the browser is sent VP9, where this gateway can decode the Mac's picture,
+# or the Mac's H.264.
+#
+# The picker's other passthrough has the Mac send H.264 in place of its HEVC, and
+# passes that. It needs no HEVC decoder in the gateway or in the page, and more
+# browsers decode H.264 than HEVC, so a default build with no FFmpeg and no
+# software decoder serves this target to every browser: the H.264 is never
+# greyed.
 # [[targets]]
 # name = "mac-high-performance"
 # protocol = "vnc"

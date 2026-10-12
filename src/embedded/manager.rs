@@ -752,7 +752,7 @@ fn describe_offers(target: &TargetConfig) -> String {
         choices.push("sound".to_owned());
     }
     // One passed in every session is no choice, and the render line names it.
-    if let Some(passthrough) = offers.passthrough.filter(|passthrough| passthrough.chosen()) {
+    for passthrough in offers.passthrough.iter().filter(|passthrough| passthrough.chosen()) {
         choices.push(format!("{} passed through", passthrough.stream()));
     }
     if offers.placement {

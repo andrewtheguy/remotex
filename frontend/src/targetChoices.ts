@@ -1,6 +1,6 @@
 // What a session is started with: how the desktop is sized, whether the remote's
-// sound is taken and as what, whether the target's own stream is passed, and where
-// a second virtual display sits. Chosen under the target at the picker, before
+// sound is taken and as what, which of the target's own streams is passed if any,
+// and where a second virtual display sits. Chosen under the target at the picker, before
 // Start, and held for the life of the session — `connect` carries them and the
 // gateway keeps them beside the target (src/config.rs, `Choices`).
 //
@@ -15,9 +15,14 @@
 // - An option the target's type does not offer has no row.
 // - One it offers that cannot be had here is greyed, with the reason: Opus in
 //   a browser with no audio decoder, a passthrough this browser cannot take, or
-//   one that is the only way this gateway can serve the target, which is then
-//   shown ticked. An RDP host's graphics pipeline is always that: the gateway
-//   composes none.
+//   a picture this gateway cannot encode.
+// - An RDP host's graphics pipeline is passed in every session, which is said and
+//   not offered: the gateway composes none.
+// - A High Performance Mac's picture is one of three: its HEVC passed through,
+//   VP9 encoded by the gateway, or its H.264 passed through, in that order: see
+//   `pictureOptions`. The first this browser and this gateway can do is taken
+//   until another is chosen. The H.264 is never greyed: no browser is asked
+//   whether it decodes it.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
 //   or lossless: see `soundRow`. In a browser with no audio decoder only the
 //   lossless one plays, which the page decodes itself, so ticking takes it.
@@ -34,8 +39,8 @@
 //   WebAssembly wherever the browser's own decoder does not take it
 //   (softwareDecoder.ts).
 
-/** The stream a target can pass untouched, as `/api/targets` names it. */
-export type Passthrough = "rdp-graphics" | "apple-media";
+/** A stream a target can pass untouched, as `/api/targets` names it. */
+export type Passthrough = "rdp-graphics" | "apple-media" | "apple-h264";
 
 /** One entry of GET /api/targets. */
 export interface TargetInfo {
@@ -65,14 +70,17 @@ export interface TargetInfo {
    * decode it in the software decoder the gateway serves.
    */
   software: boolean;
-  /** The stream this target can pass, null where it has none. */
-  passthrough: Passthrough | null;
   /**
-   * Whether passing it is the only way this gateway can serve the target: an RDP
-   * host's graphics pipeline, which no gateway composes, and a High Performance
-   * Mac on a host that cannot decode its stream.
+   * The streams this target can pass, in the picker's order: none, an RDP host's
+   * graphics pipeline, or a High Performance Mac's HEVC and its H.264.
    */
-  passthroughOnly: boolean;
+  passthroughs: Passthrough[];
+  /**
+   * Whether this gateway can serve the target's picture encoded here. Not an RDP
+   * host's graphics pipeline, which no gateway composes and every session passes,
+   * and not a High Performance Mac's on a host that cannot decode its stream.
+   */
+  encoded: boolean;
   /** Whether where the second virtual display sits is a choice. */
   placement: boolean;
   /** Whether how the host draws the graphics pipeline is a choice. */
@@ -115,7 +123,12 @@ export type Pipeline = "lossless" | "adaptive-desktop" | "adaptive-region";
 export interface Choices {
   size: Sizing;
   audio: Sound;
-  passthrough: boolean;
+  /**
+   * The stream of the target's to pass, where passing it is a choice: a Mac's
+   * HEVC or its H.264. Null for a picture encoded by the gateway, and for a
+   * stream that is passed in every session, which is not named.
+   */
+  passthrough: Passthrough | null;
   placement: Placement;
   pipeline: Pipeline;
 }
@@ -204,13 +217,13 @@ export interface PassedNote {
   note: string;
 }
 
-/** One option under an open target. */
-export interface OptionRow {
-  key: "passthrough";
+/** One way a High Performance Mac's picture can reach this browser. */
+export interface PictureOption {
+  /** What `connect` names: the stream passed, or null for VP9 encoded here. */
+  value: Choices["passthrough"];
   label: string;
-  /** What ticking it does, or why it cannot be changed here. */
+  /** What choosing it does, or why it cannot be chosen here. */
   note: string;
-  checked: boolean;
   disabled: boolean;
 }
 
@@ -232,7 +245,11 @@ export interface TargetOptions {
   pipelineRow: PipelineRow | null;
   /** The target's stream where it is passed in every session: null otherwise. */
   passed: PassedNote | null;
-  rows: OptionRow[];
+  /**
+   * The ways the target's picture can reach this browser, where that is a
+   * choice: null otherwise.
+   */
+  pictures: PictureOption[] | null;
   /** What Start sends. */
   choices: Choices;
   /** Whether a session started with them carries the remote's sound. */
@@ -241,90 +258,61 @@ export interface TargetOptions {
   blocked: string | null;
 }
 
-const PASSTHROUGH: Record<
-  Passthrough,
-  {
-    // What is said where the stream can only be passed.
-    only: PassedNote & { blocked: string };
-    // What is offered where passing it is a choice, null for a stream that is
-    // passed in every session.
-    chosen: { label: string; note: string; cannot: string } | null;
-  }
-> = {
-  "rdp-graphics": {
-    only: {
-      label: "Always passed through",
-      note: "egfx is on for this target, so every session passes the host's graphics pipeline through, for this browser to compose.",
-      blocked:
-        "This browser cannot compose the host's graphics pipeline, which this target always passes: that needs WebGL 2 and a cross-origin isolated page. Use a browser that can, or a target with egfx disabled.",
-    },
-    chosen: null,
-  },
-  "apple-media": {
-    only: {
-      label: "Always passed through",
-      note: "This gateway cannot decode the Mac's picture, so every session passes it through.",
-      blocked:
-        "This gateway cannot decode the Mac's picture, and this browser cannot take it passed through. Use a browser that decodes it, or install FFmpeg on the gateway's host.",
-    },
-    chosen: {
-      label: "Pass the Mac's picture through",
-      note: "The Mac's own HEVC, instead of VP9 encoded by the gateway. For a LAN.",
-      cannot:
-        "This browser does not decode the Mac's HEVC, and this page cannot decode it here.",
-    },
-  },
+// An RDP host's graphics pipeline: passed in every session of a target that has
+// it on, so said and not offered.
+const RDP_GRAPHICS: PassedNote & { blocked: string } = {
+  label: "Always passed through",
+  note: "egfx is on for this target, so every session passes the host's graphics pipeline through, for this browser to compose.",
+  blocked:
+    "This browser cannot compose the host's graphics pipeline, which this target always passes: that needs WebGL 2 and a cross-origin isolated page. Use a browser that can, or a target with egfx disabled.",
 };
 
 /**
- * Whether this browser can be passed `target`'s stream: where its own decoder
- * takes it, and a Mac's HEVC also where the page decodes it itself, which it then
- * does (softwareDecoder.ts). The socket states both answers about the HEVC, and
- * the gateway passes the picture to a page that has either.
+ * The ways a High Performance Mac's picture can reach this browser, in the
+ * order the picker shows them: its HEVC passed through, VP9 encoded by the
+ * gateway, and its H.264 passed through.
+ *
+ * - The HEVC is greyed in a browser whose own decoder does not take it, unless
+ *   the page decodes it itself, which it then does (softwareDecoder.ts). The
+ *   socket states both answers, and the gateway passes the picture to a page that
+ *   has either.
+ * - The VP9 is greyed on a gateway that cannot decode the Mac's picture.
+ * - The H.264 is never greyed: no browser is asked whether it decodes it.
  */
-function takes(
+function pictureOptions(
   target: TargetInfo,
   abilities: Abilities,
-  passthrough: Passthrough,
-): boolean {
-  if (passthrough === "rdp-graphics") {
-    return abilities.rdpGraphics;
-  }
-  return abilities.appleMedia || (target.software && abilities.runsHevc);
-}
-
-/**
- * How a target that has a stream to pass shows it: said, where it is passed in
- * every session, with why the target cannot start here where this browser cannot
- * take it; otherwise a row to tick.
- */
-function passthroughRow(
-  target: TargetInfo,
-  passthrough: Passthrough,
-  remembered: boolean | undefined,
-  abilities: Abilities,
-): { row: OptionRow } | { passed: PassedNote; blocked: string | null } {
-  const words = PASSTHROUGH[passthrough];
-  const able = takes(target, abilities, passthrough);
-  const chosen = target.passthroughOnly ? null : words.chosen;
-  if (!chosen) {
-    const { label, note, blocked } = words.only;
-    return { passed: { label, note }, blocked: able ? null : blocked };
-  }
-  const row = { key: "passthrough" as const, label: chosen.label };
-  if (!able) {
-    return {
-      row: { ...row, note: chosen.cannot, checked: false, disabled: true },
-    };
-  }
-  return {
-    row: {
-      ...row,
-      note: chosen.note,
-      checked: remembered ?? false,
+): PictureOption[] {
+  const hevc = abilities.appleMedia || (target.software && abilities.runsHevc);
+  const options: Record<"apple-media" | "apple-h264", PictureOption> = {
+    "apple-media": {
+      value: "apple-media",
+      label: "HEVC, passed through",
+      note: hevc
+        ? "The Mac's own picture in 4:4:4. For a LAN."
+        : "This browser does not decode the Mac's HEVC, and this page cannot decode it here.",
+      disabled: !hevc,
+    },
+    "apple-h264": {
+      value: "apple-h264",
+      label: "H.264, passed through",
+      note: "The Mac's own picture in 4:2:0.",
       disabled: false,
     },
   };
+  const encoded: PictureOption = {
+    value: null,
+    label: "VP9, encoded by the gateway",
+    note: target.encoded
+      ? "The Mac's HEVC decoded by the gateway and encoded again, at a rate that follows the link."
+      : "This gateway cannot decode the Mac's picture: install FFmpeg on its host.",
+    disabled: !target.encoded,
+  };
+  const passed = target.passthroughs.flatMap((passthrough) =>
+    passthrough === "rdp-graphics" ? [] : [options[passthrough]],
+  );
+  // Encoded here goes second, after the stream the type lists first.
+  return [...passed.slice(0, 1), encoded, ...passed.slice(1)];
 }
 
 const FOLLOWS: Record<"window" | "screen", SizeOption> = {
@@ -521,24 +509,25 @@ export function targetOptions(
     sizes[0].value;
   const sound = soundRow(target, remembered?.audio, abilities.audio);
   const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
-  const rows: OptionRow[] = [];
-  let passed: PassedNote | null = null;
-  let blocked: string | null = null;
-  if (target.passthrough) {
-    const shown = passthroughRow(
-      target,
-      target.passthrough,
-      remembered?.passthrough,
-      abilities,
-    );
-    if ("row" in shown) {
-      rows.push(shown.row);
-    } else {
-      passed = shown.passed;
-      blocked = shown.blocked;
-    }
-  }
-  const passthrough = passed !== null || rows.some((row) => row.checked);
+  // An RDP host's pipeline is passed whatever is chosen, and a browser that
+  // cannot compose it cannot start the target.
+  const always = target.passthroughs.includes("rdp-graphics");
+  const passed: PassedNote | null = always
+    ? { label: RDP_GRAPHICS.label, note: RDP_GRAPHICS.note }
+    : null;
+  const blocked =
+    always && !abilities.rdpGraphics ? RDP_GRAPHICS.blocked : null;
+  const pictures = target.passthroughs.some(
+    (passthrough) => passthrough !== "rdp-graphics",
+  )
+    ? pictureOptions(target, abilities)
+    : null;
+  // What was chosen last time, where it can be had here, and otherwise the
+  // first that can: the H.264 always can.
+  const able = pictures?.filter((option) => !option.disabled) ?? [];
+  const passthrough =
+    (able.find((option) => option.value === remembered?.passthrough) ?? able[0])
+      ?.value ?? null;
   const placements = target.placement ? PLACEMENTS : null;
   const choices: Choices = {
     size,
@@ -555,13 +544,13 @@ export function targetOptions(
     placements,
     pipelineRow: drawn.row,
     passed,
-    rows,
+    pictures,
     choices,
     // High Performance's sound comes with its picture, so it has no row and is
     // always there, for a browser that can play it.
     sound:
       choices.audio !== "off" ||
-      (target.passthrough === "apple-media" && abilities.audio),
+      (target.passthroughs.includes("apple-media") && abilities.audio),
     blocked,
   };
 }

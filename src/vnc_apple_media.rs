@@ -302,11 +302,24 @@ fn video_codec(id: u64, levels: &[u64], features: &str, f4: u64) -> Proto {
     codec
 }
 
+/// The codec a Mac sends its picture in, which the video offer decides: offered
+/// H.264 and HEVC, as Apple's viewer offers them, it sends HEVC, and offered
+/// H.264 alone, H.264.
+///
+/// The H.264 is High profile, 8-bit 4:2:0 (docs/apple-vnc-889.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Codec {
+    #[default]
+    Hevc,
+    H264,
+}
+
 /// The screen-video offer's blob: one stream at `size` backing pixels offering
-/// H.264 (RTP payload `123`) and HEVC (`100`), `tiles` pictures to a frame. The stream's fields
+/// H.264 (RTP payload `123`) and, for a stream in [`Codec::Hevc`], HEVC (`100`),
+/// `tiles` pictures to a frame. The stream's fields
 /// follow `initWithScreenSSRC:…:customVideoWidth:customVideoHeight:tilesPerFrame:
-/// ltrpEnabled:pixelFormats:…`; the Mac answers with HEVC.
-fn video_offer_blob(ssrc: u32, (width, height): (u16, u16), tiles: u64) -> Vec<u8> {
+/// ltrpEnabled:pixelFormats:…`; the Mac answers with HEVC where it is offered.
+fn video_offer_blob(ssrc: u32, (width, height): (u16, u16), tiles: u64, codec: Codec) -> Vec<u8> {
     let mut blob = Proto::default();
     blob.uint(1, 1);
     blob.uint(2, 1);
@@ -322,15 +335,17 @@ fn video_offer_blob(ssrc: u32, (width, height): (u16, u16), tiles: u64) -> Vec<u
             1,
         ),
     );
-    stream.message(
-        3,
-        video_codec(
-            100,
-            &[1, 2],
-            "FLS;LF:-1;POS:5;EOD:1;HTS:2;RR:3;POSE:4;AR:4/3,5/8;XR:4/3,5/8;",
-            14,
-        ),
-    );
+    if codec == Codec::Hevc {
+        stream.message(
+            3,
+            video_codec(
+                100,
+                &[1, 2],
+                "FLS;LF:-1;POS:5;EOD:1;HTS:2;RR:3;POSE:4;AR:4/3,5/8;XR:4/3,5/8;",
+                14,
+            ),
+        );
+    }
     stream.uint(4, u64::from(width));
     stream.uint(5, u64::from(height));
     stream.uint(6, tiles);
@@ -502,6 +517,8 @@ struct Offers {
     /// Whether what takes the picture takes it in strips, and so is offered
     /// them where the display's height allows ([`in_strips`]).
     strips: bool,
+    /// The codec the video offers ask for.
+    codec: Codec,
 }
 
 /// One video leg's keys, and this side's SSRC on it.
@@ -512,8 +529,8 @@ struct VideoOffer {
 
 impl Offers {
     /// For `displays` virtual displays, a video leg each, whose picture may
-    /// come in `strips` or must come whole.
-    fn new(displays: usize, strips: bool) -> Self {
+    /// come in `strips` or must come whole, in `codec`.
+    fn new(displays: usize, strips: bool, codec: Codec) -> Self {
         let key = || {
             let mut k = [0u8; 46];
             rand::fill(&mut k[..]);
@@ -531,6 +548,7 @@ impl Offers {
             audio_ssrc: rand::random(),
             videos,
             strips,
+            codec,
         }
     }
 
@@ -549,7 +567,7 @@ impl Offers {
             .zip(sizes)
             .map(|(video, size)| {
                 let tiles = if self.strips(*size) { STRIPS } else { 1 };
-                offer(MODE_VIDEO, &video_offer_blob(video.ssrc, *size, tiles as u64), &self.call_id)
+                offer(MODE_VIDEO, &video_offer_blob(video.ssrc, *size, tiles as u64, self.codec), &self.call_id)
             })
             .collect();
         let videos: Vec<(&[u8], &KeyPair)> =
@@ -1060,7 +1078,7 @@ impl OneWayDelay {
 }
 
 // ---------------------------------------------------------------------------
-// HEVC over RTP (RFC 7798)
+// HEVC over RTP (RFC 7798), and H.264 (RFC 6184)
 // ---------------------------------------------------------------------------
 
 /// The NAL unit type of a two-byte HEVC NAL header's first byte.
@@ -1072,10 +1090,101 @@ fn nal_type(first: u8) -> u8 {
 const NAL_AP: u8 = 48;
 const NAL_FU: u8 = 49;
 
-/// Whether a NAL unit type starts a picture the decoder can begin at: an IRAP
-/// picture (16–23) or a parameter set ahead of one.
-fn is_random_access(kind: u8) -> bool {
-    (16..=23).contains(&kind) || (32..=34).contains(&kind)
+/// RFC 6184's aggregation packets and fragmentation units, the second of each
+/// carrying a decoding order number, and the unit a Mac sends its H.264's
+/// parameter sets in ([`h264_parameter_sets`]).
+const H264_STAP_A: u8 = 24;
+const H264_STAP_B: u8 = 25;
+const H264_FU_A: u8 = 28;
+const H264_FU_B: u8 = 29;
+const H264_DESCRIPTION: u8 = 18;
+
+/// H.264's NAL unit types for an IDR picture's slice and the two parameter sets.
+const H264_IDR: u8 = 5;
+const H264_SPS: u8 = 7;
+const H264_PPS: u8 = 8;
+
+/// The NAL unit type of an H.264 NAL header.
+fn h264_nal_type(first: u8) -> u8 {
+    first & 0x1f
+}
+
+impl Codec {
+    /// Whether a NAL unit is a slice of a picture a decoder can start at: HEVC's
+    /// IRAP pictures (16–23), H.264's IDR.
+    fn starts(self, nal: &[u8]) -> bool {
+        match self {
+            Self::Hevc => (16..=23).contains(&nal_type(nal[0])),
+            Self::H264 => h264_nal_type(nal[0]) == H264_IDR,
+        }
+    }
+
+    /// Whether a NAL unit is a parameter set, which come ahead of such a picture.
+    fn parameters(self, nal: &[u8]) -> bool {
+        match self {
+            Self::Hevc => (32..=34).contains(&nal_type(nal[0])),
+            Self::H264 => matches!(h264_nal_type(nal[0]), H264_SPS | H264_PPS),
+        }
+    }
+
+    /// Whether an access unit is a picture a decoder can start at.
+    fn is_keyframe(self, unit: &AccessUnit) -> bool {
+        unit.iter().any(|nal| self.starts(nal))
+    }
+
+    /// What a sequence parameter set among `unit`'s NAL units says, if it holds
+    /// one this side can read.
+    fn params(self, unit: &AccessUnit) -> Option<StreamParams> {
+        let params = match self {
+            Self::Hevc => parse_sps(unit.iter().rfind(|nal| nal_type(nal[0]) == NAL_SPS)?),
+            Self::H264 => parse_h264_sps(unit.iter().rfind(|nal| h264_nal_type(nal[0]) == H264_SPS)?),
+        };
+        if params.is_none() {
+            log::warn!("vnc: the Mac's {} carried a sequence parameter set this side cannot read", self.name());
+        }
+        params
+    }
+
+    /// The codec as a sentence names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Hevc => "HEVC",
+            Self::H264 => "H.264",
+        }
+    }
+}
+
+/// The parameter sets a Mac's H.264 carries, each as the NAL unit a decoder
+/// takes: it sends none as NAL units of their own, and at each keyframe a unit of
+/// type 18 instead, four bytes and then an MP4 `avc1` sample description whose
+/// `avcC` box holds them (ISO/IEC 14496-15 5.3.3.1). The sequence parameter set
+/// is written out saying its pictures come in decoding order
+/// ([`h264_in_decoding_order`]); the pictures are the Mac's, untouched.
+fn h264_parameter_sets(description: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let at = description.windows(4).position(|name| name == b"avcC")?;
+    let record = description.get(at + 4..)?;
+    let mut sets = Vec::new();
+    // The version, profile, compatibility, level and length size, then the
+    // sequence parameter sets behind a count in five bits and the picture
+    // parameter sets behind one in eight, each set behind its length.
+    let mut at = 5;
+    for mask in [0x1f, 0xff] {
+        let count = record.get(at)? & mask;
+        at += 1;
+        for _ in 0..count {
+            let size = usize::from(u16::from_be_bytes([*record.get(at)?, *record.get(at + 1)?]));
+            let set = record.get(at + 2..at + 2 + size)?;
+            if set.is_empty() {
+                return None;
+            }
+            sets.push(match h264_nal_type(set[0]) {
+                H264_SPS => h264_in_decoding_order(set).unwrap_or_else(|| set.to_vec()),
+                _ => set.to_vec(),
+            });
+            at += 2 + size;
+        }
+    }
+    (!sets.is_empty()).then_some(sets)
 }
 
 /// One picture's NAL units, in order, without start codes.
@@ -1102,10 +1211,13 @@ pub enum Depacketized {
 /// on. A gap in the sequence numbers damages the picture it fell in.
 #[derive(Default)]
 struct Reassembler {
-    /// Whether the payloads carry decoding order numbers, as a stream in strips
-    /// does, and not as RFC 7798 lays them out: an aggregation packet has the one
-    /// number, with none between its units, and every fragment of a unit has it,
-    /// not the first alone.
+    codec: Codec,
+    /// Whether the HEVC's payloads carry decoding order numbers, as a stream in
+    /// strips does, and not as RFC 7798 lays them out: an aggregation packet has
+    /// the one number, with none between its units, and every fragment of a unit
+    /// has it, not the first alone. H.264's packets say which carry one: a
+    /// stream in strips comes as FU-B and STAP-B, again with the number in every
+    /// fragment, and one sent whole as FU-A and single units.
     donl: bool,
     next_sequence: Option<u16>,
     timestamp: Option<u32>,
@@ -1136,8 +1248,14 @@ struct Whole {
 }
 
 impl Reassembler {
-    fn numbered() -> Self {
-        Self { donl: true, ..Self::default() }
+    /// For a stream in `codec` whose pictures come whole.
+    fn of(codec: Codec) -> Self {
+        Self { codec, ..Self::default() }
+    }
+
+    /// For a stream in `codec` whose pictures are strips, each numbered.
+    fn numbered(codec: Codec) -> Self {
+        Self { codec, donl: true, ..Self::default() }
     }
 
     /// Take one packet. `None` for a duplicate, or a late one whose picture has
@@ -1166,6 +1284,90 @@ impl Reassembler {
     }
 
     fn parse(&mut self, payload: &[u8]) {
+        match self.codec {
+            Codec::Hevc => self.parse_hevc(payload),
+            Codec::H264 => self.parse_h264(payload),
+        }
+    }
+
+    fn parse_h264(&mut self, payload: &[u8]) {
+        let Some(&first) = payload.first() else {
+            self.damaged = true;
+            return;
+        };
+        match h264_nal_type(first) {
+            kind @ (H264_STAP_A | H264_STAP_B) => {
+                // The one number, then each unit behind its size.
+                let numbered = if kind == H264_STAP_B { 2 } else { 0 };
+                let Some(mut rest) = payload.get(1 + numbered..) else {
+                    self.damaged = true;
+                    return;
+                };
+                if numbered > 0 {
+                    self.don.get_or_insert(u16::from_be_bytes([payload[1], payload[2]]));
+                }
+                while rest.len() >= 2 {
+                    let size = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+                    if size == 0 || rest.len() < 2 + size {
+                        self.damaged = true;
+                        return;
+                    }
+                    self.take_h264(rest[2..2 + size].to_vec());
+                    rest = &rest[2 + size..];
+                }
+            }
+            kind @ (H264_FU_A | H264_FU_B) => {
+                // The number sits after the fragment header, in every fragment.
+                let numbered = if kind == H264_FU_B { 2 } else { 0 };
+                let Some(rest) = payload.get(2 + numbered..) else {
+                    self.damaged = true;
+                    return;
+                };
+                if numbered > 0 {
+                    self.don.get_or_insert(u16::from_be_bytes([payload[2], payload[3]]));
+                }
+                let fu = payload[1];
+                let (start, end) = (fu & 0x80 != 0, fu & 0x40 != 0);
+                if start {
+                    let mut nal = vec![(first & 0xe0) | (fu & 0x1f)];
+                    nal.extend_from_slice(rest);
+                    self.fragment = Some(nal);
+                } else if let Some(nal) = self.fragment.as_mut() {
+                    nal.extend_from_slice(rest);
+                } else {
+                    self.damaged = true;
+                    return;
+                }
+                if end && let Some(nal) = self.fragment.take() {
+                    self.take_h264(nal);
+                }
+            }
+            _ => self.take_h264(payload.to_vec()),
+        }
+    }
+
+    /// Add a whole H.264 NAL unit to the picture: itself, or of the Mac's unit
+    /// that describes the stream, the parameter sets in it.
+    fn take_h264(&mut self, nal: Vec<u8>) {
+        // A unit with no header is none: everything after reads its first byte.
+        let Some(&first) = nal.first() else {
+            self.damaged = true;
+            return;
+        };
+        if h264_nal_type(first) != H264_DESCRIPTION {
+            self.unit.push(nal);
+            return;
+        }
+        match h264_parameter_sets(&nal) {
+            Some(sets) => self.unit.extend(sets),
+            None => {
+                log::debug!("vnc: the Mac's H.264 carried a description of {} bytes this side cannot read", nal.len());
+                self.damaged = true;
+            }
+        }
+    }
+
+    fn parse_hevc(&mut self, payload: &[u8]) {
         // The number sits after the payload header, and in a fragment after the
         // fragment header that follows it.
         let numbered = if self.donl { 2 } else { 0 };
@@ -1230,6 +1432,7 @@ impl Reassembler {
             return false;
         }
         *self = Self {
+            codec: self.codec,
             donl: self.donl,
             next_sequence: Some(header.sequence.wrapping_add(1)),
             timestamp: Some(header.timestamp),
@@ -1250,13 +1453,16 @@ impl Reassembler {
 }
 
 /// Access units out of a run of RTP payloads, of a stream that sends each
-/// picture whole: RFC 7798 without decoding order numbers.
+/// picture whole: RFC 7798 without decoding order numbers, or RFC 6184.
 ///
 /// A gap in the sequence numbers drops the picture it fell in and everything
-/// after it until an IRAP picture or one the Mac marks as a refresh arrives,
-/// because every other picture predicts from one that was lost.
+/// after it until a picture a decoder can start at or, of the HEVC, one the Mac
+/// marks as a refresh arrives, because every other picture predicts from one
+/// that was lost. The H.264 goes on from an IDR alone: its pictures are not
+/// acknowledged, so the Mac has none to predict a refresh from.
 #[derive(Default)]
 pub struct Depacketizer {
+    codec: Codec,
     ssrc: Option<u32>,
     packets: Reassembler,
     /// Whether the stream is decodable from here: a random-access picture has
@@ -1269,17 +1475,27 @@ pub struct Depacketizer {
 }
 
 impl Depacketizer {
+    /// For a stream in `codec`.
+    pub fn new(codec: Codec) -> Self {
+        Self { codec, packets: Reassembler::of(codec), ..Self::default() }
+    }
+
+    /// Start over at a new stream, after an offer, which starts with an IDR of
+    /// its own.
+    fn begin(&mut self, ssrc: u32) {
+        *self = Self { ssrc: Some(ssrc), ..Self::new(self.codec) };
+    }
+
     pub fn push(&mut self, header: &RtpHeader, payload: &[u8]) -> Depacketized {
         if self.ssrc != Some(header.ssrc) {
-            // A new stream, after an offer: it starts with an IDR of its own.
-            *self = Self { ssrc: Some(header.ssrc), ..Self::default() };
+            self.begin(header.ssrc);
         }
         let Some(pushed) = self.packets.push(header, payload) else {
             return Depacketized::Pending;
         };
         let mut out = Depacketized::Pending;
         if pushed.lost {
-            self.resumable |= self.synced;
+            self.resumable |= self.synced && self.codec == Codec::Hevc;
             self.synced = false;
             out = Depacketized::Lost;
         }
@@ -1311,7 +1527,7 @@ impl Depacketizer {
     /// are given up, as by [`Self::resync`].
     pub fn skip(&mut self, header: &RtpHeader) {
         if self.ssrc != Some(header.ssrc) {
-            *self = Self { ssrc: Some(header.ssrc), ..Self::default() };
+            self.begin(header.ssrc);
         }
         if self.packets.skip(header) {
             self.resync();
@@ -1322,7 +1538,7 @@ impl Depacketizer {
     fn judge(&mut self, whole: Whole) -> Option<AccessUnit> {
         if !self.synced
             && (whole.refresh && self.resumable
-                || whole.unit.iter().any(|nal| is_random_access(nal_type(nal[0]))))
+                || whole.unit.iter().any(|nal| self.codec.starts(nal) || self.codec.parameters(nal)))
         {
             self.synced = true;
             self.resumable = false;
@@ -1340,7 +1556,7 @@ impl Depacketizer {
 /// under an SSRC of its own, the display's plus the strip's number, with the
 /// frame's timestamp. A frame carries only the strips that changed.
 ///
-/// The strips are one HEVC stream all the same: they share their parameter sets
+/// The strips are one stream all the same, HEVC or H.264: they share their parameter sets
 /// and one decoding order, which each packet's decoding order number gives, a
 /// picture's order count being its place in it. A strip predicts from its own
 /// earlier pictures, but the first after a keyframe may predict from another
@@ -1350,6 +1566,7 @@ impl Depacketizer {
 /// A lost packet, or a picture missing from the order, drops everything up to
 /// the next such keyframe: the stream has no refresh pictures.
 pub struct Strips {
+    codec: Codec,
     /// The display's SSRC, the first strip's.
     base: Option<u32>,
     strips: [Reassembler; STRIPS],
@@ -1363,16 +1580,16 @@ pub struct Strips {
 
 impl Default for Strips {
     fn default() -> Self {
-        Self { base: None, strips: std::array::from_fn(|_| Reassembler::numbered()), next: None, owed: 0 }
+        Self::new(Codec::default())
     }
 }
 
-/// Whether an access unit is an IRAP picture, which a decoder can start at.
-fn is_keyframe(unit: &AccessUnit) -> bool {
-    unit.iter().any(|nal| (16..=23).contains(&nal_type(nal[0])))
-}
-
 impl Strips {
+    /// For a stream in `codec`.
+    pub fn new(codec: Codec) -> Self {
+        Self { codec, base: None, strips: std::array::from_fn(|_| Reassembler::numbered(codec)), next: None, owed: 0 }
+    }
+
     /// Take `ssrc` as the stream's or a new stream's, and return the stream's:
     /// the first strip's. A new stream, after an offer, starts with the first
     /// strip's IDR, so an SSRC outside the strips' is one's first.
@@ -1382,7 +1599,7 @@ impl Strips {
             // That includes the SSRC just below one taken for the first strip's,
             // of a stream first heard at a later strip.
             _ => {
-                *self = Self { base: Some(ssrc), ..Self::default() };
+                *self = Self { base: Some(ssrc), ..Self::new(self.codec) };
                 ssrc
             }
         }
@@ -1404,10 +1621,10 @@ impl Strips {
         }
         let out = match pushed.whole {
             Some(Whole { unit, don: Some(don), .. })
-                if self.next == Some(don) || strip == 0 && is_keyframe(&unit) =>
+                if self.next == Some(don) || strip == 0 && self.codec.is_keyframe(&unit) =>
             {
                 self.next = Some(don.wrapping_add(1));
-                if strip == 0 && is_keyframe(&unit) {
+                if strip == 0 && self.codec.is_keyframe(&unit) {
                     self.owed = ALL_STRIPS & !1;
                 } else {
                     self.owed &= !(1 << strip);
@@ -1454,8 +1671,8 @@ enum Assembly {
 }
 
 impl Assembly {
-    fn new(strips: bool) -> Self {
-        if strips { Self::Strips(Box::default()) } else { Self::Whole(Depacketizer::default()) }
+    fn new(codec: Codec, strips: bool) -> Self {
+        if strips { Self::Strips(Box::new(Strips::new(codec))) } else { Self::Whole(Depacketizer::new(codec)) }
     }
 
     /// The SSRC that names the stream `ssrc` is of, or begins: its own, or of a
@@ -1515,7 +1732,7 @@ impl Assembly {
 // Passing the stream through
 // ---------------------------------------------------------------------------
 
-/// NAL unit type of a sequence parameter set.
+/// NAL unit type of an HEVC sequence parameter set.
 const NAL_SPS: u8 = 33;
 
 /// An access unit passed to the browser as the Mac sent it: one picture, as the
@@ -1546,7 +1763,9 @@ pub struct StreamParams {
     /// The cropped picture: the coded size less the conformance window.
     pub size: (u16, u16),
     /// The configuration string, `hev1` for parameter sets in band, per ISO/IEC
-    /// 14496-15 Annex E: `hev1.4.10.L150.BE.8` for the Mac's 4:4:4 stream.
+    /// 14496-15 Annex E: `hev1.4.10.L150.BE.8` for the Mac's 4:4:4 stream. Of
+    /// its H.264, `avc1` and the profile, constraints and level, as RFC 6381
+    /// writes them: `avc1.640020` for a strip of a 1600×1000 display.
     pub decode: String,
 }
 
@@ -1555,18 +1774,21 @@ pub struct StreamParams {
 /// the first is dropped, since nothing could configure a decoder for it.
 #[derive(Default)]
 pub struct Passer {
+    codec: Codec,
     params: Option<StreamParams>,
     /// The timestamp of the last strip passed, which its frame's others share.
     frame: Option<u32>,
 }
 
 impl Passer {
+    /// For a stream in `codec`.
+    pub fn new(codec: Codec) -> Self {
+        Self { codec, ..Self::default() }
+    }
+
     pub fn pass(&mut self, unit: &AccessUnit) -> Option<PassedUnit> {
-        for nal in unit.iter().filter(|nal| nal_type(nal[0]) == NAL_SPS) {
-            match parse_sps(nal) {
-                Some(params) => self.params = Some(params),
-                None => log::warn!("vnc: the Mac's HEVC carried a sequence parameter set this side cannot read"),
-            }
+        if let Some(params) = self.codec.params(unit) {
+            self.params = Some(params);
         }
         let params = self.params.as_ref()?;
         let mut data = Vec::with_capacity(unit.iter().map(|nal| nal.len() + 4).sum());
@@ -1579,20 +1801,40 @@ impl Passer {
             strip: None,
             begins: true,
             decode: params.decode.clone(),
-            keyframe: unit.iter().any(|nal| (16..=23).contains(&nal_type(nal[0]))),
+            keyframe: self.codec.is_keyframe(unit),
             data,
         })
     }
 }
 
 impl Passer {
+    /// [`Self::pass`] for a unit that is the whole of a display of `display`,
+    /// where one is offered. H.264's 4:2:0 has no odd size to say: the Mac codes
+    /// a display of one a column or a row short, 1280×800 at 1281×801, and the
+    /// unit is the display's all the same.
+    fn pass_whole(&mut self, unit: &AccessUnit, display: Option<(u16, u16)>) -> Option<PassedUnit> {
+        let passed = self.pass(unit)?;
+        Some(match display {
+            Some(display) if self.codec == Codec::H264 && passed.size == (display.0 & !1, display.1 & !1) => {
+                PassedUnit { size: display, ..passed }
+            }
+            _ => passed,
+        })
+    }
+
     /// [`Self::pass`] for a unit that is strip `strip` of a display of
     /// `display`, in the frame of `timestamp`. A picture that is not a strip of
     /// such a display is one from before the display was offered, and is not
     /// passed.
     fn pass_strip(&mut self, unit: &AccessUnit, strip: usize, timestamp: u32, display: (u16, u16)) -> Option<PassedUnit> {
         let passed = self.pass(unit)?;
-        if passed.size != (display.0, strip_rows(display.1) as u16) {
+        // H.264's 4:2:0 has no odd width to say: the Mac codes a display of one
+        // a column narrower, 1280 wide at 1281, and the last column is not sent.
+        let width = match self.codec {
+            Codec::Hevc => display.0,
+            Codec::H264 => display.0 & !1,
+        };
+        if passed.size != (width, strip_rows(display.1) as u16) {
             log::debug!(
                 "vnc: a {}\u{d7}{} picture is not a strip of the {}\u{d7}{} display offered",
                 passed.size.0,
@@ -1640,6 +1882,12 @@ impl Bits<'_> {
             }
         }
         u32::try_from((1u64 << zeros) - 1 + self.bits(zeros)?).ok()
+    }
+
+    /// `se(v)`: signed Exp-Golomb, the codes alternating from +1.
+    fn se(&mut self) -> Option<i64> {
+        let code = i64::from(self.ue()?);
+        Some(if code % 2 == 1 { (code + 1) / 2 } else { -(code / 2) })
     }
 }
 
@@ -1707,6 +1955,206 @@ pub fn parse_sps(nal: &[u8]) -> Option<StreamParams> {
     let constraints: String = constraints[..kept].iter().map(|b| format!(".{b:X}")).collect();
     let decode = format!("hev1.{space}{profile}.{compatibility:X}.{tier}{level}{constraints}");
     Some(StreamParams { size, decode })
+}
+
+/// What an H.264 sequence parameter set says ahead of its VUI.
+struct H264Sequence {
+    /// The cropped picture.
+    size: (u16, u16),
+    max_num_ref_frames: u32,
+}
+
+/// Read an H.264 sequence parameter set's RBSP from after its level as far as
+/// its VUI, which `r` is left at (H.264 7.3.2.1.1).
+fn h264_sequence(profile: u8, r: &mut Bits<'_>) -> Option<H264Sequence> {
+    r.ue()?; // seq_parameter_set_id
+    let mut chroma_format = 1;
+    let mut separate_planes = false;
+    if matches!(profile, 100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135) {
+        chroma_format = r.ue()?;
+        separate_planes = chroma_format == 3 && r.bit()? == 1;
+        r.ue()?; // bit_depth_luma_minus8
+        r.ue()?; // bit_depth_chroma_minus8
+        r.skip(1)?; // qpprime_y_zero_transform_bypass_flag
+        if r.bit()? == 1 {
+            // seq_scaling_matrix_present_flag: each list present is read to its end.
+            for list in 0..if chroma_format == 3 { 12 } else { 8 } {
+                if r.bit()? == 0 {
+                    continue;
+                }
+                let (mut last, mut next) = (8i64, 8i64);
+                for _ in 0..if list < 6 { 16 } else { 64 } {
+                    if next != 0 {
+                        next = (last + r.se()?).rem_euclid(256);
+                    }
+                    if next != 0 {
+                        last = next;
+                    }
+                }
+            }
+        }
+    }
+    r.ue()?; // log2_max_frame_num_minus4
+    match r.ue()? {
+        0 => {
+            r.ue()?; // log2_max_pic_order_cnt_lsb_minus4
+        }
+        1 => {
+            r.skip(1)?; // delta_pic_order_always_zero_flag
+            r.se()?; // offset_for_non_ref_pic
+            r.se()?; // offset_for_top_to_bottom_field
+            for _ in 0..r.ue()? {
+                r.se()?; // offset_for_ref_frame
+            }
+        }
+        _ => {}
+    }
+    let max_num_ref_frames = r.ue()?;
+    r.skip(1)?; // gaps_in_frame_num_value_allowed_flag
+    let width = r.ue()?.checked_add(1)?.checked_mul(16)?;
+    let map_units = r.ue()?.checked_add(1)?;
+    let frames_only = r.bit()?;
+    if frames_only == 0 {
+        r.skip(1)?; // mb_adaptive_frame_field_flag
+    }
+    let height = map_units.checked_mul(16 * (2 - frames_only))?;
+    r.skip(1)?; // direct_8x8_inference_flag
+    let (mut crop_w, mut crop_h) = (0, 0);
+    if r.bit()? == 1 {
+        let (left, right, top, bottom) = (r.ue()?, r.ue()?, r.ue()?, r.ue()?);
+        // CropUnitX and CropUnitY: the chroma's subsampling on each axis, and
+        // on the vertical one a field's two rows.
+        let (sub_w, sub_h) = match (chroma_format, separate_planes) {
+            (1, _) => (2, 2),
+            (2, _) => (2, 1),
+            _ => (1, 1),
+        };
+        crop_w = sub_w * left.checked_add(right)?;
+        crop_h = sub_h * (2 - frames_only) * top.checked_add(bottom)?;
+    }
+    let size = (
+        u16::try_from(width.checked_sub(crop_w)?).ok()?,
+        u16::try_from(height.checked_sub(crop_h)?).ok()?,
+    );
+    Some(H264Sequence { size, max_num_ref_frames })
+}
+
+/// The picture size and configuration string an H.264 sequence parameter set
+/// NAL unit (its one-byte header included) describes.
+pub fn parse_h264_sps(nal: &[u8]) -> Option<StreamParams> {
+    let data = rbsp(nal.get(1..)?);
+    let (profile, constraints, level) = (*data.first()?, *data.get(1)?, *data.get(2)?);
+    let sequence = h264_sequence(profile, &mut Bits { data: &data, at: 24 })?;
+    Some(StreamParams { size: sequence.size, decode: format!("avc1.{profile:02X}{constraints:02X}{level:02X}") })
+}
+
+/// Bits into an RBSP, most significant first.
+#[derive(Default)]
+struct BitWriter {
+    data: Vec<u8>,
+    bits: usize,
+}
+
+impl BitWriter {
+    fn bit(&mut self, bit: u32) {
+        if self.bits.is_multiple_of(8) {
+            self.data.push(0);
+        }
+        if bit != 0 {
+            *self.data.last_mut().expect("a byte was just pushed") |= 0x80 >> (self.bits % 8);
+        }
+        self.bits += 1;
+    }
+
+    /// `ue(v)`: unsigned Exp-Golomb.
+    fn ue(&mut self, value: u32) {
+        let code = u64::from(value) + 1;
+        let length = 64 - code.leading_zeros();
+        for _ in 1..length {
+            self.bit(0);
+        }
+        for at in (0..length).rev() {
+            self.bit((code >> at) as u32 & 1);
+        }
+    }
+}
+
+/// `sps`, an H.264 sequence parameter set NAL unit of the Mac's, saying what the
+/// Mac leaves unsaid: that its pictures come out in the order they are decoded.
+/// `None` for one that says so itself, has no VUI to say it in, or that this side
+/// cannot read, which is then passed as it came.
+///
+/// The Mac's set has a VUI without the bitstream restriction, and a decoder told
+/// nothing may hold as many pictures back as its buffer has room for before it
+/// shows the first (H.264 E.2.1 infers `max_num_reorder_frames` as the buffer's
+/// size): sixteen strips, four frames, which on a screen that goes still never
+/// come. The stream has no picture to reorder: each one's order count is its
+/// place in the decoding order. So the set is written with the restriction, its
+/// other fields at the values their absence stood for, as WebRTC writes one for
+/// the same reason.
+fn h264_in_decoding_order(sps: &[u8]) -> Option<Vec<u8>> {
+    let data = rbsp(sps.get(1..)?);
+    let mut r = Bits { data: &data, at: 24 };
+    let sequence = h264_sequence(*data.first()?, &mut r)?;
+    // vui_parameters (H.264 E.1.1), as far as its last flag.
+    if r.bit()? == 0 {
+        return None;
+    }
+    if r.bit()? == 1 && r.bits(8)? == 255 {
+        r.skip(32)?; // sar_width, sar_height
+    }
+    if r.bit()? == 1 {
+        r.skip(1)?; // overscan_appropriate_flag
+    }
+    if r.bit()? == 1 {
+        r.skip(4)?; // video_format, video_full_range_flag
+        if r.bit()? == 1 {
+            r.skip(24)?; // colour_primaries, transfer_characteristics, matrix_coefficients
+        }
+    }
+    if r.bit()? == 1 {
+        r.ue()?; // chroma_sample_loc_type_top_field
+        r.ue()?; // chroma_sample_loc_type_bottom_field
+    }
+    if r.bit()? == 1 {
+        r.skip(65)?; // num_units_in_tick, time_scale, fixed_frame_rate_flag
+    }
+    // Either set of HRD parameters is one this side does not read past.
+    if r.bit()? == 1 || r.bit()? == 1 {
+        return None;
+    }
+    r.skip(1)?; // pic_struct_present_flag
+    let restriction = r.at;
+    if r.bit()? == 1 {
+        return None;
+    }
+    let mut w = BitWriter::default();
+    let mut copied = Bits { data: &data, at: 0 };
+    for _ in 0..restriction {
+        w.bit(copied.bit()?);
+    }
+    w.bit(1); // bitstream_restriction_flag
+    w.bit(1); // motion_vectors_over_pic_boundaries_flag
+    w.ue(2); // max_bytes_per_pic_denom
+    w.ue(1); // max_bits_per_mb_denom
+    w.ue(16); // log2_max_mv_length_horizontal
+    w.ue(16); // log2_max_mv_length_vertical
+    w.ue(0); // max_num_reorder_frames
+    w.ue(sequence.max_num_ref_frames); // max_dec_frame_buffering
+    w.bit(1); // rbsp_stop_one_bit, and zeros to the byte's end
+    // Back under emulation prevention: a 3 ahead of any byte under 4 that two
+    // zeros come before.
+    let mut out = vec![sps[0]];
+    let mut zeros = 0;
+    for byte in w.data {
+        if zeros >= 2 && byte <= 3 {
+            out.push(3);
+            zeros = 0;
+        }
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+        out.push(byte);
+    }
+    Some(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2071,7 +2519,7 @@ enum Outlet {
 /// Frames the read loop may be behind by in passing them to the browser, a
 /// frame being a picture sent whole or the strips of one timestamp.
 /// Reaching it drops to the next keyframe, as the decoder's queue does: the loop
-/// waits on the browser's link ([`crate::encode::VideoSink::pass_hevc`]), so this is
+/// waits on the browser's link ([`crate::encode::VideoSink::pass_media`]), so this is
 /// where a link that cannot carry the stream sheds it. Half a second of the virtual
 /// display's 30 Hz ([`vnc_apple::DISPLAY_HZ`]).
 const PASS_QUEUE: usize = 15;
@@ -2200,12 +2648,24 @@ impl PassQueue {
 pub enum Receive {
     /// Decoded here, from strips where the display's height allows.
     Decode,
-    /// Passed to the browser as the Mac's access units, in `strips` where the
+    /// Passed to the browser as the Mac's access units, in `codec`, which is
+    /// what the Mac is offered, and in `strips` where the
     /// display's height allows: the page puts the display together from them,
     /// in its own decoder or from what the browser's decodes of each. Whole, each
     /// picture the display, only for a session that asked for it so
     /// ([`crate::config::Choices::whole`]).
-    Pass { strips: bool },
+    Pass { codec: Codec, strips: bool },
+}
+
+impl Receive {
+    /// The codec the Mac is offered: the HEVC to decode here, and whichever is
+    /// passed.
+    fn codec(self) -> Codec {
+        match self {
+            Self::Decode => Codec::Hevc,
+            Self::Pass { codec, .. } => codec,
+        }
+    }
 }
 
 /// What [`MediaStream::offer`] has the session send.
@@ -2356,7 +2816,8 @@ impl MediaStream {
         receive: Receive,
         displays: usize,
     ) -> (Self, Vec<Pictures>) {
-        let offers = Offers::new(displays, receive != Receive::Pass { strips: false });
+        let strips = !matches!(receive, Receive::Pass { strips: false, .. });
+        let offers = Offers::new(displays, strips, receive.codec());
         let (legs, pictures) = (0..offers.videos.len())
             .map(|index| {
                 let (pictures, rx) = if matches!(receive, Receive::Pass { .. }) {
@@ -2819,7 +3280,8 @@ const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `REMOTEX_HP_DUMP=<dir>`: the stream as it arrives, for replay outside the
 /// gateway (`tests/hp_capture.sh`). `video.h265` is every access unit the
-/// depacketizer completes, as Annex B; `audio.eld` is every AAC-ELD unit, each
+/// depacketizer completes, as Annex B, or `video.h264` of a session passed the
+/// Mac's H.264; `audio.eld` is every AAC-ELD unit, each
 /// behind its length as a big-endian u32. Both are written before any decoder
 /// sees them, whether the session decodes the picture or passes it on.
 ///
@@ -2841,8 +3303,13 @@ enum Track {
 const DUMP_QUEUE: usize = 4096;
 
 impl MediaDump {
-    fn from_env() -> Option<Self> {
+    /// `codec` is the picture's, which names its file.
+    fn from_env(codec: Codec) -> Option<Self> {
         let dir = std::path::PathBuf::from(std::env::var_os("REMOTEX_HP_DUMP")?);
+        let picture = match codec {
+            Codec::Hevc => "video.h265",
+            Codec::H264 => "video.h264",
+        };
         let open = |name: &str| {
             std::fs::File::create(dir.join(name))
                 .map(std::io::BufWriter::new)
@@ -2850,7 +3317,7 @@ impl MediaDump {
         };
         let opened = std::fs::create_dir_all(&dir)
             .with_context(|| format!("create {}", dir.display()))
-            .and_then(|()| Ok((open("video.h265")?, open("audio.eld")?)));
+            .and_then(|()| Ok((open(picture)?, open("audio.eld")?)));
         let (mut video, mut audio) = match opened {
             Ok(files) => files,
             Err(e) => {
@@ -2945,6 +3412,8 @@ struct VideoLeg {
     onward: Onward,
     /// Set by the decoder thread for a unit that failed to decode.
     keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The codec the leg's stream was offered in.
+    codec: Codec,
     assembly: Assembly,
     feedback: RateFeedback,
     keyframe_request: KeyframeRequest,
@@ -3066,7 +3535,7 @@ impl VideoLeg {
         // display's height, and the stream before it has stopped by then.
         let strips = self.shared.strips.load(std::sync::atomic::Ordering::Relaxed);
         if strips != matches!(self.assembly, Assembly::Strips(_)) {
-            self.assembly = Assembly::new(strips);
+            self.assembly = Assembly::new(self.codec, strips);
         }
         let stream = self.assembly.stream(header.ssrc);
         self.feedback.received(stream, header.timestamp, arrived);
@@ -3102,8 +3571,10 @@ impl VideoLeg {
                 } else {
                     self.keyframe_request.hold(tokio::time::Instant::now());
                 }
-                if let Some(params) =
-                    unit.iter().find(|nal| nal_type(nal[0]) == NAL_SPS).and_then(|sps| parse_sps(sps))
+                // What a refresh request names, which only the HEVC is asked for.
+                if self.codec == Codec::Hevc
+                    && let Some(params) =
+                        unit.iter().find(|nal| nal_type(nal[0]) == NAL_SPS).and_then(|sps| parse_sps(sps))
                 {
                     self.size = Some(params.size);
                 }
@@ -3121,8 +3592,8 @@ impl VideoLeg {
                             self.pictures += 1;
                         }
                         // A stream in strips has no refresh pictures to predict
-                        // from an acknowledged one.
-                        if strip.is_none() {
+                        // from an acknowledged one, and the H.264 is asked for none.
+                        if strip.is_none() && self.codec == Codec::Hevc {
                             self.unacknowledged = Some(header.timestamp);
                         }
                         Ok(Took::Nothing)
@@ -3263,9 +3734,11 @@ impl Receiver {
                         );
                         Onward::Decoder(units, decoder)
                     }
-                    Outlet::Passed(units) => {
-                        Onward::Browser(Passer::default(), units.clone(), std::sync::Arc::clone(&shared.offered))
-                    }
+                    Outlet::Passed(units) => Onward::Browser(
+                        Passer::new(media.offers.codec),
+                        units.clone(),
+                        std::sync::Arc::clone(&shared.offered),
+                    ),
                 };
                 Ok(VideoLeg {
                     display: index + 1,
@@ -3279,7 +3752,8 @@ impl Receiver {
                     shared: shared.clone(),
                     onward,
                     keyframe,
-                    assembly: Assembly::new(shared.strips.load(std::sync::atomic::Ordering::Relaxed)),
+                    codec: media.offers.codec,
+                    assembly: Assembly::new(media.offers.codec, shared.strips.load(std::sync::atomic::Ordering::Relaxed)),
                     feedback: RateFeedback::new(epoch),
                     keyframe_request: KeyframeRequest::default(),
                     size: None,
@@ -3319,7 +3793,7 @@ impl Receiver {
         let mut datagram = vec![0u8; 65_536];
         let mut second_datagram = vec![0u8; if alone { 0 } else { 65_536 }];
         let mut sound_datagram = vec![0u8; 2048];
-        let mut dump = MediaDump::from_env();
+        let mut dump = MediaDump::from_env(self.videos.first().map_or(Codec::Hevc, |leg| leg.codec));
         let failure = loop {
             let mut want_keyframe = [None; MAX_DISPLAYS];
             tokio::select! {
@@ -3545,9 +4019,10 @@ impl Onward {
         match self {
             Self::Decoder(queue, _) => queue.send(coded),
             Self::Browser(passer, units, offered) => {
+                let display = *offered.lock().unwrap();
                 let passed = match coded.strip {
-                    None => passer.pass(&coded.unit),
-                    Some(strip) => (*offered.lock().unwrap())
+                    None => passer.pass_whole(&coded.unit, display),
+                    Some(strip) => display
                         .and_then(|display| passer.pass_strip(&coded.unit, strip, coded.timestamp, display)),
                 };
                 passed.map_or(Sent::Unready, |passed| units.send(passed))
@@ -3714,7 +4189,7 @@ fn spawn_decoder(
                     Ok(())
                 }
                 (Some(part), Some(strip)) => {
-                    let keyframe = strip == 0 && is_keyframe(&coded.unit);
+                    let keyframe = strip == 0 && Codec::Hevc.is_keyframe(&coded.unit);
                     Canvas::place(&mut canvas, *offered.lock().unwrap(), strip, &part, keyframe)?;
                     if canvas.as_ref().is_some_and(|canvas| canvas.fresh == ALL_STRIPS) {
                         waiting = None;
@@ -3877,7 +4352,7 @@ mod tests {
     fn the_blobs_are_what_apples_negotiator_produces() {
         assert_eq!(audio_offer_blob(3_606_155_525), unhex(CAPTURED_AUDIO_BLOB));
         assert_eq!(
-            video_offer_blob(3_023_179_925, (1600, 1000), 4),
+            video_offer_blob(3_023_179_925, (1600, 1000), 4, Codec::Hevc),
             unhex(CAPTURED_VIDEO_BLOB)
         );
     }
@@ -3918,7 +4393,7 @@ mod tests {
     /// entries, the 40 Mbit/s one first, up to 100 Mbit/s.
     #[test]
     fn the_video_offer_asks_for_one_picture_a_frame_at_apples_bitrates() {
-        let blob = video_offer_blob(7, (1280, 800), 1);
+        let blob = video_offer_blob(7, (1280, 800), 1, Codec::Hevc);
         let top = fields(&blob);
         let stream = top.iter().find_map(|(f, v)| (*f == 5).then(|| v.clone().unwrap_err())).unwrap();
         let stream = fields(&stream);
@@ -4430,13 +4905,13 @@ mod tests {
             assert!(!in_strips(height), "{height} rows");
         }
         let tiles = |offers: &Offers, size| {
-            let blob = video_offer_blob(7, size, if offers.strips(size) { STRIPS } else { 1 } as u64);
+            let blob = video_offer_blob(7, size, if offers.strips(size) { STRIPS } else { 1 } as u64, Codec::Hevc);
             let stream = fields(&blob).iter().find_map(|(f, v)| (*f == 5).then(|| v.clone().unwrap_err())).unwrap();
             fields(&stream).iter().find_map(|(f, v)| (*f == 6).then(|| *v.as_ref().unwrap())).unwrap()
         };
-        assert_eq!(tiles(&Offers::new(1, true), (1600, 1000)), 4);
-        assert_eq!(tiles(&Offers::new(1, true), (160, 90)), 1);
-        assert_eq!(tiles(&Offers::new(1, false), (1600, 1000)), 1, "a passed stream");
+        assert_eq!(tiles(&Offers::new(1, true, Codec::Hevc), (1600, 1000)), 4);
+        assert_eq!(tiles(&Offers::new(1, true, Codec::Hevc), (160, 90)), 1);
+        assert_eq!(tiles(&Offers::new(1, false, Codec::Hevc), (1600, 1000)), 1, "a passed stream");
     }
 
     /// Each strip's SSRC has sequence numbers of its own, so its own rollover.
@@ -4667,6 +5142,220 @@ mod tests {
         assert_eq!(passer.pass_strip(&units[1], 1, 6900, (64, 400)), None);
     }
 
+    /// The unit a Mac on macOS 26.6 sent ahead of each keyframe strip of
+    /// a 1600×1000 display's H.264: type 18, four bytes, then an `avc1` sample
+    /// description. And the sequence parameter set of the same display in one
+    /// tile.
+    const H264_DESCRIPTION_UNIT: &str = "92e6c0a30000009761766331000000000000ffff0000000000000000000002000000020006400100004800000048000000000000000105482e32363400000000000000000000000000000000000000000000000000000018ffff0000002b6176634301640020ffe1001027640020ac1314340640869b8606808101000428ee3cb0fdf8f80000000012636f6c726e636c63000c000d000100000000";
+    const H264_STRIP_SPS: &str = "27640020ac1314340640869b86068081";
+    const H264_WHOLE_SPS: &str = "27640028ac1314601901ffe59b86068081";
+    const H264_PPS: &str = "28ee3cb0";
+
+    /// The strip's sequence parameter set as the gateway writes it out.
+    fn h264_strip_sps() -> Vec<u8> {
+        h264_in_decoding_order(&unhex(H264_STRIP_SPS)).unwrap()
+    }
+
+    /// An IDR slice and one of a picture that is none, as far as their headers.
+    const H264_IDR_SLICE: &[u8] = &[0x25, 0xb8, 0x00, 0x40, 0x00, 0x89, 0xff, 0x7c];
+    const H264_SLICE: &[u8] = &[0x21, 0xe0, 0x08, 0x00, 0x45, 0x90, 0x92];
+
+    /// An H.264 NAL unit as the fragments a stream in strips sends it in, each
+    /// with the decoding order number after its fragment header.
+    fn h264_fragments(don: u16, nal: &[u8], count: usize) -> Vec<Vec<u8>> {
+        let body = &nal[1..];
+        let size = body.len().div_ceil(count);
+        body.chunks(size)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let ends = (i + 1) * size >= body.len();
+                let fu = (nal[0] & 0x1f) | if i == 0 { 0x80 } else { 0 } | if ends { 0x40 } else { 0 };
+                [&[(nal[0] & 0xe0) | H264_FU_B, fu][..], &don.to_be_bytes()[..], chunk].concat()
+            })
+            .collect()
+    }
+
+    /// The Mac's H.264 names its parameter sets in a sample description, and they
+    /// say a strip's size or the display's, and the configuration string.
+    #[test]
+    fn the_macs_h264_describes_itself_in_a_sample_description() {
+        let (sps, pps) = (h264_strip_sps(), unhex(H264_PPS));
+        assert_eq!(h264_parameter_sets(&unhex(H264_DESCRIPTION_UNIT)), Some(vec![sps.clone(), pps]));
+        assert_eq!(h264_parameter_sets(&unhex(H264_DESCRIPTION_UNIT)[..120]), None, "cut short");
+        assert_eq!(h264_parameter_sets(b"\x92\xe6\xc0\xa3 no record"), None);
+        assert_eq!(
+            parse_h264_sps(&sps),
+            Some(StreamParams { size: (1600, 256), decode: "avc1.640020".to_owned() }),
+            "a quarter of 1000 rows, rounded up to 16"
+        );
+        assert_eq!(
+            parse_h264_sps(&unhex(H264_WHOLE_SPS)),
+            Some(StreamParams { size: (1600, 1000), decode: "avc1.640028".to_owned() }),
+            "cropped from 1008 rows"
+        );
+        assert_eq!(parse_h264_sps(&sps[..6]), None);
+        assert_eq!(parse_h264_sps(&unhex(H264_STRIP_SPS)).map(|params| params.size), Some((1600, 256)), "as the Mac sent it");
+    }
+
+    /// The Mac's set says nothing of reordering, which leaves a decoder free to
+    /// hold pictures back, so it is written out with the restriction that says
+    /// there is none: the same set as far as that flag, then the restriction.
+    #[test]
+    fn the_h264_sequence_parameter_set_says_pictures_come_in_decoding_order() {
+        let sent = unhex(H264_STRIP_SPS);
+        let written = h264_in_decoding_order(&sent).unwrap();
+        assert_eq!(written, unhex("27640020ac1314340640869b860680836822118d80"));
+        // Everything up to the flag is the Mac's: the last byte it shares holds it.
+        assert_eq!(written[..sent.len() - 1], sent[..sent.len() - 1]);
+        // Its restriction: no picture reordered, and a buffer of the twelve
+        // reference frames the set allows.
+        let data = rbsp(&written[1..]);
+        let mut r = Bits { data: &data, at: 24 };
+        assert_eq!(h264_sequence(100, &mut r).map(|sequence| (sequence.size, sequence.max_num_ref_frames)), Some(((1600, 256), 12)));
+        r.skip(1 + 1 + 1 + 1 + 4 + 1 + 24 + 1 + 1 + 1 + 1 + 1).unwrap();
+        assert_eq!(r.bit(), Some(1), "bitstream_restriction_flag");
+        r.skip(1).unwrap();
+        assert_eq!([(); 6].map(|()| r.ue().unwrap()), [2, 1, 16, 16, 0, 12]);
+        // One that says so already is left as it is, and so is one cut short.
+        assert_eq!(h264_in_decoding_order(&written), None);
+        assert_eq!(h264_in_decoding_order(&sent[..9]), None);
+        assert_eq!(h264_in_decoding_order(&unhex(H264_WHOLE_SPS)).and_then(|sps| parse_h264_sps(&sps)).map(|params| params.size), Some((1600, 1000)));
+    }
+
+    /// A keyframe of the H.264 in strips: the first strip's description in a
+    /// packet of its own and its IDR in numbered fragments, another strip's
+    /// description aggregated with its picture under the one number, and after
+    /// them pictures in fragments, in the one decoding order.
+    #[test]
+    fn h264_strips_come_out_in_their_one_decoding_order() {
+        let (sps, pps) = (h264_strip_sps(), unhex(H264_PPS));
+        let description = unhex(H264_DESCRIPTION_UNIT);
+        let mut s = Strips::new(Codec::H264);
+        assert_eq!(s.push(&strip(0, 10, 0, false), &description), (0, Depacketized::Pending));
+        let pieces = h264_fragments(7, H264_IDR_SLICE, 3);
+        assert_eq!(s.push(&strip(0, 11, 0, false), &pieces[0]), (0, Depacketized::Pending));
+        assert_eq!(s.push(&strip(0, 12, 0, false), &pieces[1]), (0, Depacketized::Pending));
+        assert_eq!(
+            s.push(&strip(0, 13, 0, true), &pieces[2]),
+            (0, Depacketized::Unit(vec![sps.clone(), pps.clone(), H264_IDR_SLICE.to_vec()]))
+        );
+        assert!(!s.whole(), "the other strips of the keyframe are still to come");
+        let sized = |nal: &[u8]| [&(nal.len() as u16).to_be_bytes()[..], nal].concat();
+        let aggregate = [&[0x20 | H264_STAP_B][..], &8u16.to_be_bytes(), &sized(&description), &sized(H264_SLICE)].concat();
+        assert_eq!(
+            s.push(&strip(1, 500, 0, true), &aggregate),
+            (1, Depacketized::Unit(vec![sps, pps, H264_SLICE.to_vec()]))
+        );
+        let slice = || Depacketized::Unit(vec![H264_SLICE.to_vec()]);
+        for (other, don) in [(2, 9), (3, 10)] {
+            let pieces = h264_fragments(don, H264_SLICE, 2);
+            assert_eq!(s.push(&strip(other, 1, 0, false), &pieces[0]), (other as usize, Depacketized::Pending));
+            assert_eq!(s.push(&strip(other, 2, 0, true), &pieces[1]), (other as usize, slice()));
+        }
+        assert!(s.whole());
+        // A picture missing from the order drops strips until the first's next IDR.
+        let pieces = h264_fragments(12, H264_SLICE, 1);
+        assert_eq!(s.push(&strip(2, 3, 400, true), &pieces[0]), (2, Depacketized::Lost), "11 never came");
+        let pieces = h264_fragments(13, H264_IDR_SLICE, 1);
+        assert_eq!(s.push(&strip(2, 4, 800, true), &pieces[0]), (2, Depacketized::Lost), "not the first strip's");
+        assert_eq!(
+            s.push(&strip(0, 14, 1200, true), &h264_fragments(14, H264_IDR_SLICE, 1)[0]),
+            (0, Depacketized::Unit(vec![H264_IDR_SLICE.to_vec()]))
+        );
+    }
+
+    /// The H.264 in one tile: the description, the IDR in fragments without a
+    /// number, and pictures a packet each. A lost packet is made good by an IDR
+    /// alone, since no picture of it was acknowledged for a refresh to predict from.
+    #[test]
+    fn h264_sent_whole_goes_on_from_an_idr_alone() {
+        let (sent, pps) = (unhex(H264_WHOLE_SPS), unhex(H264_PPS));
+        let description = [&unhex(H264_DESCRIPTION_UNIT)[..4], b"avcC\x01\x64\x00\x28\xff\xe1\x00\x11", &sent, b"\x01\x00\x04", &pps].concat();
+        let sps = h264_in_decoding_order(&sent).unwrap();
+        let fragments = |nal: &[u8]| {
+            let (first, second) = nal[1..].split_at(nal.len() / 2);
+            let kind = nal[0] & 0x1f;
+            [
+                [&[(nal[0] & 0xe0) | H264_FU_A, 0x80 | kind][..], first].concat(),
+                [&[(nal[0] & 0xe0) | H264_FU_A, 0x40 | kind][..], second].concat(),
+            ]
+        };
+        let mut d = Depacketizer::new(Codec::H264);
+        let idr = fragments(H264_IDR_SLICE);
+        assert_eq!(d.push(&header(1, 0, false), &description), Depacketized::Pending);
+        assert_eq!(d.push(&header(2, 0, false), &idr[0]), Depacketized::Pending);
+        assert_eq!(
+            d.push(&header(3, 0, true), &idr[1]),
+            Depacketized::Unit(vec![sps, pps, H264_IDR_SLICE.to_vec()])
+        );
+        assert_eq!(d.push(&header(4, 400, true), H264_SLICE), Depacketized::Unit(vec![H264_SLICE.to_vec()]));
+        // Sequence 5 never came.
+        assert_eq!(d.push(&header(6, 1200, true), H264_SLICE), Depacketized::Lost);
+        assert!(!d.resumes_at_refresh(), "an IDR is asked for");
+        let refresh = RtpHeader { refresh: true, ..header(7, 1600, true) };
+        assert_eq!(d.push(&refresh, H264_SLICE), Depacketized::Lost);
+        assert_eq!(d.push(&header(8, 2000, false), &idr[0]), Depacketized::Pending);
+        assert_eq!(d.push(&header(9, 2000, true), &idr[1]), Depacketized::Unit(vec![H264_IDR_SLICE.to_vec()]));
+    }
+
+    /// A strip of the H.264 passes as one of the HEVC does, under its display's
+    /// size and the stream's own configuration string, a keyframe at an IDR.
+    #[test]
+    fn an_h264_strip_passes_as_its_displays() {
+        use crate::protocol::Strip;
+        let (sps, pps) = (unhex(H264_STRIP_SPS), unhex(H264_PPS));
+        let keyframe = vec![sps.clone(), pps.clone(), H264_IDR_SLICE.to_vec()];
+        let other = vec![sps.clone(), pps, H264_SLICE.to_vec()];
+        let mut passer = Passer::new(Codec::H264);
+        assert_eq!(passer.pass(&vec![H264_SLICE.to_vec()]), None, "nothing describes it yet");
+        let first = passer.pass_strip(&keyframe, 0, 900, (1600, 1000)).unwrap();
+        assert_eq!(
+            (first.size, first.strip, first.begins, first.keyframe, first.decode.as_str()),
+            ((1600, 1000), Some(Strip { index: 0, ends: false }), true, true, "avc1.640020")
+        );
+        assert_eq!(&first.data[..5], &[0, 0, 0, 1, sps[0]], "Annex B, the parameter sets ahead");
+        let second = passer.pass_strip(&other, 1, 900, (1600, 1000)).unwrap();
+        assert_eq!((second.begins, second.keyframe), (false, false), "only the first strip's is an IDR");
+        // 4:2:0 codes an odd width a column narrower.
+        assert!(passer.pass_strip(&other, 1, 1300, (1601, 1000)).is_some());
+        assert_eq!(passer.pass_strip(&other, 1, 1700, (1602, 1000)), None);
+        assert_eq!(passer.pass_strip(&other, 1, 1700, (1600, 800)), None, "a strip of another height");
+    }
+
+    /// One tile of a 1281×801 display, as the Mac sent it: coded 1280×800, and
+    /// passed as that display's whole picture.
+    #[test]
+    fn a_whole_h264_picture_of_an_odd_display_passes_as_its_displays() {
+        let sps = unhex("27640020ac13145014419f89899b860680817c");
+        let unit = vec![sps, unhex(H264_PPS), H264_IDR_SLICE.to_vec()];
+        let mut passer = Passer::new(Codec::H264);
+        assert_eq!(passer.pass(&unit).unwrap().size, (1280, 800));
+        let whole = passer.pass_whole(&unit, Some((1281, 801))).unwrap();
+        assert_eq!((whole.size, whole.strip), ((1281, 801), None));
+        assert_eq!(passer.pass_whole(&unit, Some((1280, 800))).unwrap().size, (1280, 800));
+        assert_eq!(passer.pass_whole(&unit, Some((1600, 1000))).unwrap().size, (1280, 800), "another display's");
+        assert_eq!(passer.pass_whole(&unit, None).unwrap().size, (1280, 800));
+    }
+
+    /// Asked for H.264, the offer names it alone, which is what has the Mac send
+    /// it: offered both, it sends the HEVC.
+    #[test]
+    fn the_video_offer_names_the_hevc_only_for_a_stream_in_it() {
+        let hevc = video_offer_blob(7, (1600, 1000), 4, Codec::Hevc);
+        let h264 = video_offer_blob(7, (1600, 1000), 4, Codec::H264);
+        let names = |blob: &[u8], features: &[u8]| blob.windows(features.len()).any(|at| at == features);
+        assert!(names(&hevc, b"CABAC") && names(&hevc, b"POSE:4"));
+        assert!(names(&h264, b"CABAC") && !names(&h264, b"POSE:4"));
+        let (offers, _) = MediaStream::new(
+            "192.0.2.1:5900".parse().unwrap(),
+            "192.0.2.2:40000".parse().unwrap(),
+            Receive::Pass { codec: Codec::H264, strips: true },
+            1,
+        );
+        assert_eq!(offers.offers.codec, Codec::H264);
+        assert!(offers.offers.strips((1600, 1000)));
+    }
+
     /// The read loop's queue is as deep in frames whether a frame is one unit or
     /// four, and a frame is off it once its first unit is taken.
     #[tokio::test]
@@ -4885,7 +5574,7 @@ mod tests {
     fn two_displays_are_offered_named_and_answered_together() {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
-        let (mut m, pictures) = MediaStream::new(peer, local, Receive::Pass { strips: false }, 2);
+        let (mut m, pictures) = MediaStream::new(peer, local, Receive::Pass { codec: Codec::Hevc, strips: false }, 2);
         assert_eq!((m.displays(), pictures.len()), (2, 2));
 
         let sizes = [(1600, 1000), (1280, 800)];
