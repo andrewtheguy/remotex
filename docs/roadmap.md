@@ -8,22 +8,6 @@ is the only place they can be read in context.
 
 ## Planned
 
-### Verifying an RDP host's certificate
-
-The TLS handshake accepts any certificate, for the session only, and verifies the
-handshake signature alone (`proto/tls.rs`). What stands in for the chain is
-CredSSP: the credential exchange is bound to the public key of the certificate
-that terminated this very handshake, so an interceptor holding a certificate of
-its own cannot complete it. That argument is spelled out in the module's header
-and holds only because plain TLS is never offered.
-
-What it does not give an operator is a way to say *which* host they expect. A
-Windows host's default listener certificate is self-signed and regenerated when
-the machine is renamed, so a public CA chain is the wrong check for most targets;
-a per-target pin — the certificate's public key or its SHA-256 fingerprint in the
-target's configuration, compared against what the handshake presented — is the
-one that fits. Absent a pin, today's behavior stands.
-
 ### The first keyframe on a slow link
 
 Every VP9 stream governed by the target's dial starts there, and its first
@@ -124,9 +108,6 @@ a browser tab ([two virtual displays](#two-virtual-displays-past-alpha)).
 ([Windows](guide.md#windows-rdp), [Macs](guide.md#macs-vnc-with-an-apple-subtype)).
 What it lacks:
 
-- **Telling the displays apart.** The session page's Info names both displays
-  and links to the second, but nothing on the remote's screens says which
-  display is which.
 - **A tab left behind.** When the session's page goes — closed, reloading, or
   its socket dropped — the tab showing the second display carries on with no
   word of it: its input still reaches the remote through the reattach grace, and
@@ -136,7 +117,7 @@ What it lacks:
   whether the session's page is attached too, and for the tab to say so over its
   desktop until the page is back.
 
-Fixing those does not take it out of alpha by itself. It also needs more testing
+Fixing that does not take it out of alpha by itself. It also needs more testing
 than it has had, on both kinds of target, before it is offered as anything else.
 
 ### A touchpad's scroll as a gesture on a Mac
@@ -182,6 +163,22 @@ Mac, and neither has been decoded.
   answers the reports the HEVC's does, whether a browser decodes it and how it
   looks, and what a display change, a keyframe request, a loss and four tiles
   do to it.
+
+### Verifying an RDP host's certificate
+
+The TLS handshake accepts any certificate, for the session only, and verifies the
+handshake signature alone (`proto/tls.rs`). What stands in for the chain is
+CredSSP: the credential exchange is bound to the public key of the certificate
+that terminated this very handshake, so an interceptor holding a certificate of
+its own cannot complete it. That argument is spelled out in the module's header
+and holds only because plain TLS is never offered.
+
+What it does not give an operator is a way to say *which* host they expect. A
+Windows host's default listener certificate is self-signed and regenerated when
+the machine is renamed, so a public CA chain is the wrong check for most targets;
+a per-target pin — the certificate's public key or its SHA-256 fingerprint in the
+target's configuration, compared against what the handshake presented — is the
+one that fits. Absent a pin, today's behavior stands.
 
 ### Licensing on a Remote Desktop Session Host
 
@@ -244,30 +241,6 @@ thousandth of a core for a frame of music, less than libFLAC takes natively.
 What is left is the residual's Rice codes and the prediction, two loops in which
 every sample waits on the one before. What has been tried, and how a change is
 judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
-
-### Not forwarding silence in a passed sound stream
-
-A quiet RDP host sends no sound, so its browser receives no packets until
-something plays. The two passed streams do not behave that way: a High
-Performance Mac and a `wlshare` target go on sending units while nothing plays,
-and the gateway forwards each one (`AudioListener::into_passed` in
-`src/audio.rs`). Holding the silent ones back would make all three alike.
-
-- **The Mac's AAC-ELD.** Silence can be told without a decoder. A quiet Mac sends
-  one unit a hundred times a second, the four bytes `00 68 34 00`: `max_sfb` 0,
-  so no band carries a coefficient, and a `global_gain` for each channel. A unit
-  whose `max_sfb` is 0, or whose every section names the zero codebook, is
-  silence by its header, read before anything Huffman-coded. That was captured
-  on macvm; a physical Mac has not been.
-- **wlshare's sound.** wlshare holds the PCM before it codes it, so the silence is
-  its to withhold rather than the gateway's to detect in Opus or FLAC.
-
-What it saves is small: the Mac's silence is 400 bytes a second of payload
-against about 320 kbit/s while it plays. What it costs is on the page, which
-must take a stop in the units as silence rather than as a stream that fell
-behind, and in a few silent units still forwarded after the sound ends, since
-AAC-ELD's window overlaps the frames before it. Whether the framing around each
-unit makes the saving worth that has not been measured.
 
 ## Not planned
 
