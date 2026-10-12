@@ -137,11 +137,11 @@ explored:
     where the whole desktop drew 17.5 at 6.4 KB. Each round trip is held for
     the page's distance, the browser socket's smallest recent ping, idle link or
     not: behind a page 150 ms away the host then concluded 151 ms and drew 20
-    frames a second instead of 10.5. Still to do:
-    - QA it from a browser on a really slow link;
-    - tell a distant page's bandwidth from its distance: the pace is read while
-      frames wait for the page, and a page 150 ms away on an unlimited link kept
-      them waiting long enough to be reported at 0.9 to 1.7 Mbit/s.
+    frames a second instead of 10.5. The page's pace is read only while a frame
+    has waited for it longer than its distance, so a distant page is not taken
+    for a slow one: 150 ms away on an unlimited link it was reported at a median
+    of 8.2 Mbit/s rather than 0.9 to 1.7. Still to do: QA it from a browser on a
+    really slow link.
 
   Measure each case against the same desktop on the bitmap path
   (`egfx = false`), re-encoded as VP9. A host that draws with bitmap updates

@@ -1502,9 +1502,10 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   claims UDP, which it turns down when the host takes it up, so all of it stays
   on TCP. For such a
   client the host rate-controls its H.264 to the bandwidth it is told, and the
-  session tells it the page's, read from how fast the page composes while
-  frames wait for it, with each round trip held for the page's distance, its
-  smallest recent ping (`Paced` in `src/rdp_client/session.rs`). Measured with
+  session tells it the page's, read from how fast the page composes while a
+  frame has waited for it longer than its distance, its smallest recent ping,
+  with each round trip held for that distance (`Paced` in
+  `src/rdp_client/session.rs`). Measured with
   whole-desktop H.264 and a stand-in page, the host drew 17.7 frames a second at
   6.4 KB, mostly at its coarsest quantizer, for a page on 1 Mbit/s, and 20 a
   second at 20.6 KB with finer ones for a page on 4 Mbit/s. Under *H.264

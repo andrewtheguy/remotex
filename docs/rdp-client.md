@@ -182,8 +182,8 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   detection has to report the page's link, not the socket's.
 - **Answered at the page's pace, the host follows the page.** So a session that
   takes the detection answers at the caller's pace (`Paced` in `session.rs`). The
-  pace is read from how fast the caller composes while frames wait for it, by
-  the frame-composed signal a page already sends:
+  pace is read from how fast the caller composes while it is behind, by the
+  frame-composed signal a page already sends:
   - a bandwidth measurement says it took no less than the caller would take
     over its bytes;
   - a round trip is answered once the frames waiting for the caller would have
@@ -192,7 +192,8 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   The distance is what the frame-composed signal does not carry: the gateway
   says it with `Input::caller_distance`, from the smallest recent round trip of
   the browser socket's pings, and the session holds every round trip for it,
-  with frames waiting or none. Answered at once on an idle link, a round trip
+  with frames waiting or none. It also says when the caller is behind: while a
+  frame still waiting for it was handed over at least its distance ago. Answered at once on an idle link, a round trip
   timed only the hop to the host, and a page far from the gateway read as next to
   the host. A bandwidth measurement for a caller with nothing waiting says what
   arrived here, and everything stays on TCP. Nothing waits on the host. A first
@@ -218,10 +219,14 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
     With round trips answered at once the host concluded a base round trip of
     0 to 2 ms and drew 10.5 frames a second at 6.8 KB. Held for the page's
     distance, it concluded 151 ms and drew 20.2 frames a second at 6.3 KB, a
-    median 14 to 71 ms behind the desktop. It was told a median of 0.9 and
-    then 1.7 Mbit/s of bandwidth, not the page's unlimited link: the pace is
-    read while frames wait, and a page that far away keeps frames waiting for
-    its distance, not its bandwidth.
+    median 14 to 71 ms behind the desktop. But it was told a median of 0.9 and
+    then 1.7 Mbit/s of bandwidth, not the page's unlimited link: the pace was
+    read while any frame waited, and a page that far away keeps frames waiting
+    for its distance on any link. So the page counts as behind only while a
+    frame still waiting for it was handed over at least its distance ago. The
+    host was then told a median of 8.2 Mbit/s and drew 24.1 frames a second at
+    27.9 KB, a median 14 ms behind. Behind a 1 Mbit/s page 150 ms away it was
+    told 1.3 Mbit/s and drew 14 frames a second at 7 KB.
   - **The same host over a LAN, by region.** Without the change, its H.264
     regions were at 25 and 33 and its Progressive first passes mostly at quality
     50, at 7 Mbit/s. With it, every H.264 region was at 25 and every first pass
