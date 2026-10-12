@@ -125,10 +125,11 @@ explored:
     frames a second at 6.4 KB, mostly at QP 38, and behind a 4 Mbit/s page 20 a
     second at 20.6 KB at QP 22 and 30. All of it stays on TCP, so it works with a
     WebSocket ([The connection sequence](rdp-client.md#the-connection-sequence)).
-    Still to do:
-    - turn the detection and the claim of UDP on for passed sessions, where
-      `src/rdp.rs` keeps both off;
+    A passed session with H.264 now takes both (`src/rdp.rs`); one without H.264
+    takes neither. Still to do:
     - QA it from a browser on a really slow link;
+    - measure it with the H.264 by region a session asks for, rather than the
+      probe's whole desktop;
     - see how a round trip on an idle link should include the page's own
       latency, which the frame-composed signal does not carry.
 

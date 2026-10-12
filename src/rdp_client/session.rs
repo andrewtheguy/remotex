@@ -99,13 +99,15 @@ pub struct Connect {
     pub h264: gfx_proto::H264,
     /// Whether to take part in the host's network detection (MS-RDPBCGR 2.2.14):
     /// claimed in the core data, with the connection type left for the host to
-    /// detect, and answered on the message channel with what this connection
-    /// measures. For measuring what a host does with it, not for a session.
+    /// detect, and answered on the message channel: at the caller's pace while a
+    /// pipeline is passed to it ([`Paced`]), and with what this connection measures
+    /// otherwise. Taken by a session that passes its pipeline with H.264, with
+    /// [`Connect::multitransport`], so the host draws for the page's link.
     pub autodetect: bool,
     /// Whether to claim reliable UDP with Soft-Sync, and turn down every offer of it
     /// the host then makes ([`super::proto::multitransport`]), so the session stays on TCP.
-    /// For measuring whether a host draws differently for a client that offers UDP,
-    /// not for a session.
+    /// With [`Connect::autodetect`], it is what makes a Windows host rate-control its
+    /// H.264 to the link the detection reports.
     pub multitransport: bool,
     /// Where the remote's sound goes, for a target that asked for it (MS-RDPEA).
     ///

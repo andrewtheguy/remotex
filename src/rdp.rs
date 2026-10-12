@@ -425,8 +425,14 @@ fn connect_config(
         egfx: config.egfx(),
         pass_graphics: plan.rdp_graphics,
         h264: if plan.rdp_h264 { H264::ByRegion } else { H264::Refused },
-        autodetect: false,
-        multitransport: false,
+        // A passed pipeline with H.264 is drawn for the page's link: the host
+        // rate-controls its H.264 for a client that takes its network detection
+        // and claims UDP, the claim turned down when the host takes it up, and the
+        // session answers the detection at the page's pace. Without H.264 there is
+        // nothing for the host to rate-control, and a pipeline drawn here has no
+        // page to measure.
+        autodetect: plan.rdp_h264,
+        multitransport: plan.rdp_h264,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
         microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),

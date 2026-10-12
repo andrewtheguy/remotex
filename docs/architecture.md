@@ -1470,15 +1470,26 @@ remote is told how the link is doing. Today two of the three passthroughs are:
 | Passed stream | Who adapts it | What it hears of the browser's link | Target keys that reach it |
 |---|---|---|---|
 | wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`, the same walk as here: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
-| An RDP host's graphics pipeline (passthrough) | The Windows host's own pacing: frame rate by acknowledgements, frame size by its socket | Frames are acknowledged once the page has composed them, and while two large frames wait the host's socket goes unread through a small receive buffer | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
+| An RDP host's graphics pipeline (passthrough) | The Windows host: with H.264, its rate control by its network detection; frame rate by acknowledgements, frame size by its socket | With H.264, the detection is answered at the page's pace; frames are acknowledged once the page has composed them; while two large frames wait the host's socket goes unread through a small receive buffer | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
 | A High Performance Mac's HEVC (passthrough) | The Mac's rate controller, 20–60 Mbit/s | Nothing: the delay in its rate reports ends at the gateway | None |
 
 - **wlshare** walks its encoder exactly as the gateway walks its own, so a passed
   stream there is a peer of one encoded here: quality goes down to the floor, then
   the frame rate, and both come back as the link clears. See
   [wlshare's stream, passed through](#wlshares-stream-passed-through).
-- **A Windows host** has no quality dial for a client to turn. It adapts in the
-  two ways it has. It draws no more than about eleven frames ahead of its
+- **A Windows host** has no quality dial for a client to turn, but it has its
+  own network detection. A passed session with H.264 takes part in it and claims
+  UDP, which
+  it turns down when the host takes it up, so all of it stays on TCP. For such a
+  client the host rate-controls its H.264 to the bandwidth it is told, and the
+  session tells it the page's: each answer waits for the page to compose what
+  came before it (`Paced` in `src/rdp_client/session.rs`). Measured with
+  whole-desktop H.264 and a stand-in page, the host drew 17.7 frames a second at
+  6.4 KB, mostly at its coarsest quantizer, for a page on 1 Mbit/s, and 20 a
+  second at 20.6 KB with finer ones for a page on 4 Mbit/s. A passed session
+  without H.264 takes neither, and adapts only in the two ways below. See
+  [The connection sequence](rdp-client.md#the-connection-sequence). Beside that,
+  the host adapts in two more ways. It draws no more than about eleven frames ahead of its
   acknowledgements, so a page that composes slowly sets the frame rate. It sends
   smaller frames only when its own socket backs up, so the gateway lets the socket
   fill while the page is behind. Measured against a Windows 11 host with a stand-in

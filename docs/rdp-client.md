@@ -83,14 +83,16 @@ noticed on the same keepalive schedule as every other engine's.
 `ConnectionType` is declared a LAN rather than detected: the socket is the hop
 between the host and a gateway near it, which is not the link a person is on, and
 neither the declaration nor the detection alone changes what the host draws
-(below). A session requests neither an MCS message channel nor multitransport, and it does not
-advertise network-characteristics detection. The detection is implemented
-(`proto/autodetect.rs`) behind `Connect::autodetect`, which only
-`tests/rdp_link_probe.rs` turns on, to measure what a host does with it: the client
-then claims it in the core data, leaves `connectionType` for the host to detect,
-asks for and joins the message channel, and answers each measurement with what
-arrived on its own connection. Beside it, `Connect::multitransport`, also the
-probe's alone, claims reliable UDP with Soft-Sync in `CS_MULTITRANSPORT`
+(below). A session that draws the pipeline itself requests neither an MCS message
+channel nor multitransport, and does not advertise network-characteristics
+detection. A session that passes its pipeline with H.264 takes both, so the host
+rate-controls its H.264 for the page's link (below); one that passes it without
+H.264 takes neither. With `Connect::autodetect` (`proto/autodetect.rs`) the
+client claims the detection in the core data, leaves `connectionType` for the
+host to detect, asks for and joins the message channel, and answers each
+measurement at the page's pace (`Paced` in `session.rs`), or with what arrived on
+its own connection when nothing waits for the page. Beside it,
+`Connect::multitransport` claims reliable UDP with Soft-Sync in `CS_MULTITRANSPORT`
 ([MS-RDPBCGR section
 2.2.1.3.8](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf))
 and answers each Initiate Multitransport Request with `E_ABORT` (2.2.15.2), so

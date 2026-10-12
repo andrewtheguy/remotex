@@ -9,8 +9,10 @@
 //! `E_ABORT` ([MS-RDPBCGR] 3.2.5.15.1), which a client that offered Soft-Sync must
 //! send whatever happens, and the session carries on over TCP.
 //!
-//! The claim exists to find out whether a Windows host draws differently for a
-//! client that offers UDP, before anything is built to use it.
+//! The claim is there for what it makes a Windows host do. With network detection
+//! taken too, the host rate-controls its H.264 to the link the detection reports,
+//! which it does for neither alone (see "The connection sequence" in
+//! docs/rdp-client.md).
 
 use super::share;
 use super::wire::{Malformed, Reader, Writer};
