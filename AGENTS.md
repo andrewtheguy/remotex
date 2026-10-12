@@ -74,12 +74,13 @@ area's section before changing what it covers:
 
 ## Packaging and platforms
 
-- amd64 builds are x86-64-v3 by default. Code that needs a CPU level above the
-  baseline, as that is, must sit behind a Cargo feature, so that a build with
-  the feature off still runs on a machine without it. That fallback build,
-  `native-vp9` off and `target-cpu` back at the baseline, is a gateway that
-  encodes VP9 with libvpx alone, for a machine under x86-64-v3. Keep it
-  working; its command is in
+- amd64 builds target x86-64-v3 by default and are not expected to run below
+  that CPU floor. The supported build for an older amd64 processor is the
+  fallback configuration: disable `native-vp9` and set `target-cpu` back to
+  the baseline `x86-64`. That gateway encodes VP9 with libvpx alone. Any code
+  whose compilation raises the CPU floor above baseline must be behind a Cargo
+  feature that is disabled in the fallback. Keep the fallback working; its
+  command is in
   [x86-64 CPU compatibility](packaging/README.md#x86-64-cpu-compatibility).
 - The native `embedded-gateway` feature is the `remotex tui` control plane and
   its hidden `serve-embedded` workers, on Unix and Windows alike, each worker's
