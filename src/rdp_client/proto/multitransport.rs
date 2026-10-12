@@ -11,6 +11,7 @@
 //!
 //! The claim is there for what it makes a Windows host do. With network detection
 //! taken too, the host rate-controls its H.264 to the link the detection reports,
+//! and over a fast one sends each RemoteFX Progressive tile whole at full quality,
 //! which it does for neither alone (see "The connection sequence" in
 //! docs/rdp-client.md).
 

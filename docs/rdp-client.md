@@ -83,16 +83,18 @@ noticed on the same keepalive schedule as every other engine's.
 `ConnectionType` is declared a LAN rather than detected: the socket is the hop
 between the host and a gateway near it, which is not the link a person is on, and
 neither the declaration nor the detection alone changes what the host draws
-(below). A session that draws the pipeline itself requests neither an MCS message
+(below). A session without the pipeline requests neither an MCS message
 channel nor multitransport, and does not advertise network-characteristics
-detection. A session that passes its pipeline with H.264 takes both, so the host
-rate-controls its H.264 for the page's link (below); one that passes it without
-H.264 takes neither. With `Connect::autodetect` (`proto/autodetect.rs`) the
+detection. A session that passes its pipeline takes both, so the host draws its
+finest for the link it detects (below). With `Connect::autodetect`
+(`proto/autodetect.rs`) the
 client claims the detection in the core data, leaves `connectionType` for the
 host to detect, asks for and joins the message channel, and answers each
-measurement at the page's pace (`Paced` in `session.rs`), or with what arrived on
+measurement. With `Connect::paced`, a session with H.264, it answers at the
+page's pace (`Paced` in `session.rs`), or with what arrived on
 its own connection when nothing waits for the page, each round trip held for the
-page's distance either way. Beside it,
+page's distance either way. Without it, a High quality session, it answers at
+once with what arrived on its own connection. Beside it,
 `Connect::multitransport` claims reliable UDP with Soft-Sync in `CS_MULTITRANSPORT`
 ([MS-RDPBCGR section
 2.2.1.3.8](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf))
@@ -237,14 +239,25 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
     50, at 7 Mbit/s. With it, every H.264 region was at 25 and every first pass
     at 255, at 12 Mbit/s. So the coarse picture by region on a fast link is the
     host's fixed-quality mode, which the detection and the claim of UDP lift.
+- **Without H.264, the same two lift RemoteFX Progressive.** `windows-ent-sandbox`
+  over a LAN, H.264 refused, the full-screen moving picture. Taking neither, the
+  host sent every tile's first pass at the stage of quality 50 and refined what
+  stayed still to 75 and then to full: 33 frames a second of 114 KB, 30 Mbit/s.
+  Taking the detection and claiming UDP, answered with what arrived here, it
+  sent every tile whole in its first pass (`progressiveQuality` 255, the full
+  table): 31 frames a second of 280 KB, 70 Mbit/s, under the same quantization
+  tables. Behind a page on 27 Mbit/s, with the socket read as it came, it sent
+  12 frames a second of 282 KB, still every tile whole, a third of a second
+  behind the desktop.
 
 The detector's and the link probe's earlier defects are fixed: the
 connect-time count includes each payload's header, malformed requests are
 refused, a continuous measurement counts inside the framing, `timeDelta` is at
 least a millisecond, and a zero frame timestamp gives no lag. The measurements
-above were repeated with the fixes. A session started with the picker's Adaptive
-takes the detector and the claim of UDP, and answers at the page's pace; a
-High quality session takes neither, and has no H.264 for the host to rate-control
+above were repeated with the fixes. Every session with the pipeline takes the
+detector and the claim of UDP. One started with the picker's Adaptive answers at
+the page's pace; a High quality session answers with what its own connection
+measures, so the host sends its Progressive tiles whole whatever the page's link
 ([Roadmap](roadmap.md#an-official-way-to-have-windows-rate-control-its-h264-over-tcp)).
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
@@ -254,7 +267,8 @@ the first pass of each tile goes out at the progressive stage of quality 25 wher
 over a LAN it is the stage of quality 50, under the same quantization tables. Ten
 seconds after the socket is read freely again the host is back at 50. Through a
 2 MiB receive buffer the same relay showed the host nothing, and its frames stayed
-full size. Every session with the pipeline on is built on this ([The pipeline,
+full size. A session with H.264 is built on this, and a High quality session
+keeps clear of it ([The pipeline,
 passed on](#the-pipeline-passed-on)).
 
 ## The two threads
@@ -330,6 +344,22 @@ High quality advertises two: version 8 with the small cache, and version 10 with
 small cache and `AVC_DISABLED`, so the host never sends H.264 and draws with the
 pipeline's other codecs alone. `THINCLIENT` is deliberately not set. The host
 confirms one set and then draws.
+
+High quality is the host's finest and not lossless. Of the codecs the host draws
+with, ClearCodec, planar and uncompressed rectangles carry their pixels exactly,
+and RemoteFX Progressive, which it uses for pictures and whatever moves, does
+not: it extends the RemoteFX codec, "a lossy image codec" ([MS-RDPRFX section
+1](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPRFX.pdf)), by
+sub-band diffing and progressive passes ([MS-RDPEGFX section
+3.1.8.1](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)),
+and a tile at full progressive quality is still quantized by its region's
+tables (3.1.8.1.3, and MS-RDPRFX 3.1.8.1.5). No capability flag of any set asks
+a host for a lossless codec in its place (MS-RDPEGFX 2.2.3.1 to 2.2.3.10): the
+flags size the cache, swap Progressive for the RemoteFX codec, take or refuse
+H.264, and refuse the scaled mappings. What a client can have is every tile
+whole at full quality in its first pass, which a Windows host sends to one that
+takes its network detection and claims UDP
+([The connection sequence](#the-connection-sequence)).
 
 A session started Adaptive advertises otherwise, with `Connect::h264`, for a
 caller that decodes H.264 itself
@@ -433,9 +463,13 @@ far away got 24 frames a second where a near one got 30. Counted from its
 distance, it got 30. The socket below is left by the same count.
 
 Late acknowledgements slow the host's frames and leave each one full size: a host
-sends smaller frames only to a client its own socket backs up behind ([Opening a
-session](#opening-a-session)), and a session that read the socket as it came would
-hide a slow caller from it. So while two frames wait to be composed
+sends smaller frames only to a client its own socket backs up behind ([The
+connection sequence](#the-connection-sequence)), and a session that read the
+socket as it came would
+hide a slow caller from it. That is what a session without `Connect::paced`
+does, a High quality one: the socket is read as it comes, through the buffer it
+came with, and a slow caller gets fewer frames, none of them coarser. With
+`Connect::paced`, a session with H.264, while two frames wait to be composed
 (`PASSED_HELD`) the socket goes unread, through a receive buffer of 32 KB
 (`PASSED_RECEIVE_BUFFER`), and what the host sends next stays at the host. The
 host is then held by its socket, and `PASSED_AHEAD`, which two waiting never
@@ -468,7 +502,8 @@ seventh of its frames to the wait for each read; at 128 KB the 8 Mbit/s caller
 was 640 ms behind. The receive buffer bounds what the host can send in one round
 trip, so a gateway far from its host is limited by it: 32 KB carries the 31 Mbit/s
 of that picture only while the round trip is under 8 ms. So the socket has that
-buffer only while the host has a graphics pipeline open (`PassedSocket`): a host
+buffer only in a session with `Connect::paced`, while the host has a graphics
+pipeline open (`PassedSocket`): a host
 that draws with bitmap updates instead, or has closed the pipeline, has no frames
 to be held for, and keeps the buffer the socket came with.
 

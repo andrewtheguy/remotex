@@ -21,7 +21,7 @@
 //! than one virtual display and a server that takes the extended blocks: it places the
 //! second monitor against the first, and the core data's desktop is their union. A
 //! message channel and a claim of UDP go out only for a session that passes its
-//! pipeline with H.264 ([`ConferenceCreateRequest::autodetect`],
+//! pipeline ([`ConferenceCreateRequest::autodetect`],
 //! [`ConferenceCreateRequest::multitransport`]); otherwise the server has nothing to
 //! answer about either.
 

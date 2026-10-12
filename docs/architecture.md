@@ -139,8 +139,9 @@ H.264 passed. A Windows host's pipeline is not a choice: it is passed
 in every session of a target with the pipeline on, and a browser that cannot
 compose it cannot start that target. The passed pipeline follows the browser's
 link by the host's own pacing: fewer frames for a page that composes slowly, and
-smaller ones while its socket backs up, and with Adaptive by the host's rate
-control too. A Mac's passed HEVC does not: its rate control keeps it between 20
+with Adaptive coarser ones too, by the host's rate control and by its socket
+backing up. A High quality session is drawn for the link to the gateway alone,
+at the host's finest. A Mac's passed HEVC does not: its rate control keeps it between 20
 and 60 Mbit/s by the link to the gateway alone, so on a slow link a High
 Performance session is started without it and sent the gateway's VP9, which
 adapts. See
@@ -526,7 +527,8 @@ display. A host that draws with bitmap updates, on a target with
 encoded here as VP9.
 
 How the host draws the pipeline is chosen at the picker: High quality, the
-pipeline's codecs without H.264, by default, or Adaptive (alpha), H.264 the host fits to
+pipeline's codecs without H.264 at the host's finest, by default, or Adaptive
+(alpha), H.264 the host fits to
 the browser's link, over the whole desktop or only where it moves like video.
 The gateway has no H.264 decoder and is not given one. Adaptive reaches only a
 page that said it decodes H.264, and a session of any other is drawn High quality:
@@ -1222,19 +1224,22 @@ the pipeline.
   four to a batch and showed 8 a second of the 28 it composed, a quarter of a
   second and then two thirds behind; paced this way it shows 28 a second, each
   35 ms after the last, a tenth of a second behind.
-- **The host finds a slow page for itself.** A Windows host sends smaller frames
+- **In an Adaptive session the host finds a slow page for itself.** A Windows
+  host sends coarser RemoteFX Progressive frames
   to a client its own socket backs up behind, and to no other: not for late
-  acknowledgements, and not for a link it is told of. The gateway reads that
+  acknowledgements. The gateway reads that
   socket at the speed of its own network, which would hide the page's link from
-  the host. So while two large frames wait for the page's `paintAck`, past its
-  distance as above, the RDP
+  the host. So in a session started with Adaptive, while two large frames wait
+  for the page's `paintAck`, past its distance as above, the RDP
   client leaves the socket unread through a small receive buffer, and the host
   finds the page's pace in its own writes
   ([The pipeline, passed on](rdp-client.md#the-pipeline-passed-on)). Measured
   with a stand-in page on an 8 Mbit/s link, the host halved its RemoteFX
   Progressive frames and the page showed 16 a second where it had shown 8.6, no
   further behind. The host's sound and pointer share that socket and wait with
-  the frames.
+  the frames. A High quality session reads the socket as it comes, through the
+  buffer it came with: the host is never shown a slow page, and sends it fewer
+  frames, none of them coarser.
 - **A pipeline is announced where it starts.** `graphicsStart` goes out when the
   host confirms the pipeline, ahead of its first command, and again if the host
   closes the channel and opens another. It says the pipeline starts from nothing,
@@ -1568,7 +1573,7 @@ remote is told how the link is doing. Today two of the three passthroughs are:
 | Passed stream | Who adapts it | What it hears of the browser's link | Target keys that reach it |
 |---|---|---|---|
 | wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`, the same walk as here: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
-| An RDP host's graphics pipeline (passed whenever it is on) | The Windows host: with Adaptive, its H.264's rate control by its network detection; frame rate by acknowledgements, frame size by its socket | With Adaptive, the detection is answered at the page's pace; frames are acknowledged once the page has composed them; while two large frames wait the host's socket goes unread through a small receive buffer | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
+| An RDP host's graphics pipeline (passed whenever it is on) | The Windows host: frame rate by acknowledgements; with Adaptive, its H.264's rate control by its network detection, and its Progressive quality by its socket | Frames are acknowledged once the page has composed them; with Adaptive, the detection is answered at the page's pace, and while two large frames wait the host's socket goes unread through a small receive buffer; with High quality, nothing more | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
 | A High Performance Mac's HEVC (passthrough) | The Mac's rate controller, 20–60 Mbit/s | Nothing: the delay in its rate reports ends at the gateway | None |
 
 - **wlshare** walks its encoder exactly as the gateway walks its own, so a passed
@@ -1576,11 +1581,13 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   the frame rate, and both come back as the link clears. See
   [wlshare's stream, passed through](#wlshares-stream-passed-through).
 - **A Windows host** has no quality dial for a client to turn, but it has its
-  own network detection. A session started with Adaptive takes part in it and
+  own network detection. Every session with the pipeline takes part in it and
   claims UDP, which it turns down when the host takes it up, so all of it stays
   on TCP. For such a
-  client the host rate-controls its H.264 to the bandwidth it is told, and the
-  session tells it the page's, read from how fast the page composes while a
+  client the host rate-controls its H.264 to the bandwidth it is told, and sends
+  each RemoteFX Progressive tile whole at full quality over a fast link, where
+  it otherwise sends a coarser first pass and refines it. A session started
+  with Adaptive tells it the page's link, read from how fast the page composes while a
   frame has waited for it longer than its distance, its smallest recent ping,
   with each round trip held for that distance (`Paced` in
   `src/rdp_client/session.rs`). Measured with
@@ -1590,11 +1597,15 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   region* the desktop is mostly RemoteFX Progressive, which this does not
   rate-control: behind a 1 Mbit/s page the frame rate held, the delay fell from
   1.6 s to 0.56 s, and over a LAN every region went to the finest quality. A
-  High quality session takes neither, and adapts only in the two ways below. See
+  High quality session answers with what the gateway's own connection to the
+  host measures, so the host draws its finest for that link whatever the
+  page's: measured with a stand-in page on 27 Mbit/s, 12 frames a second, every
+  tile whole at full quality, where a page on a free link got 31. See
   [The connection sequence](rdp-client.md#the-connection-sequence). Beside that,
   the host adapts in two more ways. It draws no more than about eleven frames ahead of its
   acknowledgements, so a page that composes slowly sets the frame rate. It sends
-  smaller frames only when its own socket backs up, so the gateway lets the socket
+  coarser Progressive frames when its own socket backs up, so in an Adaptive
+  session the gateway lets the socket
   fill while the page is behind. Measured against a Windows 11 host with a stand-in
   page on an 8 Mbit/s link, its RemoteFX Progressive frames halved and the page
   showed 16 frames a second where it had shown 8.6. See
@@ -1865,9 +1876,10 @@ and `GET /api/targets` carries it:
   codecs without H.264, for a LAN, which is the default, and Adaptive (alpha), H.264 the
   host fits to the browser's link; under Adaptive, *H.264 full screen*, the
   default, asks for the whole desktop in H.264 (`AVC_THINCLIENT`), and *H.264
-  region* for H.264 only where the desktop moves like video. An adaptive session
-  takes the host's network detection and claims UDP; a high quality one takes
-  neither ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
+  region* for H.264 only where the desktop moves like video. Both take the
+  host's network detection and claim UDP: an adaptive session answers at the
+  page's pace, and a high quality one with what the gateway's connection
+  measures ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
 - **The second display is placed once.** `choices.placement` says `right`,
   `left`, `top` or `bottom` (`Placement` in `src/config.rs`): where the second
   of two virtual displays sits against the first, so the remote's arrangement
