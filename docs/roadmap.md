@@ -8,33 +8,7 @@ is the only place they can be read in context.
 
 ## Planned
 
-### What the RDP client does not carry yet
-
-The client carries the desktop, the pointer, keyboard, mouse, resize, the
-clipboard, sound, and the browser's camera and microphone. Touch is not carried,
-and is [under consideration](#touch-on-an-rdp-target-ms-rdpei) rather than
-planned.
-
-#### Licensing on a Remote Desktop Session Host
-
-The licensing step accepts exactly one PDU: an `ERROR_ALERT` carrying
-`STATUS_VALID_CLIENT`, which is what every Windows host this client has been
-pointed at sends. Anything else is refused by name in
-`proto/license.rs`, and the connection ends before `DemandActive`.
-
-A Session Host with the Remote Desktop Session Host role and per-device CAL
-licensing does not send that. It opens a real exchange: `LICENSE_REQUEST`, the
-client's new or upgrade licence request, the platform challenge and its response,
-and the issued licence. This client would disconnect at the first of those.
-FreeRDP's `libfreerdp/core/license.c` is an implementation to compare while
-writing the exchange; a temporary reference checkout belongs under
-`tmp/references/`.
-
-How many real deployments this reaches is not known, and no host in use has shown
-it. What would settle it is one connection to an RDSH configured for per-device
-CALs; the work is only worth taking once a host that needs it turns up.
-
-#### Verifying the server's certificate chain
+### Verifying an RDP host's certificate
 
 The TLS handshake accepts any certificate, for the session only, and verifies the
 handshake signature alone (`proto/tls.rs`). What stands in for the chain is
@@ -64,143 +38,6 @@ slow link at the cost of a coarser first second on a fast one, which the settle
 sharpens within half a second of the desktop going quiet. Measured before it is
 chosen: the cost on the LAN, where most sessions run, against the gain on the link
 it is for.
-
-### Passed streams that adapt, on Windows and the Mac
-
-The goal is a gateway that re-encodes as VP9 only for the servers that are not
-prioritized ([Other servers](architecture.md#other-servers-not-prioritized)) and
-for a browser that cannot take what the remote sends. A wlshare target is there
-already: its stream is always passed, and wlshare walks it by the browser's link.
-So is Windows, in part: an RDP target with the pipeline on passes it in every
-session, and VP9 is left to the bitmap path, `egfx = false` and a host that
-answers with bitmap updates. Its pipeline follows the browser's link by the
-host's own pacing, and in a session started with Adaptive (alpha) by the host's
-rate control of its H.264, which rests on host behaviour the specification does
-not promise
-([An official way](#an-official-way-to-have-windows-rate-control-its-h264-over-tcp);
-[A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link)).
-The Mac is not. A Mac's passed HEVC is for a LAN and stays one: its rate control is the Mac's,
-between 20 and 60 Mbit/s, and it is not to be made to hear the browser. A Mac on
-a slow link is to be served by another passed stream instead. A passed stream has
-to adapt as well as the gateway's VP9 before it can replace it. What is to be
-explored:
-
-- **Standard mode with Adaptive, passed, for a Mac on a slow link.** Standard
-  mode (`ard`), on the Mac's physical displays or on the unofficial virtual
-  display (`virtual_display = true`), is decoded here and always re-encoded
-  today ([Tier 3](architecture.md#tier-3-a-macs-standard-screen-sharing)). Apple's
-  viewer's **Adaptive** quality asks for the Mac's private encodings first, and
-  a Mac asked that way sends the 8×8 DCT tiles of `0x3f3` alone
-  ([Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)).
-  It adapts for itself, as a Windows host's H.264 does: a changed area comes
-  coarse, and its refinement follows at once on a fast link and waits for the
-  motion to stop on a slow one. At 500 kbit/s a virtual Mac kept a panning
-  picture moving and refined it in strips afterwards, where ZRLE delivered its
-  first picture and nothing more
-  ([What a Mac sends](apple-vnc-889.md#what-a-mac-sends-a-viewer-that-lists-them)).
-  So it is to be passed to the browser the way an RDP host's H.264 is: chosen
-  at the picker, as **Adaptive** on a Standard Mac beside the lossless ZRLE the
-  gateway re-encodes, held for the session, and with no VP9 encoder built for
-  it. That would make it the slow-link alternative to High Performance's HEVC:
-  the virtual display where the session should follow the window, the physical
-  displays otherwise. What it takes:
-  - **A decoder in the page.** No browser decodes `0x3f3`, so it is a
-    WebAssembly module built here, beside the page's FLAC decoder. It holds
-    what the encoding needs from one update to the next: every tile's
-    coefficients since its last full update, and the cache of refined tiles.
-    The coding is read from Apple's viewer and has not been decoded yet, so the
-    first step is a decoder run against captured rectangles and checked against
-    the same still screen sent as ZRLE.
-  - **The rectangles passed untouched.** The gateway forwards each one's bytes
-    without decoding them, and goes on reading the cursor, the layout and the
-    rest itself.
-  - **The Mac paced by the browser's link.** The Mac holds its refinement back
-    by how fast its own socket drains, so the gateway has to let the page's
-    backlog reach that socket, as it does for a passed RDP pipeline, instead of
-    reading freely and queueing.
-  - **A session that cannot be picked up half way.** The page's tile state and
-    cache are part of the stream, so an owner's reattach starts a fresh session,
-    as it does on a passed RDP pipeline.
-
-  To be measured before it is offered: a physical Mac, since all of the above
-  is from a virtual one; how the coarse picture looks, and for how long, on a
-  slow link; and such a session against ZRLE re-encoded as VP9 on the same link.
-- **More of the Windows host's own adapting.** A passed pipeline gets fewer
-  frames from a page that composes slowly, and one step down in RemoteFX
-  Progressive's first pass while the host's socket backs up. H.264 takes no step:
-  its moving regions already go out at the host's coarsest quantizer, so on a
-  slow link only its frame rate drops
-  ([The connection sequence](rdp-client.md#the-connection-sequence)).
-  Network auto-detect and `connectionType = 7` were tried over a constrained TCP
-  link: the detector reported the constraint correctly, but the host made the
-  same frame-rate reduction with or without it and did not change H.264
-  quantizers. `AVC_THINCLIENT` was tried too; it moved the whole desktop to
-  AVC444v2 but still adapted by rate. That narrows the missing
-  Microsoft-client behavior. One pathway is now found: a client that takes the
-  detection *and* claims reliable UDP, then turns down the host's offer and
-  stays on TCP, gets rate-controlled H.264. It is not known to be the only one
-  or the one Microsoft's clients use. At 1 Mbit/s
-  that means coarser regions at 21 frames a second instead of 12.5, and over a
-  LAN QP 22 throughout at 6.3 Mbit/s
-  ([The connection sequence](rdp-client.md#the-connection-sequence)). Next:
-  - Repeat the UDP offer with H.264 by region and with H.264 refused, to see
-    whether RemoteFX Progressive and the mixed desktop adapt too.
-  - A passed session's detection reports the page's link. Answered from the
-    gateway's own socket, it reported the hop to the host: behind a page on
-    1 Mbit/s the host was told 8 to 20 Mbit/s, drew LAN-grade 33 KB frames and
-    fell to 3.7 frames a second. Answered at the pace the page composes (`Paced`
-    in `session.rs`), the host was told about 1.2 Mbit/s. It then drew 17.7
-    frames a second at 6.4 KB, mostly at QP 38, and behind a 4 Mbit/s page 20 a
-    second at 20.6 KB at QP 22 and 30. All of it stays on TCP, so it works with a
-    WebSocket ([The connection sequence](rdp-client.md#the-connection-sequence)).
-    An adaptive session now takes both (`src/rdp.rs`); a lossless one takes
-    neither. The picker offers the whole desktop in H.264 (`AVC_THINCLIENT`),
-    the default under Adaptive, and H.264 by region, where the host is told the
-    page's link but the desktop is mostly RemoteFX Progressive and the frame rate
-    does not improve: 4.4 frames a second at 25.7 KB behind a 1 Mbit/s page,
-    where the whole desktop drew 17.5 at 6.4 KB. Each round trip is held for
-    the page's distance, the browser socket's smallest recent ping, idle link or
-    not: behind a page 150 ms away the host then concluded 151 ms and drew 20
-    frames a second instead of 10.5. The page's pace is read only while a frame
-    has waited for it longer than its distance, so a distant page is not taken
-    for a slow one: 150 ms away on an unlimited link it was reported at a median
-    of 8.2 Mbit/s rather than 0.9 to 1.7. Nor are the frames on their way to
-    it held as a backlog: there it got 30 frames a second, as near the host.
-    Still to do: QA it from a browser on a really slow link.
-
-  Measure each case against the same desktop on the bitmap path
-  (`egfx = false`), re-encoded as VP9. A host that draws with bitmap updates
-  could be passed too, for the page to decode.
-- **What Microsoft's iOS client is sent on a slow link.** Against the same
-  host, Microsoft's Remote Desktop client on iOS sees the whole screen soften on
-  a slow link, as video does, where a passed pipeline keeps its text sharp and
-  loses frames. The iPhone client was confirmed never to have UDP turned on, so
-  its softening comes over TCP. One TCP pathway is found: the host
-  rate-controls its H.264 for a client that takes network detection and claims
-  UDP, even when it then refuses the UDP
-  ([The connection sequence](rdp-client.md#the-connection-sequence)). Whether
-  the iPhone client takes that pathway or another, such as drawing without the
-  graphics pipeline, is not known. The host-side checks below are how to find
-  out; the transport test among them is already answered (TCP).
-
-  To be found out on the host, with the iPad on a slow link and a passed
-  session on the same link beside it:
-  - The `RemoteFX Graphics` counters (frame quality and frames skipped for
-    insufficient network, client or server resources) and the `RemoteFX
-    Network` counters (current TCP and UDP bandwidth and round trip), which say
-    what the host is doing and which transport it measures.
-  - The `RemoteDesktopServices-RdpCoreTS/Operational` event log, which records
-    the transport, the graphics version and whether AVC and AVC444 are in use.
-  - The iOS client's core data and capability advertise, read through a
-    recording proxy such as `freerdp-proxy`: whether it claims UDP in
-    `CS_MULTITRANSPORT` and network detection with UDP turned off, whether the
-    host draws it with the graphics pipeline or with bitmap updates, and which
-    codecs and quantizers the host answers with on the constrained link.
-
-On Windows the pipeline is already passed in every session, with no VP9 for a
-browser that cannot compose it. Once a passed stream for the Mac adapts as well
-as VP9 on the links measured, it is offered first at the picker, and VP9 remains
-for a browser that cannot take it.
 
 ### An official way to have Windows rate-control its H.264 over TCP
 
@@ -263,60 +100,6 @@ carry the stream.
 
 None of it has been measured at 4K.
 
-A slow link is not the passed HEVC's to answer. A browser on one is served by a
-session started without the passthrough, whose VP9 the adaptive walk lowers, and
-later by a passed Standard mode with Adaptive
-([Passed streams that adapt](#passed-streams-that-adapt-on-windows-and-the-mac)); a passed
-session is not switched to VP9 for it. A brief stall stays what it is: the Mac's
-units predict from every one
-before, so none can be dropped alone, and a full queue drops to the next IDR and
-asks the Mac for one, which brings the picture back as one fresh frame rather than
-a replay of the backlog.
-
-### Strips in Safari's decoder
-
-A passed High Performance stream comes in four strips, to the browser's own
-`VideoDecoder` as to the page's software decoder, and the page places each
-picture that decoder outputs by its strip's number
-([Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through)).
-Chrome's decoder on a Mac takes such a stream, whose pictures are a quarter of
-the display. Safari's has not been tried with one, on a Mac or an iPhone.
-
-### The page's own FLAC decoder, heard in a browser
-
-A session started with lossless sound is decoded by a decoder written in the
-page's module (`frontend/wasm/flac`), which leaves a frame's samples in the
-module's memory for the page to copy into its `AudioBuffer`
-([Audio frames](architecture.md#audio-frames)). It is
-held to libFLAC's frames sample for sample by its tests and its benchmark, under
-Bun. It has not been played in a browser: a `wlshare` session and an RDP one,
-in Chrome, Safari and Firefox, listened to, with the console read for a frame
-refused.
-
-### H.264 in the RDP graphics pipeline
-
-A host draws with H.264 only on a passed pipeline, for the page to decode, in a
-session started with the picker's Adaptive (alpha), over the whole desktop or
-by region
-([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
-What is not done:
-
-- **The gateway does not decode it, and is not going to.** It composes no
-  pipeline at all: every pipeline is passed to the page, and a Lossless session
-  refuses H.264 with `AVC_DISABLED`. Decoding H.264 here only to encode VP9
-  would be a second lossy pass. It is here so that "why not this one" has an
-  answer rather than being rediscovered.
-- **AVC444 against a host.** Both layouts are implemented and tested from the
-  specification's tables. *H.264 full screen* sets `AVC_THINCLIENT`, and the
-  host tried sent AVC444v2, luma views alone, over the whole desktop; *H.264
-  region* does not, and the same host sent AVC420 by region. No host has been
-  seen to send AVC444, or AVC444v2's chroma views.
-- **Large video.** Every decoded picture is copied into the compositor's memory
-  and converted there, which was measured at a 1280×800 desktop and not above,
-  and from a hardware decoder that copy is a readback off the GPU. Presenting a
-  decoded picture on the GPU, and reading it back only when a later command
-  copies from it, is the step after that if a large one proves slow.
-
 ### Two streams for Standard's Combined Display
 
 Standard's Combined Display over two screens is one framebuffer of both, which is
@@ -375,6 +158,60 @@ tested, on a physical Mac.
 
 ## Under consideration
 
+### A passed stream for a Mac on a slow link
+
+A Mac's passed HEVC is for a LAN, and a browser on a slow link is served by a
+session started without the passthrough, re-encoded here as VP9
+([A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link)).
+Two streams the Mac makes itself could be passed in its place, each chosen at
+the picker as an RDP host's H.264 is. Both have only been probed on a virtual
+Mac, and neither has been decoded.
+
+- **Standard mode's Adaptive encoding.** Asked as Apple's viewer's Adaptive
+  quality asks, a Mac sends its own 8×8 DCT tiles: a changed area comes coarse,
+  and its refinement waits for the motion to stop when the link is slow
+  ([What a Mac sends](apple-vnc-889.md#what-a-mac-sends-a-viewer-that-lists-them)).
+  No browser decodes it, so it takes a decoder in the page, the rectangles
+  forwarded undecoded, and the Mac's socket paced by the browser's link. Open:
+  the decoder itself, how the coarse picture looks and for how long, and the
+  session against ZRLE re-encoded as VP9 on the same link.
+- **High Performance's H.264, for a slower connection.** Offered H.264 alone, a
+  Mac sends it in place of the HEVC, and its rate follows the picture where the
+  HEVC stays near 20 Mbit/s ([Negotiation](apple-vnc-889.md#negotiation)). It is
+  8-bit 4:2:0, so its text is softer than the HEVC's. Open: whether its rate
+  answers the reports the HEVC's does, whether a browser decodes it and how it
+  looks, and what a display change, a keyframe request, a loss and four tiles
+  do to it.
+
+### Licensing on a Remote Desktop Session Host
+
+The licensing step accepts exactly one PDU: an `ERROR_ALERT` carrying
+`STATUS_VALID_CLIENT`, which is what every Windows host this client has been
+pointed at sends. Anything else is refused by name in
+`proto/license.rs`, and the connection ends before `DemandActive`.
+
+A Session Host with the Remote Desktop Session Host role and per-device CAL
+licensing does not send that. It opens a real exchange: `LICENSE_REQUEST`, the
+client's new or upgrade licence request, the platform challenge and its response,
+and the issued licence. This client would disconnect at the first of those.
+FreeRDP's `libfreerdp/core/license.c` is an implementation to compare while
+writing the exchange; a temporary reference checkout belongs under
+`tmp/references/`.
+
+How many real deployments this reaches is not known, and no host in use has shown
+it. What would settle it is one connection to an RDSH configured for per-device
+CALs; the work is only worth taking once a host that needs it turns up.
+
+### An RDP host's H.264 presented on the GPU
+
+Taken up if a large desktop's H.264 proves slow. Every picture the page decodes
+is copied into the compositor's memory and converted there, and from a hardware
+decoder that copy is a readback off the GPU
+([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
+It was measured at a 1280×800 desktop and not above. The step after it is to
+present a decoded picture on the GPU, and read it back only when a later command
+copies from it.
+
 ### Touch on an RDP target (MS-RDPEI)
 
 Taken up if the need for it shows. The RDP client does not carry touch: it is a
@@ -402,25 +239,11 @@ rather than a key.
 
 ### A cheaper frame of lossless sound
 
-Taken up if a page is ever short of the time. The page's FLAC decoder takes
-some 58 thousand cycles for a frame of music, twenty milliseconds of it, which
-is a thousandth of a core and less than libFLAC takes natively
-([the benchmark](../frontend/wasm/flac/bench/README.md)). What is left is two
-loops in which every sample waits on the one before, so neither is a loop SIMD
-divides:
-
-- **The residual's Rice codes**, half of a frame. Each is a count of zeros and a
-  shift on a 64-bit window, and the window is taken once for two to eight of
-  them. Three more shapes of that loop measured no faster, and are in the
-  benchmark's README so that they are not tried again as they were.
-- **The prediction**, a fifth. It is a function for each order to twelve, with
-  the sample before held in a register, and has been looked at least: the sum
-  over the samples before the last could be taken four at a step, and a
-  predictor of two or three samples, which a quiet passage mostly has, could
-  hold them all in registers.
-
-Those shares are a profile's under Node, and the cycles are counted under Bun,
-so a change is judged by `bench/run.sh` and not by the profile.
+Taken up if a page is ever short of the time. The page's FLAC decoder takes a
+thousandth of a core for a frame of music, less than libFLAC takes natively.
+What is left is the residual's Rice codes and the prediction, two loops in which
+every sample waits on the one before. What has been tried, and how a change is
+judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
 
 ### Not forwarding silence in a passed sound stream
 
@@ -447,6 +270,13 @@ AAC-ELD's window overlaps the frames before it. Whether the framing around each
 unit makes the saving worth that has not been measured.
 
 ## Not planned
+
+### Decoding an RDP host's H.264 at the gateway
+
+The gateway composes no graphics pipeline: every pipeline is passed to the
+page, and a Lossless session refuses H.264 with `AVC_DISABLED`
+([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
+Decoding H.264 here only to encode VP9 would be a second lossy pass.
 
 ### Encodings other than ZRLE on a plain VNC target
 
@@ -495,8 +325,3 @@ Concurrent sessions, shared sessions and a session broker are not planned. One
 gateway instance has one active session slot, as defined by the
 [session constraints](architecture.md#sessions). This keeps engine ownership,
 input state and per-session media choices attached to one browser claim.
-
-A different browser can use **Take over** to evict the current holder. A reconnect
-or target switch by the same browser reclaims the slot without a prompt. A forced
-takeover ends the existing session and returns the new holder to the picker
-(`src/session.rs`).
