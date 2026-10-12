@@ -100,7 +100,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 #
 # Its `native` feature, the EXPERIMENTAL encoder it has written in Rust, is this
 # crate's `native-vp9` above.
-screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.17" }
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.18" }
 # YUV→RGB for the HEVC pictures High Performance's media stream decodes to
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
 # no C, no assembler, the same bargain as above.
