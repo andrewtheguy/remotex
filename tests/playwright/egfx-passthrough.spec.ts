@@ -23,10 +23,10 @@
 //     REMOTEX_PLAYWRIGHT_EGFX_TARGET=win \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'
 //
-// EXPERIMENTAL: a target with `egfx_h264 = true` is told it may draw with H.264,
-// which the page decodes. That is a second opt-in, naming such a target, and it
-// needs the host to be playing a video when the spec runs: a host draws H.264
-// only for what moves like one.
+// EXPERIMENTAL: a target with `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"` is told it may draw
+// with H.264, which the page decodes. That is a second opt-in, naming such a
+// target, and it needs the host to be playing a video when the spec runs: by region
+// a host draws H.264 only for what moves like one.
 //
 //     REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=win-h264 \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'

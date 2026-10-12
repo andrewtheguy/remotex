@@ -41,7 +41,7 @@ headers' lengths, that the page acknowledges each batch once its paint worker ha
 composed it, and that a page that reloads is given a pipeline from its first
 command rather than the one that was running. A compositor that refused a command
 says so in the DOM, which is what stands in for the picture here. Against a target
-with the EXPERIMENTAL `egfx_h264` key, and a host playing a video, it also asserts
+with the EXPERIMENTAL `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"`, and a host playing a video, it also asserts
 that the page said it decodes H.264, that the session says it carries it, and that
 a batch whose commands draw with H.264 is acknowledged: the acknowledgment follows
 the decode of every access unit in the batch, and a decoder that gave no picture
@@ -238,7 +238,7 @@ REMOTEX_PLAYWRIGHT_EGFX_TARGET='win' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
-Its H.264 case needs a target with `egfx_h264 = true`, named by
+Its H.264 case needs a target with `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"`, named by
 `REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET`, while the host is playing a video:
 
 ```sh

@@ -136,7 +136,7 @@ explored:
     - see how a round trip on an idle link should include the page's own
       latency, which the frame-composed signal does not carry.
 
-  Measure each case against the session re-encoded as VP9. A host that draws with bitmap updates (`egfx = false`) could
+  Measure each case against the session re-encoded as VP9. A host that draws with bitmap updates (`egfx = "disabled"`) could
   be passed too, for the page to decode.
 - **What Microsoft's iOS client is sent on a slow link.** Against the same
   host, Microsoft's Remote Desktop client on iOS sees the whole screen soften on
@@ -237,7 +237,7 @@ refused.
 ### H.264 in the RDP graphics pipeline
 
 A host draws with H.264 only on a passed pipeline, for the page to decode, behind
-a target's experimental `egfx_h264` key
+a target's experimental `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"`
 ([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
 What is not done:
 

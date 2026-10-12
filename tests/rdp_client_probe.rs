@@ -98,7 +98,7 @@
 //! ## H.264
 //!
 //! A session that passes its pipeline may tell the host it takes H.264
-//! (`Connect::h264`), which the gateway does for a target with `egfx_h264 = true`
+//! (`Connect::h264`), which the gateway does for a target with `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"`
 //! and a browser that decodes it. A Windows host then draws what moves like video
 //! with it, so the fourth pipeline test, [`pass_h264`], needs a video playing on the
 //! host's desktop while it runs. Nothing here decodes: what it asserts is what the

@@ -119,8 +119,8 @@ The host's own stream, passed through to the browser for a LAN:
   the picture's work off the gateway. It is tested against a
   physical Windows 11 computer, from a desktop browser and from a mobile browser on iOS, with
   sound and the clipboard beside it, and not yet with the camera or the
-  microphone. A target with the experimental `egfx_h264 = true` lets the host
-  draw video with H.264 on that pipeline, which the browser decodes; without the key what is passed is lossless. See
+  microphone. A target with the experimental `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"`
+  lets the host draw with H.264 on that pipeline, which the browser decodes, rate-controlled to the browser's link; with the default `"lossless"` what is passed is lossless. See
   [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 - **macOS Screen Sharing's High Performance mode** (`ard-high-performance`), in a
   session started with the passthrough: the Mac's HEVC picture, to a browser
@@ -327,7 +327,7 @@ gateway nothing of it: whether it takes the gateway's 4:4:4 VP9, which decides
 only whether the page decodes that stream itself
 ([Decoded in the page](#decoded-in-the-page)). The
 last of the three refuses nobody: it decides only whether a passed pipeline's host is
-told it may draw with H.264, on a target whose `egfx_h264` key allows it. The
+told it may draw with H.264, on a target whose `egfx` key allows it. The
 other two say which passthrough the browser can take. They grey the choice at
 the picker, where a browser that says no starts the target encoded here; they
 refuse a `connect` that asks for the passthrough all the same; and they end the
@@ -498,7 +498,7 @@ H.264 stays refused in the capability advertise of every pipeline the gateway
 composes: a host would hand the parts of the desktop that move like video to a
 lossy codec before the gateway encodes the picture, and the gateway has no
 decoder for it. Do not give it one. A passed pipeline may carry it, behind the
-target's experimental `egfx_h264` key and only to a page that said it decodes
+target's experimental `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"` and only to a page that said it decodes
 it: the access units ride inside the pipeline's commands, the page decodes them
 with the browser's `VideoDecoder`, and the compositor paints the pictures. It is
 a target key and not a row at the picker while it is experimental; it adds no
@@ -1062,9 +1062,9 @@ the pipeline.
   where the host's own packet did, and naming the frame it ends. The engine
   queues each as a `GRAPHICS` record, which takes its share of `QUEUE_BUDGET`
   like an access unit.
-- **H.264, where the target's key allows it** (`egfx_h264 = true`,
-  EXPERIMENTAL). Without the key the host is told its client takes none, passed
-  or composed, and every pipeline is lossless. With it, a passed session whose
+- **H.264, where the target's key allows it** (`egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"`,
+  EXPERIMENTAL). Otherwise the host is told its client takes none, passed or
+  composed, and every pipeline is lossless. With it, a passed session whose
   page said it decodes H.264 advertises the capability sets that take it
   (`caps_advertise` in the graphics crate's `proto/gfx.rs`), and a Windows host
   then draws what moves like video with AVC420, in the same frames as the other
@@ -1723,7 +1723,7 @@ and `GET /api/targets` carries it:
 - **Not offered is not shown.** An option the target type does not have has no
   row. High Performance's sound is such a one: the Mac refuses the picture
   without it, so there is nothing to choose, and the session's Mute is what a
-  person has. An `rdp` target with `egfx = false` has no pipeline, so neither
+  person has. An `rdp` target with `egfx = "disabled"` has no pipeline, so neither
   the window nor the pipeline's row; one with `virtual_displays = 2` has both,
   since the browser composes a passed pipeline whole and shows one display of
   it, and it alone has the second display's row. A `connect` that names a choice the target does
@@ -2581,7 +2581,7 @@ announced only by a host that opens MS-RDPEI, which this client never asks for. 
 [`roadmap.md`](roadmap.md).
 
 Static virtual channels are asked for by what the session needs: `drdynvc` for a
-session started with resize, the default `egfx = true`, `camera = true`, or
+session started with resize, a pipeline on (any `egfx` but `"disabled"`), `camera = true`, or
 `microphone = true`; `cliprdr` always; and `rdpsnd` with `rdpdr`
 for a session started with sound.
 
@@ -2607,9 +2607,9 @@ host would hand the parts of the desktop that move like video to it, and a lossy
 video codec would lose detail before the gateway ever encodes the picture. In a
 session started with the passthrough the same channel is answered and acknowledged here and
 composed in the browser, which also decodes the H.264 a target with the
-experimental `egfx_h264` key lets the host draw with
+experimental `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"` lets the host draw with
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)).
-`egfx = false` is the bitmap path: the
+`egfx = "disabled"` is the bitmap path: the
 server draws with bitmap updates, damage is flushed on the 16 ms guess because those
 carry no frame boundary, and the desktop keeps its opening size — resize is
 not offered beside it, because an RDP resize is the pipeline's graphics reset.

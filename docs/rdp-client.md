@@ -250,7 +250,7 @@ a session that has gone out of scope has really stopped.
 ## Static virtual channels
 
 Each is asked for by what the session needs: `drdynvc` for a session started with
-resize, `egfx = true`, `camera = true`, or `microphone = true`, which is the transport Display Control,
+resize, a pipeline on (any `egfx` but `"disabled"`), `camera = true`, or `microphone = true`, which is the transport Display Control,
 the graphics pipeline, the camera's two channels, and the microphone's channel
 ride on; `cliprdr` always, and `rdpsnd` with `rdpdr` for a session started with sound — see
 [Sound](#sound-ms-rdpea).
@@ -481,11 +481,11 @@ one.
 
 ### Bitmap updates
 
-With `egfx = false` the pipeline is not advertised, so the server draws with bitmap
+With `egfx = "disabled"` the pipeline is not advertised, so the server draws with bitmap
 updates, decoded by the planar bitmap codec (`proto/planar.rs`). The client
 announces no drawing orders either, so the path is bitmaps throughout. The desktop
 keeps its opening size: a resize is the pipeline's graphics reset, Display Control is
-not taken without it, and a target with `egfx = false` offers no resize at the
+not taken without it, and a target with `egfx = "disabled"` offers no resize at the
 picker. Every server that is not Windows takes this path whatever the key.
 
 That is a deliberate narrowing, not an oversight. MS-RDPEDISP 1.3 has a server
@@ -505,11 +505,11 @@ not. The depth is asked for in the GCC conference and in the Confirm Active, but
 the server's listener has the last word, and a Demand Active naming any other depth
 is refused during the capability exchange. Measured on Windows Server 2025
 Datacenter: its `RDP-Tcp` listener limits colour depth to 16 bits out of the box,
-so `egfx = false` against it ends with *a server Bitmap capability set carries a
+so `egfx = "disabled"` against it ends with *a server Bitmap capability set carries a
 colour depth 0x10*. The same host connects and paints under the pipeline, which
 negotiates its own pixel formats and ignores that limit. A Windows workstation's
 listener allows 32 bits and takes either path. Such a server is reached with
-`egfx = true`, or with its "Limit maximum color depth" setting raised to 32 bits.
+the pipeline on, or with its "Limit maximum color depth" setting raised to 32 bits.
 
 Bitmap updates carry no frame boundary, so the engine flushes damage on a guess:
 the 16 ms coalescer (`DAMAGE_INTERVAL` in `src/rdp.rs`) reconstructs boundaries by

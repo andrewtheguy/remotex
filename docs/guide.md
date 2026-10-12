@@ -110,16 +110,19 @@ Desktop over NLA. It carries the desktop, pointer, keyboard, mouse, resize, the
 clipboard, sound, and the browser's camera and microphone. It does not carry
 touch.
 
-- `egfx = false` makes the host draw with bitmap updates instead of the graphics
+- `egfx = "disabled"` makes the host draw with bitmap updates instead of the graphics
   pipeline (MS-RDPEGFX). The desktop then keeps its size, since an RDP resize is
   the pipeline's graphics reset.
 - The passthrough sends the pipeline to the browser, which
   composes it. That takes nearly all of the picture's work off the gateway. It
   needs WebGL 2 and a cross-origin isolated page, which a proxy that drops the
   gateway's two isolation headers undoes.
-- **Experimental:** `egfx_h264 = true` lets the host draw video with H.264 on a
-  passed pipeline, which the browser decodes. Without it a passed pipeline is
-  lossless.
+- **Experimental:** `egfx = "adaptive_h264_desktop"` lets the host draw the whole desktop with
+  H.264 on a passed pipeline, which the browser decodes, and has it follow the
+  browser's link: coarser on a slow link, finer on a fast one. `egfx = "adaptive_h264_region"`
+  keeps H.264 to what moves like video and the rest lossless, which keeps text
+  sharp but adapts less. The default, `egfx = "lossless"`, passes a lossless
+  pipeline.
 - **Alpha:** `virtual_displays = 2` asks the host for two displays, each the
   session's size. Where the second sits against the first is chosen under the
   target at the picker, **Second display**: right, left, top or bottom, to match

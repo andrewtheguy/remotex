@@ -221,7 +221,7 @@ site_passwd = ""
 # `ard-high-performance` uses Apple's dynamic-resolution feature to replace its
 # one virtual display's configuration with arbitrary viewport sizes within its
 # fixed 3840×2160 backing ceiling. An "rdp" desktop is resized through its
-# graphics pipeline, so `egfx = false` leaves it at the size it keeps.
+# graphics pipeline, so `egfx = "disabled"` leaves it at the size it keeps.
 #
 # Sound takes the remote's sound, as Opus or FLAC. An "rdp" target negotiates
 # sound redirection (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM,
@@ -291,13 +291,14 @@ password = "change-me"
 # connecting client's density whatever the size, as Apple's Screen Sharing does.
 #size = "1920x1080"
 
-# RDP graphics pipeline (MS-RDPEGFX), on by default. On, a Windows host draws the
+# How the RDP graphics pipeline (MS-RDPEGFX) is drawn: "lossless" by default,
+# "adaptive_h264_desktop", "adaptive_h264_region" or "disabled". With the pipeline on, a Windows host draws the
 # desktop through the pipeline's surfaces and marks every frame, and each resize
-# is a graphics reset, cheap enough for the window to drive continuously. Off, the
-# host draws with bitmap updates and the desktop keeps its size — the
-# picker then offers neither the window nor the pipeline's passthrough; that is the
-# escape hatch for a host whose pipeline the decoders cannot paint. RDP only, and
-# refused on VNC even when set to false.
+# is a graphics reset, cheap enough for the window to drive continuously.
+# "disabled" has the host draw with bitmap updates and the desktop keep its size —
+# the picker then offers neither the window nor the pipeline's passthrough; that is
+# the escape hatch for a host whose pipeline the decoders cannot paint. RDP only,
+# and refused on VNC whatever the value.
 #
 # With the pipeline on, the picker offers passing it to the browser, which
 # composes it, rather than composing the desktop here and encoding it as VP9. For
@@ -315,19 +316,21 @@ password = "change-me"
 # hand. That is a physical Windows 11 computer, from a desktop browser and from a
 # mobile browser on iOS, with sound and the clipboard beside it; `camera` and `microphone`
 # beside it have not been tried.
-#egfx = true
-
-# EXPERIMENTAL. Let the host draw with H.264 on a pipeline that is passed to the
-# browser. A Windows host then hands the parts of the desktop that move like
-# video — a player, a scrolling page — to H.264 and draws the rest as before,
-# which is its own trade of detail for bitrate on those parts: without this key
-# everything a passed pipeline carries is lossless. The gateway decodes nothing;
-# the browser decodes the video with its own decoder and paints it through the
-# same compositor. It reaches only a session started with the passthrough, in a
-# browser that decodes H.264: any other session is as it was without the key.
-# Checked against one Windows 11 host without a GPU. RDP only, and refused beside
-# `egfx = false`.
-#egfx_h264 = true
+#
+# EXPERIMENTAL, "adaptive_h264_desktop" and "adaptive_h264_region": a passed pipeline lets the host draw with
+# H.264, which the browser decodes with its own decoder and paints through the
+# same compositor; the gateway decodes nothing. The session takes part in the
+# host's network detection, answered at the page's pace, and the host
+# rate-controls its H.264 to the page's link: coarser and at a usable frame rate
+# on a slow one, at its finest quality on a fast one. "adaptive_h264_desktop" has the host draw
+# the whole desktop with H.264, which it rate-controls all of: behind a 1 Mbit/s
+# page, 17.5 frames a second at 6.4 KB. "adaptive_h264_region" keeps H.264 to what moves like
+# video, a player or a scrolling page, and the rest lossless; text stays sharp,
+# but the rest is not rate-controlled, so the same page got 4.4 frames a second.
+# H.264 reaches only a session started with the passthrough, in a browser that
+# decodes it: any other session is drawn as "lossless". Checked against two
+# Windows 11 hosts without a GPU.
+#egfx = "lossless"
 
 # ALPHA. Ask the host for this many virtual displays, each the session's size.
 # Where the second sits against the first is chosen at the picker, on an rdp

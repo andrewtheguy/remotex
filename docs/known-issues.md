@@ -35,7 +35,7 @@ scaling fault in the gateway or the page.
 ## A veiled rectangle over a playing video, on an RDP pipeline passed with H.264
 
 **What it looks like.** In an RDP session whose pipeline is passed through, on a
-target with the experimental `egfx_h264` key
+target with the experimental `egfx = "adaptive_h264_region"`
 ([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)),
 a rectangle over most of a playing video, or of anything else on the desktop that
 moves like one, looks as if a translucent sheet lay on it: fine detail inside it
@@ -54,7 +54,8 @@ unit carried the coarsest of the three settings that host has been seen to use
 decoder, matched FFmpeg's decode of the same access unit, and opening and closing
 the menu over the session changed nothing in the stream.
 
-**What would move it.** Taking `egfx_h264` off the target: its pipeline is then
+**What would move it.** `egfx = "adaptive_h264_desktop"`, whose H.264 the host rate-controls
+to the page's link, at its finest quality on a fast one. Or `egfx = "lossless"`: its pipeline is then
 lossless, and the video is sharp at the lossless codecs' cost in bytes. Whether
 the host can be led to a finer setting is not known. It chose a finer one for
 most of a film clip at 1280×800, so content and size move it. The link probe has

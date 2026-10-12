@@ -2196,7 +2196,6 @@ mod tests {
             domain: None,
             size: Some((1, 1)),
             egfx: None,
-            egfx_h264: false,
             virtual_displays: 1,
             camera: meta.camera,
             microphone: meta.microphone,
