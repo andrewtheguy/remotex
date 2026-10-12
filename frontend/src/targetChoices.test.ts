@@ -2,7 +2,8 @@
 // then sends. The properties under test are the picker's rules: the size a session
 // will have is always shown and is a choice only where there are two, not offered
 // is not shown, offered but unavailable is greyed with the reason, and a target
-// that can only be passed cannot start in a browser that cannot take it.
+// whose stream is passed in every session cannot start in a browser that cannot
+// take it.
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import {
@@ -46,8 +47,8 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     defaultSize: DEFAULT_SIZE,
     audio: false,
     software: false,
-    passthrough: null,
-    passthroughOnly: false,
+    passthroughs: [],
+    encoded: true,
     placement: false,
     pipeline: false,
     ...offers,
@@ -59,20 +60,26 @@ const RDP = target({
   protocol: "rdp",
   resize: true,
   audio: true,
-  passthrough: "rdp-graphics",
-  passthroughOnly: true,
+  passthroughs: ["rdp-graphics"],
+  encoded: false,
   pipeline: true,
 });
 const HIGH_PERFORMANCE = target({
   subtype: "ard-high-performance",
   resize: true,
-  passthrough: "apple-media",
+  passthroughs: ["apple-media", "apple-h264"],
 });
 
 const SIZED = { w: 1920, h: 1080 };
 
-function keys(rows: { key: string }[]): string[] {
-  return rows.map((row) => row.key);
+/** A target's picture options as value and whether it is greyed, in the order shown. */
+function pictures(options: {
+  pictures: { value: string | null; disabled: boolean }[] | null;
+}): [string | null, boolean][] | null {
+  return (
+    options.pictures?.map((picture) => [picture.value, picture.disabled]) ??
+    null
+  );
 }
 
 /** The formats a target's sound can be sent as, in the order shown. */
@@ -145,12 +152,12 @@ test("a Mac sharing its physical displays is shown at their size", () => {
 test("only what the target's type offers has a row", () => {
   const rdp = targetOptions(RDP, undefined, ABLE);
   // Its pipeline is passed in every session, which is said rather than offered.
-  assert.deepEqual(rdp.rows, []);
+  assert.equal(rdp.pictures, null);
   assert.ok(rdp.passed);
   assert.deepEqual(formats(rdp), ["opus", "flac"]);
   // A plain VNC server has nothing to choose.
   const plain = targetOptions(target({}), undefined, ABLE);
-  assert.deepEqual(plain.rows, []);
+  assert.equal(plain.pictures, null);
   assert.equal(plain.soundRow, null);
   // wlshare's VP9 is the subtype's picture, not a choice. Its sound is.
   const wlshare = targetOptions(
@@ -158,31 +165,54 @@ test("only what the target's type offers has a row", () => {
     undefined,
     ABLE,
   );
-  assert.deepEqual(wlshare.rows, []);
+  assert.equal(wlshare.pictures, null);
   assert.deepEqual(formats(wlshare), ["opus", "flac"]);
   // Standard Screen Sharing on the Mac's physical displays offers nothing.
   const standard = targetOptions(target({ subtype: "ard" }), undefined, ABLE);
-  assert.deepEqual(standard.rows, []);
+  assert.equal(standard.pictures, null);
   assert.equal(standard.soundRow, null);
   assert.deepEqual(standard.choices, {
     size: "target",
     audio: "off",
-    passthrough: false,
+    passthrough: null,
     placement: "right",
     pipeline: "lossless",
   });
   assert.equal(standard.blocked, null);
 });
 
-test("nothing is ticked until somebody ticks it", () => {
+test("a Mac's picture is its HEVC passed, VP9 encoded here, or its H.264 passed", () => {
   const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
-  assert.equal(options.choices.passthrough, false);
-  assert.ok(options.rows.every((row) => !row.checked && !row.disabled));
+  assert.deepEqual(pictures(options), [
+    ["apple-media", false],
+    [null, false],
+    ["apple-h264", false],
+  ]);
+  assert.equal(options.choices.passthrough, "apple-media", "the first");
+  assert.equal(options.passed, null);
+  for (const chosen of ["apple-media", null, "apple-h264"] as const) {
+    const again = targetOptions(
+      HIGH_PERFORMANCE,
+      { passthrough: chosen },
+      ABLE,
+    );
+    assert.equal(again.choices.passthrough, chosen);
+  }
+  // Something this page never wrote there is not a choice.
+  const stale = targetOptions(
+    HIGH_PERFORMANCE,
+    { passthrough: true as never },
+    ABLE,
+  );
+  assert.equal(stale.choices.passthrough, "apple-media");
+});
+
+test("no sound is taken until somebody ticks it", () => {
   const rdp = targetOptions(RDP, undefined, ABLE);
   assert.deepEqual(rdp.choices, {
     size: "window",
     audio: "off",
-    passthrough: true,
+    passthrough: null,
     placement: "right",
     pipeline: "lossless",
   });
@@ -196,7 +226,7 @@ test("what was chosen last time is what Start sends", () => {
   assert.deepEqual(options.choices, {
     size: "window",
     audio: "opus",
-    passthrough: true,
+    passthrough: null,
     placement: "right",
     pipeline: "lossless",
   });
@@ -215,13 +245,13 @@ test("what was chosen last time is what Start sends", () => {
   );
   const plain = targetOptions(
     target({}),
-    { size: "window", audio: "opus", passthrough: true },
+    { size: "window", audio: "opus", passthrough: "apple-h264" },
     ABLE,
   );
   assert.deepEqual(plain.choices, {
     size: "target",
     audio: "off",
-    passthrough: false,
+    passthrough: null,
     placement: "right",
     pipeline: "lossless",
   });
@@ -232,7 +262,7 @@ test("what was chosen last time is what Start sends", () => {
 
 test("High Performance's sound has no row and is always carried", () => {
   const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
-  assert.deepEqual(keys(options.rows), ["passthrough"]);
+  assert.equal(options.pictures?.length, 3);
   assert.equal(options.soundRow, null);
   assert.equal(options.choices.audio, "off");
   assert.equal(options.sound, true);
@@ -276,47 +306,62 @@ test("a browser with no audio decoder is offered FLAC alone", () => {
   // Start spends no click on an audio context. Its picture is untouched.
   const mac = targetOptions(HIGH_PERFORMANCE, undefined, MUTE);
   assert.equal(mac.sound, false);
-  assert.equal(mac.rows[0]?.disabled, false);
+  assert.equal(mac.pictures?.[0].disabled, false);
 });
 
-test("a passthrough this browser cannot take is greyed, with the reason", () => {
+test("a Mac's HEVC this browser cannot take is greyed, with the reason", () => {
   // Remembered from a browser that could: still not sent from one that cannot.
   const options = targetOptions(
     HIGH_PERFORMANCE,
-    { passthrough: true },
+    { passthrough: "apple-media" },
     UNABLE,
   );
-  const row = options.rows.find((r) => r.key === "passthrough");
-  assert.ok(row);
-  assert.equal(row.disabled, true);
-  assert.equal(row.checked, false);
-  assert.match(row.note, /does not decode/);
-  assert.equal(options.choices.passthrough, false);
+  assert.deepEqual(pictures(options), [
+    ["apple-media", true],
+    [null, false],
+    ["apple-h264", false],
+  ]);
+  assert.match(options.pictures?.[0].note ?? "", /does not decode/);
+  assert.equal(options.choices.passthrough, null, "the first it can have");
   assert.equal(options.blocked, null, "the target still starts, encoded");
 });
 
 test("a gateway that cannot decode the Mac's picture can only pass it", () => {
-  const only = { ...HIGH_PERFORMANCE, passthroughOnly: true };
-  const able = targetOptions(only, { passthrough: false }, ABLE);
-  assert.deepEqual(able.rows, [], "no choice to offer");
-  assert.match(able.passed?.note ?? "", /cannot decode the Mac's picture/);
-  assert.equal(able.choices.passthrough, true);
+  const only = { ...HIGH_PERFORMANCE, encoded: false };
+  const able = targetOptions(only, { passthrough: null }, ABLE);
+  assert.deepEqual(pictures(able), [
+    ["apple-media", false],
+    [null, true],
+    ["apple-h264", false],
+  ]);
+  assert.match(
+    able.pictures?.[1].note ?? "",
+    /cannot decode the Mac's picture/,
+  );
+  assert.equal(able.choices.passthrough, "apple-media");
+  assert.equal(able.passed, null);
   assert.equal(able.blocked, null);
 
-  // And where the browser cannot take it either, the target cannot start: Start
-  // says so before the Mac is dialled.
+  // Where the browser cannot take the HEVC either, the H.264 is what is left,
+  // which no browser is asked about: the target always starts.
   const unable = targetOptions(only, undefined, UNABLE);
-  assert.match(unable.blocked ?? "", /cannot decode the Mac's picture/);
+  assert.deepEqual(pictures(unable), [
+    ["apple-media", true],
+    [null, true],
+    ["apple-h264", false],
+  ]);
+  assert.equal(unable.choices.passthrough, "apple-h264");
+  assert.equal(unable.blocked, null);
 });
 
 test("an RDP host's pipeline is always passed, and needs a page that composes it", () => {
   // No gateway composes the pipeline, so it is shown as passed, whatever was
   // remembered.
-  const able = targetOptions(RDP, { passthrough: false }, ABLE);
-  assert.deepEqual(able.rows, [], "no choice");
+  const able = targetOptions(RDP, { passthrough: "apple-media" }, ABLE);
+  assert.equal(able.pictures, null, "no choice");
   assert.equal(able.passed?.label, "Always passed through");
   assert.match(able.passed?.note ?? "", /egfx is on/);
-  assert.equal(able.choices.passthrough, true);
+  assert.equal(able.choices.passthrough, null, "passed without being named");
   assert.equal(able.blocked, null);
 
   // A browser that cannot compose it cannot start the target: no VP9 stands in.
@@ -379,11 +424,11 @@ test("choices are remembered per target", () => {
   assert.deepEqual(readRememberedChoices(), {});
   let remembered = rememberChoice({}, "win", "audio", "flac");
   remembered = rememberChoice(remembered, "win", "size", "window");
-  remembered = rememberChoice(remembered, "mac", "passthrough", true);
+  remembered = rememberChoice(remembered, "mac", "passthrough", "apple-h264");
   remembered = rememberChoice(remembered, "win", "audio", "off");
   const expected = {
     win: { audio: "off", size: "window" },
-    mac: { passthrough: true },
+    mac: { passthrough: "apple-h264" },
   };
   assert.deepEqual(remembered, expected);
   assert.deepEqual(readRememberedChoices(), expected, "and written through");
@@ -434,40 +479,40 @@ const MAC_PAGE = { ...HIGH_PERFORMANCE, software: true };
 /** A browser whose own decoder does not take the Mac's HEVC, and whose page does. */
 const NEEDS_PAGE: Abilities = { ...ABLE, appleMedia: false };
 
-test("decoding in this page is no row: the passthrough is all that is chosen", () => {
+test("decoding in this page is no option: the passthrough is all that is chosen", () => {
   for (const abilities of [ABLE, NEEDS_PAGE]) {
-    const options = targetOptions(MAC_PAGE, { passthrough: true }, abilities);
-    assert.deepEqual(
-      options.rows.map((row) => row.key),
-      ["passthrough"],
+    const options = targetOptions(
+      MAC_PAGE,
+      { passthrough: "apple-media" },
+      abilities,
     );
-    assert.equal(options.choices.passthrough, true);
+    assert.deepEqual(pictures(options), [
+      ["apple-media", false],
+      [null, false],
+      ["apple-h264", false],
+    ]);
+    assert.equal(options.choices.passthrough, "apple-media");
   }
 });
 
 test("a Mac's picture only this page decodes can be passed", () => {
   // The browser's own decoder refuses the HEVC; the gateway serves the page's.
-  const options = targetOptions(MAC_PAGE, { passthrough: true }, NEEDS_PAGE);
-  const passed = options.rows.find((row) => row.key === "passthrough");
-  assert.equal(passed?.disabled, false);
-  assert.equal(passed?.checked, true);
-  assert.equal(options.choices.passthrough, true);
+  const options = targetOptions(MAC_PAGE, undefined, NEEDS_PAGE);
+  assert.equal(options.pictures?.[0].disabled, false);
+  assert.equal(options.choices.passthrough, "apple-media");
 
-  // Without the page's HEVC decoder, served or runnable, the passthrough is
-  // greyed as for any browser that cannot take it.
+  // Without the page's HEVC decoder, served or runnable, the HEVC is greyed as
+  // for any browser that cannot take it.
   for (const [offered, abilities] of [
     [HIGH_PERFORMANCE, NEEDS_PAGE],
     [MAC_PAGE, { ...NEEDS_PAGE, runsHevc: false }],
   ] as const) {
-    const greyed = targetOptions(offered, { passthrough: true }, abilities);
-    const passthrough = greyed.rows.find((r) => r.key === "passthrough");
-    assert.equal(passthrough?.disabled, true);
-    assert.equal(greyed.choices.passthrough, false);
+    const greyed = targetOptions(
+      offered,
+      { passthrough: "apple-media" },
+      abilities,
+    );
+    assert.equal(greyed.pictures?.[0].disabled, true);
+    assert.equal(greyed.choices.passthrough, null);
   }
-
-  // A gateway that can only pass the picture starts for such a browser too.
-  const only = { ...MAC_PAGE, passthroughOnly: true };
-  const started = targetOptions(only, undefined, NEEDS_PAGE);
-  assert.equal(started.blocked, null);
-  assert.equal(started.choices.passthrough, true);
 });

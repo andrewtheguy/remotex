@@ -39,7 +39,7 @@ const PICKER_TARGET = process.env.REMOTEX_PLAYWRIGHT_PICKER_TARGET;
 interface Choices {
   size: "target" | "default" | "window";
   audio: "off" | "opus" | "flac";
-  passthrough: boolean;
+  passthrough: string | null;
 }
 
 interface Session {
@@ -114,13 +114,13 @@ test.describe("the picker's options", () => {
       pipeline: "adaptive-region",
     });
 
-    // The pipeline is passed in every session of an rdp target that has it, and
-    // drawn as was chosen.
+    // The pipeline is passed in every session of an rdp target that has it,
+    // without being named, and drawn as was chosen.
     expect(seen.connects).toEqual([
       {
         size: "window",
         audio: "off",
-        passthrough: true,
+        passthrough: null,
         placement: "right",
         pipeline: "adaptive-region",
       },

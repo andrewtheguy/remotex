@@ -89,8 +89,9 @@ pub enum Subtype {
     /// always carries sound and the picker offers no choice of it. The sound goes
     /// to the browser as the Mac's own AAC-ELD, never decoded here. The picture's
     /// decoder is loaded from the system when it is needed; a gateway whose host
-    /// lacks it can only pass the picture ([`Passthrough::AppleMedia`]), to a
-    /// browser that decodes it.
+    /// lacks it can only pass the picture, as the Mac's HEVC
+    /// ([`Passthrough::AppleMedia`]) to a browser that decodes it, or as its
+    /// H.264 ([`Passthrough::AppleH264`]).
     ArdHighPerformance,
     /// [wlshare](https://github.com/andrewtheguy/wlshare), our own wlroots VNC
     /// server, spoken to as what it is: RFB 3.8 with wlshare's private extensions
@@ -201,6 +202,10 @@ pub struct RenderPlan {
     /// here: [`Passthrough::AppleMedia`], chosen at the picker. None of the fields
     /// above reach such a picture.
     pub apple_media: bool,
+    /// The Mac is asked for H.264 instead, which passes as it came:
+    /// [`Passthrough::AppleH264`], chosen at the picker. Never set with
+    /// [`Self::apple_media`], and none of the fields above reach it either.
+    pub apple_h264: bool,
     /// An RDP host's graphics pipeline passes as it came, for the browser to
     /// compose: [`Passthrough::RdpGraphics`], in every session of a target with the
     /// pipeline on, which is never composed here. The fields above reach only the
@@ -219,15 +224,15 @@ pub struct RenderPlan {
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
-/// here and encoded as VP9. Which one a target has to pass is its type's to say
-/// ([`TargetConfig::offers`]); whether a session passes it is chosen at the picker
-/// ([`Choices::passthrough`]) where [`Self::chosen`] says it is, and otherwise it
-/// passes in every session.
+/// here and encoded as VP9. Which a target has to pass is its type's to say
+/// ([`TargetConfig::offers`]); whether a session passes one, and which, is chosen
+/// at the picker ([`Choices::passthrough`]) where [`Self::chosen`] says it is, and
+/// otherwise it passes in every session.
 ///
-/// For a LAN either way: the stream is the remote's own, with no quality walk
+/// The stream is the remote's own, with no quality walk of this gateway's
 /// behind it, so [`TargetConfig::video_quality`] and the adaptive keys do not
 /// reach a passed picture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Passthrough {
     /// An RDP host's graphics pipeline, its commands out of their bulk compression,
@@ -252,6 +257,12 @@ pub enum Passthrough {
     /// decoded pictures. Offered by `ard-high-performance`. The Mac's sound is not
     /// part of the choice: its AAC-ELD is passed in every session.
     AppleMedia,
+    /// A High Performance Mac's picture as H.264, which it sends where its offer
+    /// names no HEVC ([`crate::vnc_apple_media::Codec::H264`]): High profile,
+    /// 4:2:0. Offered by `ard-high-performance` beside the HEVC, and passed to
+    /// any browser: none is asked whether it decodes it, so one that does not
+    /// finds out from its decoder.
+    AppleH264,
 }
 
 impl Passthrough {
@@ -261,16 +272,17 @@ impl Passthrough {
         match self {
             Self::RdpGraphics => "rdp-graphics",
             Self::AppleMedia => "apple-media",
+            Self::AppleH264 => "apple-h264",
         }
     }
 
     /// Whether a session passes it only where it was chosen at the picker. The
-    /// Mac's HEVC is a choice beside the VP9 encoded here; an RDP host's pipeline
-    /// is not, as the gateway composes none.
+    /// Mac's HEVC and its H.264 are choices beside the VP9 encoded here; an RDP
+    /// host's pipeline is not, as the gateway composes none.
     pub fn chosen(self) -> bool {
         match self {
             Self::RdpGraphics => false,
-            Self::AppleMedia => true,
+            Self::AppleMedia | Self::AppleH264 => true,
         }
     }
 
@@ -279,6 +291,7 @@ impl Passthrough {
         match self {
             Self::RdpGraphics => "the host's graphics pipeline",
             Self::AppleMedia => "the Mac's HEVC",
+            Self::AppleH264 => "the Mac's H.264",
         }
     }
 }
@@ -292,8 +305,9 @@ pub struct Offers {
     /// Whether the remote's sound is a choice. False both where there is none to
     /// take and where it is always carried, as on `ard-high-performance`.
     pub audio: bool,
-    /// The stream this target can pass untouched, where it has one.
-    pub passthrough: Option<Passthrough>,
+    /// The streams this target can pass untouched, in the picker's order: none,
+    /// the one, or a High Performance Mac's two.
+    pub passthrough: &'static [Passthrough],
     /// Whether where the second virtual display sits is a choice
     /// ([`Placement`]): on a target that asks for two of a host that is told
     /// where each is.
@@ -324,11 +338,11 @@ pub struct Choices {
     /// subscribes, which is what its Mute and Unmute change.
     #[serde(default)]
     pub audio: Sound,
-    /// Pass the target's [`Passthrough`], where passing it is a choice
-    /// ([`Passthrough::chosen`]); one that passes in every session is passed
-    /// whatever this says.
+    /// The [`Passthrough`] of the target's to pass, by its name, where passing
+    /// it is a choice ([`Passthrough::chosen`]); one that passes in every session
+    /// is passed whatever this says.
     #[serde(default)]
-    pub passthrough: bool,
+    pub passthrough: Option<Passthrough>,
     /// Where the second virtual display sits.
     #[serde(default)]
     pub placement: Placement,
@@ -337,7 +351,7 @@ pub struct Choices {
     /// other is drawn lossless.
     #[serde(default)]
     pub pipeline: Pipeline,
-    /// Ask a High Performance Mac whose picture is passed for one tile, each
+    /// Ask a High Performance Mac whose picture is passed, in either codec, for one tile, each
     /// picture the whole display, and not the four strips such a session is
     /// offered ([`crate::vnc_apple_media::Receive::Pass`]). No picker names it:
     /// it is a probe's, for a capture or a comparison of the two on one gateway.
@@ -502,7 +516,7 @@ pub struct NotOffered {
 /// What the attached browser said it can take, from its session socket
 /// ([`crate::ws`]): the questions the page asks once at load and states on every
 /// session socket it opens. The first two say which passthrough this browser can
-/// be served, which is what the picker greys a choice by, what keeps it from
+/// be served (a Mac's H.264 is asked of none, and served to any), which is what the picker greys a choice by, what keeps it from
 /// starting a target that passes in every session, and what ends a session whose
 /// owner comes back unable to take its own ([`TargetConfig::beyond`]). Its
 /// VP9 decoder is no question: every browser is sent 4:4:4, and a page whose own
@@ -540,6 +554,8 @@ impl Decoders {
     pub fn takes(self, passthrough: Passthrough) -> bool {
         match passthrough {
             Passthrough::AppleMedia => self.apple_media,
+            // No browser is asked: one that does not decode it says so itself.
+            Passthrough::AppleH264 => true,
             Passthrough::RdpGraphics => self.rdp_graphics,
         }
     }
@@ -556,6 +572,8 @@ impl RenderPlan {
     pub fn passthrough(&self) -> Option<Passthrough> {
         if self.apple_media {
             Some(Passthrough::AppleMedia)
+        } else if self.apple_h264 {
+            Some(Passthrough::AppleH264)
         } else if self.rdp_graphics {
             Some(Passthrough::RdpGraphics)
         } else {
@@ -930,16 +948,25 @@ impl TargetConfig {
         let adaptive = self.render_adaptive();
         let passthrough = self.passthrough(choices);
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
+        let apple_h264 = passthrough == Some(Passthrough::AppleH264);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
         let rdp_h264 = rdp_graphics && choices.pipeline.h264() && decoders.rdp_h264;
-        RenderPlan { quality, adaptive, apple_media, rdp_graphics, rdp_h264, native_vp9: self.experimental_native_vp9 }
+        RenderPlan {
+            quality,
+            adaptive,
+            apple_media,
+            apple_h264,
+            rdp_graphics,
+            rdp_h264,
+            native_vp9: self.experimental_native_vp9,
+        }
     }
 
     /// BETA: whether a page whose own decoder refuses this target's passed HEVC
     /// can decode it in the software decoder the gateway serves, where it serves
     /// one (`page_hevc`): on a target with a Mac's picture to pass.
     pub fn software(&self, page_hevc: bool) -> bool {
-        page_hevc && self.offers().passthrough == Some(Passthrough::AppleMedia)
+        page_hevc && self.offers().passthrough.contains(&Passthrough::AppleMedia)
     }
 
     /// The choices the picker shows under this target.
@@ -956,30 +983,31 @@ impl TargetConfig {
             (Protocol::Rdp, _) => Offers {
                 resize: self.egfx(),
                 audio: true,
-                passthrough: self.egfx().then_some(Passthrough::RdpGraphics),
+                passthrough: if self.egfx() { &[Passthrough::RdpGraphics] } else { &[] },
                 placement: self.virtual_displays > 1,
                 pipeline: self.egfx(),
             },
             // Read as any VNC server, which carries no sound, and whose answer
             // to a size is not known until it is dialled.
             (Protocol::Vnc, None) => {
-                Offers { resize: false, audio: false, passthrough: None, placement: false, pipeline: false }
+                Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false }
             }
             // Its VP9 is the subtype's picture and not a choice.
             (Protocol::Vnc, Some(Subtype::Wlshare)) => {
-                Offers { resize: true, audio: true, passthrough: None, placement: false, pipeline: false }
+                Offers { resize: true, audio: true, passthrough: &[], placement: false, pipeline: false }
             }
             // Standard mode shares the Mac's physical displays, whose resolution
             // this gateway does not change, and never touches its sound.
             (Protocol::Vnc, Some(Subtype::Ard)) => {
-                Offers { resize: self.virtual_display, audio: false, passthrough: None, placement: false, pipeline: false }
+                Offers { resize: self.virtual_display, audio: false, passthrough: &[], placement: false, pipeline: false }
             }
             // The sound comes with the picture, so it is not a choice, and the
-            // Mac places a second virtual display itself.
+            // Mac places a second virtual display itself. Its picture passes in
+            // either codec the Mac sends.
             (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => Offers {
                 resize: true,
                 audio: false,
-                passthrough: Some(Passthrough::AppleMedia),
+                passthrough: &[Passthrough::AppleMedia, Passthrough::AppleH264],
                 placement: false,
                 pipeline: false,
             },
@@ -998,8 +1026,12 @@ impl TargetConfig {
                 choices.size == Sizing::BuiltIn && !(offers.resize && self.size.is_some()),
             ),
             ("sound", choices.audio != Sound::Off && !offers.audio),
-            ("a passthrough", choices.passthrough && offers.passthrough.is_none()),
-            ("a picture in one tile", choices.whole && self.passthrough(choices) != Some(Passthrough::AppleMedia)),
+            ("a passthrough", choices.passthrough.is_some_and(|named| !offers.passthrough.contains(&named))),
+            (
+                "a picture in one tile",
+                choices.whole
+                    && !matches!(self.passthrough(choices), Some(Passthrough::AppleMedia | Passthrough::AppleH264)),
+            ),
             (
                 "a place for the second display",
                 choices.placement != Placement::default() && !offers.placement,
@@ -1015,7 +1047,11 @@ impl TargetConfig {
     /// The stream a session started with `choices` passes, if any: one that is
     /// a choice where it was chosen, and one that is not in every session.
     pub fn passthrough(&self, choices: Choices) -> Option<Passthrough> {
-        self.offers().passthrough.filter(|passthrough| choices.passthrough || !passthrough.chosen())
+        self.offers()
+            .passthrough
+            .iter()
+            .copied()
+            .find(|passthrough| !passthrough.chosen() || choices.passthrough == Some(*passthrough))
     }
 
     /// The passthrough a session started with `choices` runs on that `decoders`'
@@ -2823,7 +2859,7 @@ mod tests {
         assert!(!mac.software(false), "not on a gateway without the decoder");
 
         let stated = |native_hevc, page_hevc, serves_hevc| Decoders::stated(native_hevc, page_hevc, serves_hevc, false, false);
-        let passed = Choices { passthrough: true, ..Choices::default() };
+        let passed = Choices { passthrough: Some(Passthrough::AppleMedia), ..Choices::default() };
         assert_eq!(mac.beyond(passed, stated(true, false, false)), None, "the browser's own decoder");
         assert_eq!(mac.beyond(passed, stated(false, true, true)), None, "the page's decoder");
         assert_eq!(mac.beyond(passed, stated(false, true, false)), Some(Passthrough::AppleMedia), "not served");
@@ -3143,6 +3179,7 @@ mod tests {
                 quality: DEFAULT_VIDEO_QUALITY,
                 adaptive: true,
                 apple_media: false,
+                apple_h264: false,
                 rdp_graphics: false,
                 rdp_h264: false,
                 native_vp9: false,
@@ -3159,6 +3196,7 @@ mod tests {
                 quality: 60,
                 adaptive: true,
                 apple_media: false,
+                apple_h264: false,
                 rdp_graphics: false,
                 rdp_h264: false,
                 native_vp9: false,
@@ -3346,7 +3384,7 @@ mod tests {
         // Standard mode exposes physical displays, which this gateway never resizes,
         // and never touches the Mac's sound: the picker has nothing to offer there.
         let standard = &ard("username = \"andrew\"\npassword = \"h\"").unwrap().targets[0];
-        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: None, placement: false, pipeline: false });
+        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false });
 
         // And it is a VNC subtype only.
         let err = ConfigFile::parse(&format!(
@@ -3392,7 +3430,7 @@ mod tests {
         assert!(target.has_virtual_display());
         assert_eq!(
             target.offers(),
-            Offers { resize: true, audio: false, passthrough: None, placement: false, pipeline: false },
+            Offers { resize: true, audio: false, passthrough: &[], placement: false, pipeline: false },
             "a display to resize, and no sound on Standard's virtual display either"
         );
         assert!(!target.media_stream());
@@ -3465,9 +3503,10 @@ mod tests {
         let hp = mac("ard-high-performance");
         let takes = Decoders { apple_media: true, rdp_graphics: false, rdp_h264: false };
         let declines = Decoders { apple_media: false, rdp_graphics: false, rdp_h264: false };
-        let passed = Choices { passthrough: true, ..Choices::default() };
+        let passed = Choices { passthrough: Some(Passthrough::AppleMedia), ..Choices::default() };
+        let h264 = Choices { passthrough: Some(Passthrough::AppleH264), ..Choices::default() };
 
-        assert_eq!(hp.offers().passthrough, Some(Passthrough::AppleMedia));
+        assert_eq!(hp.offers().passthrough, [Passthrough::AppleMedia, Passthrough::AppleH264], "the picker's order");
         assert!(hp.render_plan(passed, takes).apple_media);
         assert_eq!(
             hp.render_plan(passed, takes).describe(),
@@ -3477,6 +3516,21 @@ mod tests {
         assert_eq!(hp.beyond(passed, takes), None);
         assert_eq!(hp.beyond(passed, declines), Some(Passthrough::AppleMedia));
         assert_eq!(hp.beyond(Choices::default(), declines), None, "VP9 is for every browser");
+
+        // The Mac's H.264 is the other stream to pass, and no browser is asked
+        // whether it decodes it.
+        assert_eq!(hp.accepts(h264), Ok(()));
+        let plan = hp.render_plan(h264, declines);
+        assert!(plan.apple_h264 && !plan.apple_media);
+        assert_eq!(plan.passthrough(), Some(Passthrough::AppleH264));
+        assert_eq!(plan.describe(), "the Mac's H.264, passed through");
+        assert_eq!(hp.beyond(h264, declines), None, "served to any browser");
+        assert_eq!(Passthrough::AppleH264.name(), "apple-h264");
+        assert_eq!(
+            hp.accepts(Choices { passthrough: Some(Passthrough::RdpGraphics), ..Choices::default() }),
+            Err(NotOffered { target: "mac".to_owned(), choice: "a passthrough" }),
+            "another type's stream"
+        );
         assert_eq!(hp.render_summary(), "video q90 · libvpx · adaptive", "the file chooses none");
 
         // The sound comes with the picture, chosen or not, so it is not offered.
@@ -3489,13 +3543,14 @@ mod tests {
 
         // One tile is asked of a Mac whose picture is passed, and of no other.
         assert_eq!(hp.accepts(Choices { whole: true, ..passed }), Ok(()));
+        assert_eq!(hp.accepts(Choices { whole: true, ..h264 }), Ok(()));
         assert_eq!(
             hp.accepts(Choices { whole: true, ..Choices::default() }),
             Err(NotOffered { target: "mac".to_owned(), choice: "a picture in one tile" })
         );
 
         let standard = mac("ard");
-        assert_eq!(standard.offers().passthrough, None);
+        assert_eq!(standard.offers().passthrough, []);
         assert_eq!(
             standard.accepts(passed),
             Err(NotOffered { target: "mac".to_owned(), choice: "a passthrough" })
@@ -3595,13 +3650,13 @@ mod tests {
     fn virtual_displays_are_one_unless_asked_and_only_where_they_are_created() {
         let one = ConfigFile::parse(&rdp_toml("")).unwrap().targets.remove(0);
         assert_eq!(one.virtual_displays, 1);
-        assert_eq!(one.offers().passthrough, Some(Passthrough::RdpGraphics));
+        assert_eq!(one.offers().passthrough, [Passthrough::RdpGraphics]);
 
         let two = ConfigFile::parse(&rdp_toml("virtual_displays = 2")).unwrap().targets.remove(0);
         assert_eq!(two.virtual_displays, 2);
-        assert_eq!(two.offers().passthrough, Some(Passthrough::RdpGraphics), "the passthrough shows one display of the span");
+        assert_eq!(two.offers().passthrough, [Passthrough::RdpGraphics], "the passthrough shows one display of the span");
         assert!(two.offers().resize, "the window still drives each display's size");
-        assert_eq!(two.accepts(Choices { passthrough: true, ..Choices::default() }), Ok(()));
+        assert_eq!(two.accepts(Choices { passthrough: Some(Passthrough::RdpGraphics), ..Choices::default() }), Ok(()));
         // Where the second sits is chosen only where there is a second, on a host
         // that is told where: the Mac places its own.
         let below = Choices { placement: Placement::Bottom, ..Choices::default() };
@@ -3629,7 +3684,7 @@ vnc_password = \"x\"")).unwrap_err();
         .remove(0);
         assert_eq!(mac.virtual_displays, 2);
         assert!(mac.accepts(below).is_err());
-        assert_eq!(mac.offers().passthrough, Some(Passthrough::AppleMedia), "each display is a stream of its own");
+        assert!(mac.offers().passthrough.contains(&Passthrough::AppleMedia), "each display is a stream of its own");
         // One is every target's default and so is accepted anywhere.
         ConfigFile::parse(&vnc_toml("virtual_displays = 1
 vnc_password = \"x\"")).unwrap();
@@ -4041,11 +4096,11 @@ vnc_password = \"x\"")).unwrap();
             .targets
             .remove(0)
         };
-        let passed = Choices { passthrough: true, ..Choices::default() };
+        let passed = Choices { passthrough: Some(Passthrough::RdpGraphics), ..Choices::default() };
         let win = rdp("");
         assert_eq!(
             win.offers(),
-            Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics), placement: false, pipeline: true }
+            Offers { resize: true, audio: true, passthrough: &[Passthrough::RdpGraphics], placement: false, pipeline: true }
         );
         let composes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false };
         let plan = win.render_plan(passed, composes);
@@ -4077,7 +4132,7 @@ vnc_password = \"x\"")).unwrap();
         assert!(!win.render_plan(unasked, decodes).rdp_h264, "lossless unless chosen");
 
         let bitmap = rdp("egfx = false");
-        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: None, placement: false, pipeline: false });
+        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false });
         assert_eq!(
             bitmap.accepts(passed),
             Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })
@@ -4253,7 +4308,7 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80 · libvpx · adaptive");
     }
 
@@ -4265,7 +4320,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80 · libvpx");
     }
 

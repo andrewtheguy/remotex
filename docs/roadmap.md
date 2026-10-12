@@ -144,9 +144,9 @@ tested, on a physical Mac.
 A Mac's passed HEVC is for a LAN, and a browser on a slow link is served by a
 session started without the passthrough, re-encoded here as VP9
 ([A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link)).
-Two streams the Mac makes itself could be passed in its place, each chosen at
-the picker as an RDP host's H.264 is. Both have only been probed on a virtual
-Mac, and neither has been decoded.
+A stream the Mac makes itself could be passed in its place, chosen at the
+picker as an RDP host's H.264 is. It has only been probed, and has not been
+decoded.
 
 - **Standard mode's Adaptive encoding.** Asked as Apple's viewer's Adaptive
   quality asks, a Mac sends its own 8×8 DCT tiles: a changed area comes coarse,
@@ -156,13 +156,6 @@ Mac, and neither has been decoded.
   forwarded undecoded, and the Mac's socket paced by the browser's link. Open:
   the decoder itself, how the coarse picture looks and for how long, and the
   session against ZRLE re-encoded as VP9 on the same link.
-- **High Performance's H.264, for a slower connection.** Offered H.264 alone, a
-  Mac sends it in place of the HEVC, and its rate follows the picture where the
-  HEVC stays near 20 Mbit/s ([Negotiation](apple-vnc-889.md#negotiation)). It is
-  8-bit 4:2:0, so its text is softer than the HEVC's. Open: whether its rate
-  answers the reports the HEVC's does, whether a browser decodes it and how it
-  looks, and what a display change, a keyframe request, a loss and four tiles
-  do to it.
 
 ### Verifying an RDP host's certificate
 

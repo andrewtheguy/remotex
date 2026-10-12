@@ -2118,11 +2118,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: None, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
-    /// A session started with nothing but the target's passthrough.
-    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: None, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
+    /// A session started with nothing but a Mac's HEVC passed.
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -2155,7 +2155,7 @@ mod tests {
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
             let size = if self.resize { Sizing::Window } else { Sizing::Target };
-            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false }
+            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: None, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -2648,7 +2648,7 @@ mod tests {
                 },
             );
             let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true, placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
+            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::Lossless, whole: false };
 
             let token_a = mgr.claim(false, None, "login").unwrap();
             let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();
@@ -2740,7 +2740,7 @@ mod tests {
         let token = mgr.claim(false, None, "login").unwrap();
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "win", None, PASSED).await.unwrap();
+        mgr.connect(att.id, "win", None, Choices { passthrough: None, ..PASSED }).await.unwrap();
         assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { rdp_graphics: true, rdp_h264: false, .. })));
         let expect_passed_win = async |events: &mut mpsc::Receiver<AttachEvent>| match recv(events).await {
             AttachEvent::Msg(ServerMsg::Connected { name, passthrough, .. }) => {
@@ -3523,7 +3523,7 @@ mod tests {
             let token = mgr.claim(false, None, "login").unwrap();
             let mut att = mgr.attach(&token, None, TAKES).await.unwrap();
             expect_picker(&mut att.events).await;
-            let choices = Choices { passthrough: apple_media, ..Choices::default() };
+            let choices = Choices { passthrough: apple_media.then_some(Passthrough::AppleMedia), ..Choices::default() };
             mgr.connect(att.id, "mac", None, choices).await.unwrap();
             match recv(&mut att.events).await {
                 AttachEvent::Msg(ServerMsg::Connected { audio, passthrough, .. }) => {

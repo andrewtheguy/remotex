@@ -1212,6 +1212,7 @@ one field, and a second in a session that passes the picture:
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
 | `tilesPerFrame` (video stream field 6) | 4 | 4, decoded here or passed; 1 for a display under 144 rows that four tiles fail on, and for a passed session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together, or the page. One tile is one picture of the whole display on the one SSRC. |
+| The video stream's codecs (field 3) | H.264 (123) and HEVC (100) | Both, and H.264 alone for a session started with the H.264 passthrough | Offered both the Mac sends HEVC; offered 123 alone, H.264. |
 
 The video offer names two codecs by their RTP payload numbers, 123 for H.264
 and 100 for HEVC, each with its own feature string. Offered both, the Mac sends
@@ -1223,12 +1224,14 @@ same leg and under the same keys, with the sound unchanged. On macOS 26.6 at
 reference frames and a 13-bit picture order count, and tagged with the HEVC
 stream's colours: Display P3 primaries, sRGB transfer, BT.709 matrix. Its
 parameter sets do not come as NAL units of their own. A keyframe's first packet
-is an MP4 `avc1` sample description holding them, and the IDR follows as FU-A
-fragments. Remotex does not ask for it.
+is a unit of type 18 (first byte `0x92`), four bytes and then an MP4 `avc1`
+sample description holding them in its `avcC` box, and the IDR follows as FU-A
+fragments; the pictures after it come a packet each. Remotex asks for it in a
+session started with the H.264 passthrough, and passes it to the browser
+([The Mac's H.264](architecture.md#the-macs-h264)).
 
-Its rate follows the picture, where the HEVC's does not. A probe that sent no
-rate reports ran each codec alone against a virtual Mac, at 1600×1000 with one
-tile, for 20 s a run:
+A probe that sent no rate reports ran each codec alone against a virtual Mac,
+at 1600×1000 with one tile, for 20 s a run:
 
 | The display | H.264, after the first second | HEVC, after the first second |
 |---|---|---|
@@ -1237,10 +1240,8 @@ tile, for 20 s a run:
 | A 30 fps animation in a quarter of it | 9.2–11.0 Mbit/s | 19.3–21.2 Mbit/s |
 | A detailed picture panning across a window | 20.8 and 21.0 Mbit/s | 20.5 and 20.9 Mbit/s |
 
-- **The HEVC stays near its 20 Mbit/s floor** whatever the display does. The
-  H.264 reaches it only when the picture asks for it.
-- **The first picture is smaller too:** about 110 kB of a still display in its
-  first second, where the HEVC sent 2.2 MB.
+- **The first picture:** about 110 kB of a still display in its first second,
+  where the HEVC sent 2.2 MB.
 - **Not known:** why the HEVC spends that on a still display, what made
   repeats of a run differ, and whether the H.264 obeys the rate reports the
   HEVC does ([Rate control](#rate-control)).
@@ -1259,15 +1260,27 @@ the strip's number, a frame's strips sharing its timestamp.
   picture of each other strip that is not an IDR, and each strip decoded on its
   own named pictures it did not have.
 - **The packets carry the order number.** A picture comes as FU-B fragments,
-  every one with the number after its FU header, or, where it fits one packet,
-  as a STAP-B. With one tile it is FU-A and there is no number.
+  every one with the number after its FU header, or as a STAP-B. A keyframe's
+  sample description comes in a packet of its own ahead of the first and the
+  last strips' pictures, and aggregated with the picture in the STAP-B of the
+  two between, seen where those were small. With one tile it is FU-A and
+  single units, and there is no number.
+- **Nothing says the pictures come in decoding order.** The sequence parameter
+  set has a VUI (full range, Display P3 primaries, sRGB transfer, BT.709
+  matrix) and no bitstream restriction, allows 12 reference frames, and each
+  picture's order count is its place in the decoding order, one more than the
+  last.
 - **A loss is not recovered from by itself.** A run that lost packets in its
   third frame and asked for nothing decoded two frames and no picture after
   them.
+- **A PLI brings a keyframe.** One sent as SRTCP was answered at the next frame
+  by an IDR of strip 0 and a picture of each other strip, each with its
+  description.
 
-Seen on the virtual Mac only: no browser was given it, nothing but the
-four-strip capture was decoded, and a display change and a keyframe request
-were not tried.
+Seen at 1600×1000 and 2880×1800. Passed through remotex, Chrome on Linux
+decoded it in its software decoder, and Chrome and Safari on a Mac decoded it;
+a second display and whether the H.264 obeys the rate reports have not been
+tried.
 
 The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
 sets its bits and then byte-swaps the word before sending it. A published

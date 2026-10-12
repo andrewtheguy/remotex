@@ -677,16 +677,15 @@ struct TargetInfo {
     /// BETA: whether a page whose own decoder refuses this target's passed HEVC
     /// can decode it in the software decoder this gateway serves.
     software: bool,
-    /// The stream the picker offers to pass untouched, `null` where the target
-    /// has none.
-    passthrough: Option<crate::config::Passthrough>,
-    /// Whether passing that stream is the only way this gateway can serve the
-    /// target: an RDP host's pipeline, which the gateway never composes, and a
-    /// High Performance Mac on a host without the library that decodes its
-    /// picture. The picker then shows the choice made, and a browser that cannot
-    /// take the stream cannot start the target.
-    #[serde(rename = "passthroughOnly")]
-    passthrough_only: bool,
+    /// The streams the target can pass untouched, in the picker's order: none,
+    /// an RDP host's pipeline, or a High Performance Mac's HEVC and its H.264.
+    passthroughs: &'static [crate::config::Passthrough],
+    /// Whether this gateway can serve the target's picture encoded here, as VP9.
+    /// Not an RDP host's pipeline, which the gateway never composes and passes in
+    /// every session, so a browser that cannot take it cannot start the target;
+    /// and not a High Performance Mac's on a host without the library that
+    /// decodes its picture, where the picker greys that choice.
+    encoded: bool,
     /// Whether where the second virtual display sits is a choice.
     placement: bool,
     /// Whether how the host draws the graphics pipeline, lossless or adaptive
@@ -727,11 +726,11 @@ impl TargetInfo {
             default_size: target.sized().then(|| crate::config::DEFAULT_SIZE.into()),
             audio: offers.audio,
             software: target.software(page_hevc),
-            passthrough: offers.passthrough,
+            passthroughs: offers.passthrough,
             // An RDP host's pipeline, where it is on, passes in every session; a High
-            // Performance Mac's picture, on a host that cannot decode it.
-            passthrough_only: offers.passthrough.is_some_and(|passthrough| !passthrough.chosen())
-                || (target.media_stream() && !apple_decoders),
+            // Performance Mac's picture is decoded only on a host that can.
+            encoded: offers.passthrough.iter().all(|passthrough| passthrough.chosen())
+                && (!target.media_stream() || apple_decoders),
             placement: offers.placement,
             pipeline: offers.pipeline,
         }
@@ -1483,22 +1482,23 @@ mod tests {
         // sizes, no sound, no stream.
         assert_eq!(
             entry("mac", true),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthrough":null,"passthroughOnly":false,"placement":false,"pipeline":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":[],"encoded":true,"placement":false,"pipeline":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthrough":"rdp-graphics","passthroughOnly":true,"placement":false,"pipeline":true}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"encoded":false,"placement":false,"pipeline":true}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
-        // stream is, and is the only way in on a host without its decoders.
+        // picture is, in either codec, and can only be passed on a host without
+        // its decoders.
         let fast = entry("fast", true);
-        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthrough":"apple-media","passthroughOnly":false,"placement":false,"pipeline":false}"#), "{fast}");
-        assert!(entry("fast", false).ends_with(r#""passthroughOnly":true,"placement":false,"pipeline":false}"#));
+        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"encoded":true,"placement":false,"pipeline":false}"#), "{fast}");
+        assert!(entry("fast", false).ends_with(r#""encoded":false,"placement":false,"pipeline":false}"#));
         // An RDP host's pipeline, on unless `egfx` turns it off, is passed in
         // every session, whatever this host decodes.
-        assert!(entry("win", false).ends_with(r#""passthroughOnly":true,"placement":false,"pipeline":true}"#));
+        assert!(entry("win", false).ends_with(r#""encoded":false,"placement":false,"pipeline":true}"#));
         // Where the second display sits is offered by a host asked for two.
         assert!(entry("two", true).ends_with(r#""placement":true,"pipeline":true}"#));
         // The page's HEVC decoder is a choice where the gateway has it and the

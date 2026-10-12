@@ -129,11 +129,13 @@ The host's own stream, passed through to the browser:
   session started with the passthrough: the Mac's HEVC picture, to a browser
   that decodes it (Chrome and Safari; not Firefox). Its AAC-ELD sound is passed
   in every session. It is tested against a physical Mac, from a desktop browser
-  and from a mobile browser on iOS. See
+  and from a mobile browser on iOS. A session started with the picker's H.264
+  is passed the H.264 the Mac sends where it is asked for that instead. See
   [Apple's media stream, passed through](#apples-media-stream-passed-through).
 
-The Mac's passthrough is a choice made at the picker, greyed for a browser that
-cannot take the stream. A Windows host's pipeline is not a choice: it is passed
+The Mac's passthrough is a choice made at the picker, of three: its HEVC passed,
+greyed for a browser that cannot take the stream, VP9 encoded here, and its
+H.264 passed. A Windows host's pipeline is not a choice: it is passed
 in every session of a target with the pipeline on, and a browser that cannot
 compose it cannot start that target. The passed pipeline follows the browser's
 link by the host's own pacing: fewer frames for a page that composes slowly, and
@@ -236,7 +238,8 @@ gateway.
   socket carries no picture: the tab is painted from the picture the session's
   page composes, handed across the browser
   ([RDP's graphics pipeline](#rdps-graphics-pipeline)).
-- Size, sound, the Mac's passthrough and how an RDP host draws its pipeline are
+- Size, sound, which of the Mac's streams is passed if either and how an RDP
+  host draws its pipeline are
   chosen under the target at the picker and carried by `connect`; they are not
   config keys, and the gateway holds the session to them. An RDP host's pipeline
   is not chosen: a target with it on passes it in every session. The size a session will have is shown before Start: a size
@@ -310,7 +313,7 @@ A session's picture reaches the browser one of two ways, both ordinary:
   the screen-vp9 repository and reaches here as a pin bump.
 - **Passed untouched**, as the remote made it, for the browser to decode or
   compose: today wlshare's VP9 on a `wlshare` target, a High Performance Mac's
-  HEVC in a session started with the target's passthrough, and an RDP host's
+  HEVC or its H.264 in a session started with one of them, and an RDP host's
   graphics pipeline in every session of a target with it on, each with its rule
   below. Another stream the user
   asks to pass joins them with a rule of its own; do not refuse it on this
@@ -337,16 +340,17 @@ last of the three refuses nobody: it decides only whether a passed pipeline's ho
 told it may draw with H.264, in a session started with Adaptive; a browser that
 says no has Adaptive greyed, and a session it reaches all the same, a
 takeover's, is drawn lossless. The other two say which passthrough the browser
-can take. The Mac's greys the choice at the picker, where a browser that says
-no starts the target encoded here; the pipeline's, which is no choice, disables
-Start for an RDP target with the pipeline on. Both refuse a `connect` whose
+can take. The Mac's greys its HEVC at the picker, where a browser that says
+no starts the target encoded here or passed as H.264; the pipeline's, which is no choice, disables
+Start for an RDP target with the pipeline on. No question is asked about a
+Mac's H.264: it is offered to every browser, and one that does not decode it
+finds out from its decoder, in the session. Both refuse a `connect` whose
 session would pass what the browser cannot take, and end the session of an
 owner that comes back answering no, which lands on the picker
 ([Session lifecycle](#session-lifecycle)). No other browser's answers meet a
-running session: a takeover ends it first. The targets they can leave
-unstartable are an RDP target with the pipeline on, for a browser that cannot
-compose it, and a High Performance Mac on a gateway whose host lacks FFmpeg,
-which can only pass the picture. Do not grow them into
+running session: a takeover ends it first. The one target they can leave
+unstartable is an RDP target with the pipeline on, for a browser that cannot
+compose it. Do not grow them into
 a wider capability negotiation, and do not let either rebuild a session with
 choices nobody made.
 Preserve the announced configuration and color-space behavior in
@@ -440,8 +444,8 @@ that selects the stream. See
   folder `[hp_decoders]` names, loaded at start-up, so published release
   artifacts do not link it; only the non-default `apple-hp-media-static` feature
   links a static archive instead. A gateway whose host lacks it can only pass
-  the picture: `/api/targets` says so, the picker shows the passthrough as
-  chosen, and a session started without it all the same ends before it dials
+  the picture: `/api/targets` says so, the picker greys the choice of VP9, and
+  a session started with it all the same ends before it dials
   the Mac.
   A session that decodes the picture is offered it as Apple's viewer is, in
   four strips the one decoder puts together, and so is one passed, which the
@@ -461,12 +465,24 @@ that selects the stream. See
   every other target, and everything but the display follows `ard`. Call it
   unofficial wherever it is named, and tested with macOS 26 only; do not present
   it as a mode of Apple's viewer or grow it into a third subtype.
-- The passthrough on `ard-high-performance` passes the Mac's picture
+- The picker offers an `ard-high-performance` target's picture three ways, in
+  this order: the Mac's HEVC passed, VP9 encoded here, and the Mac's H.264
+  passed. The first that this browser and this gateway can do is taken until
+  another is chosen. Do not add a fourth, reorder them, or let the gateway
+  choose among them for a browser.
+- The HEVC passthrough passes the Mac's picture
   unaltered, for a LAN: HEVC access units on the display socket. It is offered
   at the picker to a browser that said it decodes the HEVC, or whose page
-  can decode it ([Decoded in the page](#decoded-in-the-page)); a session started
-  without it is sent VP9. The sound is not part of the choice: AAC-ELD units go
-  on `/ws/audio` either way. Decoded or passed, the
+  can decode it ([Decoded in the page](#decoded-in-the-page)), and greyed for
+  any other; a session started
+  with VP9 is sent that, which a gateway whose host lacks FFmpeg has greyed.
+- The H.264 passthrough asks the Mac for H.264 instead, by an offer that names
+  no HEVC, and passes that: High profile, 4:2:0. It is offered to every
+  browser. Do not ask a browser whether it decodes it at the picker, grey it, or fall back from it to another picture.
+  Its pictures pass unaltered; its sequence parameter set, which the Mac sends
+  inside a sample description and the gateway writes out, is written saying the
+  pictures come in decoding order. The sound is not part of the choice: AAC-ELD units go
+  on `/ws/audio` in all three. Decoded or passed, the
   stream is the only picture. Until its first picture, at connect and
   across every display change, the page says the screen is not available
   (`screenUnavailable`) and sends the Mac no input; the Mac's ZRLE
@@ -827,10 +843,13 @@ sends.
 #### Apple's media stream, passed through
 
 `ard-high-performance` decodes the Mac's HEVC here and encodes every picture again
-as VP9. A session started with the passthrough is sent the HEVC instead, as
+as VP9. A session started with the HEVC passthrough is sent the HEVC instead, as
 the Mac sent it, and the gateway neither decodes nor encodes a picture
-of the stream. The sound is passed in every session, started with the passthrough
-or not: the gateway has no decoder for the Mac's AAC-ELD, and the browser has.
+of the stream. One started with the H.264 passthrough has the Mac send H.264,
+which is passed the same way ([The Mac's H.264](#the-macs-h264) below); the rest
+of this section is about the HEVC, and holds for the H.264 where it does not say
+otherwise. The sound is passed in every session, whichever picture it was
+started with: the gateway has no decoder for the Mac's AAC-ELD, and the browser has.
 The passthrough is for a LAN. High Performance always enables its
 own rate controller, between 20 and 60 Mbit/s
 ([Rate control](apple-vnc-889.md#rate-control)); this is automatic media-stream
@@ -928,12 +947,13 @@ Three controls with similar names therefore remain separate:
   the 23 ms across six threads that decoding one took.
   Measured against macvm at 2880×1800 on an M2 Max, a picture took 9 ms
   across eight threads, 44 on one.
-  `render_plan` sets `apple_media` for a session started with the passthrough,
+  `render_plan` sets `apple_media` for a session started with the HEVC passthrough
+  (and `apple_h264` for one started with the H.264),
   which a `connect` is refused from a browser that can take it neither way; any
   other session is sent VP9. The plan
   is fixed for an engine: a reload that no longer decodes the stream ends the
   session and lands on the picker ([Session lifecycle](#session-lifecycle)).
-- **What passes** (`VideoSink::pass_hevc`). The receiver reassembles access units as
+- **What passes** (`VideoSink::pass_media`). The receiver reassembles access units as
   it always does, and hands them to the read loop in order rather than to the
   decoder thread. Each goes out as Annex B, a keyframe where it holds an IRAP
   picture, behind a `VideoFormat` whose configuration string and size are read from
@@ -1025,13 +1045,66 @@ Three controls with similar names therefore remain separate:
   and says so under Audio; Chrome and Safari decode it, and Firefox 153 on
   Linux accepted the configuration and produced no sound.
 - **Without the decoder.** The picture's decoder is the host's FFmpeg,
-  loaded when it is needed: when a session without the passthrough starts,
+  loaded when it is needed: when a session without a passthrough starts,
   and when `/api/targets` lists a High Performance target, which is how the
-  picker knows. On a host without it the picture can only be passed, so the
-  picker shows the passthrough as chosen, and for a browser that cannot take the
-  HEVC Start is greyed with the reason: that is the one target the browser's
-  answer leaves unstartable. A `connect` that asks for the picture decoded all the
+  picker knows (`encoded`). On a host without it the picture can only be passed,
+  so the picker greys VP9 with the reason. A browser that cannot take the HEVC
+  either is left the H.264, which is taken for it, so the target still starts.
+  A `connect` that asks for the picture decoded all the
   same is told so by the engine, naming the library, before it dials the Mac.
+
+##### The Mac's H.264
+
+A session started with the picker's H.264 (`choices.passthrough` of
+`apple-h264`, `Passthrough::AppleH264`) asks the Mac for H.264 and passes it.
+Chrome on Linux decodes it, in its software decoder, and so do Chrome and
+Safari on a Mac.
+
+- **The offer names H.264 alone.** Offered both codecs, as Apple's viewer offers
+  them, the Mac sends HEVC; offered payload 123 alone it sends H.264
+  (`Codec::H264` in `src/vnc_apple_media.rs`, which `Receive::Pass` carries to
+  the offer). The ports, the keys, the sound leg, the rate reports and the
+  four strips are the HEVC session's.
+- **The same strips, as RFC 6184 packets.** Each strip is a High profile 4:2:0
+  picture under the display's SSRC plus its number, and the four are one stream
+  in one decoding order, which `Strips` puts back as it does the HEVC's. A
+  picture comes as FU-B fragments, each with the order number, or as a STAP-B;
+  one sent whole, to a display too low for strips, as FU-A fragments and single
+  units with no number.
+- **Its parameter sets come in a sample description.** The Mac sends none as
+  NAL units: each keyframe strip carries a unit of type 18 holding an MP4 `avc1`
+  sample description, and the receiver takes the sets out of its `avcC` box and
+  puts them ahead of the picture (`h264_parameter_sets`), so what the browser is
+  sent is Annex B with its parameter sets in band, a keyframe where it holds an
+  IDR. The `videoFormat` names the stream by its own set: `avc1.` and the
+  profile, constraints and level, `avc1.640020` for a strip of a 1600×1000
+  display.
+- **The set is written saying there is no reordering.** The Mac's sequence
+  parameter set has a VUI with no bitstream restriction, which leaves a decoder
+  free to hold back as many pictures as its buffer has room for before it shows
+  the first: sixteen strips, on a screen that may go still before they come. The
+  stream reorders nothing, each picture's order count being its place in the
+  decoding order, so the gateway writes the set with the restriction that says so
+  (`h264_in_decoding_order`: `max_num_reorder_frames` 0, a buffer of the set's own
+  reference frames, the other fields at the values their absence stood for).
+  That is the one thing of the stream the gateway writes; every picture is the
+  Mac's. A set that already says it, or that the gateway cannot read, passes as
+  it came.
+- **A restart is an IDR, by a PLI alone.** The Mac answers a PLI with the first
+  strip's IDR and a picture of each other strip within tens of milliseconds, as
+  it does for the HEVC. No picture is acknowledged and no refresh asked for, in
+  strips or whole.
+- **An odd side is coded a pixel shorter.** 4:2:0 has no odd size to say: at
+  1281×801 the Mac sent strips 1280 wide, and one tile as 1280×800. So a strip
+  is taken as its display's where its width is the display's rounded down to
+  even, a whole picture where both its sides are, and the last column or row is
+  not sent.
+- **No browser is asked.** The picker offers it to every browser and the
+  gateway serves it to any (`Decoders::takes`). The page decodes it in the
+  browser's own `VideoDecoder`, a strip a picture, and draws a frame's strips
+  as it draws the HEVC's from that decoder (`paintStrips`); there is no software
+  decoder for it in the page. A browser that does not decode it says so in the
+  session, by its decoder's error.
 
 #### RDP's graphics pipeline, passed through
 
@@ -1067,8 +1140,9 @@ the pipeline.
   not cross-origin isolated has no shared memory, which is what a proxy that
   drops the gateway's two headers leaves, and one without WebGL 2 has nowhere to
   present. So the page asks itself once (`frontend/src/rdpGraphics.ts`) and states
-  `rdp_graphics=true|false` on its session socket. `/api/targets` marks an
-  `rdp` target with its pipeline on `passthroughOnly`, and the picker says it is
+  `rdp_graphics=true|false` on its session socket. `/api/targets` lists the
+  pipeline among an `rdp` target's `passthroughs` and says the target is not
+  `encoded`, and the picker says it is
   always passed, as a note and not a row; for a page that said no it disables Start with the
   reason, `connect` refuses the target, and an owner coming back from such a
   page has the session ended. `render_plan` sets `rdp_graphics` on every session
@@ -1699,7 +1773,7 @@ instead of a reconnect.
 
 These things about a session are chosen by whoever starts it, before it starts:
 how the desktop is sized, whether the remote's sound is taken and as what,
-whether a Mac's own stream is passed through, where a second virtual display
+which of a Mac's own streams is passed through if either, where a second virtual display
 sits, how an RDP host draws its graphics pipeline, and, BETA, whether a Mac's
 passed HEVC is decoded by the page's
 own software decoder ([Decoded in the page](#decoded-in-the-page)), which is the
@@ -1720,7 +1794,7 @@ and `GET /api/targets` carries it:
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden |
 | `vnc`, `ard` | no | hidden | hidden | hidden |
 | `vnc`, `ard` with `virtual_display` | yes | hidden | hidden | hidden |
-| `vnc`, `ard-high-performance` | yes | hidden: always carried | shown: the Mac's media stream | hidden |
+| `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC, VP9 encoded here, or the Mac's H.264 | hidden |
 
 - **The size is shown before Start.** A desktop is sized one of three ways
   (`Sizing` in `src/config.rs`): kept at the target's size, which is its
@@ -1758,16 +1832,26 @@ and `GET /api/targets` carries it:
   since the browser composes a passed pipeline whole and shows one display of
   it, and it alone has the second display's row. A `connect` that names a choice the target does
   not offer is refused with an `error`, and the slot stays as it was.
-- **Offered but unavailable is greyed, with the reason.** The Mac's passthrough
+- **A Mac's picture is one of three.** `choices.passthrough` names the stream
+  passed, `apple-media` for the Mac's HEVC or `apple-h264` for its H.264, or
+  nothing for VP9 encoded here (`Passthrough` in `src/config.rs`). The picker's
+  Picture group shows them as radios in that order, HEVC passed through, VP9
+  encoded by the gateway, H.264 passed through, and takes the first that is not
+  greyed until somebody chooses another (`pictureOptions` in
+  `frontend/src/targetChoices.ts`). A `connect` that names none is sent VP9.
+- **Offered but unavailable is greyed, with the reason.** The Mac's HEVC
   is greyed wherever the browser cannot take it: one that does not decode the
   Mac's HEVC, or a gateway with no HEVC decoder archive to serve a browser that
-  needs it. `/api/targets` says, as `passthroughOnly`, where a stream can only
-  be passed: on every `rdp` target with the pipeline on, which the gateway never
-  composes, and where a gateway's host lacks FFmpeg and so cannot decode a Mac's
-  picture at all. There the picker says the stream is always passed, as a note
-  with no box to tick, and where the
+  needs it. VP9 is greyed where the gateway's host lacks FFmpeg and so cannot
+  decode a Mac's picture at all. The Mac's H.264 is never greyed. `/api/targets`
+  says which streams a target can pass, as `passthroughs`, and as `encoded`
+  whether its picture can be encoded here: not on an `rdp` target with the
+  pipeline on, which the gateway never composes, and not on a High Performance
+  Mac without FFmpeg. For the pipeline the picker says the stream is always
+  passed, as a note
+  with nothing to choose, and where the
   browser cannot take it Start is disabled and says why, before the host is
-  dialled; for the pipeline that reads "This browser cannot compose the host's
+  dialled: "This browser cannot compose the host's
   graphics pipeline, which this target always passes". A `connect` whose
   session would pass a stream the browser said it cannot take is refused
   (`ConnectError::Beyond`). Adaptive is greyed for a browser whose
@@ -1811,7 +1895,8 @@ and `GET /api/targets` carries it:
   reload wherever the browser can play without a click.
 - **The browser remembers.** What was chosen under a target is kept in the
   browser's local storage per target, and is how the target opens next time.
-  Until then a configured size is the size and no remote's sound plays. A greyed
+  Until then a configured size is the size, no remote's sound plays, and a Mac's
+  picture is the first of its three this browser can have. A greyed
   row is not remembered, and a remembered size the target does not offer this
   client is not sent.
 - **A session is held to its choices, and to the browser that made them.** The
@@ -1856,7 +1941,7 @@ one. Both appear on the client's session card, which
 (`mediaLabel.ts`).
 
 `GET /api/targets` carries `subtype` too, beside the options each target offers
-(`resize`, `audio`, `passthrough`, `passthroughOnly`, `placement` and
+(`resize`, `audio`, `passthroughs`, `encoded`, `placement` and
 `pipeline`) and the sizes it keeps
 (`size`, the configured one, and `defaultSize`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,

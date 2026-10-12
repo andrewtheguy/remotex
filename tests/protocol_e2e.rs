@@ -1245,7 +1245,7 @@ fn mac_target(port: u16) -> TargetConfig {
 /// and the picture passed to the browser [`connect_mac_ws`] stands in for, so the
 /// session needs no decoder and a host without FFmpeg drives it too;
 /// the fake names no ports for the stream anyway.
-const MAC_CHOICES: &str = r#"{"size":"window","passthrough":true}"#;
+const MAC_CHOICES: &str = r#"{"size":"window","passthrough":"apple-media"}"#;
 
 /// A session started with nothing but the window sizing the desktop.
 const RESIZE: &str = r#"{"size":"window"}"#;

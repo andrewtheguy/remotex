@@ -229,7 +229,9 @@ export async function expectDecodedAsTheBrowserSays(page: Page): Promise<void> {
         ? "the page's"
         : "none: the session takes VP9",
   });
-  await logInAndConnectTo(page, HEVC_TARGET ?? "", "", { passthrough: passed });
+  await logInAndConnectTo(page, HEVC_TARGET ?? "", "", {
+    passthrough: passed ? "apple-media" : null,
+  });
 
   expect(await offered(page)).toBe(SERVES_DECODER);
   expect(await page.evaluate(() => globalThis.crossOriginIsolated)).toBe(true);
@@ -237,7 +239,7 @@ export async function expectDecodedAsTheBrowserSays(page: Page): Promise<void> {
   // Stated whatever the browser's own answer: keeping the stream in that decoder
   // is the page's choice and not its only way.
   expect(seen.pageHevc, "this page's").toBe("true");
-  expect(seen.connects.at(-1)?.passthrough).toBe(passed);
+  expect(seen.connects.at(-1)?.passthrough).toBe(passed ? "apple-media" : null);
 
   if (!passed) {
     await expect

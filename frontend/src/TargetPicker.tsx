@@ -11,6 +11,7 @@ import { runnableDecoders } from "./softwareSupport.ts";
 import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 import {
   type Choices,
+  type PictureOption,
   type Pipeline,
   type PipelineRow,
   readRememberedChoices,
@@ -316,34 +317,24 @@ export default function TargetPicker({
                         }
                       />
                     )}
-                    {/* Only what the target's type offers has a row; one that
-                        cannot be had here is greyed and says why. */}
-                    {options.rows.map((row) => (
-                      <label
-                        key={row.key}
-                        className={`picker-option${row.disabled ? " picker-option-unavailable" : ""}`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={row.checked}
-                          disabled={row.disabled || pendingTarget !== null}
-                          onChange={(e) =>
-                            setRemembered((was) =>
-                              rememberChoice(
-                                was,
-                                t.name,
-                                row.key,
-                                e.target.checked,
-                              ),
-                            )
-                          }
-                        />
-                        <span className="picker-option-text">
-                          <span>{row.label}</span>
-                          <span className="picker-option-note">{row.note}</span>
-                        </span>
-                      </label>
-                    ))}
+                    {/* How a High Performance Mac's picture reaches this
+                        browser, where the target has one to choose. */}
+                    <PictureChoice
+                      target={t.name}
+                      pictures={options.pictures}
+                      chosen={options.choices.passthrough}
+                      locked={pendingTarget !== null}
+                      choose={(passthrough) =>
+                        setRemembered((was) =>
+                          rememberChoice(
+                            was,
+                            t.name,
+                            "passthrough",
+                            passthrough,
+                          ),
+                        )
+                      }
+                    />
                     {options.blocked && (
                       <p className="picker-error">{options.blocked}</p>
                     )}
@@ -386,6 +377,50 @@ export default function TargetPicker({
         <AppVersion className="app-version" />
       </div>
     </div>
+  );
+}
+
+// How a High Performance Mac's picture reaches this browser: one of its own
+// streams passed through, or VP9 encoded by the gateway. One that cannot be had
+// here is greyed, with the reason. Nothing on a target with no such choice.
+function PictureChoice({
+  target,
+  pictures,
+  chosen,
+  locked,
+  choose,
+}: {
+  target: string;
+  pictures: PictureOption[] | null;
+  chosen: Choices["passthrough"];
+  locked: boolean;
+  choose: (passthrough: Choices["passthrough"]) => void;
+}) {
+  if (!pictures) {
+    return null;
+  }
+  return (
+    <fieldset className="picker-choice">
+      <legend>Picture</legend>
+      {pictures.map((picture) => (
+        <label
+          key={picture.value ?? "encoded"}
+          className={`picker-option${picture.disabled ? " picker-option-unavailable" : ""}`}
+        >
+          <input
+            type="radio"
+            name={`picker-picture-${target}`}
+            checked={chosen === picture.value}
+            disabled={picture.disabled || locked}
+            onChange={() => choose(picture.value)}
+          />
+          <span className="picker-option-text">
+            <span>{picture.label}</span>
+            <span className="picker-option-note">{picture.note}</span>
+          </span>
+        </label>
+      ))}
+    </fieldset>
   );
 }
 
