@@ -128,8 +128,11 @@ explored:
     A passed session with H.264 now takes both (`src/rdp.rs`); one without H.264
     takes neither. Still to do:
     - QA it from a browser on a really slow link;
-    - measure it with the H.264 by region a session asks for, rather than the
-      probe's whole desktop;
+    - decide whether a passed session with H.264 asks for the whole desktop in
+      H.264 (`AVC_THINCLIENT`). By region, the host is told the page's link, but
+      the desktop is mostly RemoteFX Progressive and the frame rate does not
+      improve: 4.4 frames a second at 25.7 KB behind a 1 Mbit/s page, where the
+      whole desktop drew 17.5 at 6.4 KB;
     - see how a round trip on an idle link should include the page's own
       latency, which the frame-composed signal does not carry.
 

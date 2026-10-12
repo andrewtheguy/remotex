@@ -180,19 +180,38 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   the same page got 13 frames a second at 9.6 KB. For a passed session the
   detection has to report the page's link, not the socket's.
 - **Answered at the page's pace, the host follows the page.** So a session that
-  passes its pipeline answers at the caller's pace (`Paced` in `session.rs`). A
-  round trip is answered once the caller has composed everything handed over
-  before it. A bandwidth measurement is answered once the caller has composed
-  everything up to its Stop, and is timed between the caller reaching its Start
-  and reaching its Stop. A caller with nothing waiting is answered at once. The
-  clock is the frame-composed signal a page already sends, and everything stays
-  on TCP.
+  passes its pipeline answers at the caller's pace (`Paced` in `session.rs`). The
+  pace is read from how fast the caller composes while frames wait for it, by
+  the frame-composed signal a page already sends:
+  - a bandwidth measurement says it took no less than the caller would take
+    over its bytes;
+  - a round trip is answered once the frames waiting for the caller would have
+    gone through at that pace.
+
+  A caller with nothing waiting is answered with what arrived here, and
+  everything stays on TCP. Nothing waits on the host. A first version, which
+  held each reply until the caller had composed the frames before it, stalled a
+  host drawing H.264 by region: the host held a frame's end for the reply, and
+  the reply waited for that frame.
   - **1 Mbit/s page:** the host was told about 1.2 Mbit/s. It drew 17.7 frames a
     second at 6.4 KB, 66% of regions at 38, 0.1 to 0.25 s behind the desktop.
   - **4 Mbit/s page:** it was told 4.3 to 5 Mbit/s and drew 20 frames a second
     at 20.6 KB, at 22 and 30 with none at 38.
   - **1 Mbit/s page, paced, UDP not offered:** no Network Characteristics
     Results, and 13.1 frames a second at 9.5 KB as before.
+  - **On a second host, `windows-ent-sandbox`, with a full-screen video and a
+    1 Mbit/s page.** It was told 1.0 to 1.4 Mbit/s. With whole-desktop H.264 it
+    drew 17.5 frames a second at 6.4 KB, 70% of regions at 38, about 0.2 s
+    behind the desktop. With the H.264 by region a session asks for, it drew
+    4.4 frames a second at 25.7 KB, 0.56 s behind; without the change, 5.0 at
+    24.7 KB, 1.6 s behind. By region the desktop is mostly RemoteFX Progressive
+    and ClearCodec, which this does not rate-control: 81% of Progressive first
+    passes were at quality 25 either way.
+  - **The same host over a LAN, by region.** Without the change, its H.264
+    regions were at 25 and 33 and its Progressive first passes mostly at quality
+    50, at 7 Mbit/s. With it, every H.264 region was at 25 and every first pass
+    at 255, at 12 Mbit/s. So the coarse picture by region on a fast link is the
+    host's fixed-quality mode, which the detection and the claim of UDP lift.
 
 The detector's and the link probe's earlier defects are fixed: the
 connect-time count includes each payload's header, malformed requests are

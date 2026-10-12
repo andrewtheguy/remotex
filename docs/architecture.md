@@ -1482,11 +1482,15 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   UDP, which
   it turns down when the host takes it up, so all of it stays on TCP. For such a
   client the host rate-controls its H.264 to the bandwidth it is told, and the
-  session tells it the page's: each answer waits for the page to compose what
-  came before it (`Paced` in `src/rdp_client/session.rs`). Measured with
+  session tells it the page's, read from how fast the page composes while
+  frames wait for it (`Paced` in `src/rdp_client/session.rs`). Measured with
   whole-desktop H.264 and a stand-in page, the host drew 17.7 frames a second at
   6.4 KB, mostly at its coarsest quantizer, for a page on 1 Mbit/s, and 20 a
-  second at 20.6 KB with finer ones for a page on 4 Mbit/s. A passed session
+  second at 20.6 KB with finer ones for a page on 4 Mbit/s. With the H.264 by
+  region a session asks for, the desktop is mostly RemoteFX Progressive, which
+  this does not rate-control: behind a 1 Mbit/s page the frame rate held, the
+  delay fell from 1.6 s to 0.56 s, and over a LAN every region went to the
+  finest quality. A passed session
   without H.264 takes neither, and adapts only in the two ways below. See
   [The connection sequence](rdp-client.md#the-connection-sequence). Beside that,
   the host adapts in two more ways. It draws no more than about eleven frames ahead of its
