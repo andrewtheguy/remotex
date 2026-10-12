@@ -1675,6 +1675,7 @@ mod tests {
                     audio: crate::config::Sound::Off,
                     passthrough: true,
                     placement: crate::config::Placement::Right,
+                    pipeline: crate::config::Pipeline::Lossless,
                     whole: false,
                 }
             ),

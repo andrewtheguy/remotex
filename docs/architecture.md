@@ -36,11 +36,12 @@ picture and sound over the Mac's media stream, as Apple's viewer takes them),
 whose AAC-ELD sound every session passes to the browser, and whose HEVC a session
 started with the passthrough passes too rather than re-encoding it — see
 [Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
-session started with its passthrough is not decoded here either: the host's
-graphics pipeline is passed on for the browser to compose — see
+host's graphics pipeline is not decoded here either: on a target with the
+pipeline on, every session passes it on for the browser to compose — see
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
-How a session's desktop is sized, whether it takes the remote's sound and whether
-it passes the remote's stream are chosen at the picker before it starts — see
+How a session's desktop is sized, whether it takes the remote's sound, whether
+it passes the Mac's stream and how an RDP host draws its pipeline are chosen at
+the picker before it starts — see
 [What a session is started with](#what-a-session-is-started-with). Remote audio is encoded as
 Opus, save the Mac's passed AAC-ELD, wlshare's own Opus, passed too, and a target's lossless FLAC
 ([Lossless sound](#lossless-sound)), and sent on `/ws/audio`, never on the picture queue.
@@ -75,7 +76,7 @@ and optimization prioritize them.
 | Tier | Server | Target | Displays | Sound | Camera and microphone | Picture |
 |---|---|---|---|---|---|---|
 | 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
-| 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | VP9 from the gateway, or the graphics pipeline passed through |
+| 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; VP9 from the gateway on the bitmap path |
 | 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | VP9 from the gateway, or the Mac's HEVC passed through |
 | 3 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
 | baseline | any other VNC server | `vnc` | one framebuffer at the size the server says, at 1x | none | no | VP9 from the gateway |
@@ -111,16 +112,18 @@ ask for the stream. See
 
 #### Tier 2: modern Windows' Remote Desktop, and a Mac's High Performance Screen Sharing
 
-The host's own stream, passed through to the browser for a LAN:
+The host's own stream, passed through to the browser:
 
-- **Modern Windows' own Remote Desktop server**, in a session started with the
-  passthrough: the host's graphics pipeline (MS-RDPEGFX), composed in the browser
-  by the gateway's own compositor built to WebAssembly, which takes nearly all of
-  the picture's work off the gateway. It is tested against a
-  physical Windows 11 computer, from a desktop browser and from a mobile browser on iOS, with
-  sound and the clipboard beside it, and not yet with the camera or the
-  microphone. A target with the experimental `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"`
-  lets the host draw with H.264 on that pipeline, which the browser decodes, rate-controlled to the browser's link; with the default `"lossless"` what is passed is lossless. See
+- **Modern Windows' own Remote Desktop server**, in every session of a target
+  with the pipeline on: the host's graphics pipeline (MS-RDPEGFX), composed in
+  the browser by the gateway's own compositor built to WebAssembly, which takes
+  nearly all of the picture's work off the gateway. It is tested against a
+  physical Windows 11 computer, from a desktop browser and from a mobile browser
+  on iOS, with sound and the clipboard beside it, and not yet with the camera or
+  the microphone. A session started with the picker's Adaptive (alpha) lets the
+  host draw with H.264 on that pipeline, which the browser decodes,
+  rate-controlled to the browser's link; with the default Lossless what is passed
+  is lossless. See
   [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 - **macOS Screen Sharing's High Performance mode** (`ard-high-performance`), in a
   session started with the passthrough: the Mac's HEVC picture, to a browser
@@ -129,19 +132,21 @@ The host's own stream, passed through to the browser for a LAN:
   and from a mobile browser on iOS. See
   [Apple's media stream, passed through](#apples-media-stream-passed-through).
 
-The passthrough is a choice made at the picker, greyed for a browser that cannot
-take the stream. A Windows host's passed pipeline follows the browser's link by
-the host's own pacing: fewer frames for a page that composes slowly, and smaller
-ones while its socket backs up. A Mac's passed HEVC does not: its rate control
-keeps it between 20 and 60 Mbit/s by the link to the gateway alone, so on a slow
-link a High Performance session is started without it and sent the gateway's
-VP9, which adapts. See
+The Mac's passthrough is a choice made at the picker, greyed for a browser that
+cannot take the stream. A Windows host's pipeline is not a choice: it is passed
+in every session of a target with the pipeline on, and a browser that cannot
+compose it cannot start that target. The passed pipeline follows the browser's
+link by the host's own pacing: fewer frames for a page that composes slowly, and
+smaller ones while its socket backs up, and with Adaptive by the host's rate
+control too. A Mac's passed HEVC does not: its rate control keeps it between 20
+and 60 Mbit/s by the link to the gateway alone, so on a slow link a High
+Performance session is started without it and sent the gateway's VP9, which
+adapts. See
 [A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
-VP9 also serves a browser that cannot
-decode the Mac's stream, and a Windows host that draws with plain bitmap updates
-rather than the pipeline. On RDP the passthrough is the only way past VP9:
-without it the gateway composes the host's pipeline, or takes its bitmap updates,
-and encodes the picture as VP9.
+VP9 also serves a browser that cannot decode the Mac's stream, and on RDP only
+the bitmap path: a target with `egfx = false`, and a host that answers the
+offer of the pipeline with plain bitmap updates. The gateway composes no
+graphics pipeline.
 
 #### Tier 3: a Mac's Standard Screen Sharing
 
@@ -161,9 +166,9 @@ as needed rather than ahead of the tiers.
 
 Another RDP server, an older Windows or xrdp say, may happen to work if it
 speaks what the client implements ([The RDP client](rdp-client.md)), but it is
-not a target: it is not tested against. Its picture follows Windows' rule,
-encoded as VP9 in the gateway unless the session was started with the pipeline
-passed.
+not a target: it is not tested against. Its picture follows Windows' rule: a
+pipeline it draws is passed, and bitmap updates are encoded as VP9 in the
+gateway.
 
 ### The client and its bundle
 
@@ -227,13 +232,14 @@ passed.
   or a High Performance Mac and over a `wlshare` target's two outputs, for the
   second display at `/display/2` (alpha). That is one session shown twice, not a shared one; do not
   let a display socket in for any other login, or hand a tab the claim's token.
-  In a session started with an RDP host's pipeline passed, the second display's
+  In a session that passes an RDP host's pipeline, the second display's
   socket carries no picture: the tab is painted from the picture the session's
   page composes, handed across the browser
   ([RDP's graphics pipeline](#rdps-graphics-pipeline)).
-- Size, sound and passthrough are chosen under the target at the picker and
-  carried by `connect`; they are not config keys, and the gateway holds the
-  session to them. The size a session will have is shown before Start: a size
+- Size, sound, the Mac's passthrough and how an RDP host draws its pipeline are
+  chosen under the target at the picker and carried by `connect`; they are not
+  config keys, and the gateway holds the session to them. An RDP host's pipeline
+  is not chosen: a target with it on passes it in every session. The size a session will have is shown before Start: a size
   the desktop keeps, the target's `size` or the default, or the window's.
   Which of the three a target shows is its type's to say
   (`TargetConfig::offers`): one it does not offer has no row and is refused in a
@@ -303,9 +309,10 @@ A session's picture reaches the browser one of two ways, both ordinary:
   conversion in front of them, the codec string or the quality walk changes in
   the screen-vp9 repository and reaches here as a pin bump.
 - **Passed untouched**, as the remote made it, for the browser to decode or
-  compose: today wlshare's VP9 on a `wlshare` target, and in a session started
-  with the target's passthrough a High Performance Mac's HEVC or an RDP host's
-  graphics pipeline, each with its rule below. Another stream the user
+  compose: today wlshare's VP9 on a `wlshare` target, a High Performance Mac's
+  HEVC in a session started with the target's passthrough, and an RDP host's
+  graphics pipeline in every session of a target with it on, each with its rule
+  below. Another stream the user
   asks to pass joins them with a rule of its own; do not refuse it on this
   rule's account.
 
@@ -327,15 +334,19 @@ gateway nothing of it: whether it takes the gateway's 4:4:4 VP9, which decides
 only whether the page decodes that stream itself
 ([Decoded in the page](#decoded-in-the-page)). The
 last of the three refuses nobody: it decides only whether a passed pipeline's host is
-told it may draw with H.264, on a target whose `egfx` key allows it. The
-other two say which passthrough the browser can take. They grey the choice at
-the picker, where a browser that says no starts the target encoded here; they
-refuse a `connect` that asks for the passthrough all the same; and they end the
-session of an owner that comes back answering no, which lands on the picker
+told it may draw with H.264, in a session started with Adaptive; a browser that
+says no has Adaptive greyed, and a session it reaches all the same, a
+takeover's, is drawn lossless. The other two say which passthrough the browser
+can take. The Mac's greys the choice at the picker, where a browser that says
+no starts the target encoded here; the pipeline's, which is no choice, disables
+Start for an RDP target with the pipeline on. Both refuse a `connect` whose
+session would pass what the browser cannot take, and end the session of an
+owner that comes back answering no, which lands on the picker
 ([Session lifecycle](#session-lifecycle)). No other browser's answers meet a
-running session: a takeover ends it first. The one target
-they can leave unstartable is a High Performance Mac on a gateway whose host
-lacks FFmpeg, which can only pass the picture. Do not grow them into
+running session: a takeover ends it first. The targets they can leave
+unstartable are an RDP target with the pipeline on, for a browser that cannot
+compose it, and a High Performance Mac on a gateway whose host lacks FFmpeg,
+which can only pass the picture. Do not grow them into
 a wider capability negotiation, and do not let either rebuild a session with
 choices nobody made.
 Preserve the announced configuration and color-space behavior in
@@ -471,37 +482,39 @@ that selects the stream. See
 
 #### RDP's graphics pipeline
 
-The passthrough on `rdp` passes the host's graphics pipeline (MS-RDPEGFX) to
-the browser, for a LAN: its commands out of their bulk compression, never
-altered, as `GRAPHICS` records on the display socket behind a `graphicsStart`;
-the gateway neither composes nor encodes them. It is offered at the picker by a
-target with the pipeline on, to a page that said it composes one: a
-cross-origin isolated page, for the compositor's threads, with a WebGL 2 canvas
-to present on (`frontend/src/rdpGraphics.ts`). The page
+An `rdp` target with the pipeline on passes the host's graphics pipeline
+(MS-RDPEGFX) to the browser in every session: its commands out of their bulk
+compression, never altered, as `GRAPHICS` records on the display socket behind a
+`graphicsStart`; the gateway neither composes nor encodes them, and composes no
+pipeline at all. The picker shows the passthrough ticked and locked, and only a
+page that said it composes one can start the target: a cross-origin isolated
+page, for the compositor's threads, with a WebGL 2 canvas to present on
+(`frontend/src/rdpGraphics.ts`). Any other has Start disabled with the reason,
+and has no VP9 to fall back to; `egfx = false` is the target for it. The page
 composes with the gateway's own compositor, `crates/remotex-rdp-graphics`,
 bound to WebAssembly by `frontend/wasm/egfx`: keep that crate building for
 `wasm32-unknown-unknown`. One decoder and compositor is the gateway's rule; do
 not write a second one there. The page, which already carries software
 decoders of its own, may decode, compose or present the pipeline its own way
 (on the GPU, say) where that brings a measured gain. The host answers a
-repaint out of its caches, so a reattach starts such a session over; do not
+repaint out of its caches, so every reattach starts such a session over; do not
 resume one on a repaint. Over two virtual displays the host draws one span
 through one pipeline, whose caches and copies between surfaces cross the
 displays: the page composes the span once and shows the column `graphicsView`
 names, and on *All Displays* the second display's tab is painted that column of
 the same picture, handed across the browser (`frontend/src/displayRelay.ts`).
 Do not compose a pipeline in two tabs, and do not deal its commands out by
-display. A host that draws with bitmap updates is encoded here
-as VP9.
+display. A host that draws with bitmap updates, on a target with
+`egfx = false` or one that answers the offer of the pipeline with them, is
+encoded here as VP9.
 
-H.264 stays refused in the capability advertise of every pipeline the gateway
-composes: a host would hand the parts of the desktop that move like video to a
-lossy codec before the gateway encodes the picture, and the gateway has no
-decoder for it. Do not give it one. A passed pipeline may carry it, behind the
-target's experimental `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"` and only to a page that said it decodes
-it: the access units ride inside the pipeline's commands, the page decodes them
-with the browser's `VideoDecoder`, and the compositor paints the pictures. It is
-a target key and not a row at the picker while it is experimental; it adds no
+How the host draws the pipeline is chosen at the picker: Lossless, the host's
+lossless codecs alone, by default, or Adaptive (alpha), H.264 the host fits to
+the browser's link, over the whole desktop or only where it moves like video.
+The gateway has no H.264 decoder and is not given one. Adaptive reaches only a
+page that said it decodes H.264, and a session of any other is drawn lossless:
+the access units ride inside the pipeline's commands, the page decodes them with
+the browser's `VideoDecoder`, and the compositor paints the pictures. It adds no
 wire format, no record and no second stream. See
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 
@@ -559,10 +572,10 @@ updates in source order even though each encode runs off the engine's own task.
 
 Each target has one full-desktop picture path. Ordinarily it is one inter-frame
 VP9 stream, encoded by the gateway or made by wlshare and passed through. Two
-paths, chosen at the picker, keep another representation the remote made: an
-`ard-high-performance` session can pass the Mac's HEVC,
-and an RDP session can pass the host's graphics pipeline for the browser to
-compose. A VNC desktop past the stream's picture ceiling in a session started
+paths keep another representation the remote made: an
+`ard-high-performance` session can pass the Mac's HEVC, chosen at the picker,
+and every session of an RDP target with the pipeline on passes the host's
+graphics pipeline for the browser to compose. A VNC desktop past the stream's picture ceiling in a session started
 without resize has no picture until the remote sends a smaller one — see
 [past the ceiling](#past-the-ceiling).
 
@@ -583,8 +596,10 @@ for the browsers whose own decoder does not take it.
   own quantizer threshold, and the settle sharpens a quiet desktop back at the
   dial. Turned off, the walk is the pressure-only one.
 
-Neither reaches a stream passed at the picker's choice: a session started with
-the passthrough sends the Mac's HEVC, or the RDP host's pipeline, as it came.
+Neither reaches a passed stream: a session started with the Mac's passthrough
+sends its HEVC as it came, and an RDP target with the pipeline on sends the
+host's pipeline as it came, so on such a target the two keys reach only VP9
+encoded for a host that answers with bitmap updates.
 wlshare's stream, passed on every `wlshare` target, is told both and walks
 itself. Which passed streams follow the browser's link, and how, is in
 [A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
@@ -1019,24 +1034,25 @@ Three controls with similar names therefore remain separate:
 
 #### RDP's graphics pipeline, passed through
 
-An `rdp` target composes the host's graphics pipeline here — every codec, the
-surfaces and the caches — and encodes the picture that results as VP9. In a
-session started with the passthrough it does neither: the pipeline's commands go to the
-browser as the host sent them, and the page composes them. It is for a LAN. What
-it saves is the gateway's work, which for a desktop in use was measured at about
-three quarters VP9 encoding and a quarter decoding; passing the commands leaves
-the gateway the connection, the channel's bulk compression and the frame
-acknowledgements, a few percent of a core whatever the desktop is doing. What it
-costs is the browser's work, and the quality walk: what the host draws with is
-sent as it is, so `video_quality` and `render_adaptive` reach nothing of it.
-The host still follows the browser's link by its own pacing, as *The page
-paces the host* and *The host finds a slow page for itself* below describe
+An `rdp` target with the pipeline on composes nothing of it here: in every
+session the pipeline's commands go to the browser as the host sent them, and the
+page composes them. Composing it here and encoding the picture as VP9 was
+measured, for a desktop in use, at about three quarters VP9 encoding and a
+quarter decoding; passing the commands leaves the gateway the connection, the
+channel's bulk compression and the frame acknowledgements, a few percent of a
+core whatever the desktop is doing. What it costs is the browser's work, and
+the quality walk: what the host draws with is sent as it is, so `video_quality`
+and `render_adaptive` reach nothing of it. A browser that cannot compose it
+cannot start the target, and there is no VP9 to fall back to: a target with
+`egfx = false` is the one for it. The host still follows the browser's link by
+its own pacing, as *The page paces the host* and *The host finds a slow page
+for itself* below describe, and with Adaptive by its rate control
 ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
 
 The compositor the page runs is the gateway's own, unit tested
 as it is there, and the module built from it is tested as the page loads it.
 What is passed is checked against a real host: `tests/rdp_client_probe.rs`
-composes a passed pipeline beside the session that passed it,
+composes what a session passes test-side, with the page's compositor,
 `tests/playwright/egfx-passthrough.spec.ts` reads the display socket of a
 headless browser composing one, and `tests/playwright/egfx-two-displays.spec.ts`
 reads both displays' sockets of a browser showing a passed span in two tabs.
@@ -1050,9 +1066,12 @@ the pipeline.
   not cross-origin isolated has no shared memory, which is what a proxy that
   drops the gateway's two headers leaves, and one without WebGL 2 has nowhere to
   present. So the page asks itself once (`frontend/src/rdpGraphics.ts`) and states
-  `rdp_graphics=true|false` on its session socket; the picker greys the choice
-  for a page that said no, and `render_plan` sets `rdp_graphics` from the
-  session's choice. Only an `rdp` target with its pipeline on offers it.
+  `rdp_graphics=true|false` on its session socket. `/api/targets` marks an
+  `rdp` target with its pipeline on `passthroughOnly`, and the picker shows the
+  row ticked and locked; for a page that said no it disables Start with the
+  reason, `connect` refuses the target, and an owner coming back from such a
+  page has the session ended. `render_plan` sets `rdp_graphics` on every session
+  of such a target.
 - **What passes** (`VideoSink::pass_graphics`). The RDP client still owns the
   channel: it answers the capability exchange, unwraps the bulk compression —
   whose history is the connection's — and writes every frame's acknowledgement
@@ -1062,14 +1081,15 @@ the pipeline.
   where the host's own packet did, and naming the frame it ends. The engine
   queues each as a `GRAPHICS` record, which takes its share of `QUEUE_BUDGET`
   like an access unit.
-- **H.264, where the target's key allows it** (`egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"`,
-  EXPERIMENTAL). Otherwise the host is told its client takes none, passed or
-  composed, and every pipeline is lossless. With it, a passed session whose
-  page said it decodes H.264 advertises the capability sets that take it
-  (`caps_advertise` in the graphics crate's `proto/gfx.rs`), and a Windows host
-  then draws what moves like video with AVC420, in the same frames as the other
-  codecs: one H.264 stream for each surface, each access unit behind a mask of
-  the rectangles it shows. The gateway does nothing with them: they are bytes in
+- **H.264, where the session chose Adaptive** (ALPHA). Otherwise the host is
+  told its client takes none, and the pipeline is lossless. With it, a session
+  whose page said it decodes H.264 advertises the capability sets that take it
+  (`caps_advertise` in the graphics crate's `proto/gfx.rs`). Under *H.264 full
+  screen*, the default, they carry `AVC_THINCLIENT` (MS-RDPEGFX 2.2.3.6), and a
+  Windows host draws the whole desktop in AVC444v2. Under *H.264 region* the
+  flag is left out, and a Windows host draws what moves like video with AVC420,
+  in the same frames as the other codecs: one H.264 stream for each surface,
+  each access unit behind a mask of the rectangles it shows. The gateway does nothing with them: they are bytes in
   the commands it passes. The page says whether it can on its session socket,
   `rdp_h264=true|false` (`frontend/src/rdpH264.ts`), and finds out by doing it
   when it loads: three access units of a stream of its own, shaped like a Windows
@@ -1077,8 +1097,8 @@ the pipeline.
   picture before the next unit is handed over, laid out as the compositor reads
   it, and copy into shared memory. A decoder that holds a picture back for the
   units after it gives none in time, which is a no: a run cannot wait on units
-  the host has not sent. A page that says no is not turned away; its host is told
-  to send none.
+  the host has not sent. A page that says no has Adaptive greyed, and is not
+  turned away from a session that chose it: its host is told to send none.
 
   A run that carries H.264 is composed in three steps, and its batch is
   acknowledged after the third, so the host is still paced by what the page has
@@ -1103,10 +1123,10 @@ the pipeline.
   decode does: the host sends no keyframe on request.
 
   Checked against one Windows 11 host without a GPU, whose stream is Main
-  profile, AVC420 by region. AVC444 and AVC444v2, which a host policy selects for
-  the whole desktop, are implemented from the specification and tested against
-  pictures built from its tables; no host has been seen to send both of their
-  views.
+  profile: AVC420 by region, and over the whole desktop, asked for with
+  `AVC_THINCLIENT`, AVC444v2 in luma views alone. AVC444, and AVC444v2's chroma
+  views, are implemented from the specification and tested against pictures
+  built from its tables; no host has been seen to send both of their views.
 - **The page paces the host.** A frame is acknowledged to the host when the
   page has composed it, not when the gateway read it. Nothing between the host
   and the page can drop a frame — every command is state the next one draws
@@ -1201,9 +1221,8 @@ the pipeline.
   the paint worker draws on and the page shows from a pipeline's first drawn run
   until its picture is given back. Drawing the rectangles from it onto the
   desktop's canvas instead made the GPU copy the whole picture for every run, at
-  twice the GPU's time on an integrated one. A browser without WebGL 2 is told
-  the compositor could not be loaded, and sees such a host through the gateway's
-  encoding. The module's
+  twice the GPU's time on an integrated one. A browser without WebGL 2 says it
+  cannot compose, and cannot start such a target. The module's
   standard library has to be built for threads, which takes a nightly Cargo:
   `frontend/wasm/egfx/rust-toolchain.toml` pins one by its date, for that
   directory alone.
@@ -1212,15 +1231,16 @@ the pipeline.
   It answers even a repaint out of them — measured against Windows 11, a
   compositor that joined with nothing and asked for a repaint was left with most
   of the desktop wrong, after a graphics reset as after a Suppress Output — so a
-  page that comes back cannot be repaired by the engine that is running. A
-  reattach to a passed pipeline therefore ends the engine and starts another
-  ([Session lifecycle](#session-lifecycle)), which is a logon to the session the
-  host kept. A `refresh` from a page that still holds the pipeline's state is
+  page that comes back cannot be repaired by the engine that is running. Every
+  reattach to an RDP session with the pipeline on therefore ends the engine and
+  starts another ([Session lifecycle](#session-lifecycle)), which is a logon to
+  the session the host kept. A `refresh` from a page that still holds the pipeline's state is
   passed to the host as a repaint.
-- **A host without the pipeline is encoded here.** The key asks for the pipeline
-  to be passed, and a server that answers the offer with bitmap updates has none:
-  its picture is decoded and encoded as VP9 at the target's dial, as without the
-  key, and a `videoFormat` rather than a `graphicsStart` opens it.
+- **A host without the pipeline is encoded here.** A server that answers the
+  offer of the pipeline with bitmap updates has none to pass, and the bitmap
+  updates a host sends before it confirms the pipeline are not the pipeline's:
+  that picture is decoded and encoded as VP9 at the target's dial, as with
+  `egfx = false`, and a `videoFormat` rather than a `graphicsStart` opens it.
 
 ### Decoded in the page
 
@@ -1470,7 +1490,7 @@ remote is told how the link is doing. Today two of the three passthroughs are:
 | Passed stream | Who adapts it | What it hears of the browser's link | Target keys that reach it |
 |---|---|---|---|
 | wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`, the same walk as here: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
-| An RDP host's graphics pipeline (passthrough) | The Windows host: with H.264, its rate control by its network detection; frame rate by acknowledgements, frame size by its socket | With H.264, the detection is answered at the page's pace; frames are acknowledged once the page has composed them; while two large frames wait the host's socket goes unread through a small receive buffer | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
+| An RDP host's graphics pipeline (passed whenever it is on) | The Windows host: with Adaptive, its H.264's rate control by its network detection; frame rate by acknowledgements, frame size by its socket | With Adaptive, the detection is answered at the page's pace; frames are acknowledged once the page has composed them; while two large frames wait the host's socket goes unread through a small receive buffer | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
 | A High Performance Mac's HEVC (passthrough) | The Mac's rate controller, 20–60 Mbit/s | Nothing: the delay in its rate reports ends at the gateway | None |
 
 - **wlshare** walks its encoder exactly as the gateway walks its own, so a passed
@@ -1478,20 +1498,19 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   the frame rate, and both come back as the link clears. See
   [wlshare's stream, passed through](#wlshares-stream-passed-through).
 - **A Windows host** has no quality dial for a client to turn, but it has its
-  own network detection. A passed session with H.264 takes part in it and claims
-  UDP, which
-  it turns down when the host takes it up, so all of it stays on TCP. For such a
+  own network detection. A session started with Adaptive takes part in it and
+  claims UDP, which it turns down when the host takes it up, so all of it stays
+  on TCP. For such a
   client the host rate-controls its H.264 to the bandwidth it is told, and the
   session tells it the page's, read from how fast the page composes while
   frames wait for it (`Paced` in `src/rdp_client/session.rs`). Measured with
   whole-desktop H.264 and a stand-in page, the host drew 17.7 frames a second at
   6.4 KB, mostly at its coarsest quantizer, for a page on 1 Mbit/s, and 20 a
-  second at 20.6 KB with finer ones for a page on 4 Mbit/s. With the H.264 by
-  region a session asks for, the desktop is mostly RemoteFX Progressive, which
-  this does not rate-control: behind a 1 Mbit/s page the frame rate held, the
-  delay fell from 1.6 s to 0.56 s, and over a LAN every region went to the
-  finest quality. A passed session
-  without H.264 takes neither, and adapts only in the two ways below. See
+  second at 20.6 KB with finer ones for a page on 4 Mbit/s. Under *H.264
+  region* the desktop is mostly RemoteFX Progressive, which this does not
+  rate-control: behind a 1 Mbit/s page the frame rate held, the delay fell from
+  1.6 s to 0.56 s, and over a LAN every region went to the finest quality. A
+  Lossless session takes neither, and adapts only in the two ways below. See
   [The connection sequence](rdp-client.md#the-connection-sequence). Beside that,
   the host adapts in two more ways. It draws no more than about eleven frames ahead of its
   acknowledgements, so a page that composes slowly sets the frame rate. It sends
@@ -1500,10 +1519,10 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   page on an 8 Mbit/s link, its RemoteFX Progressive frames halved and the page
   showed 16 frames a second where it had shown 8.6. See
   [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)
-  and [The pipeline, passed on](rdp-client.md#the-pipeline-passed-on). Composed
-  here instead, the host is acknowledged as each frame is decoded and its socket
-  is read at the gateway's own speed: it adapts to the gateway, and the VP9 walk
-  adapts to the browser.
+  and [The pipeline, passed on](rdp-client.md#the-pipeline-passed-on). On the
+  bitmap path the host's updates are decoded here and its socket is read at the
+  gateway's own speed: it adapts to the gateway, and the VP9 walk adapts to the
+  browser.
 - **A Mac** walks its HEVC by the one-way delay to the gateway, which on a LAN is
   never behind. A browser that falls behind fills the gateway's queue, which drops
   to the next IDR and asks the Mac for one. The passthrough is for a LAN; a slow
@@ -1586,11 +1605,11 @@ the browser.
 
 What the browser is asked is three questions. One decides what a host is told and
 nothing else: whether this browser decodes the H.264 a passed RDP pipeline may
-carry. The other two say
-which passthrough the browser can take: a High
-Performance Mac's HEVC, and an RDP host's graphics pipeline. They
-decide what the picker offers before a session starts, where a "no" starts the
-target encoded here, and they keep a session started with a passthrough from
+carry, which greys the picker's Adaptive for a "no". The other two say which
+passthrough the browser can take: a High Performance Mac's HEVC, and an RDP
+host's graphics pipeline. They decide what the picker offers before a session
+starts, where a "no" starts a Mac encoded here and leaves an RDP target with the
+pipeline on unstartable, and they keep a session that passes a stream from
 being sent to a browser that cannot show it
 ([What a session is started with](#what-a-session-is-started-with)). Whether
 the browser's own decoder takes the 4:4:4 VP9 is asked by the page for itself:
@@ -1648,9 +1667,9 @@ Every `connect` first ends any running engine, including one already connected
 to the same target, and the next engine is not spawned until that process exits;
 `ENGINE_EXIT_GRACE` bounds the wait. Switching targets and logging out likewise
 end the engine outright. The sole resume is the owning browser reattaching to
-the same target after its session socket drops. An engine passing an
-RDP host's graphics pipeline is never resumed: the page that comes back holds
-none of what the host draws against
+the same target after its session socket drops. An RDP engine with the host's
+graphics pipeline on is never resumed: the page that comes back holds none of
+what the host draws against
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)),
 so it is started over with the choices it was started with. And an owner that
 comes back unable to take the session's passthrough has nothing to resume or
@@ -1673,24 +1692,28 @@ instead of a reconnect.
 
 These things about a session are chosen by whoever starts it, before it starts:
 how the desktop is sized, whether the remote's sound is taken and as what,
-whether the remote's own stream is passed through, where a second virtual
-display sits, and, BETA, whether a Mac's passed HEVC is decoded by the page's
+whether a Mac's own stream is passed through, where a second virtual display
+sits, how an RDP host draws its graphics pipeline, and, BETA, whether a Mac's
+passed HEVC is decoded by the page's
 own software decoder ([Decoded in the page](#decoded-in-the-page)), which is the
 gateway's to offer as well as the target's. Picking a target at the picker opens it,
 its options show under it with a Start button, and Start sends `connect` with the
-choices (`Choices` in `src/config.rs`). None of them is a config key.
+choices (`Choices` in `src/config.rs`). None of them is a config key. An RDP
+host's pipeline is not among them: a target with it on passes it in every
+session.
 
 Which options a target shows is its type's to say, from `TargetConfig::offers`,
 and `GET /api/targets` carries it:
 
-| Target | Window drives the size | Sound | Passthrough |
-|---|---|---|---|
-| `rdp` | yes | shown | shown: the graphics pipeline |
-| `vnc` | no | hidden | hidden |
-| `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture |
-| `vnc`, `ard` | no | hidden | hidden |
-| `vnc`, `ard` with `virtual_display` | yes | hidden | hidden |
-| `vnc`, `ard-high-performance` | yes | hidden: always carried | shown: the Mac's media stream |
+| Target | Window drives the size | Sound | Passthrough | Graphics |
+|---|---|---|---|---|
+| `rdp` | yes | shown | shown ticked and locked: the graphics pipeline | shown: lossless or adaptive H.264 |
+| `rdp` with `egfx = false` | no | shown | hidden | hidden |
+| `vnc` | no | hidden | hidden | hidden |
+| `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden |
+| `vnc`, `ard` | no | hidden | hidden | hidden |
+| `vnc`, `ard` with `virtual_display` | yes | hidden | hidden | hidden |
+| `vnc`, `ard-high-performance` | yes | hidden: always carried | shown: the Mac's media stream | hidden |
 
 - **The size is shown before Start.** A desktop is sized one of three ways
   (`Sizing` in `src/config.rs`): kept at the target's size, which is its
@@ -1723,22 +1746,36 @@ and `GET /api/targets` carries it:
 - **Not offered is not shown.** An option the target type does not have has no
   row. High Performance's sound is such a one: the Mac refuses the picture
   without it, so there is nothing to choose, and the session's Mute is what a
-  person has. An `rdp` target with `egfx = "disabled"` has no pipeline, so neither
-  the window nor the pipeline's row; one with `virtual_displays = 2` has both,
+  person has. An `rdp` target with `egfx = false` has no pipeline, so neither
+  the window nor the pipeline's rows; one with `virtual_displays = 2` has both,
   since the browser composes a passed pipeline whole and shows one display of
   it, and it alone has the second display's row. A `connect` that names a choice the target does
   not offer is refused with an `error`, and the slot stays as it was.
-- **Offered but unavailable is greyed, with the reason.** A passthrough is
-  greyed wherever the browser cannot take it: one that does not decode the Mac's
-  HEVC, a gateway with no HEVC decoder archive to serve a
-  browser that needs it, a page that cannot compose the pipeline. `/api/targets`
-  also says, as `passthroughOnly`, where a gateway's host lacks FFmpeg
-  and so cannot decode a Mac's picture at all: there the picture can only
-  be passed, the row shows it chosen, and where the browser cannot take it
-  either Start is greyed and says why, before the Mac is dialled.
-  A `connect`
-  that asks for a passthrough the browser said it cannot take is refused like an
-  unoffered one.
+- **Offered but unavailable is greyed, with the reason.** The Mac's passthrough
+  is greyed wherever the browser cannot take it: one that does not decode the
+  Mac's HEVC, or a gateway with no HEVC decoder archive to serve a browser that
+  needs it. `/api/targets` says, as `passthroughOnly`, where a stream can only
+  be passed: on every `rdp` target with the pipeline on, which the gateway never
+  composes, and where a gateway's host lacks FFmpeg and so cannot decode a Mac's
+  picture at all. There the row shows it chosen and locked, and where the
+  browser cannot take it Start is disabled and says why, before the host is
+  dialled; for the pipeline that reads "This browser cannot compose the host's
+  graphics pipeline, which this target always passes". A `connect` whose
+  session would pass a stream the browser said it cannot take is refused
+  (`ConnectError::Beyond`). Adaptive is greyed for a browser whose
+  `VideoDecoder` cannot decode the host's H.264, with "This browser has no
+  VideoDecoder that takes the host's H.264."; a session that chose it all the
+  same, a takeover's, is drawn lossless rather than refused.
+- **The host draws the pipeline lossless or adaptive.** `choices.pipeline` says
+  `lossless`, `adaptive-desktop` or `adaptive-region` (`Pipeline` in
+  `src/config.rs`), offered by an `rdp` target with the pipeline on and refused
+  elsewhere. The picker's Graphics group shows Lossless, the host's lossless
+  codecs alone, for a LAN, which is the default, and Adaptive (alpha), H.264 the
+  host fits to the browser's link; under Adaptive, *H.264 full screen*, the
+  default, asks for the whole desktop in H.264 (`AVC_THINCLIENT`), and *H.264
+  region* for H.264 only where the desktop moves like video. An adaptive session
+  takes the host's network detection and claims UDP; a lossless one takes
+  neither ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
 - **The second display is placed once.** `choices.placement` says `right`,
   `left`, `top` or `bottom` (`Placement` in `src/config.rs`): where the second
   of two virtual displays sits against the first, so the remote's arrangement
@@ -1811,7 +1848,8 @@ one. Both appear on the client's session card, which
 (`mediaLabel.ts`).
 
 `GET /api/targets` carries `subtype` too, beside the options each target offers
-(`resize`, `audio`, `passthrough` and `passthroughOnly`) and the sizes it keeps
+(`resize`, `audio`, `passthrough`, `passthroughOnly`, `placement` and
+`pipeline`) and the sizes it keeps
 (`size`, the configured one, and `defaultSize`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
 not something to discover after connecting. The row uses the config spelling
@@ -2367,8 +2405,8 @@ positions into it, and lists the columns as `Display 1` and `Display 2`. A
 holds, with the list, the size and a repaint of the chosen column, and the host
 is asked for nothing. The list follows what the host laid out, read off the
 desktop it opened and off each graphics reset's monitor count, so a host that
-opens one desktop lists nothing. The pipeline's passthrough is offered beside
-it: the browser composes a passed pipeline whole and shows one column of it
+opens one desktop lists nothing. The pipeline is passed beside it as over one
+display: the browser composes a passed pipeline whole and shows one column of it
 ([Two displays, one picture](#rdps-graphics-pipeline-passed-through)).
 
 With two columns the list ends with *All Displays* (alpha), under the id Apple's
@@ -2581,7 +2619,7 @@ announced only by a host that opens MS-RDPEI, which this client never asks for. 
 [`roadmap.md`](roadmap.md).
 
 Static virtual channels are asked for by what the session needs: `drdynvc` for a
-session started with resize, a pipeline on (any `egfx` but `"disabled"`), `camera = true`, or
+session started with resize, the pipeline on (`egfx` left on), `camera = true`, or
 `microphone = true`; `cliprdr` always; and `rdpsnd` with `rdpdr`
 for a session started with sound.
 
@@ -2598,18 +2636,16 @@ elsewhere, and held to two ([Roadmap](roadmap.md#more-than-two-virtual-displays-
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
 the 16 ms coalescer demoted to a 100 ms safety net — and answers a monitor layout
-with a graphics reset. The implemented and observed decoder set is ClearCodec and
-its NSCodec subcodec, RemoteFX Progressive, planar and uncompressed rectangles.
-The compositor carries the corresponding copies and caches between updates. A
-rectangle that cannot be decoded is left unchanged and logged; malformed PDU
-framing still ends the session. H.264 is refused in the capability advertise: a
-host would hand the parts of the desktop that move like video to it, and a lossy
-video codec would lose detail before the gateway ever encodes the picture. In a
-session started with the passthrough the same channel is answered and acknowledged here and
-composed in the browser, which also decodes the H.264 a target with the
-experimental `egfx = "adaptive_h264_desktop"` or `"adaptive_h264_region"` lets the host draw with
+with a graphics reset. The channel is answered and acknowledged here, its bulk
+compression unwrapped, and its commands passed to the browser in every session,
+where the page composes them; malformed PDU framing still ends the session. The
+compositor the page runs implements ClearCodec and its NSCodec subcodec, RemoteFX
+Progressive, planar and uncompressed rectangles, with the copies and caches
+between updates, and decodes the H.264 a session started with Adaptive (alpha)
+lets the host draw with; a Lossless session refuses H.264 in the capability
+advertise
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)).
-`egfx = "disabled"` is the bitmap path: the
+`egfx = false` is the bitmap path: the
 server draws with bitmap updates, damage is flushed on the 16 ms guess because those
 carry no frame boundary, and the desktop keeps its opening size — resize is
 not offered beside it, because an RDP resize is the pipeline's graphics reset.
@@ -2770,7 +2806,7 @@ display layout sets the actual framebuffer geometry. There is no resize mode or
 one-shot button in the session. The Mac supplies that virtual display the way
 it does to Apple's viewer: as HEVC over its media stream, offered once the display has
 settled and decoded in the gateway by the host's FFmpeg libavcodec (`src/vnc_apple_media.rs`),
-or passed to the browser in a session started with the passthrough. The gateway's
+or passed to the browser in a session started with the Mac's passthrough. The gateway's
 decoder runs four slice threads because one is too slow for 60 pictures a second:
 on one core of an i5-8500T a 1600×1000 picture took 14–23 ms, on four 7–14 ms.
 ZRLE rectangles are never the picture: the few the Mac sends before it is asked

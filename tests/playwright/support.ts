@@ -151,12 +151,14 @@ export function readRemoteClipboard(): string {
 // follows the window whatever is asked, since that is the one size it has here.
 //
 // `passthrough` is the Mac's, the one that is a choice: an RDP target with its
-// pipeline on (egfx not "disabled") passes it in every session, its row shown
-// ticked and locked.
+// pipeline on (egfx not false) passes it in every session, its row shown ticked
+// and locked. `pipeline` is how the host draws that pipeline, lossless unless
+// asked.
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
   passthrough?: boolean;
+  pipeline?: "lossless" | "adaptive-desktop" | "adaptive-region";
 }
 
 // A picker button reads "<name> <protocol> · <host>", so a target is named by what
@@ -252,6 +254,27 @@ export async function startTarget(
   if (choices.sound) {
     await item
       .getByRole("radio", { name: /^Opus/ })
+      .check({ timeout: LEAVE_TIMEOUT_MS });
+  }
+  // How the host draws the pipeline, where the target has one: lossless, or
+  // adaptive and then its H.264 over the full screen or by region.
+  const graphics = item.getByRole("group", { name: "Graphics" });
+  const pipeline = choices.pipeline ?? "lossless";
+  if (pipeline !== "lossless" || (await graphics.count()) > 0) {
+    await graphics
+      .getByRole("radio", {
+        name: pipeline === "lossless" ? /^Lossless/ : /^Adaptive/,
+      })
+      .check({ timeout: LEAVE_TIMEOUT_MS });
+  }
+  if (pipeline !== "lossless") {
+    await graphics
+      .getByRole("radio", {
+        name:
+          pipeline === "adaptive-desktop"
+            ? /^H\.264 full screen/
+            : /^H\.264 region/,
+      })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
   const passed = item.getByRole("checkbox", { name: /^Pass / });

@@ -17,7 +17,7 @@
 // A memory that is shared needs a page that is cross-origin isolated, which the
 // gateway's two headers make of every page it serves (src/assets.rs).
 //
-// H.264 is the one codec the module does not decode (EXPERIMENTAL, rdpH264.ts): a
+// H.264 is the one codec the module does not decode (ALPHA, rdpH264.ts): a
 // run's access units are found by `scan`, decoded by the browser (egfxVideo.ts),
 // and each picture's samples copied into the module's memory by `supply`, before
 // the run is composed and paints them.

@@ -491,15 +491,15 @@ pub enum H264 {
 /// What this client can take, in a session that takes H.264 and in one that does
 /// not.
 ///
-/// Without it: version 8 and version 10, the small cache, and no H.264. Version 8
-/// alone would have a Windows host draw with RemoteFX Progressive and planar;
-/// version 10 adds nothing this client has to decode — its point is
-/// `AVC_DISABLED`, which is a version-10 flag, so that a host which would otherwise
-/// hand the parts of the desktop that move like video to H.264 is told not to: a
-/// lossy video codec would lose detail before the gateway ever encodes the picture,
-/// and the gateway has no decoder for it.
+/// Without it — a lossless session: version 8 and version 10, the small cache,
+/// and no H.264. Version 8 alone would have a Windows host draw with RemoteFX
+/// Progressive and planar; version 10 adds nothing the page has to decode — its
+/// point is `AVC_DISABLED`, which is a version-10 flag, so that a host which would
+/// otherwise hand the parts of the desktop that move like video to H.264 is told
+/// not to: a lossy video codec would lose the detail the session was started to
+/// keep.
 ///
-/// With it — a passed pipeline whose page decodes the H.264 itself — every
+/// With it — an adaptive session, whose page decodes the H.264 itself — every
 /// capability set from version 8 to 10.4, and 10.7. The host confirms the newest
 /// set it knows, and what the sets add over version 8 is H.264: 8.1 with the YUV420
 /// mode flagged on, 10 implying the YUV444 mode as well, 10.1 the second YUV444
@@ -507,8 +507,8 @@ pub enum H264 {
 /// current Windows host draws a desktop with video playing on it, the video in
 /// AVC420 and the rest in ClearCodec and Progressive. `AVC_THINCLIENT`, which asks
 /// for the whole desktop in AVC444, is set only for [`H264::WholeDesktop`], on
-/// every set from 10.3, where the flag starts: the host's own choice by region is
-/// the better picture for text. 10.5 and 10.6 are left out, and 10.7 carries
+/// every set from 10.3, where the flag starts; [`H264::ByRegion`] leaves the
+/// choice by region to the host. 10.5 and 10.6 are left out, and 10.7 carries
 /// `SCALEDMAP_DISABLE`: from 10.5 a host may map a surface to the output through
 /// the scaled mappings, commands this client ignores, and only 10.7 has a flag to
 /// say so. A host that knows 10.5 or 10.6 but not 10.7 settles on 10.4.

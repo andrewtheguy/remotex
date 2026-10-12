@@ -109,15 +109,20 @@ test.describe("the picker's options", () => {
     page,
   }) => {
     const seen = watchSession(page);
-    await logInAndConnectTo(page, PICKER_TARGET ?? "", "", { resize: true });
+    await logInAndConnectTo(page, PICKER_TARGET ?? "", "", {
+      resize: true,
+      pipeline: "adaptive-region",
+    });
 
-    // The pipeline is passed in every session of an rdp target that has it.
+    // The pipeline is passed in every session of an rdp target that has it, and
+    // drawn as was chosen.
     expect(seen.connects).toEqual([
       {
         size: "window",
         audio: "off",
         passthrough: true,
         placement: "right",
+        pipeline: "adaptive-region",
       },
     ]);
     const connected = seen.statuses.at(-1);
@@ -163,10 +168,20 @@ test.describe("the picker's options", () => {
     await expect(formats).toHaveCount(2);
     await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
     await expect(item.getByRole("radio", { name: /^FLAC/ })).not.toBeChecked();
-    // The pipeline is shown passed, and is no choice.
+    // The pipeline is shown passed, and is no choice. How the host draws it is,
+    // lossless until somebody chooses adaptive, whose H.264 is then over the
+    // full screen until somebody chooses the region.
     const passed = item.getByRole("checkbox", { name: PASSED });
     await expect(passed).toBeChecked();
     await expect(passed).toBeDisabled();
+    const graphics = item.getByRole("group", { name: "Graphics" });
+    await expect(graphics.getByRole("radio", { name: /^Lossless/ })).toBeChecked();
+    await expect(graphics.getByRole("radio", { name: /^H\.264/ })).toHaveCount(0);
+    await graphics.getByRole("radio", { name: /^Adaptive \(alpha\)/ }).check();
+    await expect(
+      graphics.getByRole("radio", { name: /^H\.264 full screen/ }),
+    ).toBeChecked();
+    await graphics.getByRole("radio", { name: /^Lossless/ }).check();
     await expect(
       item.getByRole("button", { name: "Start", exact: true }),
     ).toBeEnabled();

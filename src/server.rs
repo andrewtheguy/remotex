@@ -689,6 +689,9 @@ struct TargetInfo {
     passthrough_only: bool,
     /// Whether where the second virtual display sits is a choice.
     placement: bool,
+    /// Whether how the host draws the graphics pipeline, lossless or adaptive
+    /// H.264, is a choice.
+    pipeline: bool,
 }
 
 /// A desktop size in points, as the picker shows it before Start.
@@ -730,6 +733,7 @@ impl TargetInfo {
             passthrough_only: offers.passthrough.is_some_and(|passthrough| !passthrough.chosen())
                 || (target.media_stream() && !apple_decoders),
             placement: offers.placement,
+            pipeline: offers.pipeline,
         }
     }
 }
@@ -1479,24 +1483,24 @@ mod tests {
         // sizes, no sound, no stream.
         assert_eq!(
             entry("mac", true),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthrough":null,"passthroughOnly":false,"placement":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthrough":null,"passthroughOnly":false,"placement":false,"pipeline":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthrough":"rdp-graphics","passthroughOnly":true,"placement":false}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthrough":"rdp-graphics","passthroughOnly":true,"placement":false,"pipeline":true}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // stream is, and is the only way in on a host without its decoders.
         let fast = entry("fast", true);
-        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthrough":"apple-media","passthroughOnly":false,"placement":false}"#), "{fast}");
-        assert!(entry("fast", false).ends_with(r#""passthroughOnly":true,"placement":false}"#));
+        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthrough":"apple-media","passthroughOnly":false,"placement":false,"pipeline":false}"#), "{fast}");
+        assert!(entry("fast", false).ends_with(r#""passthroughOnly":true,"placement":false,"pipeline":false}"#));
         // An RDP host's pipeline, on unless `egfx` turns it off, is passed in
         // every session, whatever this host decodes.
-        assert!(entry("win", false).ends_with(r#""passthroughOnly":true,"placement":false}"#));
+        assert!(entry("win", false).ends_with(r#""passthroughOnly":true,"placement":false,"pipeline":true}"#));
         // Where the second display sits is offered by a host asked for two.
-        assert!(entry("two", true).ends_with(r#""placement":true}"#));
+        assert!(entry("two", true).ends_with(r#""placement":true,"pipeline":true}"#));
         // The page's HEVC decoder is a choice where the gateway has it and the
         // target has a Mac's picture to pass.
         assert!(entry("fast", true).contains(r#""software":false,"#));

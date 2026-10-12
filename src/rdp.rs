@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::{AudioBridge, PcmFormat};
-use crate::config::{Choices, Egfx, Placement, RenderPlan, Sizing, TargetConfig};
+use crate::config::{Choices, Pipeline, Placement, RenderPlan, Sizing, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
@@ -424,11 +424,11 @@ fn connect_config(
         resize: choices.resize(),
         // Passed to the browser whenever it is on: the gateway composes none.
         egfx: config.egfx(),
-        // The whole desktop unless the target says `egfx = "adaptive_h264_region"`: the host
+        // The whole desktop unless the session chose H.264 by region: the host
         // rate-controls all of it to the page's link that way, where by region most
         // of the desktop is RemoteFX Progressive, which it does not.
-        h264: match (plan.rdp_h264, config.egfx_mode()) {
-            (true, Egfx::AdaptiveH264Region) => H264::ByRegion,
+        h264: match (plan.rdp_h264, choices.pipeline) {
+            (true, Pipeline::AdaptiveRegion) => H264::ByRegion,
             (true, _) => H264::WholeDesktop,
             (false, _) => H264::Refused,
         },

@@ -124,7 +124,7 @@ export function createFramePainter(options: {
    */
   makeRelay?: () => RelayPort;
   /**
-   * EXPERIMENTAL: what decodes the H.264 a pipeline may carry (egfxVideo.ts): the
+   * ALPHA: what decodes the H.264 a pipeline may carry (egfxVideo.ts): the
    * browser's `VideoDecoder`, a stream for each surface. Injectable for a test,
    * which has no decoder.
    */

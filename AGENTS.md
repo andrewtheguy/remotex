@@ -61,9 +61,10 @@ area's section before changing what it covers:
   release; the pinned HEVC decoder archive as the one file read at run time; no
   fallback browser paths.
 - [Sessions](docs/architecture.md#sessions): one active session per gateway,
-  with takeover, and a fresh engine for every `connect`; size, sound and
-  passthrough chosen at the picker, not in the config, and held for the
-  session's life.
+  with takeover, and a fresh engine for every `connect`; size, sound, the Mac's
+  passthrough and how an RDP host draws its pipeline chosen at the picker, not
+  in the config, and held for the session's life; an RDP host's pipeline passed
+  in every session it is on.
 - [Input and display](docs/architecture.md#input-and-display): the two touch
   layers, the display picker as the remote's, presentation at 100%, density as
   the wire's word, and the Apple mosaic as the one rescale.

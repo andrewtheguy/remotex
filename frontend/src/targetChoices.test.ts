@@ -17,6 +17,7 @@ import {
 const ABLE: Abilities = {
   appleMedia: true,
   rdpGraphics: true,
+  rdpH264: true,
   audio: true,
   runsHevc: true,
   follows: "window",
@@ -24,6 +25,7 @@ const ABLE: Abilities = {
 const UNABLE: Abilities = {
   appleMedia: false,
   rdpGraphics: false,
+  rdpH264: false,
   audio: false,
   runsHevc: false,
   follows: "window",
@@ -47,6 +49,7 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     passthrough: null,
     passthroughOnly: false,
     placement: false,
+    pipeline: false,
     ...offers,
   };
 }
@@ -58,6 +61,7 @@ const RDP = target({
   audio: true,
   passthrough: "rdp-graphics",
   passthroughOnly: true,
+  pipeline: true,
 });
 const HIGH_PERFORMANCE = target({
   subtype: "ard-high-performance",
@@ -163,6 +167,7 @@ test("only what the target's type offers has a row", () => {
     audio: "off",
     passthrough: false,
     placement: "right",
+    pipeline: "lossless",
   });
   assert.equal(standard.blocked, null);
 });
@@ -177,6 +182,7 @@ test("nothing is ticked until somebody ticks it", () => {
     audio: "off",
     passthrough: true,
     placement: "right",
+    pipeline: "lossless",
   });
   assert.equal(rdp.sound, false);
   assert.equal(rdp.soundRow?.checked, false);
@@ -190,6 +196,7 @@ test("what was chosen last time is what Start sends", () => {
     audio: "opus",
     passthrough: true,
     placement: "right",
+    pipeline: "lossless",
   });
   assert.equal(options.sound, true);
   assert.equal(options.soundRow?.checked, true);
@@ -214,6 +221,7 @@ test("what was chosen last time is what Start sends", () => {
     audio: "off",
     passthrough: false,
     placement: "right",
+    pipeline: "lossless",
   });
   // Nor is something this page never wrote there.
   const stale = targetOptions(RDP, { audio: true as never }, ABLE);
@@ -316,6 +324,47 @@ test("an RDP host's pipeline is always passed, and needs a page that composes it
   const unable = targetOptions(RDP, undefined, UNABLE);
   assert.match(unable.blocked ?? "", /WebGL 2/);
   assert.equal(unable.rows.find((r) => r.key === "passthrough")?.checked, true);
+});
+
+test("how the host draws the pipeline is lossless until somebody chooses adaptive", () => {
+  const options = targetOptions(RDP, undefined, ABLE);
+  assert.equal(options.choices.pipeline, "lossless");
+  assert.deepEqual(
+    options.pipelineRow?.modes.map((mode) => [mode.value, mode.disabled]),
+    [
+      ["lossless", false],
+      ["adaptive", false],
+    ],
+  );
+  assert.match(options.pipelineRow?.modes[1].label ?? "", /alpha/);
+  assert.deepEqual(
+    options.pipelineRow?.h264.map((option) => option.value),
+    ["adaptive-desktop", "adaptive-region"],
+  );
+  for (const pipeline of ["adaptive-desktop", "adaptive-region"] as const) {
+    assert.equal(
+      targetOptions(RDP, { pipeline }, ABLE).choices.pipeline,
+      pipeline,
+    );
+  }
+  // No other target has a pipeline to draw.
+  const mac = targetOptions(
+    HIGH_PERFORMANCE,
+    { pipeline: "adaptive-desktop" },
+    ABLE,
+  );
+  assert.equal(mac.pipelineRow, null);
+  assert.equal(mac.choices.pipeline, "lossless");
+});
+
+test("a browser that cannot decode the H.264 is offered lossless alone", () => {
+  const NO_H264: Abilities = { ...ABLE, rdpH264: false };
+  const options = targetOptions(RDP, { pipeline: "adaptive-region" }, NO_H264);
+  const adaptive = options.pipelineRow?.modes[1];
+  assert.equal(adaptive?.disabled, true);
+  assert.match(adaptive?.note ?? "", /VideoDecoder/);
+  assert.equal(options.choices.pipeline, "lossless", "remembered, not sent");
+  assert.equal(options.blocked, null, "the target still starts, lossless");
 });
 
 const storage = new Map<string, string>();

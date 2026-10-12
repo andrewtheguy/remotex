@@ -758,6 +758,9 @@ fn describe_offers(target: &TargetConfig) -> String {
     if offers.placement {
         choices.push("where the second display sits".to_owned());
     }
+    if offers.pipeline {
+        choices.push("lossless or adaptive H.264".to_owned());
+    }
     if choices.is_empty() {
         "nothing to choose".to_owned()
     } else {
@@ -1726,7 +1729,7 @@ mod tests {
             "the render plan describes itself: {page}"
         );
         assert!(
-            page.contains(&spec("picker", "offers resize, sound")),
+            page.contains(&spec("picker", "offers resize, sound, lossless or adaptive H.264")),
             "what a session's starter chooses is the type's to offer, and the pipeline is passed unasked: {page}"
         );
         assert!(

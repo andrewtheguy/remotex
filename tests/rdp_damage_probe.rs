@@ -10,7 +10,7 @@
 //! and the page's compositor paints it and names each rectangle it painted. So
 //! under the pipeline what is probed is that compositor, fed what the session
 //! passed as the page feeds it ([`Page`]), and on the bitmap path of a target with
-//! `egfx = "disabled"` it is the client itself.
+//! `egfx = false` it is the client itself.
 //!
 //! This probe is the gateway's shadow with nothing else attached. It keeps a mirror
 //! of the picture and refreshes it *only* inside the rectangles reported, exactly

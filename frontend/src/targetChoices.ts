@@ -23,6 +23,10 @@
 //   lossless one plays, which the page decodes itself, so ticking takes it.
 // - Where the second display sits is a choice on a target that asks its host for
 //   two and tells it where each is: see `PLACEMENTS`.
+// - How the host draws an RDP pipeline, lossless or adaptive H.264 (alpha), is a
+//   choice on a target with the pipeline on, and under adaptive the whole desktop
+//   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
+//   offered lossless alone.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 // - Which decoder takes the picture is no choice: the page decodes the VP9, and
@@ -71,6 +75,8 @@ export interface TargetInfo {
   passthroughOnly: boolean;
   /** Whether where the second virtual display sits is a choice. */
   placement: boolean;
+  /** Whether how the host draws the graphics pipeline is a choice. */
+  pipeline: boolean;
 }
 
 /** A desktop size in points. */
@@ -98,12 +104,20 @@ export type Sound = "off" | "opus" | "flac";
  */
 export type Placement = "right" | "left" | "top" | "bottom";
 
+/**
+ * How the host draws an RDP session's graphics pipeline, as `connect` names it:
+ * with its lossless codecs, or adaptive, in H.264 the host fits to the link, over
+ * the whole desktop or only where it moves like video.
+ */
+export type Pipeline = "lossless" | "adaptive-desktop" | "adaptive-region";
+
 /** What `connect` carries. */
 export interface Choices {
   size: Sizing;
   audio: Sound;
   passthrough: boolean;
   placement: Placement;
+  pipeline: Pipeline;
 }
 
 /** What this browser can do with a target. */
@@ -114,6 +128,8 @@ export interface Abilities {
    */
   appleMedia: boolean;
   rdpGraphics: boolean;
+  /** Whether it decodes the H.264 an RDP host may draw with (rdpH264.ts). */
+  rdpH264: boolean;
   /**
    * Whether this browser has an audio decoder, which Opus and a Mac's AAC-ELD
    * need. FLAC does not: the page decodes it itself (flacDecoder.ts).
@@ -157,6 +173,24 @@ export interface SoundRow {
   formats: SoundFormat[];
 }
 
+/** One way the host can draw the pipeline, or one way of drawing it adaptive. */
+export interface PipelineOption<V> {
+  value: V;
+  label: string;
+  /** What choosing it does, or why it cannot be chosen here. */
+  note: string;
+  disabled: boolean;
+}
+
+/**
+ * How the host draws the pipeline: lossless or adaptive, and under an adaptive
+ * one, the whole desktop or by region.
+ */
+export interface PipelineRow {
+  modes: PipelineOption<"lossless" | "adaptive">[];
+  h264: PipelineOption<Exclude<Pipeline, "lossless">>[];
+}
+
 /** One place the second display can sit. */
 export interface PlacementOption {
   value: Placement;
@@ -187,6 +221,8 @@ export interface TargetOptions {
    * where it is not a choice.
    */
   placements: PlacementOption[] | null;
+  /** How the host draws the pipeline, as a choice: null where it is none. */
+  pipelineRow: PipelineRow | null;
   rows: OptionRow[];
   /** What Start sends. */
   choices: Choices;
@@ -406,6 +442,65 @@ const PLACEMENTS: PlacementOption[] = [
 ];
 
 /**
+ * `target`'s pipeline as the picker shows it: nothing where it is no choice, and
+ * otherwise lossless or adaptive, adaptive's H.264 over the whole desktop by
+ * default or by region. A browser that cannot decode the H.264 has adaptive
+ * greyed; an adaptive one remembered from before is not sent, and stays
+ * remembered for a browser that can.
+ */
+function pipelineRow(
+  target: TargetInfo,
+  remembered: Pipeline | undefined,
+  decodes: boolean,
+): { row: PipelineRow | null; pipeline: Pipeline } {
+  if (!target.pipeline) {
+    return { row: null, pipeline: "lossless" };
+  }
+  const h264: PipelineRow["h264"] = [
+    {
+      value: "adaptive-desktop",
+      label: "H.264 full screen",
+      note: "The whole desktop in H.264, which the host fits to the link.",
+      disabled: false,
+    },
+    {
+      value: "adaptive-region",
+      label: "H.264 region",
+      note: "H.264 only where the desktop moves like video, the rest lossless, which the host does not fit to the link.",
+      disabled: false,
+    },
+  ];
+  const pipeline =
+    remembered !== undefined &&
+    (remembered === "lossless" ||
+      (decodes && h264.some((option) => option.value === remembered)))
+      ? remembered
+      : "lossless";
+  return {
+    row: {
+      modes: [
+        {
+          value: "lossless",
+          label: "Lossless",
+          note: "The host's lossless codecs alone. For a LAN.",
+          disabled: false,
+        },
+        {
+          value: "adaptive",
+          label: "Adaptive (alpha)",
+          note: decodes
+            ? "H.264, which the host fits to the link this browser is on."
+            : "This browser has no VideoDecoder that takes the host's H.264.",
+          disabled: !decodes,
+        },
+      ],
+      h264,
+    },
+    pipeline,
+  };
+}
+
+/**
  * The options under `target`, from what was `remembered` for it and what this
  * browser can do. A size the operator configured is the size until somebody
  * chooses another, and no remote's sound starts playing until somebody asks.
@@ -420,6 +515,7 @@ export function targetOptions(
     sizes.find((option) => option.value === remembered?.size)?.value ??
     sizes[0].value;
   const sound = soundRow(target, remembered?.audio, abilities.audio);
+  const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
   const rows: OptionRow[] = [];
   let blocked: string | null = null;
   if (target.passthrough) {
@@ -441,11 +537,13 @@ export function targetOptions(
     placement:
       placements?.find((option) => option.value === remembered?.placement)
         ?.value ?? "right",
+    pipeline: drawn.pipeline,
   };
   return {
     sizes,
     soundRow: sound.row,
     placements,
+    pipelineRow: drawn.row,
     rows,
     choices,
     // High Performance's sound comes with its picture, so it has no row and is
