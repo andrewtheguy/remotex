@@ -13,7 +13,8 @@ or later releases, and RPM distributions with the same baseline. The package
 format alone does not make the binary compatible with an older distribution.
 
 Release binaries for x86-64, on Linux and Windows and in the container image,
-require a processor with AVX2. For one without it, build the gateway from
+require a processor at x86-64-v3: AVX2, BMI1 and BMI2, LZCNT, MOVBE and FMA,
+which Intel's have from Haswell and AMD's from Excavator. For one under it, build the gateway from
 source as
 [x86-64 CPU compatibility](../packaging/README.md#x86-64-cpu-compatibility)
 describes.

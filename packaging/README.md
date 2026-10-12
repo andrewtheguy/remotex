@@ -120,20 +120,22 @@ filenames, which the container build selects by release version.
 
 ## x86-64 CPU compatibility
 
-An x86-64 gateway is built for AVX2, and a machine without it is the fallback
-build below. The default `native-vp9` feature is screen-vp9's experimental VP9
-encoder in Rust, which a target's `experimental_native_vp9` asks for; its
-kernels are AVX2 with no choosing at run time, and it refuses to build without
-them. Cargo cannot set a flag by feature, so `.cargo/config.toml` sets
-`-C target-feature=+avx2` for every x86-64 build, and every release artifact
-for x86-64, the container's binary included, needs a processor with AVX2. Arm64
-needs nothing set: NEON is in its baseline.
+An x86-64 gateway is built for x86-64-v3 (AVX2, BMI1 and BMI2, LZCNT, MOVBE
+and FMA: Intel's processors from Haswell, AMD's from Excavator), and a machine
+under it is the fallback build below. The default `native-vp9` feature is
+screen-vp9's experimental VP9 encoder in Rust, which a target's
+`experimental_native_vp9` asks for; it is written for that level with no
+choosing at run time, and it refuses to build under it. Cargo cannot set a
+flag by feature, so `.cargo/config.toml` sets `-C target-cpu=x86-64-v3` for
+every x86-64 build, and every release artifact for x86-64, the container's
+binary included, needs a processor at that level. Arm64 needs nothing set:
+NEON is in its baseline.
 
 The fallback is that feature off and the flag taken back out, which the
 environment does, since `RUSTFLAGS` replaces the configuration's:
 
 ```sh
-RUSTFLAGS='-C target-feature=-avx2' RUSTDOCFLAGS='-C target-feature=-avx2' \
+RUSTFLAGS='-C target-cpu=x86-64' RUSTDOCFLAGS='-C target-cpu=x86-64' \
   cargo build --release --no-default-features --features embedded-gateway
 ```
 
@@ -143,13 +145,13 @@ so in `--help` (`Features:` without `native-vp9`), and refuses
 `experimental_native_vp9` on every target but a `wlshare` one, whose encoder
 is wlshare's own.
 
-A Cargo feature may need a CPU flag of the machine this way, AVX2 or another:
+A Cargo feature may need a CPU level of the machine this way, x86-64-v3 or another:
 its flag goes in `.cargo/config.toml` beside it, and the fallback is the
 feature off and the flag taken back out. The fallback build goes without what
 the feature does, and nothing limits what that may be: were libvpx dropped,
-VP9 encoding itself could be a feature a machine without AVX2 has not. So that the fallback stays that
-small, code no feature gates may not need one. Neither Cargo
-configuration nor packaging and CI set `target-cpu`,
+VP9 encoding itself could be a feature a machine under x86-64-v3 has not. So that the fallback stays that
+small, code no feature gates may not need one. Nothing but such a
+feature's flag in `.cargo/config.toml` sets `target-cpu`, in packaging and CI as well,
 everything outside such a feature dispatches SIMD at run time, and
 the prebuilt archives downloaded by the sys crates must use the baseline x86-64 ISA
 with their hand-written kernels selected by CPUID: libvpx's rtcd tables,

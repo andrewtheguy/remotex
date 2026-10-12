@@ -1507,9 +1507,9 @@ codec is one to maintain. The encoder is the `screen-vp9` crate, its own
 repository pinned by release tag here and in wlshare. It holds two: libvpx, which
 every stream is coded with unless its target says otherwise, and an
 **experimental** one written in Rust, which a target's `experimental_native_vp9`
-asks for and the default `native-vp9` feature builds in. That one's kernels are
-NEON on arm64 and AVX2 on amd64, so an amd64 gateway is built for AVX2, and one
-for a machine without it is built without the feature
+asks for and the default `native-vp9` feature builds in. That one is built for
+NEON on arm64 and x86-64-v3 on amd64, so an amd64 gateway is built for x86-64-v3, and one
+for a machine under it is built without the feature
 ([x86-64 CPU compatibility](../packaging/README.md#x86-64-cpu-compatibility)).
 The crate is the one place libvpx is
 spoken to for this gateway and for wlshare's own stream: the quantizer pinned to the dial, screen-content
