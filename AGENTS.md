@@ -76,7 +76,8 @@ area's section before changing what it covers:
 
 - amd64 builds are x86-64-v3 by default. Code that needs a CPU level above the
   baseline, as that is, must sit behind a Cargo feature, so that a build with
-  the feature off still runs on a machine without it. See
+  the feature off still runs on a machine without it. Keep that fallback build
+  working; its command is in
   [x86-64 CPU compatibility](packaging/README.md#x86-64-cpu-compatibility).
 - The native `embedded-gateway` feature is the `remotex tui` control plane and
   its hidden `serve-embedded` workers, on Unix and Windows alike, each worker's
