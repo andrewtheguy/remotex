@@ -19,7 +19,7 @@ use remotex_rdp_graphics::gfx::{self, Graphics};
 use super::camera::{Camera, CameraCommand, CameraFeed, CameraInput, CameraQueues, CameraSink};
 use super::input::{Clipboard, Command, Input};
 use super::pointer::Cursor;
-use super::proto::autodetect::Detector;
+use super::proto::autodetect::{self, Detector};
 use super::proto::capabilities::DemandActive;
 use super::proto::channel::Chunk;
 use super::proto::fastpath::{self, Fragments, Update};
@@ -1134,7 +1134,9 @@ impl<'a> Active<'a> {
 
     async fn dispatch(&mut self, frame: &[u8]) -> Result<Option<Result<()>>> {
         // A frame with no first byte is not one [`Frames`] hands out.
-        self.detector.received(frame.len());
+        if self.message_channel.is_some() {
+            self.detector.received(autodetect::counted(frame, self.message_channel)?);
+        }
         if fastpath::is_output(frame[0]) {
             self.on_updates(frame).await?;
             return Ok(None);

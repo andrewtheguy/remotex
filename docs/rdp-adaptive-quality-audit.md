@@ -32,7 +32,12 @@ desktop on a slow link.
 
 ### AQ-1 — connect-time bandwidth byte count omits each header
 
-- [ ] Fixed and verified
+- [x] Fixed and verified: `Detector::payload` adds the declared payload plus eight
+  bytes for each Payload and connect-time Stop, and
+  `a_connect_time_measurement_counts_each_payload_with_its_header` feeds 1,024
+  and 512 real payload bytes and reads `byteCount` 1,552 from the encoded
+  response. The laptop ran no connect-time measurement in either repeat run, so
+  only the unit test exercises this path.
 
 `src/rdp_client/proto/autodetect.rs` adds only `payloadLength` for a connect-time
 Bandwidth Measure Payload and Bandwidth Measure Stop. [MS-RDPBCGR section
@@ -49,7 +54,12 @@ Done when:
 
 ### AQ-2 — malformed auto-detect requests are accepted and counted
 
-- [ ] Fixed and verified
+- [x] Fixed and verified: `headerLength` is checked per request type, and a
+  Payload or connect-time Stop consumes its declared payload before counting it.
+  `a_header_length_that_does_not_fit_the_request_is_refused` accepts each of
+  the nine request shapes and refuses every other header length for each;
+  `a_payload_shorter_than_it_says_is_refused` covers a truncated Payload and a
+  Stop with none of its payload, neither counted.
 
 `Detector::answer` reads but ignores `headerLength`. It also trusts
 `payloadLength` without consuming that many bytes. A truncated PDU can therefore
@@ -68,7 +78,15 @@ Done when:
 
 ### AQ-3 — continuous bandwidth measurement counts the wrong wire boundary
 
-- [ ] Fixed and verified
+- [x] Fixed and verified: `autodetect::counted` counts a fast-path PDU's body
+  past its header and a Send Data Indication's MCS payload, and nothing on the
+  message channel, whose PDUs `Detector::answer` counts past their security
+  header, the Start excepted and the Stop included. Under TLS no other PDU wears
+  a security header once the connection is up.
+  `a_continuous_measurement_counts_inside_the_framing` builds the frames byte by
+  byte, independently of the parsers, and asserts 566 bytes across a Start, a
+  long and a short fast-path PDU, an I/O-channel PDU, a virtual-channel PDU and
+  the Stop.
 
 `src/rdp_client/session.rs` calls `detector.received(frame.len())` before the MCS
 message-channel packet is decoded. This counts TPKT, X.224, and MCS framing. It
@@ -88,7 +106,10 @@ Done when:
 
 ### AQ-4 — sub-millisecond measurements report an unusable zero `timeDelta`
 
-- [ ] Fixed and verified
+- [x] Fixed and verified: `timeDelta` is at least one millisecond, still
+  saturating at `u32::MAX`, and `a_measurement_under_a_millisecond_says_it_took_one`
+  reads 1 from the value and the encoded response. The repeat LAN run reported
+  none of its 594 measurements at zero.
 
 Elapsed time is truncated to whole milliseconds without a lower bound. The LAN
 run reported nonzero bytes in zero milliseconds for 49 of 417 measurements.
@@ -107,7 +128,11 @@ Done when:
 
 ### AQ-5 — the link probe treats an unavailable GFX timestamp as midnight
 
-- [ ] Fixed and verified
+- [x] Fixed and verified: `time_of_day` gives no sample for a zero timestamp,
+  and `lag` takes the offset around the host's day. Three tests in
+  `tests/rdp_link_probe.rs` cover zero, an ordinary timestamp and a frame either
+  side of midnight. The repeat runs' largest "most behind" values were 44 ms on
+  the LAN and 1,402 ms behind the 1 Mbit/s relay.
 
 `tests/rdp_link_probe.rs` converts `RDPGFX_START_FRAME.timestamp == 0` to
 midnight. [MS-RDPEGFX section
@@ -148,9 +173,15 @@ Done when:
 
 ## Gateway-to-host validation gate
 
-- [ ] Fix AQ-1 through AQ-5 and run the required Rust checks.
-- [ ] Repeat the LAN and 1 Mbit/s real-host probes. Confirm exact connect-time and
+- [x] Fix AQ-1 through AQ-5 and run the required Rust checks.
+- [x] Repeat the LAN and 1 Mbit/s real-host probes. Confirm exact connect-time and
   continuous byte counts, no zero `timeDelta`, and no bogus timestamp outliers.
+  `tmp/autodetect/lan-fixed.log` and `throttle1000-fixed.log`: 594 and 1,849
+  measurements, none at zero; through the relay the host was told 985 kbit/s in
+  all. The host ran no connect-time measurement, so its count rests on the unit
+  test. Nothing else moved: 31.8 frames/s at 2,455 kbit/s on the LAN, 12.5 at
+  951 kbit/s constrained, 9.5 to 9.6 KB a frame and quantizers 22, 30 and 38 in
+  both, still with no Network Characteristics Result.
 - [ ] Force Microsoft's client to TCP over the same constrained host link and
   collect its RemoteFX Graphics and network performance counters plus the
   `RdpCoreTS` operational log.

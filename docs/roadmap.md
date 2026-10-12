@@ -108,8 +108,9 @@ explored:
   same frame-rate reduction with or without it and did not change H.264
   quantizers. `AVC_THINCLIENT` was tried too; it moved the whole desktop to
   AVC444v2 but still adapted by rate. That narrows the missing
-  Microsoft-client behavior without proving that UDP causes it. First complete
-  the [RDP adaptive-quality audit](rdp-adaptive-quality-audit.md), then compare
+  Microsoft-client behavior without proving that UDP causes it. The detector
+  defects in the [RDP adaptive-quality audit](rdp-adaptive-quality-audit.md) are
+  fixed and the runs repeated to the same result; next is to compare
   Microsoft's client forced to TCP on the same constrained host link before
   implementing a second transport. Measure each case against the session
   re-encoded as VP9. A host that draws with bitmap updates (`egfx = false`) could

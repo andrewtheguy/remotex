@@ -147,11 +147,11 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   slow link. UDP is still one difference to test, but this run does not prove it
   is the cause.
 
-The experimental detector and link probe have confirmed defects. Their single
-checkbox work list, evidence, and completion criteria are in the [RDP
-adaptive-quality audit](rdp-adaptive-quality-audit.md). Until those boxes pass,
-the probe is useful evidence of this host's constrained TCP behavior but is not
-a conforming implementation to promote into normal sessions.
+The defects the experimental detector and link probe had are fixed, and the
+measurements above were repeated with the fixes, to the same result; the
+checklist, its evidence and what comes next are in the [RDP adaptive-quality
+audit](rdp-adaptive-quality-audit.md). The detector stays out of normal sessions
+until that comparison with Microsoft's client says it belongs there.
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
 backing up, and the regions say what it does then ([MS-RDPEGFX section

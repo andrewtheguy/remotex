@@ -142,6 +142,27 @@ fn motion(action: &str) {
     assert!(status.success(), "{script} {action} failed: {status}");
 }
 
+/// Milliseconds in a day, which the host's frame clock wraps at.
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// A StartFrame's timestamp as milliseconds of the host's UTC day ([MS-RDPEGFX]
+/// 2.2.2.11): milliseconds, seconds, minutes and hours. Zero says the host has no
+/// time to give, and gives no sample.
+fn time_of_day(timestamp: u32) -> Option<i64> {
+    if timestamp == 0 {
+        return None;
+    }
+    let field = |shift: u32, bits: u32| i64::from((timestamp >> shift) & ((1 << bits) - 1));
+    Some(field(0, 10) + 1000 * (field(10, 6) + 60 * (field(16, 6) + 60 * field(22, 10))))
+}
+
+/// How far behind the desktop a frame was composed, from its offset between the two
+/// clocks and the smallest offset seen: taken around the day, so a frame the host
+/// began after its midnight is not a day behind one it began before.
+fn lag(offset: i64, nearest: i64) -> i64 {
+    (offset - nearest).rem_euclid(DAY_MS)
+}
+
 /// What one stretch of the session carried.
 #[derive(Default)]
 struct Tally {
@@ -321,8 +342,7 @@ impl Tally {
             let (codec, data) = match message.expect("the passed commands parse") {
                 // [MS-RDPEGFX] 2.2.2.11: milliseconds, seconds, minutes, hours.
                 Message::StartFrame { timestamp, .. } => {
-                    let field = |shift: u32, bits: u32| i64::from((timestamp >> shift) & ((1 << bits) - 1));
-                    self.began = Some(field(0, 10) + 1000 * (field(10, 6) + 60 * (field(16, 6) + 60 * field(22, 10))));
+                    self.began = time_of_day(timestamp);
                     continue;
                 }
                 Message::WireToSurface1 { codec, data, .. } | Message::WireToSurface2 { codec, data, .. } => {
@@ -503,7 +523,7 @@ async fn a_real_host_draws_for_a_slow_client() {
                 println!("  {:5.1}s {}", started.elapsed().as_secs_f32(), window.line(window_started.elapsed()));
                 println!("         {}", window.progressive.line());
                 println!("         {}", window.avc.line());
-                let mut behind: Vec<i64> = window.behind.iter().map(|offset| offset - nearest).collect();
+                let mut behind: Vec<i64> = window.behind.iter().map(|&offset| lag(offset, nearest)).collect();
                 behind.sort_unstable();
                 if let (Some(median), Some(most)) = (behind.get(behind.len() / 2), behind.last()) {
                     println!("         behind the desktop: median {median} ms, most {most} ms");
@@ -523,4 +543,35 @@ async fn a_real_host_draws_for_a_slow_client() {
     println!("  after the first {}s: {}", WINDOW.as_secs(), total.line(covered));
     assert!(total.frames > 0, "the host drew nothing once the picture was moving");
     drop(session);
+}
+
+/// A StartFrame timestamp, packed as 2.2.2.11 lays it out.
+fn packed(hours: u32, minutes: u32, seconds: u32, millis: u32) -> u32 {
+    (hours << 22) | (minutes << 16) | (seconds << 10) | millis
+}
+
+#[test]
+fn a_frame_with_no_timestamp_gives_no_sample() {
+    assert_eq!(time_of_day(0), None);
+}
+
+#[test]
+fn a_timestamp_reads_as_milliseconds_of_the_day() {
+    assert_eq!(time_of_day(packed(13, 45, 7, 250)), Some(((13 * 60 + 45) * 60 + 7) * 1000 + 250));
+    assert_eq!(time_of_day(packed(0, 0, 0, 1)), Some(1), "a millisecond past midnight is a time");
+}
+
+/// Two frames composed 20 ms apart on the page's clock, the host beginning the
+/// first a millisecond before its midnight and the second 19 ms after it: both
+/// equally behind, rather than the second a day behind.
+#[test]
+fn the_lag_is_taken_around_the_hosts_midnight() {
+    let before = time_of_day(packed(23, 59, 59, 999)).unwrap();
+    let after = time_of_day(packed(0, 0, 0, 19)).unwrap();
+    let first = 5_000 - before;
+    let second = 5_020 - after;
+    let nearest = first.min(second);
+    assert_eq!(lag(first, nearest), 0);
+    assert_eq!(lag(second, nearest), 0);
+    assert_eq!(lag(first + 30, nearest), 30, "a later composition is behind by what it waited");
 }

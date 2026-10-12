@@ -148,6 +148,11 @@ pub struct Update<'a> {
 
 /// Every update in one whole fast-path output PDU, in order.
 pub fn updates(frame: &[u8]) -> Result<Updates<'_>, Malformed> {
+    Ok(Updates { r: Reader::new("a fast-path update", body(frame)?) })
+}
+
+/// A fast-path output PDU's updates, past its header and no further than its length.
+pub fn body(frame: &[u8]) -> Result<&[u8], Malformed> {
     const WHAT: &str = "a fast-path output PDU";
 
     let Some(Header { start, length }) = header(frame)? else {
@@ -157,8 +162,7 @@ pub fn updates(frame: &[u8]) -> Result<Updates<'_>, Malformed> {
     // The declared length is what the PDU is. Reading to the end of the buffer
     // instead would hand on whatever a caller read past it.
     r.skip(start)?;
-    let updates = r.bytes(length - start)?;
-    Ok(Updates { r: Reader::new("a fast-path update", updates) })
+    r.bytes(length - start)
 }
 
 /// The iterator [`updates`] hands back.

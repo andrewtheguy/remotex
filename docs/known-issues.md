@@ -63,8 +63,8 @@ has asked for whole-desktop AVC444v2 with `AVC_THINCLIENT`: the host reduced its
 frame rate to the link and kept the same quantizers. That proves one adaptive
 response, not the softening seen with Microsoft's own client; UDP remains to be
 isolated by forcing Microsoft's client to TCP on the same constrained host link.
-The implementation defects and that comparison are tracked in one place in the
-[RDP adaptive-quality audit](rdp-adaptive-quality-audit.md). It is recorded so
+That comparison, and the detector defects fixed before it, are tracked in one
+place in the [RDP adaptive-quality audit](rdp-adaptive-quality-audit.md). It is recorded so
 that the rectangle is recognised as the host's encoding rather than investigated
 as a fault in the page's decoders or the compositor.
 
