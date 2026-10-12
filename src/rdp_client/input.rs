@@ -217,7 +217,9 @@ impl Input {
     /// between this client and it when nothing is queued, which the frames it
     /// composes do not say. A round trip of the host's network detection is
     /// answered no sooner than that, so the host hears the whole way to the caller
-    /// and not only the hop to this client. Said again whenever it changes, and
+    /// and not only the hop to this client, and a frame handed over less than that
+    /// ago is on its way rather than waiting, so a distant caller is not held as a
+    /// slow one. Said again whenever it changes, and
     /// dropped, as input is, if said before the session is connected.
     pub fn caller_distance(&self, round_trip: Duration) {
         self.push(Command::CallerDistance(round_trip));

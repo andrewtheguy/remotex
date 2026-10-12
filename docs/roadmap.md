@@ -140,8 +140,9 @@ explored:
     frames a second instead of 10.5. The page's pace is read only while a frame
     has waited for it longer than its distance, so a distant page is not taken
     for a slow one: 150 ms away on an unlimited link it was reported at a median
-    of 8.2 Mbit/s rather than 0.9 to 1.7. Still to do: QA it from a browser on a
-    really slow link.
+    of 8.2 Mbit/s rather than 0.9 to 1.7. Nor are the frames on their way to
+    it held as a backlog: there it got 30 frames a second, as near the host.
+    Still to do: QA it from a browser on a really slow link.
 
   Measure each case against the same desktop on the bitmap path
   (`egfx = false`), re-encoded as VP9. A host that draws with bitmap updates

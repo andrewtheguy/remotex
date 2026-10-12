@@ -338,8 +338,19 @@ impl PassedSocket {
 
 /// The frames of a passed pipeline ([`Connect::egfx`]), between the
 /// caller that composes them and the host that waits to hear of each.
+///
+/// A frame handed over less than the caller's distance ago is on its way, not
+/// waiting: a caller 150 ms away has every frame of the last 150 ms in flight on
+/// any link. Counted as waiting, those held a host drawing 24 frames a second
+/// for such a caller to [`PASSED_AHEAD`] in flight, and its socket unread
+/// ([`PASSED_HELD`]), however fast the caller's link. So only the frames handed
+/// over at least that long ago count as waiting: the ones the caller would have
+/// composed by now had its link been free.
 #[derive(Default)]
 struct PassedFrames {
+    /// The round trip to the caller with nothing queued
+    /// ([`Input::caller_distance`]); nothing until it is said.
+    distance: Duration,
     /// Handed to the caller, which has not said they are composed, each with the
     /// bytes of its commands and when it was handed over; oldest first.
     owed: VecDeque<(u32, usize, Instant)>,
@@ -359,25 +370,36 @@ struct PassedFrames {
 }
 
 impl PassedFrames {
-    /// Whether the host's socket is left unread: [`PASSED_HELD`] frames wait for
-    /// the caller.
-    fn held(&self) -> bool {
-        self.owed.len() >= PASSED_HELD && self.owed_bytes >= self.owed.len() * PASSED_HELD_BYTES
+    /// The frames waiting for the caller at `now`, and their bytes: those handed
+    /// over at least its distance ago.
+    fn waiting(&self, now: Instant) -> (usize, usize) {
+        self.owed
+            .iter()
+            .take_while(|(_, _, handed)| now.saturating_duration_since(*handed) >= self.distance)
+            .fold((0, 0), |(frames, bytes), (_, size, _)| (frames + 1, bytes + size))
     }
 
-    /// A run of `bytes` was handed to the caller, ending `frame` if it ends one.
-    fn handed(&mut self, bytes: usize, frame: Option<u32>) {
+    /// Whether the caller is behind at `now`: a frame waits for it.
+    fn behind(&self, now: Instant) -> bool {
+        self.waiting(now).0 > 0
+    }
+
+    /// Whether the host's socket is left unread: [`PASSED_HELD`] frames wait for
+    /// the caller.
+    fn held(&self, now: Instant) -> bool {
+        let (frames, bytes) = self.waiting(now);
+        frames >= PASSED_HELD && bytes >= frames * PASSED_HELD_BYTES
+    }
+
+    /// A run of `bytes` was handed to the caller at `now`, ending `frame` if it
+    /// ends one.
+    fn handed(&mut self, bytes: usize, frame: Option<u32>, now: Instant) {
         self.begun_bytes = self.begun_bytes.saturating_add(bytes);
         if let Some(frame) = frame {
             let bytes = std::mem::take(&mut self.begun_bytes);
             self.owed_bytes = self.owed_bytes.saturating_add(bytes);
-            self.owed.push_back((frame, bytes, Instant::now()));
+            self.owed.push_back((frame, bytes, now));
         }
-    }
-
-    /// When the oldest frame still waiting for the caller was handed over.
-    fn waiting_since(&self) -> Option<Instant> {
-        self.owed.front().map(|(_, _, handed)| *handed)
     }
 
     /// The acknowledgements to send now that the run ending `frame` is composed,
@@ -389,10 +411,10 @@ impl PassedFrames {
     /// composed only after the runs before it. How soon after is what holds the
     /// host to [`PASSED_AHEAD`]: nothing is acknowledged while more than that many
     /// wait for the caller, one frame for each composed at exactly that many, and
-    /// two while fewer wait, until the caller has composed all it was handed, when
-    /// everything is. So a caller that keeps up is acknowledged at once, and no
+    /// two while fewer wait, until none waits, when everything is. So a caller
+    /// that keeps up is acknowledged at once, however far away, and no
     /// acknowledgement outlasts the frames in front of it.
-    fn composed(&mut self, frame: u32) -> Vec<(u32, u32)> {
+    fn composed(&mut self, frame: u32, now: Instant) -> Vec<(u32, u32)> {
         let Some(through) = self.owed.iter().position(|(owed, ..)| *owed == frame) else {
             return Vec::new();
         };
@@ -400,7 +422,7 @@ impl PassedFrames {
             self.owed_bytes -= bytes;
             self.kept.push_back(frame);
         }
-        let due = match self.owed.len() {
+        let due = match self.waiting(now).0 {
             0 => self.kept.len(),
             waiting if waiting < PASSED_AHEAD => 2,
             PASSED_AHEAD => 1,
@@ -438,16 +460,13 @@ impl PassedFrames {
 /// for it on an idle link too: answered at once, it would time only the hop to
 /// this client, and a page far from the gateway would read as next to the host.
 ///
-/// Behind is more than waiting: a frame handed to a caller 150 ms away waits
-/// 150 ms for it on any link. Read as its pace, a distant page on an unlimited
+/// Behind is more than a frame owed: a frame handed to a caller 150 ms away is
+/// owed for 150 ms on any link. Read as its pace, a distant page on an unlimited
 /// link was reported at 0.9 to 1.7 Mbit/s. So the caller is behind only while a
-/// frame still waiting for it was handed over at least its distance ago, which
-/// it would have composed by then had its link been free.
+/// frame waits for it in the sense of [`PassedFrames`]: handed over at least its
+/// distance ago.
 #[derive(Default)]
 struct Paced {
-    /// The round trip to the caller with nothing queued
-    /// ([`Input::caller_distance`]); nothing until it is said.
-    distance: Duration,
     /// When the caller last composed, and whether it was still behind then.
     last: Option<(Instant, bool)>,
     /// What the caller composed while it was behind: when, how many bytes, and
@@ -466,19 +485,12 @@ const PACE_WINDOW: Duration = Duration::from_secs(2);
 const PACE_SAMPLE: Duration = Duration::from_millis(200);
 
 impl Paced {
-    /// Whether the caller is behind at `now`, with the oldest frame still waiting
-    /// for it handed over at `waiting_since`.
-    fn behind(&self, waiting_since: Option<Instant>, now: Instant) -> bool {
-        waiting_since.is_some_and(|handed| now.saturating_duration_since(handed) >= self.distance)
-    }
-
-    /// The caller composed `bytes`, with the oldest frame still waiting for it
-    /// after handed over at `waiting_since`.
-    fn composed(&mut self, bytes: usize, waiting_since: Option<Instant>, now: Instant) {
+    /// The caller composed `bytes`, and is `behind` after.
+    fn composed(&mut self, bytes: usize, behind: bool, now: Instant) {
         if let Some((last, true)) = self.last {
             self.samples.push_back((now, bytes as u64, now.saturating_duration_since(last)));
         }
-        self.last = Some((now, self.behind(waiting_since, now)));
+        self.last = Some((now, behind));
         while self.samples.front().is_some_and(|(at, ..)| now.saturating_duration_since(*at) > PACE_WINDOW) {
             self.samples.pop_front();
         }
@@ -491,22 +503,23 @@ impl Paced {
         (busy >= PACE_SAMPLE).then(|| bytes as f64 / busy.as_secs_f64())
     }
 
-    /// What one detection answer comes to now, with `owed` bytes waiting for the
-    /// caller, the oldest of them handed over at `waiting_since`: the reply to send
-    /// at once, if there is one.
+    /// What one detection answer comes to now, with `owed` bytes handed to the
+    /// caller and not composed, whether it is `behind`, and its `distance`: the
+    /// reply to send at once, if there is one.
     fn answer(
         &mut self,
         answer: autodetect::Answer,
         owed: usize,
-        waiting_since: Option<Instant>,
+        behind: bool,
+        distance: Duration,
         now: Instant,
     ) -> Option<Vec<u8>> {
         use autodetect::Answer;
-        let pace = self.pace().filter(|_| self.behind(waiting_since, now));
+        let pace = self.pace().filter(|_| behind);
         match answer {
             Answer::Reply(reply) => {
                 let queued = pace.map_or(Duration::ZERO, |pace| Duration::from_secs_f64(owed as f64 / pace));
-                let wait = queued + self.distance;
+                let wait = queued + distance;
                 if wait.is_zero() && self.held.is_empty() {
                     return Some(reply);
                 }
@@ -1214,7 +1227,7 @@ impl<'a> Active<'a> {
             tokio::select! {
                 // Not while the caller is behind on a passed pipeline: the host
                 // is to find that out from its own socket.
-                read = self.frames.next(&mut self.frame), if !self.passed.held() => {
+                read = self.frames.next(&mut self.frame), if !self.passed.held(Instant::now()) => {
                     read?;
                     if let Some(ended) = self.on_frame().await? {
                         return ended;
@@ -1313,7 +1326,9 @@ impl<'a> Active<'a> {
                 Some(reply) => Some(reply),
                 None => {
                     let answer = connect::heard(&mut self.detector, payload)?;
-                    self.paced.answer(answer, self.passed.owed_bytes, self.passed.waiting_since(), Instant::now())
+                    let now = Instant::now();
+                    let (owed, behind) = (self.passed.owed_bytes, self.passed.behind(now));
+                    self.paced.answer(answer, owed, behind, self.passed.distance, now)
                 }
             };
             if let Some(reply) = reply {
@@ -1541,7 +1556,7 @@ impl<'a> Active<'a> {
                 // Handed over, not finished: the frame a run ends is acknowledged
                 // when the caller says it has been composed.
                 gfx::Update::Passed { commands, frame } => {
-                    self.passed.handed(commands.len(), frame);
+                    self.passed.handed(commands.len(), frame, Instant::now());
                     self.send(Event::Graphics { commands, frame }).await;
                     if frame.is_some() {
                         self.send(Event::Frame).await;
@@ -1627,10 +1642,11 @@ impl<'a> Active<'a> {
     /// one of a channel the host has closed since, and nothing is said for it.
     async fn on_frame_composed(&mut self, frame: u32) -> Result<()> {
         let owed = self.passed.owed_bytes;
-        for (frame, finished) in self.passed.composed(frame) {
+        let now = Instant::now();
+        for (frame, finished) in self.passed.composed(frame, now) {
             self.acknowledge_frame(frame, finished).await?;
         }
-        self.paced.composed(owed - self.passed.owed_bytes, self.passed.waiting_since(), Instant::now());
+        self.paced.composed(owed - self.passed.owed_bytes, self.passed.behind(now), now);
         Ok(())
     }
 
@@ -1901,7 +1917,7 @@ impl<'a> Active<'a> {
                         }
                         Command::Clipboard(what) => self.send_clipboard(what).await?,
                         Command::FrameComposed(frame) => self.on_frame_composed(frame).await?,
-                        Command::CallerDistance(round_trip) => self.paced.distance = round_trip,
+                        Command::CallerDistance(round_trip) => self.passed.distance = round_trip,
                         Command::Input(_) => unreachable!("matched above"),
                     }
                 }
@@ -2196,7 +2212,7 @@ mod tests {
     fn behind(start: Instant) -> Paced {
         let mut paced = Paced::default();
         for i in 0..3 {
-            paced.composed(10_000, Some(start), start + Duration::from_millis(100 * i));
+            paced.composed(10_000, true, start + Duration::from_millis(100 * i));
         }
         paced
     }
@@ -2206,10 +2222,10 @@ mod tests {
     fn a_caller_that_keeps_up_is_answered_at_once() {
         let now = Instant::now();
         let mut paced = behind(now);
-        assert_eq!(paced.answer(autodetect::Answer::Reply(b"rtt".to_vec()), 0, None, now), Some(b"rtt".to_vec()));
-        assert_eq!(paced.answer(measured(50_000), 0, None, now), Some(b"at once".to_vec()));
+        assert_eq!(paced.answer(autodetect::Answer::Reply(b"rtt".to_vec()), 0, false, Duration::ZERO, now), Some(b"rtt".to_vec()));
+        assert_eq!(paced.answer(measured(50_000), 0, false, Duration::ZERO, now), Some(b"at once".to_vec()));
         let mut fresh = Paced::default();
-        assert_eq!(fresh.answer(measured(50_000), 30_000, Some(now), now), Some(b"at once".to_vec()), "no pace read yet");
+        assert_eq!(fresh.answer(measured(50_000), 30_000, true, Duration::ZERO, now), Some(b"at once".to_vec()), "no pace read yet");
     }
 
     /// Behind a slow caller a measurement takes as long as the caller would over
@@ -2219,10 +2235,10 @@ mod tests {
         let start = Instant::now();
         let now = start + Duration::from_millis(200);
         let mut paced = behind(start);
-        let reply = paced.answer(measured(50_000), 30_000, Some(start), now).unwrap();
+        let reply = paced.answer(measured(50_000), 30_000, true, Duration::ZERO, now).unwrap();
         assert_eq!(paced_millis(&reply), 500, "50 KB at 100 KB a second");
 
-        assert_eq!(paced.answer(autodetect::Answer::Reply(b"rtt".to_vec()), 30_000, Some(start), now), None);
+        assert_eq!(paced.answer(autodetect::Answer::Reply(b"rtt".to_vec()), 30_000, true, Duration::ZERO, now), None);
         assert_eq!(paced.next_due(), Some(now + Duration::from_millis(300)), "30 KB ahead of it");
         assert!(paced.due(now + Duration::from_millis(299)).is_empty());
         assert_eq!(paced.due(now + Duration::from_millis(300)), vec![b"rtt".to_vec()]);
@@ -2236,12 +2252,12 @@ mod tests {
         let start = Instant::now();
         let now = start + Duration::from_millis(200);
         let mut paced = behind(start);
-        paced.distance = Duration::from_millis(80);
-        assert_eq!(paced.answer(autodetect::Answer::Reply(b"idle".to_vec()), 0, None, now), None);
+        let distance = Duration::from_millis(80);
+        assert_eq!(paced.answer(autodetect::Answer::Reply(b"idle".to_vec()), 0, false, distance, now), None);
         assert_eq!(paced.next_due(), Some(now + Duration::from_millis(80)), "the distance alone");
-        assert_eq!(paced.answer(measured(50_000), 0, None, now), Some(b"at once".to_vec()));
+        assert_eq!(paced.answer(measured(50_000), 0, false, distance, now), Some(b"at once".to_vec()));
 
-        assert_eq!(paced.answer(autodetect::Answer::Reply(b"behind".to_vec()), 30_000, Some(start), now), None);
+        assert_eq!(paced.answer(autodetect::Answer::Reply(b"behind".to_vec()), 30_000, true, distance, now), None);
         assert_eq!(paced.due(now + Duration::from_millis(80)), vec![b"idle".to_vec()]);
         assert_eq!(paced.next_due(), Some(now + Duration::from_millis(380)), "30 KB ahead of it, then the distance");
     }
@@ -2253,33 +2269,39 @@ mod tests {
         let mut paced = Paced::default();
         for i in 0..5 {
             // Each frame composed with nothing behind it, a second apart.
-            paced.composed(10_000, None, start + Duration::from_secs(i));
+            paced.composed(10_000, false, start + Duration::from_secs(i));
         }
         assert_eq!(paced.pace(), None);
     }
 
-    /// A caller far away keeps frames waiting for its distance on any link, and
-    /// is not read as slow for it: frames handed every 50 ms and each composed
-    /// 150 ms later leave the oldest still waiting handed only 100 ms before.
+    /// A caller far away has frames in flight for its distance on any link, and
+    /// none of them waits: frames handed every 50 ms, each composed 150 ms later,
+    /// leave the oldest still owed handed only 100 ms before. Its pace is not
+    /// read, every frame is acknowledged as it is composed, and the socket is
+    /// read throughout.
     #[test]
-    fn a_distant_caller_is_not_read_as_slow() {
+    fn a_distant_caller_that_keeps_up_is_not_behind() {
         let start = Instant::now();
-        let mut paced = Paced { distance: Duration::from_millis(150), ..Paced::default() };
-        for i in 0..20 {
-            let next_handed = start + Duration::from_millis(50 * (i + 1));
-            paced.composed(10_000, Some(next_handed), start + Duration::from_millis(50 * i + 150));
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut passed = PassedFrames { distance: Duration::from_millis(150), ..PassedFrames::default() };
+        let mut paced = Paced::default();
+        for frame in 0..4 {
+            passed.handed(100_000, Some(frame), at(50 * u64::from(frame)));
+        }
+        for frame in 0..20 {
+            let now = at(50 * u64::from(frame) + 150);
+            assert!(!passed.held(now), "frame {frame}");
+            assert_eq!(passed.composed(frame, now).len(), 1, "frame {frame} acknowledged at once");
+            paced.composed(100_000, passed.behind(now), now);
+            passed.handed(100_000, Some(frame + 4), at(50 * u64::from(frame + 4)));
         }
         assert_eq!(paced.pace(), None);
-        let now = start + Duration::from_millis(1100);
-        let waiting_since = Some(start + Duration::from_millis(1000));
-        assert_eq!(paced.answer(measured(50_000), 30_000, waiting_since, now), Some(b"at once".to_vec()));
-        assert_eq!(paced.answer(autodetect::Answer::Reply(b"rtt".to_vec()), 30_000, waiting_since, now), None);
-        assert_eq!(paced.next_due(), Some(now + Duration::from_millis(150)), "its distance alone");
 
-        // Once a frame has waited longer than that, the caller is behind.
-        paced.composed(10_000, Some(start), start + Duration::from_millis(1200));
-        paced.composed(10_000, Some(start), start + Duration::from_millis(1500));
-        assert_eq!(paced.pace(), Some(10_000.0 / 0.3));
+        // Once frames have waited longer than that, the caller is behind.
+        let late = at(1500);
+        assert!(passed.behind(late));
+        assert!(passed.held(late));
+        assert_eq!(passed.composed(20, late).len(), 1, "three still wait: one for one");
     }
 
     /// A caller that composes each frame before the next arrives is acknowledged
@@ -2288,13 +2310,13 @@ mod tests {
     #[test]
     fn a_caller_that_keeps_up_is_acknowledged_as_it_composes() {
         let mut passed = PassedFrames::default();
-        passed.handed(0, Some(7));
-        assert_eq!(passed.composed(7), vec![(7, 1)]);
-        passed.handed(0, Some(8));
-        passed.handed(0, Some(9));
-        assert_eq!(passed.composed(9), vec![(8, 2), (9, 3)], "8 was composed before 9 could be");
-        assert_eq!(passed.composed(8), Vec::new(), "already acknowledged");
-        assert_eq!(passed.composed(99), Vec::new(), "never handed over");
+        passed.handed(0, Some(7), Instant::now());
+        assert_eq!(passed.composed(7, Instant::now()), vec![(7, 1)]);
+        passed.handed(0, Some(8), Instant::now());
+        passed.handed(0, Some(9), Instant::now());
+        assert_eq!(passed.composed(9, Instant::now()), vec![(8, 2), (9, 3)], "8 was composed before 9 could be");
+        assert_eq!(passed.composed(8, Instant::now()), Vec::new(), "already acknowledged");
+        assert_eq!(passed.composed(99, Instant::now()), Vec::new(), "never handed over");
     }
 
     /// The socket is left while [`PASSED_HELD`] frames wait, and read again as soon
@@ -2302,22 +2324,22 @@ mod tests {
     #[test]
     fn the_socket_is_left_while_the_caller_is_behind() {
         let mut passed = PassedFrames::default();
-        assert!(!passed.held());
-        passed.handed(60_000, None);
-        passed.handed(40_000, Some(1));
-        assert!(!passed.held());
-        passed.handed(100_000, Some(2));
-        assert!(passed.held());
-        passed.composed(1);
-        assert!(!passed.held());
+        assert!(!passed.held(Instant::now()));
+        passed.handed(60_000, None, Instant::now());
+        passed.handed(40_000, Some(1), Instant::now());
+        assert!(!passed.held(Instant::now()));
+        passed.handed(100_000, Some(2), Instant::now());
+        assert!(passed.held(Instant::now()));
+        passed.composed(1, Instant::now());
+        assert!(!passed.held(Instant::now()));
         assert_eq!(passed.owed_bytes, 100_000, "the first frame's runs went with it, whole");
         // A small frame beside a large one: what waits is counted by what each was.
-        passed.handed(1_000, Some(3));
-        passed.handed(200_000, Some(4));
-        assert!(passed.held());
-        passed.composed(3);
+        passed.handed(1_000, Some(3), Instant::now());
+        passed.handed(200_000, Some(4), Instant::now());
+        assert!(passed.held(Instant::now()));
+        passed.composed(3, Instant::now());
         assert_eq!(passed.owed_bytes, 200_000);
-        assert!(!passed.held(), "one waits");
+        assert!(!passed.held(Instant::now()), "one waits");
     }
 
     /// Small frames never fill the host's socket, so the socket is read however
@@ -2326,10 +2348,10 @@ mod tests {
     fn the_socket_is_read_while_small_frames_wait() {
         let mut passed = PassedFrames::default();
         for frame in 1..=6 {
-            passed.handed(9_000, Some(frame));
-            assert!(!passed.held());
+            passed.handed(9_000, Some(frame), Instant::now());
+            assert!(!passed.held(Instant::now()));
         }
-        assert_eq!(passed.composed(1), Vec::new(), "five wait, more than the host is kept ahead by");
+        assert_eq!(passed.composed(1, Instant::now()), Vec::new(), "five wait, more than the host is kept ahead by");
     }
 
     /// A caller with more than [`PASSED_AHEAD`] frames waiting is slower than the
@@ -2340,18 +2362,18 @@ mod tests {
     fn a_caller_that_is_behind_holds_the_host_to_a_few_frames_ahead() {
         let mut passed = PassedFrames::default();
         for frame in 1..=6 {
-            passed.handed(0, Some(frame));
+            passed.handed(0, Some(frame), Instant::now());
         }
-        assert_eq!(passed.composed(1), Vec::new(), "five wait");
-        assert_eq!(passed.composed(2), Vec::new(), "four wait");
-        assert_eq!(passed.composed(3), vec![(1, 1)], "three wait: one for one");
+        assert_eq!(passed.composed(1, Instant::now()), Vec::new(), "five wait");
+        assert_eq!(passed.composed(2, Instant::now()), Vec::new(), "four wait");
+        assert_eq!(passed.composed(3, Instant::now()), vec![(1, 1)], "three wait: one for one");
         // The host draws another on that acknowledgement.
-        passed.handed(0, Some(7));
-        assert_eq!(passed.composed(4), vec![(2, 2)]);
+        passed.handed(0, Some(7), Instant::now());
+        assert_eq!(passed.composed(4, Instant::now()), vec![(2, 2)]);
         // It draws none, and the caller catches up.
-        assert_eq!(passed.composed(5), vec![(3, 3), (4, 4)], "two wait");
-        assert_eq!(passed.composed(6), vec![(5, 5), (6, 6)], "one waits");
-        assert_eq!(passed.composed(7), vec![(7, 7)], "none waits, and none is kept");
+        assert_eq!(passed.composed(5, Instant::now()), vec![(3, 3), (4, 4)], "two wait");
+        assert_eq!(passed.composed(6, Instant::now()), vec![(5, 5), (6, 6)], "one waits");
+        assert_eq!(passed.composed(7, Instant::now()), vec![(7, 7)], "none waits, and none is kept");
         assert!(passed.owed.is_empty() && passed.kept.is_empty());
     }
 

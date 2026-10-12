@@ -226,7 +226,12 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
     frame still waiting for it was handed over at least its distance ago. The
     host was then told a median of 8.2 Mbit/s and drew 24.1 frames a second at
     27.9 KB, a median 14 ms behind. Behind a 1 Mbit/s page 150 ms away it was
-    told 1.3 Mbit/s and drew 14 frames a second at 7 KB.
+    told 1.3 Mbit/s and drew 14 frames a second at 7 KB. The frames in flight
+    still counted against `PASSED_AHEAD` and `PASSED_HELD`, which held the host
+    to about three frames in each 150 ms; counted only once past the distance
+    ([The pipeline, passed on](#the-pipeline-passed-on)), the unlimited page got
+    30 frames a second at 28.6 KB, every H.264 region at 22, with the host told
+    a median of 83 Mbit/s, and the 1 Mbit/s page 16.5 a second at 6.3 KB.
   - **The same host over a LAN, by region.** Without the change, its H.264
     regions were at 25 and 33 and its Progressive first passes mostly at quality
     50, at 7 Mbit/s. With it, every H.264 region was at 25 and every first pass
@@ -418,6 +423,14 @@ unacknowledged, and the host's count fills with those; at that many, one is
 acknowledged for each composed; below it, two; and once nothing waits,
 everything is. A caller that keeps up is acknowledged at once, and no
 acknowledgement outlasts the frames in front of it.
+
+A frame waits only once it was handed over at least the caller's distance ago
+(`Input::caller_distance`, the browser socket's smallest recent ping). Until
+then it is on its way: a caller 150 ms away has every frame of the last 150 ms
+in flight on any link. Counted as waiting, those held the host to three frames
+in each 150 ms and left its socket unread, and a page on an unlimited link that
+far away got 24 frames a second where a near one got 30. Counted from its
+distance, it got 30. The socket below is left by the same count.
 
 Late acknowledgements slow the host's frames and leave each one full size: a host
 sends smaller frames only to a client its own socket backs up behind ([Opening a

@@ -1138,7 +1138,9 @@ the pipeline.
   batch as the queue budget does (`Painted` in `protocol.rs`), said when the
   batch is acknowledged — or wherever the batch is dropped instead, so a socket
   that closes leaves the host waiting on nothing. The RDP client keeps the host
-  a few frames ahead of the page rather than as far as the host would go
+  a few frames ahead of the page rather than as far as the host would go, the
+  frames on their way to a distant page, those handed over less than its
+  smallest recent ping ago, not counted among them
   ([The pipeline, passed on](rdp-client.md#the-pipeline-passed-on)). Measured
   with a stand-in page composing at 35 ms a frame against a host drawing at
   30 frames/s: acknowledged as the gateway read them, the page was sent frames
@@ -1149,7 +1151,8 @@ the pipeline.
   to a client its own socket backs up behind, and to no other: not for late
   acknowledgements, and not for a link it is told of. The gateway reads that
   socket at the speed of its own network, which would hide the page's link from
-  the host. So while two large frames wait for the page's `paintAck`, the RDP
+  the host. So while two large frames wait for the page's `paintAck`, past its
+  distance as above, the RDP
   client leaves the socket unread through a small receive buffer, and the host
   finds the page's pace in its own writes
   ([The pipeline, passed on](rdp-client.md#the-pipeline-passed-on)). Measured
