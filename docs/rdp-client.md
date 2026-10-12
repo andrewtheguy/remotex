@@ -82,14 +82,19 @@ noticed on the same keepalive schedule as every other engine's.
 
 `ConnectionType` is declared a LAN rather than detected: the socket is the hop
 between the host and a gateway near it, which is not the link a person is on, and
-neither the declaration nor the detection changes what the host draws (below). A
-session requests neither an MCS message channel nor multitransport, and it does not
+neither the declaration nor the detection alone changes what the host draws
+(below). A session requests neither an MCS message channel nor multitransport, and it does not
 advertise network-characteristics detection. The detection is implemented
 (`proto/autodetect.rs`) behind `Connect::autodetect`, which only
 `tests/rdp_link_probe.rs` turns on, to measure what a host does with it: the client
 then claims it in the core data, leaves `connectionType` for the host to detect,
 asks for and joins the message channel, and answers each measurement with what
-arrived on its own connection. This is a deliberate
+arrived on its own connection. Beside it, `Connect::multitransport`, also the
+probe's alone, claims reliable UDP with Soft-Sync in `CS_MULTITRANSPORT`
+([MS-RDPBCGR section
+2.2.1.3.8](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf))
+and answers each Initiate Multitransport Request with `E_ABORT` (2.2.15.2), so
+the session stays on TCP (`proto/multitransport.rs`). This is a deliberate
 protocol boundary, not a general claim about what Windows will send. In particular,
 [MS-RDPBCGR section
 2.2.1.3.2](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
@@ -98,7 +103,8 @@ support. The tested Windows 10 and 11 hosts accept the client's smaller
 combination; an auto-detect PDU outside that observed traffic is unsupported.
 
 A Windows host does draw the graphics pipeline for a slow link, but for the one it
-finds for itself and not for the one it is told of. Measured against a Windows 11
+finds for itself and not for the one it is told of, unless the client also offers
+UDP (the last case below). Measured against a Windows 11
 host without a GPU, with the pipeline passed and one full-screen moving picture at
 1280×800, which over a LAN is about 34 frames a second at 114 KB each in RemoteFX
 Progressive, and about 32 a second at 9 KB each where H.264 is taken:
@@ -143,15 +149,33 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   evidence of failure: [MS-RDPBCGR section
   1.3.9](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
   does not include that message in the continuous exchange over the main TCP
-  connection. Microsoft's own clients see a whole desktop of H.264 soften on a
-  slow link. UDP is still one difference to test, but this run does not prove it
-  is the cause.
+  connection.
+- **Offered UDP and told, the quantizers move.** The same laptop, the same video,
+  whole-desktop AVC444v2 and the detection, with the client also claiming UDP and
+  turning down the one offer of it the host made, so that everything stayed on
+  TCP. The host's detection changed at once: round-trip requests, and about a
+  hundred Network Characteristics Results in 45 seconds, the first saying 512
+  kbit/s and 400 ms before any measurement, which a client that did not claim UDP
+  was never sent. Its encoder changed with it. Over the LAN every region went out
+  at 22, in 26 KB frames, 30 a second at 6.3 Mbit/s, where a control run
+  beside it without the claim was 22, 30 and 38 in 9.6 KB frames at 2.4 Mbit/s.
+  Behind the relay at 1 Mbit/s it drew 21 frames a second at 5.6 KB, 76% of
+  its regions at 38, where without the claim it drew 12.5 at 9.5 KB with 52% at
+  38: a coarser picture at a usable rate.
+  The claim without the detection changed nothing: 22, 30 and 38 at 2.4 Mbit/s
+  over the LAN, and no results. So the host rate-controls its H.264 for a client
+  that both takes the detection and offers UDP, without the UDP being used. This
+  is one pathway, not shown to be the only one or the one Microsoft's clients
+  take. Microsoft's iPhone client, with UDP off, softens over TCP by means not yet
+  read ([Roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac)).
 
-The defects the experimental detector and link probe had are fixed, and the
-measurements above were repeated with the fixes, to the same result; the
-checklist, its evidence and what comes next are in the [RDP adaptive-quality
-audit](rdp-adaptive-quality-audit.md). The detector stays out of normal sessions
-until that comparison with Microsoft's client says it belongs there.
+The detector's and the link probe's earlier defects are fixed: the
+connect-time count includes each payload's header, malformed requests are
+refused, a continuous measurement counts inside the framing, `timeDelta` is at
+least a millisecond, and a zero frame timestamp gives no lag. The measurements
+above were repeated with the fixes. The detector and the claim of UDP stay out of
+normal sessions until it is decided whose link they should report
+([Roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac)).
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
 backing up, and the regions say what it does then ([MS-RDPEGFX section
@@ -391,7 +415,8 @@ AVC420 it draws otherwise, in frames of the same 9 KB, and the text of the
 desktop goes through H.264 with them. Over a full-screen video it is the cheaper
 of the two by far: 2.4 Mbit/s at 32 frames a second, where by region the same
 video took 7.2 Mbit/s, 5.7 of it RemoteFX Progressive and 0.6 AVC420. On a slow
-link it gives up frames and keeps its quantizers
+link it gives up frames and keeps its quantizers, unless the client takes the
+network detection and offers UDP
 ([The connection sequence](#the-connection-sequence)).
 
 The access units ride in the commands handed on, and the caller composes a run

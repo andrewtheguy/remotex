@@ -43,6 +43,8 @@
 //!   needed.
 //! - [`autodetect`] — the host measuring the link to the client, on the message
 //!   channel, for a session that claims it.
+//! - [`multitransport`] — the host offering UDP, on the same channel, to a session
+//!   that claims it, and the client turning it down.
 //! - [`capabilities`] — what the two ends agree to send each other, exchanged once
 //!   before any pixel moves.
 //! - [`finalization`] — the four PDUs between a confirmed share and a desktop.
@@ -89,6 +91,7 @@ pub mod info;
 pub mod input;
 pub mod license;
 pub mod mcs;
+pub mod multitransport;
 pub mod per;
 pub mod pointer;
 pub mod rdpdr;

@@ -18,6 +18,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
 use super::proto::autodetect::{Answer, Detector};
+use super::proto::multitransport;
 use super::proto::capabilities::{ConfirmActive, DemandActive};
 use super::proto::credssp::{self, Credentials};
 use super::proto::finalization::{self, Response};
@@ -189,6 +190,8 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         graphics: config.egfx,
         // Its message channel rides an extended block, as the monitors do.
         autodetect: config.autodetect && extended,
+        // So does its claim of UDP.
+        multitransport: if config.multitransport && extended { multitransport::OFFERED } else { 0 },
     }
     .encode();
     writer
@@ -198,7 +201,11 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     frames.next(&mut frame).await?;
     let answer = mcs::connect_response(&frame)?;
     let answer = ConferenceCreateResponse::decode(answer)?;
-    let ConferenceCreateResponse { io_channel, channels, requested_protocols, message_channel } = answer;
+    let ConferenceCreateResponse { io_channel, channels, requested_protocols, message_channel, multitransport } =
+        answer;
+    if let Some(flags) = multitransport {
+        info!("rdp: the host takes multitransport {flags:#x}");
+    }
     // The server's own record of what step 1 offered, sent inside TLS where a machine
     // that rewrote the clear-text negotiation cannot reach it. [MS-RDPBCGR] 3.2.5.3.4
     // says to drop a connection whose record disagrees.
@@ -255,7 +262,8 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     send(&mut writer, user, io_channel, &logon).await.context("sending the Client Info PDU")?;
 
     // 8. Connect-time network detection, for a session that claimed it, answered on
-    //    the message channel until the licensing arrives.
+    //    the message channel until the licensing arrives, and an offer of UDP after
+    //    it, for a session that claimed that, turned down there.
     let mut detector = Detector::default();
     let mut answering = message_channel.map(|channel| (channel, &mut detector));
 
@@ -341,9 +349,18 @@ pub(super) async fn activate(
     }
 }
 
-/// What one Auto-Detect Request PDU comes to: the reply to send, if there is one,
+/// What one PDU on the message channel comes to: the reply to send, if there is one.
+///
+/// An offer of UDP is turned down, and logged. Anything else is network detection,
 /// with what was measured and what the host concluded logged on the way.
-pub(super) fn detected(detector: &mut Detector, payload: &[u8]) -> Result<Option<Vec<u8>>> {
+pub(super) fn on_message(detector: &mut Detector, payload: &[u8]) -> Result<Option<Vec<u8>>> {
+    if multitransport::is_request(payload) {
+        // A continuous measurement counts it as well, past its security header.
+        detector.received(payload.len().saturating_sub(4));
+        let (request, reply) = multitransport::decline(payload).context("reading an offer of UDP")?;
+        info!("rdp: the host offered transport {} as request {:#x}, turned down", request.protocol, request.id);
+        return Ok(Some(reply));
+    }
     Ok(match detector.answer(payload, Instant::now()).context("reading network detection")? {
         Answer::Nothing => None,
         Answer::Reply(reply) => Some(reply),
@@ -370,8 +387,8 @@ async fn send(
     Ok(())
 }
 
-/// One PDU in, off the channel it was expected on, answering network detection on
-/// the message channel meanwhile.
+/// One PDU in, off the channel it was expected on, answering what arrives on the
+/// message channel meanwhile.
 async fn receive<'a>(
     frames: &mut Frames<ReadHalf<tls::Stream>>,
     writer: &mut WriteHalf<tls::Stream>,
@@ -387,8 +404,8 @@ async fn receive<'a>(
         if data.channel != *message {
             break;
         }
-        if let Some(reply) = detected(detector, data.payload)? {
-            send(writer, user, *message, &reply).await.context("answering network detection")?;
+        if let Some(reply) = on_message(detector, data.payload)? {
+            send(writer, user, *message, &reply).await.context("answering on the message channel")?;
         }
     }
     match mcs::send_data_indication(frame)? {

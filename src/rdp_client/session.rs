@@ -102,6 +102,11 @@ pub struct Connect {
     /// detect, and answered on the message channel with what this connection
     /// measures. For measuring what a host does with it, not for a session.
     pub autodetect: bool,
+    /// Whether to claim reliable UDP with Soft-Sync, and turn down every offer of it
+    /// the host then makes ([`super::proto::multitransport`]), so the session stays on TCP.
+    /// For measuring whether a host draws differently for a client that offers UDP,
+    /// not for a session.
+    pub multitransport: bool,
     /// Where the remote's sound goes, for a target that asked for it (MS-RDPEA).
     ///
     /// Asked for, the client names the `rdpsnd` channel, takes the dynamic channel a
@@ -1165,9 +1170,9 @@ impl<'a> Active<'a> {
     /// capability exchange it was kept from.
     async fn on_channel(&mut self, channel: u16, payload: &[u8]) -> Result<()> {
         if self.message_channel == Some(channel) {
-            if let Some(reply) = connect::detected(&mut self.detector, payload)? {
+            if let Some(reply) = connect::on_message(&mut self.detector, payload)? {
                 let frame = mcs::send_data_request(self.user, channel, &reply)?;
-                self.write(&frame).await.context("answering network detection")?;
+                self.write(&frame).await.context("answering on the message channel")?;
             }
             return Ok(());
         }

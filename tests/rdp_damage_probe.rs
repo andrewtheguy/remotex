@@ -81,6 +81,7 @@ fn connect() -> (Session, Receiver<Event>) {
         pass_graphics: false,
         h264: H264::Refused,
         autodetect: false,
+        multitransport: false,
         audio: offers.audio.then(|| Box::new(Silence) as Box<dyn AudioSink>),
         // A camera draws nothing, and one the browser never plugs costs the host a
         // channel and nothing else.

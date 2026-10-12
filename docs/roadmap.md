@@ -108,24 +108,34 @@ explored:
   same frame-rate reduction with or without it and did not change H.264
   quantizers. `AVC_THINCLIENT` was tried too; it moved the whole desktop to
   AVC444v2 but still adapted by rate. That narrows the missing
-  Microsoft-client behavior without proving that UDP causes it. The detector
-  defects in the [RDP adaptive-quality audit](rdp-adaptive-quality-audit.md) are
-  fixed and the runs repeated to the same result; next is to compare
-  Microsoft's client forced to TCP on the same constrained host link before
-  implementing a second transport. Measure each case against the session
-  re-encoded as VP9. A host that draws with bitmap updates (`egfx = false`) could
+  Microsoft-client behavior. One pathway is now found: a client that takes the
+  detection *and* claims reliable UDP, then turns down the host's offer and
+  stays on TCP, gets rate-controlled H.264. It is not known to be the only one
+  or the one Microsoft's clients use. At 1 Mbit/s
+  that means coarser regions at 21 frames a second instead of 12.5, and over a
+  LAN QP 22 throughout at 6.3 Mbit/s
+  ([The connection sequence](rdp-client.md#the-connection-sequence)). Next:
+  - Repeat the UDP offer with H.264 by region and with H.264 refused, to see
+    whether RemoteFX Progressive and the mixed desktop adapt too.
+  - Decide whose link a passed session's detection reports. Answered from the
+    gateway's own socket, it measures the hop to the host, and on a LAN the host
+    then fills that hop at QP 22, which a browser on a slow link cannot carry.
+    Answering from the browser's link is what decides the browser integration
+    and its QA.
+
+  Measure each case against the session re-encoded as VP9. A host that draws with bitmap updates (`egfx = false`) could
   be passed too, for the page to decode.
 - **What Microsoft's iOS client is sent on a slow link.** Against the same
   host, Microsoft's Remote Desktop client on iOS sees the whole screen soften on
   a slow link, as video does, where a passed pipeline keeps its text sharp and
-  loses frames. The probe now asks for the whole desktop with `AVC_THINCLIENT`;
-  the host answers in AVC444v2, but chooses fewer frames rather than coarser
-  quantizers. The remaining demonstrated difference is the UDP transport, and an
-  unrecorded capability or host policy is still possible. Microsoft's clients add
-  RDP-UDP beside TCP, whose bandwidth, loss and round-trip estimates the host's
-  encoder may follow. This client asks for no multitransport. If UDP is shown to
-  be the cause, adapting the same way means implementing MS-RDPEMT and
-  MS-RDPEUDP, which are to be added to ms-rdp-specs first.
+  loses frames. The iPhone client was confirmed never to have UDP turned on, so
+  its softening comes over TCP. One TCP pathway is found: the host
+  rate-controls its H.264 for a client that takes network detection and claims
+  UDP, even when it then refuses the UDP
+  ([The connection sequence](rdp-client.md#the-connection-sequence)). Whether
+  the iPhone client takes that pathway or another, such as drawing without the
+  graphics pipeline, is not known. The host-side checks below are how to find
+  out; the transport test among them is already answered (TCP).
 
   To be found out on the host, with the iPad on a slow link and a passed
   session on the same link beside it:
@@ -135,12 +145,11 @@ explored:
     what the host is doing and which transport it measures.
   - The `RemoteDesktopServices-RdpCoreTS/Operational` event log, which records
     the transport, the graphics version and whether AVC and AVC444 are in use.
-  - The same iOS session with the host held to TCP, by the *Select RDP transport
-    protocols* policy or a firewall rule on UDP 3389. If the whole-screen
-    softening goes, the transport was the cause; if it stays, the advertise.
-  - The iOS client's capability advertise and the codecs the host answers with,
-    read through a recording proxy such as `freerdp-proxy`, which carries TCP
-    alone and so doubles as the test above.
+  - The iOS client's core data and capability advertise, read through a
+    recording proxy such as `freerdp-proxy`: whether it claims UDP in
+    `CS_MULTITRANSPORT` and network detection with UDP turned off, whether the
+    host draws it with the graphics pipeline or with bitmap updates, and which
+    codecs and quantizers the host answers with on the constrained link.
 
 Once a passed stream adapts as well as VP9 on the links measured, the
 passthrough is offered first at the picker, and VP9 remains for a browser that

@@ -426,6 +426,7 @@ fn connect_config(
         pass_graphics: plan.rdp_graphics,
         h264: if plan.rdp_h264 { H264::ByRegion } else { H264::Refused },
         autodetect: false,
+        multitransport: false,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
         microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),
