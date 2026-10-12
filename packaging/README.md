@@ -179,8 +179,9 @@ browser decodes it. Published release
 artifacts neither compile nor link FFmpeg: the gateway loads the system's shared libraries
 when a session needs them, or on Windows the ones in the folder `[hp_decoders]`
 names when it starts (`src/libav.rs`), and a host without them
-runs those targets only with the picture passed through, for browsers that decode
-it. The `.deb` recommends the Linux one, the public container image does not
+runs those targets only with the picture passed through: the Mac's H.264, which
+needs no HEVC decoder in the gateway or the page, to any browser, or its HEVC to
+a browser that decodes it. The `.deb` recommends the Linux one, the public container image does not
 carry it and the private one `publish-full-image.sh` builds carries Debian's;
 elsewhere the operator installs it, as
 [High Performance decoder](../docs/high-performance-decoder.md) says for each

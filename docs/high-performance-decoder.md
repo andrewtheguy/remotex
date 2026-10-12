@@ -11,8 +11,9 @@ out. Install it on the host that runs the gateway:
 |---|---|---|---|
 | FFmpeg's libavcodec, with its libavutil | the HEVC picture | FFmpeg 6.1 to 9 (libavcodec 60 to 63) | LGPL-2.1-or-later |
 
-Only `ard-high-performance` needs it. `rdp`, plain `vnc` and `ard` targets,
-`virtual_display = true` included, do not.
+Only `ard-high-performance` needs it, and only to be sent as VP9: the picker's
+passthroughs need none ([Without the decoder](#without-the-decoder)). `rdp`,
+plain `vnc` and `ard` targets, `virtual_display = true` included, do not.
 
 The gateway loads it when a session needs it, and looks again at every session
 until it finds it. So it can be installed while the gateway runs: the next
@@ -160,14 +161,19 @@ vnc: refusing a session that does not pass the Mac's picture: the HEVC decoder, 
 ## Without the decoder
 
 A gateway without it still serves an `ard-high-performance` target, with the
-picture passed through, when the page's startup probe finds an HEVC decoder
-path, either native or the optional software decoder described in
-[`remotex.example.toml`](../remotex.example.toml). Support depends on the
-browser, platform and GPU, so the picker is the answer rather than a
-browser-name table. It shows the passthrough as already chosen there. The HEVC
-goes to that browser as the Mac sent it, and nothing is decoded on the gateway.
-Without a decoder path the target's Start is greyed, with the reason, so the Mac
-is never dialled.
+picture passed through, in either of the two codecs the Mac sends, and nothing
+decoded on the gateway. The picker greys its VP9 there.
+
+- **The Mac's H.264** needs no HEVC decoder anywhere. The Mac is asked for
+  H.264 in place of its HEVC, and the browser decodes it with its own decoder,
+  which more browsers have for H.264 than for HEVC. The picker offers it to
+  every browser, so the target always starts.
+- **The Mac's HEVC** goes to a page whose startup probe finds an HEVC decoder
+  path, either native or the optional software decoder described in
+  [`remotex.example.toml`](../remotex.example.toml). Support depends on the
+  browser, platform and GPU, so the picker is the answer rather than a
+  browser-name table: it greys the HEVC for a page without one, and starts on
+  the H.264.
 
 The sound needs nothing on the gateway either way: every session is sent the
 Mac's AAC-ELD, which the browser tries to decode. A browser that cannot decode
