@@ -1245,8 +1245,29 @@ tile, for 20 s a run:
   repeats of a run differ, and whether the H.264 obeys the rate reports the
   HEVC does ([Rate control](#rate-control)).
 
-Seen on the virtual Mac only: no browser was given it, nothing was decoded, and
-a display change, a keyframe request and more than one tile were not tried.
+Offered 123 alone with `tilesPerFrame` 4, the Mac sends the H.264 in four
+strips, laid out as the HEVC's are ([In strips](#in-strips)). At 1600×1000 each
+was a 1600×256 picture, High profile, level 3.2, under the display's SSRC plus
+the strip's number, a frame's strips sharing its timestamp.
+
+- **One H.264 stream.** The strips share one set of parameter sets, which each
+  strip's keyframe picture carries in its own sample description, and one
+  decoding order number counting across the four SSRCs without a gap. Merged in
+  that order, 15 s under a moving pointer decoded clean in FFmpeg as one stream
+  of strip-sized pictures, and stacked they were the display.
+- **Strips predict from each other.** A keyframe is an IDR of strip 0 and a
+  picture of each other strip that is not an IDR, and each strip decoded on its
+  own named pictures it did not have.
+- **The packets carry the order number.** A picture comes as FU-B fragments,
+  every one with the number after its FU header, or, where it fits one packet,
+  as a STAP-B. With one tile it is FU-A and there is no number.
+- **A loss is not recovered from by itself.** A run that lost packets in its
+  third frame and asked for nothing decoded two frames and no picture after
+  them.
+
+Seen on the virtual Mac only: no browser was given it, nothing but the
+four-strip capture was decoded, and a display change and a keyframe request
+were not tried.
 
 The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
 sets its bits and then byte-swaps the word before sending it. A published
