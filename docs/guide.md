@@ -81,7 +81,8 @@ config key.
 - **Passthrough.** Sends the remote's own stream to the browser as it came
   instead of VP9 encoded by the gateway. On a Mac it is a choice, for a LAN,
   greyed where the browser cannot take the stream. On an `rdp` target with the
-  pipeline on it is no choice: the row is ticked and locked, and a browser that
+  pipeline on it is no choice: the picker says it is always passed, with no box
+  to tick, and a browser that
   cannot compose the pipeline cannot start the target. A passed RDP pipeline
   follows the browser's link: the Windows host draws fewer and smaller frames
   for a browser that falls behind. A passed Mac's HEVC does not: on a slow link,

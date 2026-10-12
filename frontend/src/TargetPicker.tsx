@@ -286,6 +286,21 @@ export default function TargetPicker({
                         </div>
                       </fieldset>
                     )}
+                    {/* A stream passed in every session is said, not
+                        offered. */}
+                    {options.passed && (
+                      <p className="picker-choice">
+                        <span className="picker-choice-heading">
+                          Passthrough
+                        </span>
+                        <span className="picker-option-text">
+                          <span>{options.passed.label}</span>
+                          <span className="picker-option-note">
+                            {options.passed.note}
+                          </span>
+                        </span>
+                      </p>
+                    )}
                     {/* How the host draws the pipeline, on an RDP target
                         with one. */}
                     {options.pipelineRow && (

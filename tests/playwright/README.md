@@ -138,7 +138,8 @@ target opens to the size it will have and the options its type offers and the
 browser remembers what was chosen, and that a second browser taking the session
 over is given none of it: it lands on a picker where a target whose pipeline it
 cannot compose has Start disabled, with the reason, and no VP9 in its place. It
-also checks that the pipeline's row is ticked and locked, and that the Graphics
+also checks that the pipeline is said to be always passed, with no box to tick,
+and that the Graphics
 group opens on Lossless and, under Adaptive, on H.264 full screen. It needs an
 `rdp` target that configures a `size`, the one type that offers all three
 choices, and the tone harness is one.

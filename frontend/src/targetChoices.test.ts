@@ -144,7 +144,9 @@ test("a Mac sharing its physical displays is shown at their size", () => {
 
 test("only what the target's type offers has a row", () => {
   const rdp = targetOptions(RDP, undefined, ABLE);
-  assert.deepEqual(keys(rdp.rows), ["passthrough"]);
+  // Its pipeline is passed in every session, which is said rather than offered.
+  assert.deepEqual(rdp.rows, []);
+  assert.ok(rdp.passed);
   assert.deepEqual(formats(rdp), ["opus", "flac"]);
   // A plain VNC server has nothing to choose.
   const plain = targetOptions(target({}), undefined, ABLE);
@@ -296,10 +298,8 @@ test("a passthrough this browser cannot take is greyed, with the reason", () => 
 test("a gateway that cannot decode the Mac's picture can only pass it", () => {
   const only = { ...HIGH_PERFORMANCE, passthroughOnly: true };
   const able = targetOptions(only, { passthrough: false }, ABLE);
-  const row = able.rows.find((r) => r.key === "passthrough");
-  assert.ok(row);
-  assert.equal(row.checked, true, "shown as the choice already made");
-  assert.equal(row.disabled, true);
+  assert.deepEqual(able.rows, [], "no choice to offer");
+  assert.match(able.passed?.note ?? "", /cannot decode the Mac's picture/);
   assert.equal(able.choices.passthrough, true);
   assert.equal(able.blocked, null);
 
@@ -313,17 +313,16 @@ test("an RDP host's pipeline is always passed, and needs a page that composes it
   // No gateway composes the pipeline, so it is shown as passed, whatever was
   // remembered.
   const able = targetOptions(RDP, { passthrough: false }, ABLE);
-  const row = able.rows.find((r) => r.key === "passthrough");
-  assert.ok(row);
-  assert.equal(row.checked, true);
-  assert.equal(row.disabled, true, "no choice");
+  assert.deepEqual(able.rows, [], "no choice");
+  assert.equal(able.passed?.label, "Always passed through");
+  assert.match(able.passed?.note ?? "", /egfx is on/);
   assert.equal(able.choices.passthrough, true);
   assert.equal(able.blocked, null);
 
   // A browser that cannot compose it cannot start the target: no VP9 stands in.
   const unable = targetOptions(RDP, undefined, UNABLE);
   assert.match(unable.blocked ?? "", /WebGL 2/);
-  assert.equal(unable.rows.find((r) => r.key === "passthrough")?.checked, true);
+  assert.ok(unable.passed);
 });
 
 test("how the host draws the pipeline is lossless until somebody chooses adaptive", () => {

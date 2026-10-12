@@ -197,6 +197,13 @@ export interface PlacementOption {
   label: string;
 }
 
+/** A stream that is passed in every session, said rather than offered. */
+export interface PassedNote {
+  label: string;
+  /** Why it is always passed. */
+  note: string;
+}
+
 /** One option under an open target. */
 export interface OptionRow {
   key: "passthrough";
@@ -223,6 +230,8 @@ export interface TargetOptions {
   placements: PlacementOption[] | null;
   /** How the host draws the pipeline, as a choice: null where it is none. */
   pipelineRow: PipelineRow | null;
+  /** The target's stream where it is passed in every session: null otherwise. */
+  passed: PassedNote | null;
   rows: OptionRow[];
   /** What Start sends. */
   choices: Choices;
@@ -235,31 +244,31 @@ export interface TargetOptions {
 const PASSTHROUGH: Record<
   Passthrough,
   {
-    label: string;
     // What is said where the stream can only be passed.
-    only: { note: string; blocked: string };
-    // What is said where passing it is a choice, null for a stream that is
+    only: PassedNote & { blocked: string };
+    // What is offered where passing it is a choice, null for a stream that is
     // passed in every session.
-    chosen: { note: string; cannot: string } | null;
+    chosen: { label: string; note: string; cannot: string } | null;
   }
 > = {
   "rdp-graphics": {
-    label: "The graphics pipeline, passed through",
     only: {
-      note: "The host's drawing is composed in this browser, in every session.",
+      label: "Always passed through",
+      note: "egfx is on for this target, so every session passes the host's graphics pipeline through, for this browser to compose.",
       blocked:
         "This browser cannot compose the host's graphics pipeline, which this target always passes: that needs WebGL 2 and a cross-origin isolated page. Use a browser that can, or a target with egfx disabled.",
     },
     chosen: null,
   },
   "apple-media": {
-    label: "Pass the Mac's picture through",
     only: {
-      note: "This gateway cannot decode the Mac's picture, so it is always passed.",
+      label: "Always passed through",
+      note: "This gateway cannot decode the Mac's picture, so every session passes it through.",
       blocked:
         "This gateway cannot decode the Mac's picture, and this browser cannot take it passed through. Use a browser that decodes it, or install FFmpeg on the gateway's host.",
     },
     chosen: {
+      label: "Pass the Mac's picture through",
       note: "The Mac's own HEVC, instead of VP9 encoded by the gateway. For a LAN.",
       cannot:
         "This browser does not decode the Mac's HEVC, and this page cannot decode it here.",
@@ -285,30 +294,27 @@ function takes(
 }
 
 /**
- * The passthrough row of a target that has a stream to pass, and why the target
- * cannot start here where that stream is the only way and this browser cannot
- * take it.
+ * How a target that has a stream to pass shows it: said, where it is passed in
+ * every session, with why the target cannot start here where this browser cannot
+ * take it; otherwise a row to tick.
  */
 function passthroughRow(
   target: TargetInfo,
   passthrough: Passthrough,
   remembered: boolean | undefined,
   abilities: Abilities,
-): { row: OptionRow; blocked: string | null } {
+): { row: OptionRow } | { passed: PassedNote; blocked: string | null } {
   const words = PASSTHROUGH[passthrough];
   const able = takes(target, abilities, passthrough);
-  const row = { key: "passthrough" as const, label: words.label };
   const chosen = target.passthroughOnly ? null : words.chosen;
   if (!chosen) {
-    return {
-      row: { ...row, note: words.only.note, checked: true, disabled: true },
-      blocked: able ? null : words.only.blocked,
-    };
+    const { label, note, blocked } = words.only;
+    return { passed: { label, note }, blocked: able ? null : blocked };
   }
+  const row = { key: "passthrough" as const, label: chosen.label };
   if (!able) {
     return {
       row: { ...row, note: chosen.cannot, checked: false, disabled: true },
-      blocked: null,
     };
   }
   return {
@@ -318,7 +324,6 @@ function passthroughRow(
       checked: remembered ?? false,
       disabled: false,
     },
-    blocked: null,
   };
 }
 
@@ -517,18 +522,23 @@ export function targetOptions(
   const sound = soundRow(target, remembered?.audio, abilities.audio);
   const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
   const rows: OptionRow[] = [];
+  let passed: PassedNote | null = null;
   let blocked: string | null = null;
   if (target.passthrough) {
-    const passed = passthroughRow(
+    const shown = passthroughRow(
       target,
       target.passthrough,
       remembered?.passthrough,
       abilities,
     );
-    rows.push(passed.row);
-    blocked = passed.blocked;
+    if ("row" in shown) {
+      rows.push(shown.row);
+    } else {
+      passed = shown.passed;
+      blocked = shown.blocked;
+    }
   }
-  const passthrough = rows.some((row) => row.checked);
+  const passthrough = passed !== null || rows.some((row) => row.checked);
   const placements = target.placement ? PLACEMENTS : null;
   const choices: Choices = {
     size,
@@ -544,6 +554,7 @@ export function targetOptions(
     soundRow: sound.row,
     placements,
     pipelineRow: drawn.row,
+    passed,
     rows,
     choices,
     // High Performance's sound comes with its picture, so it has no row and is

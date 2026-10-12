@@ -560,8 +560,8 @@ password = "change-me"
 # EXPERIMENTAL. Decoding the picture here takes the host's FFmpeg (libavcodec 60
 # to 63), which the gateway loads when it is needed.
 # docs/high-performance-decoder.md says how to install it on Linux, macOS and
-# Windows. Without it the picture can only be passed: the picker shows the
-# passthrough as already chosen, and a browser that cannot decode the HEVC
+# Windows. Without it the picture can only be passed: the picker says so, with
+# no box to tick, and a browser that cannot decode the HEVC
 # cannot start the target, which Start says. See docs/apple-vnc-889.md, "The
 # media stream".
 #

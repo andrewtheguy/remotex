@@ -92,7 +92,7 @@ async function openTarget(page: Page): Promise<Locator> {
 }
 
 const SOUND = /^Sound/;
-const PASSED = /^The graphics pipeline, passed through/;
+const PASSED = "egfx is on for this target, so every session passes the host's graphics pipeline through";
 
 test.describe("the picker's options", () => {
   test.skip(
@@ -168,12 +168,11 @@ test.describe("the picker's options", () => {
     await expect(formats).toHaveCount(2);
     await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
     await expect(item.getByRole("radio", { name: /^FLAC/ })).not.toBeChecked();
-    // The pipeline is shown passed, and is no choice. How the host draws it is,
-    // lossless until somebody chooses adaptive, whose H.264 is then over the
-    // full screen until somebody chooses the region.
-    const passed = item.getByRole("checkbox", { name: PASSED });
-    await expect(passed).toBeChecked();
-    await expect(passed).toBeDisabled();
+    // The pipeline is said to be passed, and is no choice. How the host draws
+    // it is, lossless until somebody chooses adaptive, whose H.264 is then over
+    // the full screen until somebody chooses the region.
+    await expect(item).toContainText(PASSED);
+    await expect(item.getByRole("checkbox", { name: /pass/i })).toHaveCount(0);
     const graphics = item.getByRole("group", { name: "Graphics" });
     await expect(graphics.getByRole("radio", { name: /^Lossless/ })).toBeChecked();
     await expect(graphics.getByRole("radio", { name: /^H\.264/ })).toHaveCount(0);
@@ -229,9 +228,7 @@ test.describe("the picker's options", () => {
       ).toBeVisible();
       expect(second.statuses).toEqual([]);
       const item = await openTarget(other);
-      const passed = item.getByRole("checkbox", { name: PASSED });
-      await expect(passed).toBeDisabled();
-      await expect(passed).toBeChecked();
+      await expect(item).toContainText(PASSED);
       await expect(item).toContainText(
         "This browser cannot compose the host's graphics pipeline",
       );

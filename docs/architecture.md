@@ -486,7 +486,8 @@ An `rdp` target with the pipeline on passes the host's graphics pipeline
 (MS-RDPEGFX) to the browser in every session: its commands out of their bulk
 compression, never altered, as `GRAPHICS` records on the display socket behind a
 `graphicsStart`; the gateway neither composes nor encodes them, and composes no
-pipeline at all. The picker shows the passthrough ticked and locked, and only a
+pipeline at all. The picker says the pipeline is always passed, with no box to
+tick, and only a
 page that said it composes one can start the target: a cross-origin isolated
 page, for the compositor's threads, with a WebGL 2 canvas to present on
 (`frontend/src/rdpGraphics.ts`). Any other has Start disabled with the reason,
@@ -1067,8 +1068,8 @@ the pipeline.
   drops the gateway's two headers leaves, and one without WebGL 2 has nowhere to
   present. So the page asks itself once (`frontend/src/rdpGraphics.ts`) and states
   `rdp_graphics=true|false` on its session socket. `/api/targets` marks an
-  `rdp` target with its pipeline on `passthroughOnly`, and the picker shows the
-  row ticked and locked; for a page that said no it disables Start with the
+  `rdp` target with its pipeline on `passthroughOnly`, and the picker says it is
+  always passed, as a note and not a row; for a page that said no it disables Start with the
   reason, `connect` refuses the target, and an owner coming back from such a
   page has the session ended. `render_plan` sets `rdp_graphics` on every session
   of such a target.
@@ -1712,7 +1713,7 @@ and `GET /api/targets` carries it:
 
 | Target | Window drives the size | Sound | Passthrough | Graphics |
 |---|---|---|---|---|
-| `rdp` | yes | shown | shown ticked and locked: the graphics pipeline | shown: lossless or adaptive H.264 |
+| `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: lossless or adaptive H.264 |
 | `rdp` with `egfx = false` | no | shown | hidden | hidden |
 | `vnc` | no | hidden | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden |
@@ -1762,7 +1763,8 @@ and `GET /api/targets` carries it:
   needs it. `/api/targets` says, as `passthroughOnly`, where a stream can only
   be passed: on every `rdp` target with the pipeline on, which the gateway never
   composes, and where a gateway's host lacks FFmpeg and so cannot decode a Mac's
-  picture at all. There the row shows it chosen and locked, and where the
+  picture at all. There the picker says the stream is always passed, as a note
+  with no box to tick, and where the
   browser cannot take it Start is disabled and says why, before the host is
   dialled; for the pipeline that reads "This browser cannot compose the host's
   graphics pipeline, which this target always passes". A `connect` whose
