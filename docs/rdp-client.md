@@ -170,7 +170,7 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   that both takes the detection and offers UDP, without the UDP being used. This
   is one pathway, not shown to be the only one or the one Microsoft's clients
   take. Microsoft's iPhone client, with UDP off, softens over TCP by means not yet
-  read ([Roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac)).
+  read ([Roadmap](roadmap.md#an-official-way-to-have-windows-rate-control-its-h264-over-tcp)).
 - **Offered UDP behind a slow page, the wrong link is reported.** Same again, with
   the host's link fast and a page on 1 Mbit/s behind the gateway instead, which
   is the case of a passed pipeline. Answered from what reached this client's socket, the
@@ -245,7 +245,7 @@ least a millisecond, and a zero frame timestamp gives no lag. The measurements
 above were repeated with the fixes. A session started with the picker's Adaptive
 takes the detector and the claim of UDP, and answers at the page's pace; a
 Lossless session takes neither, and has no H.264 for the host to rate-control
-([Roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac)).
+([Roadmap](roadmap.md#an-official-way-to-have-windows-rate-control-its-h264-over-tcp)).
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
 backing up, and the regions say what it does then ([MS-RDPEGFX section

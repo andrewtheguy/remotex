@@ -1224,9 +1224,29 @@ reference frames and a 13-bit picture order count, and tagged with the HEVC
 stream's colours: Display P3 primaries, sRGB transfer, BT.709 matrix. Its
 parameter sets do not come as NAL units of their own. A keyframe's first packet
 is an MP4 `avc1` sample description holding them, and the IDR follows as FU-A
-fragments. Remotex does not ask for it. Seen in one short run on the virtual Mac
-only: no browser was given it, and a display change, a keyframe request and
-more than one tile were not tried.
+fragments. Remotex does not ask for it.
+
+Its rate follows the picture, where the HEVC's does not. A probe that sent no
+rate reports ran each codec alone against a virtual Mac, at 1600×1000 with one
+tile, for 20 s a run:
+
+| The display | H.264, after the first second | HEVC, after the first second |
+|---|---|---|
+| Still | 33 and 473 kbit/s | 15.4 and 15.5 Mbit/s |
+| Only the pointer moving | 115 and 494 kbit/s | 3.0 and 16.8 Mbit/s |
+| A 30 fps animation in a quarter of it | 9.2–11.0 Mbit/s | 19.3–21.2 Mbit/s |
+| A detailed picture panning across a window | 20.8 and 21.0 Mbit/s | 20.5 and 20.9 Mbit/s |
+
+- **The HEVC stays near its 20 Mbit/s floor** whatever the display does. The
+  H.264 reaches it only when the picture asks for it.
+- **The first picture is smaller too:** about 110 kB of a still display in its
+  first second, where the HEVC sent 2.2 MB.
+- **Not known:** why the HEVC spends that on a still display, what made
+  repeats of a run differ, and whether the H.264 obeys the rate reports the
+  HEVC does ([Rate control](#rate-control)).
+
+Seen on the virtual Mac only: no browser was given it, nothing was decoded, and
+a display change, a keyframe request and more than one tile were not tried.
 
 The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
 sets its bits and then byte-swaps the word before sending it. A published

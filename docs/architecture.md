@@ -1533,8 +1533,9 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   never behind. A browser that falls behind fills the gateway's queue, which drops
   to the next IDR and asks the Mac for one. The passthrough is for a LAN; a slow
   link wants a session started without it, whose VP9 the walk follows. A passed
-  Standard mode with Apple's Adaptive encodings, as the slow-link alternative, is
-  [on the roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac).
+  Standard mode with Apple's Adaptive encodings, and High Performance's H.264,
+  are [under consideration](roadmap.md#a-passed-stream-for-a-mac-on-a-slow-link)
+  as slow-link alternatives.
 - **Other VNC servers**, a plain `vnc` target included even when wlshare answers
   it, and a Mac in Standard mode, have no passed stream: their picture is always
   encoded here, and the walk follows the browser's link wherever `render_adaptive`
