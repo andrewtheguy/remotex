@@ -496,11 +496,14 @@ impl Paced {
         }
     }
 
-    /// The caller's pace, in bytes a second, while it was behind.
-    fn pace(&self) -> Option<f64> {
-        let busy: Duration = self.samples.iter().map(|(_, _, took)| *took).sum();
-        let bytes: u64 = self.samples.iter().map(|(_, bytes, _)| *bytes).sum();
-        (busy >= PACE_SAMPLE).then(|| bytes as f64 / busy.as_secs_f64())
+    /// The caller's pace at `now`, in bytes a second, while it was behind: read
+    /// from the samples within [`PACE_WINDOW`] of `now`, since a caller that has
+    /// stopped composing has not composed since.
+    fn pace(&self, now: Instant) -> Option<f64> {
+        let recent = || self.samples.iter().filter(|(at, ..)| now.saturating_duration_since(*at) <= PACE_WINDOW);
+        let busy: Duration = recent().map(|(_, _, took)| *took).sum();
+        let bytes: u64 = recent().map(|(_, bytes, _)| *bytes).sum();
+        (busy >= PACE_SAMPLE && bytes > 0).then(|| bytes as f64 / busy.as_secs_f64())
     }
 
     /// What one detection answer comes to now, with `owed` bytes handed to the
@@ -515,7 +518,7 @@ impl Paced {
         now: Instant,
     ) -> Option<Vec<u8>> {
         use autodetect::Answer;
-        let pace = self.pace().filter(|_| behind);
+        let pace = self.pace(now).filter(|_| behind);
         match answer {
             Answer::Reply(reply) => {
                 let queued = pace.map_or(Duration::ZERO, |pace| Duration::from_secs_f64(owed as f64 / pace));
@@ -1447,8 +1450,9 @@ impl<'a> Active<'a> {
                     dynamics.graphics = None;
                     *graphics = graphics.as_ref().map(Graphics::fresh);
                     // Its frames went with it: an acknowledgement still to come is
-                    // for a channel that is no longer there to be told.
-                    *passed = PassedFrames::default();
+                    // for a channel that is no longer there to be told. The
+                    // caller's distance is the caller's, and is not said again.
+                    *passed = PassedFrames { distance: passed.distance, ..PassedFrames::default() };
                     (vec![dvc::close(channel)], Vec::new())
                 }
                 // The sound, on the channel a current host prefers for it. Every
@@ -1646,7 +1650,12 @@ impl<'a> Active<'a> {
         for (frame, finished) in self.passed.composed(frame, now) {
             self.acknowledge_frame(frame, finished).await?;
         }
-        self.paced.composed(owed - self.passed.owed_bytes, self.passed.behind(now), now);
+        // A frame not waited on composed nothing this session handed over, and
+        // says nothing of the caller's pace.
+        let composed = owed - self.passed.owed_bytes;
+        if composed > 0 {
+            self.paced.composed(composed, self.passed.behind(now), now);
+        }
         Ok(())
     }
 
@@ -2271,7 +2280,31 @@ mod tests {
             // Each frame composed with nothing behind it, a second apart.
             paced.composed(10_000, false, start + Duration::from_secs(i));
         }
-        assert_eq!(paced.pace(), None);
+        assert_eq!(paced.pace(start + Duration::from_secs(4)), None);
+    }
+
+    /// A caller that stopped composing while behind has no pace from before: its
+    /// samples age out at the time they are read, not only when it composes again.
+    #[test]
+    fn a_stalled_caller_has_no_old_pace() {
+        let start = Instant::now();
+        let paced = behind(start);
+        assert!(paced.pace(start + Duration::from_millis(200)).is_some());
+        assert_eq!(paced.pace(start + PACE_WINDOW + Duration::from_millis(200)), None);
+        let mut paced = behind(start);
+        let reply = paced.answer(measured(50_000), 30_000, true, Duration::ZERO, start + Duration::from_secs(5));
+        assert_eq!(reply, Some(b"at once".to_vec()), "answered as measured, not at a pace long gone");
+    }
+
+    /// Time with nothing composed is no pace at all, not a pace of nothing.
+    #[test]
+    fn nothing_composed_is_no_pace() {
+        let start = Instant::now();
+        let mut paced = Paced::default();
+        for i in 0..4 {
+            paced.composed(0, true, start + Duration::from_millis(100 * i));
+        }
+        assert_eq!(paced.pace(start + Duration::from_millis(300)), None);
     }
 
     /// A caller far away has frames in flight for its distance on any link, and
@@ -2295,7 +2328,7 @@ mod tests {
             paced.composed(100_000, passed.behind(now), now);
             passed.handed(100_000, Some(frame + 4), at(50 * u64::from(frame + 4)));
         }
-        assert_eq!(paced.pace(), None);
+        assert_eq!(paced.pace(at(1100)), None);
 
         // Once frames have waited longer than that, the caller is behind.
         let late = at(1500);
