@@ -23,7 +23,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/flac"]
 
 [package]
 name = "remotex"
-version = "0.0.386"
+version = "0.0.387"
 license = "MIT"
 edition = "2024"
 
@@ -40,10 +40,10 @@ embedded-gateway = ["dep:crossterm", "dep:libc", "dep:windows-sys"]
 apple-hp-media-static = ["dep:avcodec-hevc-sys"]
 # EXPERIMENTAL: screen-vp9's encoder written in Rust, which a target's
 # `experimental_native_vp9` codes its stream with in libvpx's place. On by
-# default, in a container's build as in a native one. Its kernels are NEON on
-# arm64 and AVX2 on amd64, which `.cargo/config.toml` builds for; a build
+# default, in a container's build as in a native one. It is built for NEON on
+# arm64 and for x86-64-v3 on amd64, which `.cargo/config.toml` sets; a build
 # without the feature and with that flag taken back out is the gateway for an
-# amd64 machine with no AVX2 (packaging/README.md, "x86-64 CPU compatibility").
+# amd64 machine under x86-64-v3 (packaging/README.md, "x86-64 CPU compatibility").
 native-vp9 = ["screen-vp9/native"]
 
 [dependencies]
@@ -100,7 +100,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 #
 # Its `native` feature, the EXPERIMENTAL encoder it has written in Rust, is this
 # crate's `native-vp9` above.
-screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.16" }
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.17" }
 # YUV→RGB for the HEVC pictures High Performance's media stream decodes to
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
 # no C, no assembler, the same bargain as above.

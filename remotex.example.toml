@@ -637,6 +637,6 @@ password = "change-me"
 # `video_quality`, so two targets of one host that differ in this key alone are
 # the two encoders side by side. A "wlshare" target needs a wlshare that has the
 # encoder; an older one ignores the request and codes with libvpx. A gateway
-# built without the `native-vp9` feature, the build for an amd64 machine with no
-# AVX2, has no such encoder and refuses the key on every other target.
+# built without the `native-vp9` feature, the build for an amd64 machine under
+# x86-64-v3, has no such encoder and refuses the key on every other target.
 #experimental_native_vp9 = false
