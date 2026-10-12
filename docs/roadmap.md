@@ -117,11 +117,17 @@ explored:
   ([The connection sequence](rdp-client.md#the-connection-sequence)). Next:
   - Repeat the UDP offer with H.264 by region and with H.264 refused, to see
     whether RemoteFX Progressive and the mixed desktop adapt too.
-  - Decide whose link a passed session's detection reports. Answered from the
-    gateway's own socket, it measures the hop to the host, and on a LAN the host
-    then fills that hop at QP 22, which a browser on a slow link cannot carry.
-    Answering from the browser's link is what decides the browser integration
-    and its QA.
+  - Make a passed session's detection report the browser's link. Answered from
+    the gateway's own socket it reports the hop to the host: behind a page on
+    1 Mbit/s the host was told 8 to 20 Mbit/s, drew LAN-grade 33 KB frames and
+    fell to 3.7 frames a second, where without the claim it held 13. Ways to
+    report the page's link instead:
+    - close each bandwidth measurement when the page has acknowledged the bytes
+      up to its Stop, not when the gateway read them;
+    - answer each round-trip request only after a round trip to the page.
+
+    All of it stays on TCP, so it works with a WebSocket. This decides the
+    browser integration and its QA.
 
   Measure each case against the session re-encoded as VP9. A host that draws with bitmap updates (`egfx = false`) could
   be passed too, for the page to decode.

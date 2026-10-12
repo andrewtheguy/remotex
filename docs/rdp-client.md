@@ -168,6 +168,15 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   is one pathway, not shown to be the only one or the one Microsoft's clients
   take. Microsoft's iPhone client, with UDP off, softens over TCP by means not yet
   read ([Roadmap](roadmap.md#passed-streams-that-adapt-on-windows-and-the-mac)).
+- **Offered UDP behind a slow page, the wrong link is reported.** Same again, with
+  the host's link fast and a page on 1 Mbit/s behind the gateway instead, which
+  is the passthrough case. Answered from what reached this client's socket, the
+  host was told 8 to 20 Mbit/s: each measurement is a short burst that lands in
+  the receive buffer before the page's pace holds the socket back. The host
+  answered with the LAN's quality, regions at 22 and 30 in 33 KB frames, and so
+  only 3.7 frames a second, a second or two behind the desktop. Without the claim,
+  the same page got 13 frames a second at 9.6 KB. For a passed session the
+  detection has to report the page's link, not the socket's.
 
 The detector's and the link probe's earlier defects are fixed: the
 connect-time count includes each payload's header, malformed requests are
