@@ -108,9 +108,6 @@ a browser tab ([two virtual displays](#two-virtual-displays-past-alpha)).
 ([Windows](guide.md#windows-rdp), [Macs](guide.md#macs-vnc-with-an-apple-subtype)).
 What it lacks:
 
-- **Telling the displays apart.** The session page's Info names both displays
-  and links to the second, but nothing on the remote's screens says which
-  display is which.
 - **A tab left behind.** When the session's page goes — closed, reloading, or
   its socket dropped — the tab showing the second display carries on with no
   word of it: its input still reaches the remote through the reattach grace, and
@@ -120,7 +117,7 @@ What it lacks:
   whether the session's page is attached too, and for the tab to say so over its
   desktop until the page is back.
 
-Fixing those does not take it out of alpha by itself. It also needs more testing
+Fixing that does not take it out of alpha by itself. It also needs more testing
 than it has had, on both kinds of target, before it is offered as anything else.
 
 ### A touchpad's scroll as a gesture on a Mac
@@ -244,30 +241,6 @@ thousandth of a core for a frame of music, less than libFLAC takes natively.
 What is left is the residual's Rice codes and the prediction, two loops in which
 every sample waits on the one before. What has been tried, and how a change is
 judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
-
-### Not forwarding silence in a passed sound stream
-
-A quiet RDP host sends no sound, so its browser receives no packets until
-something plays. The two passed streams do not behave that way: a High
-Performance Mac and a `wlshare` target go on sending units while nothing plays,
-and the gateway forwards each one (`AudioListener::into_passed` in
-`src/audio.rs`). Holding the silent ones back would make all three alike.
-
-- **The Mac's AAC-ELD.** Silence can be told without a decoder. A quiet Mac sends
-  one unit a hundred times a second, the four bytes `00 68 34 00`: `max_sfb` 0,
-  so no band carries a coefficient, and a `global_gain` for each channel. A unit
-  whose `max_sfb` is 0, or whose every section names the zero codebook, is
-  silence by its header, read before anything Huffman-coded. That was captured
-  on macvm; a physical Mac has not been.
-- **wlshare's sound.** wlshare holds the PCM before it codes it, so the silence is
-  its to withhold rather than the gateway's to detect in Opus or FLAC.
-
-What it saves is small: the Mac's silence is 400 bytes a second of payload
-against about 320 kbit/s while it plays. What it costs is on the page, which
-must take a stop in the units as silence rather than as a stream that fell
-behind, and in a few silent units still forwarded after the sound ends, since
-AAC-ELD's window overlaps the frames before it. Whether the framing around each
-unit makes the saving worth that has not been measured.
 
 ## Not planned
 
