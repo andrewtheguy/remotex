@@ -89,18 +89,42 @@ explored:
   mode (`ard`), on the Mac's physical displays or on the unofficial virtual
   display (`virtual_display = true`), is decoded here and always re-encoded
   today ([Tier 3](architecture.md#tier-3-a-macs-standard-screen-sharing)). Apple's
-  viewer's **Adaptive** quality asks for the Mac's private encodings first, the
-  8×8 DCT tiles of `0x3f3` and the 15-bit zlib of `0x3ea`, before zlib and ZRLE
+  viewer's **Adaptive** quality asks for the Mac's private encodings first, and
+  a Mac asked that way sends the 8×8 DCT tiles of `0x3f3` alone
   ([Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)).
-  Passed and decoded in the page, they are lossy encodings the Mac chooses
-  itself, and RFB is pulled, one update request at a time, so a request held
-  until the page has drawn the update before it paces the Mac by the browser's
-  link, as wlshare's held fence does. That would make it the slow-link
-  alternative to High Performance's HEVC: the virtual display where the session
-  should follow the window, the physical displays otherwise. What is to be
-  measured is whether the Mac chooses among the encodings, or refines its tiles
-  less, when the link is slow, and how such a session compares on that link with
-  ZRLE re-encoded as VP9.
+  It adapts for itself, as a Windows host's H.264 does: a changed area comes
+  coarse, and its refinement follows at once on a fast link and waits for the
+  motion to stop on a slow one. At 500 kbit/s a virtual Mac kept a panning
+  picture moving and refined it in strips afterwards, where ZRLE delivered its
+  first picture and nothing more
+  ([What a Mac sends](apple-vnc-889.md#what-a-mac-sends-a-viewer-that-lists-them)).
+  So it is to be passed to the browser the way an RDP host's H.264 is: chosen
+  at the picker, as **Adaptive** on a Standard Mac beside the lossless ZRLE the
+  gateway re-encodes, held for the session, and with no VP9 encoder built for
+  it. That would make it the slow-link alternative to High Performance's HEVC:
+  the virtual display where the session should follow the window, the physical
+  displays otherwise. What it takes:
+  - **A decoder in the page.** No browser decodes `0x3f3`, so it is a
+    WebAssembly module built here, beside the page's FLAC decoder. It holds
+    what the encoding needs from one update to the next: every tile's
+    coefficients since its last full update, and the cache of refined tiles.
+    The coding is read from Apple's viewer and has not been decoded yet, so the
+    first step is a decoder run against captured rectangles and checked against
+    the same still screen sent as ZRLE.
+  - **The rectangles passed untouched.** The gateway forwards each one's bytes
+    without decoding them, and goes on reading the cursor, the layout and the
+    rest itself.
+  - **The Mac paced by the browser's link.** The Mac holds its refinement back
+    by how fast its own socket drains, so the gateway has to let the page's
+    backlog reach that socket, as it does for a passed RDP pipeline, instead of
+    reading freely and queueing.
+  - **A session that cannot be picked up half way.** The page's tile state and
+    cache are part of the stream, so an owner's reattach starts a fresh session,
+    as it does on a passed RDP pipeline.
+
+  To be measured before it is offered: a physical Mac, since all of the above
+  is from a virtual one; how the coarse picture looks, and for how long, on a
+  slow link; and such a session against ZRLE re-encoded as VP9 on the same link.
 - **More of the Windows host's own adapting.** A passed pipeline gets fewer
   frames from a page that composes slowly, and one step down in RemoteFX
   Progressive's first pass while the host's socket backs up. H.264 takes no step:

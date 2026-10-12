@@ -928,7 +928,9 @@ Read from the daemon, for a reader of Apple's viewer's captures:
 
 Remotex advertises none of these, but Adaptive quality lists `0x3f3` and `0x3ea`
 first, so a capture of Apple's viewer is full of them. This is read from the
-Mac's encoders and the viewer's decoders.
+Mac's encoders and the viewer's decoders, and
+[what the Mac sends](#what-a-mac-sends-a-viewer-that-lists-them) from a probe's
+captures of a virtual Mac. No decoder has been run against those captures.
 
 **`0x3e8`, `0x3e9` and `0x3ea` are zlib with fewer bits per pixel.** A rectangle
 is a `u32` length and that many bytes of zlib. Each encoding keeps its own deflate
@@ -948,11 +950,13 @@ each row and carries half the error to the next pixel, so the picture is dithere
 **`0x3f3` codes the picture in 8×8 tiles.** A rectangle is a `u32` length, at
 most 100,000,000, then a body whose first byte says what it is:
 - **0, a full update.**
-  - Bytes 1 and 2 are parameters for its DCT tiles.
+  - Bytes 1 and 2 are two precisions, and each DCT tile says which it was coded
+    at. The Mac sends 3 and 5 in a session's first picture and 15 and 25 after it.
   - Bytes 3–5 are a big-endian `u24` offset from the body's start to a data stream.
   - A command stream starts at byte 6.
 - **1, a partial update,** which refines the tiles of the last full update.
-  - Bytes 1 and 2 are DCT parameters; the Mac sends 14 and 19.
+  - Bytes 1 and 2 are how many chroma coefficients a refined tile gets, for Cr
+    and for Cb, and at most 64; the Mac sends 14 and 19.
   - One bit stream starts at byte 3 and gives each tile a 2-bit code: 0 leaves the
     tile alone, 1 refines its DCT coefficients, 2 repeats the copy the full update
     made for it, and 3 takes a cached tile.
@@ -987,6 +991,103 @@ A command's operands come from the data stream:
 | 7 | the cached tile after the last one used |
 
 Both streams end with `0x6d`.
+
+**A DCT tile is three 8×8 blocks, Y, Cb and Cr, and a full update sends the
+luminance coarsely and the chrominance flat.** The blocks hold quantized
+coefficients in JPEG's zigzag order. The viewer multiplies them by the tables of
+message 2, inverts them with the JPEG reference library's integer transform, and
+converts with JPEG's YCbCr. A tile's operands are, in order:
+- **a copy bit.** Set, the tile is the previous DCT tile of this update over
+  again, and nothing follows.
+- **a bit that keeps the previous DCT tile's chrominance,** and **a bit that
+  picks the precision** n: byte 1 of the body when clear, byte 2 when set.
+- **the Cb and then the Cr DC,** unless they were kept, each a
+  [signed number](#signed-number) v: the value is 2 × (p / 2 − v), where p is
+  the previous DCT tile's and the division rounds towards zero. A full update
+  sends no other chroma coefficient.
+- **the Y DC,** a signed number taken from the previous DCT tile's.
+- **the Y AC coefficients,** from position 1, each step starting with a bit:
+  - **`0` and two bits:** `00` is a zero here, `10` is one unit and `11` minus
+    one unit. `01` is followed by a bit: clear, the block ends; set, two bits r
+    follow and r + 3 positions are zero. When r is 3, three-bit groups follow,
+    each adding its value to the run, until one is below 7.
+  - **`1`, k further `1` bits and a `0`:** a larger value, its last bit the
+    sign, set for negative, and the bits before that added to a base:
+
+    | Position | k | Bits before the sign | Base |
+    |---|---|---|---|
+    | 1–5 | 0–3 | 2 | 2 + 4k |
+    | 1–5 | 4 and up | 3 | 18 + 8(k − 4) |
+    | 6–63 | 0 | 1 | 2 |
+    | 6–63 | 1 | 2 | 4 |
+    | 6–63 | 2 and up | 3 | 8(k − 1) |
+
+  Every AC value is sent short of its low bits: a unit is 1 shifted left by s,
+  and a larger value is shifted the same.
+
+  | Precision n | s below position n | s from position n |
+  |---|---|---|
+  | under 15 | 3 | 4 |
+  | 15 and over | 1 | 3 |
+
+<a id="signed-number"></a>**A signed number** is k `1` bits and a `0`, then:
+- **k = 0:** a bit. Clear is 0; set is 1, and a sign bit follows.
+- **k = 1:** 2 plus one bit, then the sign.
+- **k = 2:** 4 plus two bits, then the sign.
+- **k of 3 and up:** 8(k − 2) plus three bits, then the sign.
+
+The viewer keeps, for every tile of the framebuffer, the precision and the
+coefficients its last full update gave it, each in one signed byte. A partial
+update works on those.
+
+**A partial update's code 1 sends the bits the full update left out.**
+- **Six bits, plus one, are how many Y coefficients the tile now has,** c. The
+  DC stays. Each position from 1 up to c − 1 is brought to full precision:
+  - **a coefficient that was not zero** takes s more bits, the s it was sent
+    short by, and moves that far from zero;
+  - **a zero** takes a whole signed number. Below position n of a tile sent at
+    15 or over it takes less: a bit that leaves it zero when clear, and when set
+    a sign bit for 1 or −1.
+- **Cr and then Cb** each take one bit for the DC, which moves it one from zero,
+  or for a zero DC leaves it or is followed by a sign bit. Then come the AC
+  coefficients up to the count in byte 1 for Cr and byte 2 for Cb, as JPEG codes
+  them: a Huffman symbol for a run of zeros and a size, from one of JPEG's
+  standard AC tables, then that many value bits.
+- **The refined tile goes into a cache,** as 64 Y, 15 Cr and 20 Cb coefficients
+  under the next index. Indices run from 1 and wrap after 64,999. A full
+  update's commands 6 and 7, and a partial update's code 3, draw a tile from
+  it; code 3 is followed by a bit that takes the entry after the last one used,
+  or when clear by a 16-bit index.
+- **Code 2** copies from where the full update's command 1 or 2 copied, when the
+  tile copied from still belongs to that full update.
+
+### What a Mac sends a viewer that lists them
+
+A probe listed `0x3f3`, `0x3ea`, zlib and ZRLE, as Adaptive does, to a virtual
+Mac in Standard mode at 1280×800, with pushes armed at 33,333, and read its
+socket no faster than a set rate. The same was run listing ZRLE alone.
+- **Only `0x3f3` came.** One quantization message, before the first picture,
+  then full and partial updates.
+- **The first picture is the coarsest,** the whole display in 21–35 kB, where
+  ZRLE's was 660 kB and more.
+- **A changed area comes as a full update, and its refinement after it.** With
+  the socket read freely, or at 2 Mbit/s, partial updates over the same area
+  follow each full one at once, and cost more than it did.
+- **On a link too slow for that, the refinement waits for the motion.** At
+  500 kbit/s, with a detailed picture panning for three seconds and then still,
+  the full updates took the link while it moved. The refinement came as strips
+  one tile high and as wide as the display, from the top down: about two a
+  second during the motion, about eight a second once it stopped, and the whole
+  display in some twelve seconds. Motion that starts again slows the strips
+  again.
+- **It is the cost that decides, not the rate alone.** A picture whose
+  refinement was cheap was refined whole after every full update at 500 kbit/s
+  too.
+- **A full update costs the same on any link.** The precisions did not change
+  with the rate. What a slow link changes is how many updates there are and
+  when the refinement comes.
+- **ZRLE on the same links** moved a sixteenth of the pixels at 2 Mbit/s, and at
+  500 kbit/s delivered its first picture and nothing more in 20 s.
 
 ### The numbers, in both forms
 
@@ -1549,8 +1650,11 @@ is 10 s overdue.
 
 ## Still unknown
 
-- **`0x3f3`'s DCT tiles:** how their coefficients, and a partial update's
-  refinements, are coded
+- **`0x3f3` decoded:** the coding is read from the viewer and no decoder has
+  been run against a capture, so which of JPEG's AC tables the chrominance uses,
+  and the order of a pixel's bytes, are unchecked. What the Mac measures to
+  hold a refinement back, and how the picture looks before it, are unknown, and
+  nothing was captured from a physical Mac
   ([Apple's own framebuffer encodings](#apples-own-framebuffer-encodings)).
 - **Other login types:** type 35's Kerberos tokens
   ([Other login types](#other-login-types)).
