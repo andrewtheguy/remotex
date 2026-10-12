@@ -349,30 +349,43 @@ pub(super) async fn activate(
     }
 }
 
-/// What one PDU on the message channel comes to: the reply to send, if there is one.
-///
-/// An offer of UDP is turned down, and logged. Anything else is network detection,
-/// with what was measured and what the host concluded logged on the way.
+/// What one PDU on the message channel comes to: the reply to send, if there is one,
+/// sent as soon as it is due.
 pub(super) fn on_message(detector: &mut Detector, payload: &[u8]) -> Result<Option<Vec<u8>>> {
-    if multitransport::is_request(payload) {
-        // A continuous measurement counts it as well, past its security header.
-        detector.received(payload.len().saturating_sub(4));
-        let (request, reply) = multitransport::decline(payload).context("reading an offer of UDP")?;
-        info!("rdp: the host offered transport {} as request {:#x}, turned down", request.protocol, request.id);
+    if let Some(reply) = turned_down(detector, payload)? {
         return Ok(Some(reply));
     }
-    Ok(match detector.answer(payload, Instant::now()).context("reading network detection")? {
-        Answer::Nothing => None,
-        Answer::Reply(reply) => Some(reply),
-        Answer::Measured { reply, millis, bytes } => {
-            debug!("rdp: network detection measured {bytes} bytes in {millis} ms");
-            Some(reply)
-        }
-        Answer::Concluded(said) => {
-            info!("rdp: the host concluded {said:?}");
-            None
-        }
+    Ok(match heard(detector, payload)? {
+        Answer::Reply(reply) | Answer::Measured { reply, .. } => Some(reply),
+        Answer::Nothing | Answer::Started | Answer::Concluded(_) => None,
     })
+}
+
+/// The reply that turns down an offer of UDP, logged, or `None` for a PDU that is
+/// not one.
+pub(super) fn turned_down(detector: &mut Detector, payload: &[u8]) -> Result<Option<Vec<u8>>> {
+    if !multitransport::is_request(payload) {
+        return Ok(None);
+    }
+    // A continuous measurement counts it as well, past its security header.
+    detector.received(payload.len().saturating_sub(4));
+    let (request, reply) = multitransport::decline(payload).context("reading an offer of UDP")?;
+    info!("rdp: the host offered transport {} as request {:#x}, turned down", request.protocol, request.id);
+    Ok(Some(reply))
+}
+
+/// One network-detection PDU, with what was measured and what the host concluded
+/// logged on the way.
+pub(super) fn heard(detector: &mut Detector, payload: &[u8]) -> Result<Answer> {
+    let answer = detector.answer(payload, Instant::now()).context("reading network detection")?;
+    match &answer {
+        Answer::Measured { millis, bytes, .. } => {
+            debug!("rdp: network detection measured {bytes} bytes in {millis} ms");
+        }
+        Answer::Concluded(said) => info!("rdp: the host concluded {said:?}"),
+        _ => {}
+    }
+    Ok(answer)
 }
 
 /// One PDU out, addressed to a channel.

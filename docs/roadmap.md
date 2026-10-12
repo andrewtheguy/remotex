@@ -117,17 +117,20 @@ explored:
   ([The connection sequence](rdp-client.md#the-connection-sequence)). Next:
   - Repeat the UDP offer with H.264 by region and with H.264 refused, to see
     whether RemoteFX Progressive and the mixed desktop adapt too.
-  - Make a passed session's detection report the browser's link. Answered from
-    the gateway's own socket it reports the hop to the host: behind a page on
+  - A passed session's detection reports the page's link. Answered from the
+    gateway's own socket, it reported the hop to the host: behind a page on
     1 Mbit/s the host was told 8 to 20 Mbit/s, drew LAN-grade 33 KB frames and
-    fell to 3.7 frames a second, where without the claim it held 13. Ways to
-    report the page's link instead:
-    - close each bandwidth measurement when the page has acknowledged the bytes
-      up to its Stop, not when the gateway read them;
-    - answer each round-trip request only after a round trip to the page.
-
-    All of it stays on TCP, so it works with a WebSocket. This decides the
-    browser integration and its QA.
+    fell to 3.7 frames a second. Answered at the pace the page composes (`Paced`
+    in `session.rs`), the host was told about 1.2 Mbit/s. It then drew 17.7
+    frames a second at 6.4 KB, mostly at QP 38, and behind a 4 Mbit/s page 20 a
+    second at 20.6 KB at QP 22 and 30. All of it stays on TCP, so it works with a
+    WebSocket ([The connection sequence](rdp-client.md#the-connection-sequence)).
+    Still to do:
+    - turn the detection and the claim of UDP on for passed sessions, where
+      `src/rdp.rs` keeps both off;
+    - QA it from a browser on a really slow link;
+    - see how a round trip on an idle link should include the page's own
+      latency, which the frame-composed signal does not carry.
 
   Measure each case against the session re-encoded as VP9. A host that draws with bitmap updates (`egfx = false`) could
   be passed too, for the page to decode.

@@ -415,6 +415,134 @@ impl PassedFrames {
     }
 }
 
+/// Network detection answered at the pace of the caller a pipeline is passed to,
+/// for a session that takes part in it ([`Connect::autodetect`]).
+///
+/// What reaches this client's socket says nothing of a slow caller: the host's
+/// measurements are short bursts, and each lands in the receive buffer before the
+/// caller's pace holds the socket back ([`PASSED_HELD`]). Behind a page on
+/// 1 Mbit/s a host told what arrived here heard 8 to 20 Mbit/s. So while frames
+/// wait for the caller, a reply waits with them, and the caller's composing is the
+/// clock:
+///
+/// - a round trip is answered once the caller has composed everything handed
+///   over before the request;
+/// - a bandwidth measurement is answered once the caller has composed everything
+///   handed over before its Stop, and it took from when the caller had composed
+///   everything handed over before its Start to then.
+///
+/// A caller with nothing waiting is not what limits the link, so then the reply
+/// goes at once and says what arrived here.
+#[derive(Default)]
+struct Paced {
+    /// The bytes of the runs handed to the caller.
+    handed: u64,
+    /// The bytes of those the caller has composed, or has been let off.
+    composed: u64,
+    /// The measurement under way: `handed` at its Start, and when the caller had
+    /// composed that much.
+    started: Option<(u64, Option<std::time::Instant>)>,
+    /// Replies waiting for the caller, by `handed` when each was asked for.
+    waiting: VecDeque<Waiting>,
+}
+
+/// One reply waiting for the caller ([`Paced`]).
+enum Waiting {
+    /// A round trip's response, to send once `through` is composed.
+    RoundTrip { through: u64, reply: Vec<u8> },
+    /// A bandwidth measurement's results, timed from `from` to when `through` is
+    /// composed.
+    Measured { through: u64, from: (u64, Option<std::time::Instant>), sequence: u16, results: u16, bytes: u32 },
+}
+
+impl Waiting {
+    fn through(&self) -> u64 {
+        match self {
+            Self::RoundTrip { through, .. } | Self::Measured { through, .. } => *through,
+        }
+    }
+}
+
+impl Paced {
+    fn caught_up(&self) -> bool {
+        self.composed >= self.handed
+    }
+
+    /// A run of `bytes` was handed to the caller.
+    fn handed(&mut self, bytes: usize) {
+        self.handed = self.handed.saturating_add(bytes as u64);
+    }
+
+    /// What one detection answer comes to now: the reply to send, if it is due.
+    fn answer(&mut self, answer: autodetect::Answer, now: std::time::Instant) -> Option<Vec<u8>> {
+        use autodetect::Answer;
+        match answer {
+            Answer::Started => {
+                self.started = Some((self.handed, self.caught_up().then_some(now)));
+                None
+            }
+            Answer::Reply(reply) if !self.caught_up() => {
+                self.waiting.push_back(Waiting::RoundTrip { through: self.handed, reply });
+                None
+            }
+            Answer::Measured { reply, sequence, results, bytes, .. } => match self.started.take() {
+                Some(from) if !self.caught_up() => {
+                    self.waiting.push_back(Waiting::Measured { through: self.handed, from, sequence, results, bytes });
+                    None
+                }
+                _ => Some(reply),
+            },
+            Answer::Reply(reply) => Some(reply),
+            Answer::Nothing | Answer::Concluded(_) => None,
+        }
+    }
+
+    /// The caller composed `bytes` more; the replies now due, in order.
+    fn composed(&mut self, bytes: usize, now: std::time::Instant) -> Vec<Vec<u8>> {
+        self.composed = self.composed.saturating_add(bytes as u64).min(self.handed);
+        self.due(now)
+    }
+
+    /// The caller is let off what it was handed, because the pipeline it was
+    /// handed it on has closed; every reply waiting is due.
+    fn forget(&mut self, now: std::time::Instant) -> Vec<Vec<u8>> {
+        self.composed = self.handed;
+        self.due(now)
+    }
+
+    fn due(&mut self, now: std::time::Instant) -> Vec<Vec<u8>> {
+        let composed = self.composed;
+        let reached = |(at, when): &mut (u64, Option<std::time::Instant>)| {
+            if when.is_none() && *at <= composed {
+                *when = Some(now);
+            }
+        };
+        if let Some(started) = &mut self.started {
+            reached(started);
+        }
+        for waiting in &mut self.waiting {
+            if let Waiting::Measured { from, .. } = waiting {
+                reached(from);
+            }
+        }
+        let mut due = Vec::new();
+        while self.waiting.front().is_some_and(|waiting| waiting.through() <= composed) {
+            due.push(match self.waiting.pop_front().expect("just seen") {
+                Waiting::RoundTrip { reply, .. } => reply,
+                Waiting::Measured { from: (_, began), sequence, results, bytes, .. } => {
+                    let began = began.expect("reached before what follows it");
+                    let millis = u32::try_from(now.saturating_duration_since(began).as_millis())
+                        .unwrap_or(u32::MAX)
+                        .max(1);
+                    debug!("rdp: network detection measured {bytes} bytes in {millis} ms at the caller's pace");
+                    autodetect::timed(sequence, results, millis, bytes)
+                }
+            });
+        }
+        due
+    }
+}
+
 /// How many events may wait for the caller before the session thread waits for it.
 ///
 /// Bounded so a caller that falls behind slows the session rather than growing a
@@ -801,6 +929,8 @@ struct Active<'a> {
     graphics: Option<Graphics>,
     /// The frames of a pipeline that is passed on, between the caller and the host.
     passed: PassedFrames,
+    /// Network detection answered at the caller's pace while it is passed frames.
+    paced: Paced,
     /// Whether [`Event::ResizeReady`] has gone out.
     resize_ready: bool,
     /// The most recent size asked for before the channel was ready — only the most
@@ -1051,6 +1181,7 @@ impl<'a> Active<'a> {
                 false => Graphics::new(),
             }),
             passed: PassedFrames::default(),
+            paced: Paced::default(),
             resize_ready: false,
             pending_resize: None,
             clip_ready: false,
@@ -1170,14 +1301,28 @@ impl<'a> Active<'a> {
     /// capability exchange it was kept from.
     async fn on_channel(&mut self, channel: u16, payload: &[u8]) -> Result<()> {
         if self.message_channel == Some(channel) {
-            if let Some(reply) = connect::on_message(&mut self.detector, payload)? {
-                let frame = mcs::send_data_request(self.user, channel, &reply)?;
-                self.write(&frame).await.context("answering on the message channel")?;
+            let reply = match connect::turned_down(&mut self.detector, payload)? {
+                Some(reply) => Some(reply),
+                None => {
+                    let answer = connect::heard(&mut self.detector, payload)?;
+                    self.paced.answer(answer, std::time::Instant::now())
+                }
+            };
+            if let Some(reply) = reply {
+                self.answer_message(&reply).await?;
             }
             return Ok(());
         }
         if self.dynamic.is_some_and(|dynamic| dynamic.number == channel) {
-            return self.on_dynamic(payload).await;
+            self.on_dynamic(payload).await?;
+            // A pipeline that closed took its frames with it, and nothing waits on
+            // them any more.
+            if self.dynamics.graphics.is_none() && !self.paced.caught_up() {
+                for reply in self.paced.forget(std::time::Instant::now()) {
+                    self.answer_message(&reply).await?;
+                }
+            }
+            return Ok(());
         }
         if self.clipboard.is_some_and(|clipboard| clipboard.number == channel) {
             return self.on_clipboard(payload).await;
@@ -1398,6 +1543,7 @@ impl<'a> Active<'a> {
                 // when the caller says it has been composed.
                 gfx::Update::Passed { commands, frame } => {
                     self.passed.handed(commands.len(), frame);
+                    self.paced.handed(commands.len());
                     self.send(Event::Graphics { commands, frame }).await;
                     if frame.is_some() {
                         self.send(Event::Frame).await;
@@ -1482,10 +1628,22 @@ impl<'a> Active<'a> {
     /// A frame this session is not waiting on is one already covered that way, or
     /// one of a channel the host has closed since, and nothing is said for it.
     async fn on_frame_composed(&mut self, frame: u32) -> Result<()> {
+        let owed = self.passed.owed_bytes;
         for (frame, finished) in self.passed.composed(frame) {
             self.acknowledge_frame(frame, finished).await?;
         }
+        let composed = owed - self.passed.owed_bytes;
+        for reply in self.paced.composed(composed, std::time::Instant::now()) {
+            self.answer_message(&reply).await?;
+        }
         Ok(())
+    }
+
+    /// One reply on the message channel, for a session that has one.
+    async fn answer_message(&mut self, reply: &[u8]) -> Result<()> {
+        let Some(channel) = self.message_channel else { return Ok(()) };
+        let frame = mcs::send_data_request(self.user, channel, reply)?;
+        self.write(&frame).await.context("answering on the message channel")
     }
 
     /// The acknowledgement every EndFrame is owed: without it a Windows host
@@ -2027,6 +2185,58 @@ fn narrow(v: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a paced bandwidth result says it took, out of its encoded response:
+    /// past the security header, headerLength, type, sequence and responseType.
+    fn paced_millis(reply: &[u8]) -> u32 {
+        u32::from_le_bytes(reply[10..14].try_into().unwrap())
+    }
+
+    fn measured(bytes: u32) -> autodetect::Answer {
+        autodetect::Answer::Measured { reply: b"at once".to_vec(), sequence: 3, results: 0x000B, millis: 2, bytes }
+    }
+
+    /// A caller with nothing waiting is answered as the socket measured it.
+    #[test]
+    fn a_caller_that_keeps_up_is_answered_at_once() {
+        let mut paced = Paced::default();
+        let now = std::time::Instant::now();
+        assert_eq!(paced.answer(autodetect::Answer::Reply(b"rtt".to_vec()), now), Some(b"rtt".to_vec()));
+        assert_eq!(paced.answer(autodetect::Answer::Started, now), None);
+        assert_eq!(paced.answer(measured(500), now), Some(b"at once".to_vec()));
+    }
+
+    /// Behind a slow caller a round trip waits for what was handed over before it,
+    /// and a measurement is timed by the caller composing what came between.
+    #[test]
+    fn a_slow_caller_is_the_clock() {
+        let mut paced = Paced::default();
+        let start = std::time::Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        paced.handed(4_000);
+        // Started with 4,000 bytes still to compose: timed from when they are.
+        assert_eq!(paced.answer(autodetect::Answer::Started, at(0)), None);
+        paced.handed(10_000);
+        assert_eq!(paced.answer(autodetect::Answer::Reply(b"rtt".to_vec()), at(1)), None);
+        assert_eq!(paced.answer(measured(10_000), at(2)), None, "read at once, but not composed");
+        assert!(paced.composed(3_000, at(20)).is_empty());
+        assert!(paced.composed(1_000, at(30)).is_empty(), "the Start's bytes, so the clock starts");
+        let due = paced.composed(10_000, at(110));
+        assert_eq!(due.len(), 2);
+        assert_eq!(due[0], b"rtt".to_vec());
+        assert_eq!(paced_millis(&due[1]), 80, "from 30 ms to 110 ms");
+    }
+
+    /// A pipeline that closes lets every reply waiting on it go.
+    #[test]
+    fn a_closed_pipeline_lets_its_replies_go() {
+        let mut paced = Paced::default();
+        let now = std::time::Instant::now();
+        paced.handed(1_000);
+        assert_eq!(paced.answer(autodetect::Answer::Reply(b"rtt".to_vec()), now), None);
+        assert_eq!(paced.forget(now), vec![b"rtt".to_vec()]);
+        assert!(paced.caught_up());
+    }
 
     /// A caller that composes each frame before the next arrives is acknowledged
     /// at once, in the host's order, each acknowledgement counting one more

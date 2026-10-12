@@ -177,6 +177,20 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
   only 3.7 frames a second, a second or two behind the desktop. Without the claim,
   the same page got 13 frames a second at 9.6 KB. For a passed session the
   detection has to report the page's link, not the socket's.
+- **Answered at the page's pace, the host follows the page.** So a session that
+  passes its pipeline answers at the caller's pace (`Paced` in `session.rs`). A
+  round trip is answered once the caller has composed everything handed over
+  before it. A bandwidth measurement is answered once the caller has composed
+  everything up to its Stop, and is timed between the caller reaching its Start
+  and reaching its Stop. A caller with nothing waiting is answered at once. The
+  clock is the frame-composed signal a page already sends, and everything stays
+  on TCP.
+  - **1 Mbit/s page:** the host was told about 1.2 Mbit/s. It drew 17.7 frames a
+    second at 6.4 KB, 66% of regions at 38, 0.1 to 0.25 s behind the desktop.
+  - **4 Mbit/s page:** it was told 4.3 to 5 Mbit/s and drew 20 frames a second
+    at 20.6 KB, at 22 and 30 with none at 38.
+  - **1 Mbit/s page, paced, UDP not offered:** no Network Characteristics
+    Results, and 13.1 frames a second at 9.5 KB as before.
 
 The detector's and the link probe's earlier defects are fixed: the
 connect-time count includes each payload's header, malformed requests are
