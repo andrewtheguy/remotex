@@ -35,16 +35,16 @@ const PLAIN_TARGET: &str = "wlshare-dummy-plain";
 /// Where the wlshare checkout to build is, when not beside this repository.
 const WLSHARE_DIR_ENV: &str = "REMOTEX_TEST_WLSHARE_DIR";
 
-/// Which of wlshare's VP9 encoders the `wlshare` target asks for: `libvpx`, which
-/// is what an unset variable means, or `native`, its experimental encoder
-/// (`experimental_native_vp9`). Every test here holds for either.
+/// Which of wlshare's VP9 encoders a session of the `wlshare` target is started
+/// with: `libvpx`, which is what an unset variable means, or `native`, its alpha
+/// encoder (the picker's `vp9` choice). Every test here holds for either.
 const WLSHARE_VP9_ENV: &str = "REMOTEX_TEST_WLSHARE_VP9";
 
-/// Whether the run asks for wlshare's experimental encoder ([`WLSHARE_VP9_ENV`]).
-fn native_vp9() -> bool {
+/// The encoder the run asks for ([`WLSHARE_VP9_ENV`]), as `connect` names it.
+fn vp9_choice() -> &'static str {
     match std::env::var(WLSHARE_VP9_ENV).as_deref() {
-        Err(_) | Ok("libvpx") => false,
-        Ok("native") => true,
+        Err(_) | Ok("libvpx") => "libvpx",
+        Ok("native") => "native",
         Ok(other) => panic!("{WLSHARE_VP9_ENV}={other}: libvpx or native"),
     }
 }
@@ -123,7 +123,6 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         microphone: true,
         video_quality: None,
         render_adaptive: None,
-        experimental_native_vp9: native_vp9(),
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,
@@ -291,7 +290,8 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     // 2x: the output's mode and scale change in one configuration, and the
     // logical size stays what it was.
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"window"}}}}"#
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"window","vp9":"{}"}}}}"#,
+        vp9_choice()
     )))
     .await
     .unwrap();
@@ -348,7 +348,7 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
         container.logs()
     );
     // And coded by the encoder the run asked for.
-    let coder = if native_vp9() { "coded by screen-vp9's Rust coder (experimental)" } else { "coded by libvpx" };
+    let coder = if vp9_choice() == "native" { "coded by screen-vp9's Rust coder (experimental)" } else { "coded by libvpx" };
     assert!(container.logs().contains(coder), "wlshare's VP9 was not {coder}:\n{}", container.logs());
     let decode = view.decode.as_deref().expect("a video format was announced");
     assert!(decode.starts_with("vp09.01."), "the stream was announced as {decode}");
@@ -375,7 +375,8 @@ async fn all_displays_shows_the_second_output_in_a_tab_of_its_own() {
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     let mut view = View::new();
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"window"}}}}"#
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"window","vp9":"{}"}}}}"#,
+        vp9_choice()
     )))
     .await
     .unwrap();
@@ -552,7 +553,8 @@ async fn uplink_signal(ws: &mut common::Socket) -> serde_json::Value {
 /// Connect to the target and read the session socket up to `connected`, which is
 /// returned; after it the socket is only drained, so nothing backs up behind it.
 async fn open_session(ws: &mut common::Ws) -> serde_json::Value {
-    common::connect_target_with(ws, TARGET, r#"{"size":"window"}"#).await;
+    let choices = format!(r#"{{"size":"window","vp9":"{}"}}"#, vp9_choice());
+    common::connect_target_with(ws, TARGET, &choices).await;
     loop {
         if let Message::Text(text) = ws.next().await.expect("session socket open").expect("websocket receive") {
             let msg: serde_json::Value = serde_json::from_str(&text).expect("control message is JSON");

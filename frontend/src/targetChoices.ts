@@ -32,6 +32,9 @@
 //   choice on a target with the pipeline on, and under adaptive the whole desktop
 //   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
 //   offered high quality alone.
+// - Which encoder codes the VP9, libvpx or the native one in Rust (alpha), is a
+//   choice on a target that offers it, while the picture chosen is VP9: see
+//   `encoderOptions`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 // - Which decoder takes the picture is no choice: the page decodes the VP9, and
@@ -85,6 +88,8 @@ export interface TargetInfo {
   placement: boolean;
   /** Whether how the host draws the graphics pipeline is a choice. */
   pipeline: boolean;
+  /** Whether which encoder codes the VP9 is a choice. */
+  vp9: boolean;
 }
 
 /** A desktop size in points. */
@@ -119,6 +124,13 @@ export type Placement = "right" | "left" | "top" | "bottom";
  */
 export type Pipeline = "high-quality" | "adaptive-desktop" | "adaptive-region";
 
+/**
+ * Which encoder codes a session's VP9, as `connect` names it: libvpx, or the
+ * native one in Rust (alpha). The gateway's own where it encodes the picture,
+ * and wlshare's on a `wlshare` target.
+ */
+export type Vp9Encoder = "libvpx" | "native";
+
 /** What `connect` carries. */
 export interface Choices {
   size: Sizing;
@@ -131,6 +143,7 @@ export interface Choices {
   passthrough: Passthrough | null;
   placement: Placement;
   pipeline: Pipeline;
+  vp9: Vp9Encoder;
 }
 
 /** What this browser can do with a target. */
@@ -204,6 +217,14 @@ export interface PipelineRow {
   h264: PipelineOption<Exclude<Pipeline, "high-quality">>[];
 }
 
+/** One encoder the VP9 can be coded with. */
+export interface EncoderOption {
+  value: Vp9Encoder;
+  label: string;
+  /** What choosing it does. */
+  note: string;
+}
+
 /** One place the second display can sit. */
 export interface PlacementOption {
   value: Placement;
@@ -250,6 +271,11 @@ export interface TargetOptions {
    * choice: null otherwise.
    */
   pictures: PictureOption[] | null;
+  /**
+   * The encoders the VP9 can be coded with: null where that is no choice, and
+   * where the picture chosen is passed rather than VP9.
+   */
+  encoders: EncoderOption[] | null;
   /** What Start sends. */
   choices: Choices;
   /** Whether a session started with them carries the remote's sound. */
@@ -313,6 +339,30 @@ function pictureOptions(
   );
   // Encoded here goes second, after the stream the type lists first.
   return [...passed.slice(0, 1), encoded, ...passed.slice(1)];
+}
+
+/**
+ * The encoders `target`'s VP9 can be coded with, libvpx first: by wlshare on a
+ * `wlshare` target, and by the gateway on any other. The stream is the same to
+ * the page either way.
+ */
+function encoderOptions(target: TargetInfo): EncoderOption[] {
+  const coder =
+    target.protocol === "vnc" && target.subtype === "wlshare"
+      ? "wlshare codes"
+      : "The gateway codes";
+  return [
+    {
+      value: "libvpx",
+      label: "libvpx",
+      note: `${coder} the VP9 with libvpx.`,
+    },
+    {
+      value: "native",
+      label: "Native (alpha)",
+      note: `${coder} the VP9 with screen-vp9's encoder in Rust.`,
+    },
+  ];
 }
 
 const FOLLOWS: Record<"window" | "screen", SizeOption> = {
@@ -529,6 +579,9 @@ export function targetOptions(
     (able.find((option) => option.value === remembered?.passthrough) ?? able[0])
       ?.value ?? null;
   const placements = target.placement ? PLACEMENTS : null;
+  // A passed picture is no VP9, so its encoder is no choice.
+  const encoders =
+    target.vp9 && passthrough === null ? encoderOptions(target) : null;
   const choices: Choices = {
     size,
     audio: sound.audio,
@@ -537,6 +590,9 @@ export function targetOptions(
       placements?.find((option) => option.value === remembered?.placement)
         ?.value ?? "right",
     pipeline: drawn.pipeline,
+    vp9:
+      encoders?.find((option) => option.value === remembered?.vp9)?.value ??
+      "libvpx",
   };
   return {
     sizes,
@@ -545,6 +601,7 @@ export function targetOptions(
     pipelineRow: drawn.row,
     passed,
     pictures,
+    encoders,
     choices,
     // High Performance's sound comes with its picture, so it has no row and is
     // always there, for a browser that can play it.

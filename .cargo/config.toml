@@ -1,4 +1,4 @@
-# The `native-vp9` feature, on by default, is screen-vp9's experimental VP9
+# The `native-vp9` feature, on by default, is screen-vp9's alpha VP9
 # encoder in Rust, which on amd64 is built for x86-64-v3 (AVX2, BMI1 and BMI2,
 # LZCNT, MOVBE, FMA: Haswell and Excavator on), above that target's baseline,
 # and which refuses to build under it. Cargo cannot set a flag by feature, so

@@ -11,6 +11,7 @@ import { runnableDecoders } from "./softwareSupport.ts";
 import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 import {
   type Choices,
+  type EncoderOption,
   type PictureOption,
   type Pipeline,
   type PipelineRow,
@@ -20,6 +21,7 @@ import {
   type SoundRow,
   type TargetInfo,
   targetOptions,
+  type Vp9Encoder,
 } from "./targetChoices.ts";
 import { sizeFollows } from "./useRemoteDesktop.ts";
 
@@ -335,6 +337,19 @@ export default function TargetPicker({
                         )
                       }
                     />
+                    {/* Which encoder codes the VP9, while the picture is
+                        VP9. */}
+                    <EncoderChoice
+                      target={t.name}
+                      encoders={options.encoders}
+                      chosen={options.choices.vp9}
+                      locked={pendingTarget !== null}
+                      choose={(vp9) =>
+                        setRemembered((was) =>
+                          rememberChoice(was, t.name, "vp9", vp9),
+                        )
+                      }
+                    />
                     {options.blocked && (
                       <p className="picker-error">{options.blocked}</p>
                     )}
@@ -417,6 +432,46 @@ function PictureChoice({
           <span className="picker-option-text">
             <span>{picture.label}</span>
             <span className="picker-option-note">{picture.note}</span>
+          </span>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+// Which encoder codes the VP9: libvpx, or the native one in Rust (alpha).
+// Nothing where that is no choice.
+function EncoderChoice({
+  target,
+  encoders,
+  chosen,
+  locked,
+  choose,
+}: {
+  target: string;
+  encoders: EncoderOption[] | null;
+  chosen: Vp9Encoder;
+  locked: boolean;
+  choose: (vp9: Vp9Encoder) => void;
+}) {
+  if (!encoders) {
+    return null;
+  }
+  return (
+    <fieldset className="picker-choice">
+      <legend>VP9 encoder</legend>
+      {encoders.map((encoder) => (
+        <label key={encoder.value} className="picker-option">
+          <input
+            type="radio"
+            name={`picker-vp9-${target}`}
+            checked={chosen === encoder.value}
+            disabled={locked}
+            onChange={() => choose(encoder.value)}
+          />
+          <span className="picker-option-text">
+            <span>{encoder.label}</span>
+            <span className="picker-option-note">{encoder.note}</span>
           </span>
         </label>
       ))}
