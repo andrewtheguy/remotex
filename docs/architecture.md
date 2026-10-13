@@ -1010,7 +1010,11 @@ Three controls with similar names therefore remain separate:
   the gateway sends `screenUnavailable` with `active: true`, and the page says
   "Screen not available" over the canvas and sends no input meanwhile: the
   pointer and keys would land on a display nobody can see, so the page drops its
-  input listeners and releases what was held. The Mac's ZRLE rectangles
+  input listeners and releases what was held. Where the Mac's own report says it
+  sends no picture of the display at all, which it does of one too low for its
+  four strips, the gateway adds `pictureWithheld`, the page asks for a larger
+  size in that notice's place, and the session waits for one
+  ([In strips](apple-vnc-889.md#in-strips)). The Mac's ZRLE rectangles
   are stepped over by their length (`Decoders::step_over`), never inflated and
   never handed to `VideoSink::damage`, so a session that passes the stream
   builds no VP9 encoder: one held idle for a session's life was some 240 MB at

@@ -722,6 +722,10 @@ struct DesktopState {
     /// that picture is on its way ([`uncover`]). Input goes to the Mac all the
     /// while: its display is there, only its picture is not.
     covered: bool,
+    /// The browser has been told the Mac sends no picture of the canvas's
+    /// display ([`ServerMsg::PictureWithheld`]), as the Mac's stream last said
+    /// ([`tell_withheld`]).
+    withheld: bool,
     /// The list the Mac holds names the media stream first, so it sends this
     /// session no pixels ([`vnc_apple_media::encodings_preferring_media_stream`]):
     /// from the `SetEncodings` that asks for the stream's ports to the session's
@@ -1733,6 +1737,9 @@ struct TabFeed {
     /// The tab has been told its screen is not available, as the session's canvas
     /// is ([`DesktopState::covered`]).
     covered: bool,
+    /// The tab has been told the Mac sends no picture of its display, as the
+    /// session's canvas is ([`DesktopState::withheld`]).
+    withheld: bool,
 }
 
 /// The tab showing the second display, shared by the engine's two loops: the
@@ -1831,6 +1838,47 @@ async fn tab_send(tab: &SharedTab, media: Option<&SharedMedia>, msgs: Vec<Server
             return tab_gone(tab, media, &e);
         }
     }
+}
+
+/// Tell the browser what the Mac's stream says of each display shown: that it
+/// sends no picture of it ([`MediaStream::withheld`]), or that it no longer says
+/// so. The canvas's display on its socket, and the second's in its tab. Looked at
+/// every turn of the read loop, which the stream wakes at its first such report
+/// and at every offer.
+async fn tell_withheld(
+    desktop: &SharedDesktop,
+    media: &SharedMedia,
+    sink: &VideoSink,
+    tab: &SharedTab,
+) -> anyhow::Result<()> {
+    let canvas = desktop.lock().unwrap().view.active;
+    let (canvas, second) = {
+        let media = media.lock().unwrap();
+        (media.withheld(canvas), media.withheld(1))
+    };
+    let (told, size) = {
+        let mut d = desktop.lock().unwrap();
+        (std::mem::replace(&mut d.withheld, canvas) != canvas, d.size)
+    };
+    if told {
+        if canvas {
+            warn!(
+                "vnc: the Mac sends no picture of the {}x{} display: its stream runs and its \
+                 report says it has sent none",
+                size.0, size.1
+            );
+        }
+        sink.msg(ServerMsg::PictureWithheld { active: canvas }).await?;
+    }
+    let told = tab
+        .lock()
+        .unwrap()
+        .as_mut()
+        .is_some_and(|tab| std::mem::replace(&mut tab.withheld, second) != second);
+    if told {
+        tab_send(tab, Some(media), vec![ServerMsg::PictureWithheld { active: second }]).await;
+    }
+    Ok(())
 }
 
 /// Tell the tab its screen is not available until its display's next picture: the
@@ -2999,6 +3047,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         canvas_live: false,
         media_live: false,
         covered: media_stream,
+        withheld: false,
         media_preferred: false,
         in_update: false,
         media_stream,
@@ -3473,12 +3522,17 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                     // A stream still to deliver, or a resize in progress, is said
                     // to the new browser too.
-                    let (resizing, covered) = {
+                    let (resizing, covered, withheld) = {
                         let d = desktop.lock().unwrap();
-                        (d.hp.shown, d.covered)
+                        (d.hp.shown, d.covered, d.withheld)
                     };
                     if covered
                         && let Err(e) = sink.msg(ServerMsg::ScreenUnavailable { active: true }).await
+                    {
+                        break Err(e);
+                    }
+                    if withheld
+                        && let Err(e) = sink.msg(ServerMsg::PictureWithheld { active: true }).await
                     {
                         break Err(e);
                     }
@@ -4392,6 +4446,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
         // [`MediaStream::overdue`]. Read here, once a turn, like the deadline above,
         // and read again at an offer, which may come from the input loop while this
         // one waits behind a still screen.
+        if let Some(media) = media.as_ref() {
+            tell_withheld(desktop, media, &sink, &shared.tab).await?;
+        }
         let media_deadline = media.as_ref().and_then(|m| m.lock().unwrap().deadline());
         let media_due = async {
             match media_deadline {
@@ -6537,6 +6594,7 @@ async fn hp_tab_shown(
         shadow: Arc::new(std::sync::Mutex::new(Shadow::new("vnc", shown.size.0, shown.size.1))),
         live: false,
         covered: true,
+        withheld: false,
     });
     tab_repaint(shared, macos).await;
 }
@@ -9716,6 +9774,7 @@ mod tests {
             canvas_live: false,
             media_live: false,
             covered: false,
+            withheld: false,
             media_preferred: false,
             in_update: false,
             media_stream: false,

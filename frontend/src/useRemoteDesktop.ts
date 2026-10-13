@@ -748,6 +748,10 @@ export function useRemoteDesktop(
   // A High Performance Mac's media stream has sent no picture of this display —
   // the gateway's `screenUnavailable`. Reset as `remoteResizing` is.
   const [screenUnavailable, setScreenUnavailable] = useState(false);
+  // The Mac has said it sends no picture of this display at its size — the
+  // gateway's `pictureWithheld`, which says why the screen is not available.
+  // Reset as `remoteResizing` is.
+  const [pictureWithheld, setPictureWithheld] = useState(false);
   // Either notice is over the desktop, which is what input and focus follow: a
   // key or a click sent to a Mac whose picture is not on screen lands wherever
   // the display that comes back happens to put it.
@@ -1530,6 +1534,7 @@ export function useRemoteDesktop(
       unavailableSeq += 1;
       setRemoteResizing(false);
       setScreenUnavailable(false);
+      setPictureWithheld(false);
       paintSocket = socket;
       socket.binaryType = "arraybuffer";
       displayWs = socket;
@@ -2084,6 +2089,7 @@ export function useRemoteDesktop(
       unavailableSeq += 1;
       setRemoteResizing(false);
       setScreenUnavailable(false);
+      setPictureWithheld(false);
       setDisplays([]);
       setActiveDisplayId(null);
       if (tabDisplay === null) {
@@ -2251,6 +2257,9 @@ export function useRemoteDesktop(
           break;
         case "screenUnavailable":
           screenUnavailableSaid(msg.active);
+          break;
+        case "pictureWithheld":
+          setPictureWithheld(msg.active);
           break;
         case "oversize":
           setOversize(msg.cause);
@@ -3233,6 +3242,7 @@ export function useRemoteDesktop(
     // The cover over a settling High Performance resize.
     remoteResizing,
     screenUnavailable,
+    pictureWithheld,
     viewOnly,
     setViewOnly,
     onLocalShortcut,

@@ -93,6 +93,7 @@ function OversizeNotice({
 function SessionCovers({
   resizing,
   unavailable,
+  withheld,
   oversize,
   size,
   displays,
@@ -101,6 +102,7 @@ function SessionCovers({
 }: {
   resizing: boolean;
   unavailable: boolean;
+  withheld: boolean;
   oversize: HoldCause | null;
   size: RemoteSize | null;
   displays: DisplayInfo[];
@@ -126,13 +128,29 @@ function SessionCovers({
           rather than showing an empty or stale canvas. Like the resize notice it
           holds input back: a key or a click would land on a display nobody is
           looking at. The resize notice stands in front while both hold. */}
-      {unavailable && !resizing && (
+      {unavailable && !withheld && !resizing && (
         <output className="resize-overlay">
           <span className="status">Screen not available</span>
           <span className="status-hint">
             Waiting for the Mac's picture. Input is held until it is back.
           </span>
         </output>
+      )}
+
+      {/* The same gap, once the Mac has said it sends no picture of a display
+          this size: waiting brings none, and another size does. The Mac says so
+          of a display too low for the strips its picture is sent in, and gives
+          no reason, so the notice asks for a size rather than naming one. */}
+      {unavailable && withheld && !resizing && (
+        <div className="resize-overlay" role="alert">
+          <span className="status">No picture at this size</span>
+          <span className="status-hint">
+            {size
+              ? `The Mac sends no picture of a ${size.w}×${size.h} display.`
+              : "The Mac sends no picture of a display this size."}{" "}
+            Make the window larger, or start the session at a larger size.
+          </span>
+        </div>
       )}
 
       {/* A desktop past what video carries: no picture comes, and the session stays
@@ -305,6 +323,7 @@ export default function RemoteDesktop({
     setTouchEnabled,
     remoteResizing,
     screenUnavailable,
+    pictureWithheld,
     setViewOnly,
     onLocalShortcut,
     takeOver,
@@ -485,6 +504,7 @@ export default function RemoteDesktop({
         <SessionCovers
           resizing={remoteResizing}
           unavailable={screenUnavailable}
+          withheld={pictureWithheld}
           oversize={oversize}
           size={size}
           displays={displays}

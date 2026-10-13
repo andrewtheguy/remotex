@@ -1211,7 +1211,7 @@ one field, and a second in a session that passes the picture:
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
-| `tilesPerFrame` (video stream field 6) | 4 | 4, decoded here or passed; 1 for a display under 144 rows that four tiles fail on, and for a passed session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together, or the page. One tile is one picture of the whole display on the one SSRC. |
+| `tilesPerFrame` (video stream field 6) | 4 | 4, decoded here or passed, whatever the display's size; 1 for a passed session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together, or the page. One tile is one picture of the whole display on the one SSRC. |
 | The video stream's codecs (field 3) | H.264 (123) and HEVC (100) | Both, and H.264 alone for a session started with the H.264 passthrough | Offered both the Mac sends HEVC; offered 123 alone, H.264. |
 
 The video offer names two codecs by their RTP payload numbers, 123 for H.264
@@ -1438,7 +1438,8 @@ other failures (see [Liveness](#the-stream)).
     viewer does.
 - **Liveness.** The `SetEncodings` naming 1010 owes message 1 within 10 s, and so
   does a display that has settled without one. Every offer owes its answer, its
-  display's first picture and the first sound packet within 10 s, and the running
+  display's first picture, or the Mac's word that it sends none
+  ([In strips](#in-strips)), and the first sound packet within 10 s, and the running
   stream an authentic
   packet, SRTP or SRTCP, on each leg every 48 s, 16 of Apple's 3-second
   timeouts. Apple's viewer times each leg from the last RTCP packet it
@@ -1501,8 +1502,23 @@ four strips do not fit it sends no picture at all (below).
   strips, as 80, 90 and 136 had failed and 64, 100, 104, 112, 120 and 128
   worked. An offer of one tile brings the picture at a failing height. A last
   strip that starts exactly at the end passes the check and is sent, with
-  nothing of the display in it, as at 48, 96 and 144 rows. Remotex offers one
-  tile for a display of the failing heights.
+  nothing of the display in it, as at 48, 96 and 144 rows.
+- **The Mac says it sends none, and only that.** Nothing of the failure
+  reaches the wire as an error: the answer is 4, no media-stream error message
+  follows (none in 70 s), and the sound runs. What the Mac does say is in its
+  own report on the picture's leg. A stream that sends pictures reports as a
+  sender (RTCP type 200); the failing one reports once a second as a receiver
+  (type 201), which is what a sender that has sent nothing sends. A working
+  stream reports as a receiver too, behind a still screen, but only after its
+  first picture.
+- **Remotex takes the Mac's word.** It offers four tiles at every size and
+  holds no list of heights. A receiver's report on a display's leg, from a
+  stream that has brought no picture of the display since its offer, is the Mac
+  withholding it: the session stays open where a missing picture would end it
+  ([Liveness](#the-stream)), the gateway sends `pictureWithheld`, and the page
+  says "No picture at this size" in the place of "Screen not available" and
+  asks for a larger one. It lifts at the display's next offer, which a resize
+  brings, or at a picture. The leg still owes its reports.
 - **Only what changed.** A frame carries the strips that changed and no
   others. Under a moving pointer and a clock, 112 of 648 frames carried all
   four. Nothing in a packet says how many strips a frame has.
