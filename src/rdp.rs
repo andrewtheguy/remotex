@@ -432,13 +432,16 @@ fn connect_config(
             (true, _) => H264::WholeDesktop,
             (false, _) => H264::Refused,
         },
+        // Every session that offers the pipeline takes the host's network
+        // detection: MS-RDPBCGR 2.2.1.3.2 has the pipeline's flag require it, and
+        // the detection alone changes nothing a Windows host draws.
+        autodetect: config.egfx(),
         // A pipeline with H.264 is drawn for the page's link: the host
-        // rate-controls its H.264 for a client that takes its network detection
-        // and claims UDP, the claim turned down when the host takes it up, and the
-        // session answers the detection at the page's pace and leaves the host's
-        // socket unread while the page is behind. High quality takes neither, and
-        // its socket is read as it comes.
-        autodetect: plan.rdp_h264,
+        // rate-controls its H.264 for a client that also claims UDP, the claim
+        // turned down when the host takes it up, and the session answers the
+        // detection at the page's pace and leaves the host's socket unread while
+        // the page is behind. High quality claims none, answers with what its own
+        // connection measures, and its socket is read as it comes.
         multitransport: plan.rdp_h264,
         paced: plan.rdp_h264,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),

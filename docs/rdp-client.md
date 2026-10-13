@@ -85,9 +85,12 @@ between the host and a gateway near it, which is not the link a person is on, an
 neither the declaration nor the detection alone changes what the host draws
 (below). A session without the pipeline requests neither an MCS message
 channel nor multitransport, and does not advertise network-characteristics
-detection. A session that passes its pipeline with H.264 takes both, so the
-host rate-controls it for the link it detects (below); a High quality session
-takes neither. With `Connect::autodetect`
+detection. A session that passes its pipeline takes the detection, which
+[MS-RDPBCGR section
+2.2.1.3.2](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
+requires of a client that advertises the graphics-pipeline flag, and one that
+passes it with H.264 claims UDP as well, so the host rate-controls it for the
+link it detects (below); a High quality session claims none. With `Connect::autodetect`
 (`proto/autodetect.rs`) the
 client claims the detection in the core data, leaves `connectionType` for the
 host to detect, asks for and joins the message channel, and answers each
@@ -101,12 +104,9 @@ once with what arrived on its own connection. Beside it,
 2.2.1.3.8](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf))
 and answers each Initiate Multitransport Request with `E_ABORT` (2.2.15.2), so
 the session stays on TCP (`proto/multitransport.rs`). This is a deliberate
-protocol boundary, not a general claim about what Windows will send. In particular,
-[MS-RDPBCGR section
-2.2.1.3.2](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPBCGR.pdf)
-says that advertising the graphics-pipeline flag also requires network-detection
-support. The tested Windows 10 and 11 hosts accept the client's smaller
-combination; an auto-detect PDU outside that observed traffic is unsupported.
+protocol boundary, not a general claim about what Windows will send: an
+auto-detect PDU outside the traffic observed from the tested Windows 10 and 11
+hosts is unsupported.
 
 A Windows host does draw the graphics pipeline for a slow link, but for the one it
 finds for itself and not for the one it is told of, unless the client also offers
@@ -255,10 +255,11 @@ The detector's and the link probe's earlier defects are fixed: the
 connect-time count includes each payload's header, malformed requests are
 refused, a continuous measurement counts inside the framing, `timeDelta` is at
 least a millisecond, and a zero frame timestamp gives no lag. The measurements
-above were repeated with the fixes. A session started with the picker's Adaptive
-takes the detector and the claim of UDP, and answers at the page's pace; a High
-quality session takes neither, so the host draws its Progressive first passes
-coarser and refines what stays still
+above were repeated with the fixes. Every session with the pipeline takes the detector. One started with the
+picker's Adaptive claims UDP too, and answers at the page's pace; a High
+quality session claims none and answers with what its own connection measures,
+so the host draws its Progressive first passes coarser and refines what stays
+still
 ([Roadmap](roadmap.md#an-official-way-to-have-windows-rate-control-its-h264-over-tcp)).
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket

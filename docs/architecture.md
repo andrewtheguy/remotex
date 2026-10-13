@@ -1581,8 +1581,8 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   the frame rate, and both come back as the link clears. See
   [wlshare's stream, passed through](#wlshares-stream-passed-through).
 - **A Windows host** has no quality dial for a client to turn, but it has its
-  own network detection. An adaptive session takes part in it and
-  claims UDP, which it turns down when the host takes it up, so all of it stays
+  own network detection. Every session with the pipeline takes part in it, and
+  an adaptive one also claims UDP, which it turns down when the host takes it up, so all of it stays
   on TCP. For such a
   client the host rate-controls its H.264 to the bandwidth it is told, and sends
   each RemoteFX Progressive tile whole at full quality over a fast link, where
@@ -1597,7 +1597,8 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   region* the desktop is mostly RemoteFX Progressive, which this does not
   rate-control: behind a 1 Mbit/s page the frame rate held, the delay fell from
   1.6 s to 0.56 s, and over a LAN every region went to the finest quality. A
-  High quality session takes neither. See
+  High quality session takes the detection alone, which changes nothing the
+  host draws. See
   [The connection sequence](rdp-client.md#the-connection-sequence). Beside that,
   the host adapts in two more ways. It draws no more than about eleven frames ahead of its
   acknowledgements, so a page that composes slowly sets the frame rate. It sends
@@ -1877,9 +1878,10 @@ and `GET /api/targets` carries it:
   codecs without H.264, for a LAN, which is the default, and Adaptive (alpha), H.264 the
   host fits to the browser's link; under Adaptive, *H.264 full screen*, the
   default, asks for the whole desktop in H.264 (`AVC_THINCLIENT`), and *H.264
-  region* for H.264 only where the desktop moves like video. An adaptive session
-  takes the host's network detection and claims UDP, answered at the page's
-  pace; a high quality one takes neither ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
+  region* for H.264 only where the desktop moves like video. Both take the
+  host's network detection. An adaptive session also claims UDP and answers at
+  the page's pace; a high quality one claims none and answers with what the
+  gateway's connection measures ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
 - **The VP9 is coded by libvpx unless the native encoder is chosen.**
   `choices.vp9` says `libvpx` or `native` (`Vp9Encoder` in `src/config.rs`):
   the encoder in Rust, alpha, that `screen-vp9` has written, here for a picture
