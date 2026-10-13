@@ -6685,6 +6685,12 @@ async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> 
     if let Some(msg) = msg {
         sink.msg(msg).await?;
     }
+    // What the Mac's stream says of the display now on the canvas, which it may
+    // have said while nobody was shown it: the read loop was woken for that
+    // then, and is not for this.
+    if let Some(media) = media {
+        tell_withheld(desktop, media, sink, &shared.tab).await?;
+    }
     if resize && was.all && !now.all {
         request_resize(uplink, desktop, ResizeAsk::Density, true).await?;
         hp_wake.notify_one();
