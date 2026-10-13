@@ -20,10 +20,10 @@
 //! channels. A fourth, `CS_MONITOR`, goes out only for a session that asked for more
 //! than one virtual display and a server that takes the extended blocks: it places the
 //! second monitor against the first, and the core data's desktop is their union. A
-//! message channel and a claim of UDP go out only for a session that passes its
-//! pipeline with H.264 ([`ConferenceCreateRequest::autodetect`],
-//! [`ConferenceCreateRequest::multitransport`]); otherwise the server has nothing to
-//! answer about either.
+//! message channel goes out only for a session that passes its pipeline
+//! ([`ConferenceCreateRequest::autodetect`]), and a claim of UDP only for one that
+//! passes it with H.264 ([`ConferenceCreateRequest::multitransport`]); otherwise the
+//! server has nothing to answer about either.
 
 use super::wire::{Malformed, Reader, Writer};
 use crate::config::Placement;
