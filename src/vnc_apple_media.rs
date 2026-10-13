@@ -3672,6 +3672,15 @@ async fn keyframe_wanted(videos: &[VideoLeg]) -> usize {
     }
 }
 
+/// Whether a receive on one of the stream's connected sockets failed only to
+/// report an ICMP unreachable, for a report sent before the Mac's side was up.
+/// Linux and macOS say so as a refused connection, and Windows as a reset one
+/// (`WSAECONNRESET`) on the receive after the send. UDP has no connection to
+/// refuse or reset otherwise, so neither is the socket failing.
+fn unreachable(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset)
+}
+
 impl Receiver {
     /// The sockets, bound to the port numbers the Mac named and connected to
     /// the Mac's. Every Mac names the same ones (its RFB port and the next, and the
@@ -3842,7 +3851,7 @@ impl Receiver {
                 received = self.audio.recv(&mut sound_datagram) => {
                     let len = match received {
                         Ok(len) => len,
-                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
+                        Err(e) if unreachable(&e) => continue,
                         Err(e) => break anyhow::Error::new(e).context("the Mac's sound socket failed"),
                     };
                     let data = &mut sound_datagram[..len];
@@ -3874,9 +3883,7 @@ impl Receiver {
                     let arrived = std::time::Instant::now();
                     let len = match received {
                         Ok(len) => len,
-                        // A connected socket's report of an ICMP unreachable, for a
-                        // report sent before the Mac's side was up.
-                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
+                        Err(e) if unreachable(&e) => continue,
                         Err(e) => {
                             break anyhow::Error::new(e).context("the Mac's screen video socket failed");
                         }
@@ -3891,7 +3898,7 @@ impl Receiver {
                     let arrived = std::time::Instant::now();
                     let len = match received {
                         Ok(len) => len,
-                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
+                        Err(e) if unreachable(&e) => continue,
                         Err(e) => {
                             break anyhow::Error::new(e)
                                 .context("the Mac's second screen video socket failed");
@@ -5354,6 +5361,25 @@ mod tests {
         );
         assert_eq!(offers.offers.codec, Codec::H264);
         assert!(offers.offers.strips((1600, 1000)));
+    }
+
+    /// A report sent to a port nobody has open yet, as the first after an offer
+    /// can be, draws an ICMP unreachable that the next receive reports in this
+    /// platform's words: none of them is the socket failing.
+    #[tokio::test]
+    async fn a_report_to_a_port_not_yet_open_is_no_socket_failure() {
+        let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(closed).await.unwrap();
+        socket.send(b"report").await.unwrap();
+        let mut datagram = [0u8; 16];
+        match tokio::time::timeout(std::time::Duration::from_secs(2), socket.recv(&mut datagram)).await {
+            Ok(Err(e)) => assert!(unreachable(&e), "{e}"),
+            Ok(Ok(len)) => panic!("{len} bytes from a closed port"),
+            // A platform that reports nothing leaves the socket as it was.
+            Err(_) => {}
+        }
+        assert!(!unreachable(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
     }
 
     /// The read loop's queue is as deep in frames whether a frame is one unit or
