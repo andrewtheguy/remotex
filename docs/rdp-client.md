@@ -85,15 +85,16 @@ between the host and a gateway near it, which is not the link a person is on, an
 neither the declaration nor the detection alone changes what the host draws
 (below). A session without the pipeline requests neither an MCS message
 channel nor multitransport, and does not advertise network-characteristics
-detection. A session that passes its pipeline takes both, so the host draws its
-finest for the link it detects (below). With `Connect::autodetect`
+detection. A session that passes its pipeline with H.264 takes both, so the
+host rate-controls it for the link it detects (below); a High quality session
+takes neither. With `Connect::autodetect`
 (`proto/autodetect.rs`) the
 client claims the detection in the core data, leaves `connectionType` for the
 host to detect, asks for and joins the message channel, and answers each
 measurement. With `Connect::paced`, a session with H.264, it answers at the
 page's pace (`Paced` in `session.rs`), or with what arrived on
 its own connection when nothing waits for the page, each round trip held for the
-page's distance either way. Without it, a High quality session, it answers at
+page's distance either way. Without it, it answers at
 once with what arrived on its own connection. Beside it,
 `Connect::multitransport` claims reliable UDP with Soft-Sync in `CS_MULTITRANSPORT`
 ([MS-RDPBCGR section
@@ -254,10 +255,10 @@ The detector's and the link probe's earlier defects are fixed: the
 connect-time count includes each payload's header, malformed requests are
 refused, a continuous measurement counts inside the framing, `timeDelta` is at
 least a millisecond, and a zero frame timestamp gives no lag. The measurements
-above were repeated with the fixes. Every session with the pipeline takes the
-detector and the claim of UDP. One started with the picker's Adaptive answers at
-the page's pace; a High quality session answers with what its own connection
-measures, so the host sends its Progressive tiles whole whatever the page's link
+above were repeated with the fixes. A session started with the picker's Adaptive
+takes the detector and the claim of UDP, and answers at the page's pace; a High
+quality session takes neither, so the host draws its Progressive first passes
+coarser and refines what stays still
 ([Roadmap](roadmap.md#an-official-way-to-have-windows-rate-control-its-h264-over-tcp)).
 
 So what makes this host spend fewer bytes on a Progressive frame is its own socket
@@ -345,7 +346,7 @@ small cache and `AVC_DISABLED`, so the host never sends H.264 and draws with the
 pipeline's other codecs alone. `THINCLIENT` is deliberately not set. The host
 confirms one set and then draws.
 
-High quality is the host's finest and not lossless. Of the codecs the host draws
+High quality is not lossless. Of the codecs the host draws
 with, ClearCodec, planar and uncompressed rectangles carry their pixels exactly,
 and RemoteFX Progressive, which it uses for pictures and whatever moves, does
 not: it extends the RemoteFX codec, "a lossy image codec" ([MS-RDPRFX section

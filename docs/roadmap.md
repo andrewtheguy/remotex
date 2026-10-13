@@ -25,9 +25,7 @@ it is for.
 
 ### An official way to have Windows rate-control its H.264 over TCP
 
-A session with the pipeline has the host draw for the link it detects, an
-adaptive one its H.264 rate-controlled and a high quality one its RemoteFX
-Progressive tiles whole, by taking the network
+An adaptive session has the host rate-control its H.264 by taking the network
 detection and claiming reliable UDP in `CS_MULTITRANSPORT`, then turning the
 host's offer of UDP down (`E_ABORT`) and staying on TCP
 ([The connection sequence](rdp-client.md#the-connection-sequence)). It works

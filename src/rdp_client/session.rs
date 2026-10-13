@@ -95,7 +95,8 @@ pub struct Connect {
     /// claimed in the core data, with the connection type left for the host to
     /// detect, and answered on the message channel: at the caller's pace with
     /// [`Connect::paced`], and with what this connection measures otherwise. Taken
-    /// by a session that passes its pipeline, with [`Connect::multitransport`].
+    /// by a session that passes its pipeline with H.264, with
+    /// [`Connect::multitransport`].
     pub autodetect: bool,
     /// Whether to claim reliable UDP with Soft-Sync, and turn down every offer of it
     /// the host then makes ([`super::proto::multitransport`]), so the session stays on TCP.

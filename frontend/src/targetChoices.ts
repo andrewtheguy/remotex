@@ -525,7 +525,7 @@ function pipelineRow(
         {
           value: "high-quality",
           label: "High quality",
-          note: "The pipeline's codecs without H.264, at the host's finest. For a LAN.",
+          note: "The pipeline's codecs without H.264. For a LAN.",
           disabled: false,
         },
         {

@@ -432,16 +432,14 @@ fn connect_config(
             (true, _) => H264::WholeDesktop,
             (false, _) => H264::Refused,
         },
-        // A host draws its finest for a client that takes its network detection
-        // and claims UDP, the claim turned down when the host takes it up: over a
-        // fast link every RemoteFX Progressive tile whole at full quality, where
-        // it otherwise sends a coarser first pass and refines it, and its H.264
-        // rate-controlled to the link it is told of.
-        autodetect: config.egfx(),
-        multitransport: config.egfx(),
-        // With H.264 that link is the page's: the session answers at the page's
-        // pace and leaves the host's socket unread while the page is behind.
-        // High quality is drawn for the link to this gateway alone.
+        // A pipeline with H.264 is drawn for the page's link: the host
+        // rate-controls its H.264 for a client that takes its network detection
+        // and claims UDP, the claim turned down when the host takes it up, and the
+        // session answers the detection at the page's pace and leaves the host's
+        // socket unread while the page is behind. High quality takes neither, and
+        // its socket is read as it comes.
+        autodetect: plan.rdp_h264,
+        multitransport: plan.rdp_h264,
         paced: plan.rdp_h264,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
