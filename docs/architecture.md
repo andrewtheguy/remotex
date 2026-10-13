@@ -2416,10 +2416,16 @@ because its server's answer is not known before it is dialled.
 A Mac is reported no window under 800×600 points, the smallest Apple's own
 client allows (`remoteMinimum.ts`). The page holds that bound on every size it
 reports, the session's window, a second display's tab and a tablet's one
-request; the gateway applies what it is told and does not adjust it, and a
-window smaller than the display scrolls. A Mac asked for less sends no picture
-of some sizes ([Apple VNC](apple-vnc-889.md#in-strips)), which the gateway
-still reads and says (`pictureWithheld`) for a client that reports one.
+request, and a window smaller than the display scrolls. The gateway never
+adjusts a size on its way to the Mac: what it sends is a size a client asked
+for, or nothing. Behind the page it refuses what is under the minimum where it
+arrives (`vnc_apple::MIN_DISPLAY_POINTS`): a window report for a Mac's virtual
+display is logged and dropped and the display keeps its size, a client screen
+that small is not an opening size and the session opens at the default as for
+a client that named none, and a configured `size` that small fails
+`check-config`. Behind that, a Mac that sends no picture of a display says so
+in its stream, which the gateway reads and tells the page
+(`pictureWithheld`, [Apple VNC](apple-vnc-889.md#in-strips)).
 
 The opening size is one rule for every engine that can ask for one
 (`TargetConfig::opening_size`). A session that keeps its size opens at it: the

@@ -2762,6 +2762,22 @@ struct Leg {
     told: std::sync::Arc<tokio::sync::Notify>,
 }
 
+impl Leg {
+    /// An authentic report of RTCP packet type `kind` came from the Mac on the
+    /// leg at `at`: the leg is alive, and a receiver's report says the Mac has
+    /// sent nothing since its last, which is what a sender with nothing sent
+    /// sends. The first of those since an offer wakes the session.
+    fn report(&self, kind: u8, at: std::time::Instant) {
+        *self.heard.lock().unwrap() = Some(at);
+        if kind == RTCP_RECEIVER_REPORT {
+            *self.unsent.lock().unwrap() = Some(at);
+            if !self.reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                self.told.notify_one();
+            }
+        }
+    }
+}
+
 /// Where the receiver and its decoder threads leave the first reason they stopped.
 type Failure = std::sync::Arc<std::sync::Mutex<Option<anyhow::Error>>>;
 
@@ -3052,6 +3068,29 @@ impl MediaStream {
             return false;
         };
         self.withheld_last(self.leg_of(leg), offered).is_some()
+    }
+
+    /// A stream offered for displays of `sizes` and answered, as the session's
+    /// tests find one: no port is bound, which takes an address of this host's.
+    #[cfg(test)]
+    pub(crate) fn test_answered(&mut self, sizes: &[(u16, u16)]) {
+        self.asked = true;
+        self.invited = true;
+        assert!(matches!(self.offer(sizes), Some(Offer::Configuration(_))), "no offer for {sizes:?}");
+        self.pending = false;
+    }
+
+    /// The Mac's report of RTCP packet type `kind` on display `leg`'s leg, as
+    /// the receiver notes one off the wire.
+    #[cfg(test)]
+    pub(crate) fn test_report(&self, leg: usize, kind: u8) {
+        self.legs[self.leg_of(leg)].report(kind, std::time::Instant::now());
+    }
+
+    /// A picture's packet on display `leg`'s leg, as the receiver notes one.
+    #[cfg(test)]
+    pub(crate) fn test_pictured(&self, leg: usize) {
+        *self.legs[self.leg_of(leg)].pictured.lock().unwrap() = Some(std::time::Instant::now());
     }
 
     /// When a leg whose picture the Mac withholds ([`Self::withheld`]) last
@@ -3556,16 +3595,8 @@ impl VideoLeg {
             // sends no picture.
             Err(SrtpError::Rtcp) => {
                 if self.reports.authenticate(data).is_ok() {
-                    let now = std::time::Instant::now();
-                    *self.shared.heard.lock().unwrap() = Some(now);
-                    // Its header is in the clear. A sender that sent nothing since
-                    // its last report sends a receiver's.
-                    if data[1] == RTCP_RECEIVER_REPORT {
-                        *self.shared.unsent.lock().unwrap() = Some(now);
-                        if !self.shared.reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            self.shared.told.notify_one();
-                        }
-                    }
+                    // Its header is in the clear.
+                    self.shared.report(data[1], std::time::Instant::now());
                 }
                 return Ok(Took::Nothing);
             }
@@ -5689,6 +5720,67 @@ mod tests {
         assert!(!m.withheld(0), "a display change owes nothing");
         offer_on_ports(&mut m, (1600, 1000));
         assert!(!m.withheld(0), "nor does its offer, until its own stream reports");
+    }
+
+    /// What the receiver reads off the Mac's report is its packet type, which
+    /// SRTCP leaves in the clear: a receiver's, from a stream that has brought
+    /// no picture, withholds the display, and a sender's does not. A still
+    /// screen's stream reports as a receiver too, behind its first picture.
+    #[test]
+    fn the_macs_report_as_a_receiver_withholds_a_display_and_as_a_sender_does_not() {
+        let mut mac = SrtcpSender::new(&master());
+        let mut reports = SrtcpReceiver::new(&master());
+        let receiver = mac.protect(&rtcp_receiver_report(0x0102_0304));
+        reports.authenticate(&receiver).expect("authentic");
+        assert_eq!(receiver[1], RTCP_RECEIVER_REPORT, "the type is readable under SRTCP");
+        let mut sender_report = [0u8; 28];
+        sender_report[..8].copy_from_slice(&[0x80, 200, 0, 6, 1, 2, 3, 4]);
+        let sender = mac.protect(&sender_report);
+        reports.authenticate(&sender).expect("authentic");
+        assert_eq!(sender[1], 200);
+
+        let mut m = media();
+        offer_on_ports(&mut m, (320, 136));
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        m.legs[0].report(sender[1], std::time::Instant::now());
+        assert!(!m.withheld(0), "a sender's report is a stream that sends pictures");
+        assert!(heard_since(&m.legs[0].heard, std::time::Instant::now() - std::time::Duration::from_secs(1)).is_some());
+        m.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(m.withheld(0), "a receiver's, with no picture, is the Mac sending none");
+
+        let mut still = media();
+        offer_on_ports(&mut still, (1600, 1000));
+        assert!(!still.on_reply(&unhex(ANSWER)).unwrap());
+        *still.legs[0].pictured.lock().unwrap() = Some(std::time::Instant::now());
+        still.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(!still.withheld(0), "behind a picture it is a still screen");
+    }
+
+    /// The session is woken at the first report that says nothing was sent, once
+    /// for each offer: the receiver carries on across offers, and a later
+    /// display's first such report is as much news as the first's.
+    #[tokio::test]
+    async fn each_offers_first_report_of_nothing_sent_wakes_the_session() {
+        let woken = |m: &MediaStream| {
+            let wake = m.offered();
+            async move { tokio::time::timeout(std::time::Duration::from_millis(50), wake.notified()).await.is_ok() }
+        };
+        let mut m = media();
+        offer_on_ports(&mut m, (320, 136));
+        assert!(woken(&m).await, "the offer's own wake");
+        m.legs[0].report(200, std::time::Instant::now());
+        assert!(!woken(&m).await, "a sender's report wakes nobody");
+        m.legs[0].report(RTCP_RECEIVER_REPORT, std::time::Instant::now());
+        assert!(woken(&m).await, "the first receiver's report");
+        m.legs[0].report(RTCP_RECEIVER_REPORT, std::time::Instant::now());
+        assert!(!woken(&m).await, "and not the next");
+
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        m.stopped();
+        offer_on_ports(&mut m, (1600, 1000));
+        assert!(woken(&m).await, "the next offer's own wake");
+        m.legs[0].report(RTCP_RECEIVER_REPORT, std::time::Instant::now());
+        assert!(woken(&m).await, "and its first receiver's report, on the receiver that carried on");
     }
 
     /// A session with two virtual displays offers a video leg for each in the one

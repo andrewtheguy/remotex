@@ -914,13 +914,19 @@ impl TargetConfig {
     /// viewport and pinch-zooms ([`HostDisplay::fit`]) has a screen but not one
     /// to open at: it is the one client not showing the desktop at 100%, and
     /// its screen is a tablet's, to be asked for in landscape once the session
-    /// is up. It opens at the default, as does a client that named no screen.
+    /// is up. It opens at the default, as does a client that named no screen,
+    /// and one whose screen is under the least a Mac's virtual display is asked
+    /// for ([`crate::vnc_apple::MIN_DISPLAY_POINTS`]).
     pub fn opening_size(&self, sizing: Sizing, display: Option<HostDisplay>) -> (u16, u16) {
         match sizing {
             Sizing::Target => self.kept_size(),
             Sizing::BuiltIn => DEFAULT_SIZE,
             Sizing::Window => {
-                display.filter(|d| !d.fit).map_or(DEFAULT_SIZE, |d| (d.w, d.h))
+                // A screen smaller than a Mac's virtual display is asked for is
+                // not one to open at either: refused like no screen, not raised.
+                let too_small =
+                    |d: &HostDisplay| self.has_virtual_display() && crate::vnc_apple::under_minimum((d.w, d.h));
+                display.filter(|d| !d.fit && !too_small(d)).map_or(DEFAULT_SIZE, |d| (d.w, d.h))
             }
         }
     }
@@ -1769,6 +1775,18 @@ impl ConfigFile {
                  greater than zero",
                 target.name,
                 size_text(target.size)
+            );
+            // A Mac's virtual display is asked for no less than its own client's
+            // smallest window: below it the Mac sends no picture of some sizes.
+            anyhow::ensure!(
+                !target.has_virtual_display() || target.size.is_none_or(|size| !crate::vnc_apple::under_minimum(size)),
+                "target {:?} sets a {} size, but a Mac's virtual display is asked for at least \
+                 {}x{} points, the smallest Apple's own Screen Sharing window: set a larger \
+                 size, or leave the key out",
+                target.name,
+                size_text(target.size),
+                crate::vnc_apple::MIN_DISPLAY_POINTS.0,
+                crate::vnc_apple::MIN_DISPLAY_POINTS.1
             );
             // A configured size is asked for as pixels at 1x, so the one oversize
             // the video stream refuses that check-config *can* see is a size
@@ -3755,6 +3773,27 @@ vnc_password = \"x\"")).unwrap();
             ConfigFile::parse(&rdp_toml(size))
                 .expect("a 4K size, either way up, is a picture the stream takes");
         }
+    }
+
+    /// A Mac's virtual display is not configured, or opened at a client's
+    /// screen, under the smallest window Apple's own client allows; any other
+    /// target is.
+    #[test]
+    fn a_mac_is_not_sized_under_its_own_clients_smallest_window() {
+        let hp = "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n";
+        for size in ["640x480", "800x599", "799x600"] {
+            let err = ConfigFile::parse(&vnc_toml(&format!("{hp}size = \"{size}\""))).unwrap_err();
+            assert!(format!("{err:#}").contains("800x600"), "{err:#}");
+            ConfigFile::parse(&vnc_toml(&format!("size = \"{size}\""))).expect("a plain VNC target takes it");
+        }
+        let mac = &ConfigFile::parse(&vnc_toml(&format!("{hp}size = \"800x600\""))).unwrap().targets[0];
+        assert_eq!(mac.kept_size(), (800, 600));
+        let plain = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        let small = HostDisplay { w: 640, h: 480, scale: 100, fit: false };
+        assert_eq!(mac.opening_size(Sizing::Window, Some(small)), DEFAULT_SIZE, "refused, not raised");
+        assert_eq!(plain.opening_size(Sizing::Window, Some(small)), (640, 480));
+        let least = HostDisplay { w: 800, h: 600, scale: 200, fit: false };
+        assert_eq!(mac.opening_size(Sizing::Window, Some(least)), (800, 600));
     }
 
     /// A zero axis is refused on every target that takes a size alike — a High

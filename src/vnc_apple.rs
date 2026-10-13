@@ -100,6 +100,23 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 /// browser to draw.
 pub const MAX_COMBINED_SCREENS: usize = 2;
 
+/// The smallest virtual display a Mac is asked for, in points: the smallest
+/// window Apple's own client allows, at 1x and at 2x alike. A Mac asked for
+/// less sends no picture of some displays: one too low for the strips its High
+/// Performance picture is sent in, and at 2x one it answers with a display of
+/// its own choosing and then captures nothing of.
+///
+/// The page holds this bound on what it reports (`remoteMinimum.ts`). Here a
+/// size under it is refused where it arrives ([`under_minimum`]), never raised
+/// to it: what is sent to the Mac is a size some client asked for, or nothing.
+pub const MIN_DISPLAY_POINTS: (u16, u16) = (800, 600);
+
+/// Whether a display of `points` is less than a Mac is asked for
+/// ([`MIN_DISPLAY_POINTS`]).
+pub fn under_minimum(points: (u16, u16)) -> bool {
+    points.0 < MIN_DISPLAY_POINTS.0 || points.1 < MIN_DISPLAY_POINTS.1
+}
+
 /// What this client advertises to a Mac.
 ///
 /// `screensharingd` resets its display flags on every `SetEncodings` and sets one for

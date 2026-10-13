@@ -545,10 +545,12 @@ A backing size twice the logical one makes a 2x display.
   and 960×600 for 640×400, and after the first of those its screen capture
   lost the display and no picture came at all, with no encoder error. Remotex's
   page reports a Mac no window under 800×600 points, so neither is asked for:
-  the bound is on what the browser reports, and the gateway passes on what it
-  is told. A smaller window scrolls the display. What the Mac says of a
-  display it sends no picture of is still read
-  ([In strips](#in-strips)), for a client that reports less.
+  the bound is on what the browser reports, and a smaller window scrolls the
+  display. The gateway does not raise a smaller size to it: it refuses one,
+  whether a window report, a client's screen at connect or a configured
+  `size`, and sends the Mac only sizes a client asked for. What the Mac says
+  of a display it sends no picture of is still read
+  ([In strips](#in-strips)).
 - **Ask for 1x or 2x only.** The Mac does not round a fractional ratio. 1.5x and
   1.25x modes produced 2x displays of fewer points, with zoomed text and a Dock
   shrunk to fit.
