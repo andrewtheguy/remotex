@@ -94,7 +94,7 @@ amd64 machine under x86-64-v3.
   start that session without it.
   See [A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link).
 - **Graphics.** How an RDP host draws its pipeline. *High quality*, the default,
-  is the pipeline's codecs without H.264 at the host's finest quality, for a
+  is the pipeline's codecs without H.264, for a
   LAN: a slow link gets fewer frames, none of them coarser. *Adaptive* (alpha) is H.264
   the host fits to the browser's link: coarser on a slow link, finer on a fast
   one. Under it, *H.264 full screen*, the default, draws the whole desktop in

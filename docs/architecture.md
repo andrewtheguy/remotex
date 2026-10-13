@@ -140,8 +140,8 @@ in every session of a target with the pipeline on, and a browser that cannot
 compose it cannot start that target. The passed pipeline follows the browser's
 link by the host's own pacing: fewer frames for a page that composes slowly, and
 with Adaptive coarser ones too, by the host's rate control and by its socket
-backing up. A High quality session is drawn for the link to the gateway alone,
-at the host's finest. A Mac's passed HEVC does not: its rate control keeps it between 20
+backing up. A High quality session is drawn for the link to the gateway alone.
+A Mac's passed HEVC does not: its rate control keeps it between 20
 and 60 Mbit/s by the link to the gateway alone, so on a slow link a High
 Performance session is started without it and sent the gateway's VP9, which
 adapts. See
@@ -527,7 +527,7 @@ display. A host that draws with bitmap updates, on a target with
 encoded here as VP9.
 
 How the host draws the pipeline is chosen at the picker: High quality, the
-pipeline's codecs without H.264 at the host's finest, by default, or Adaptive
+pipeline's codecs without H.264, by default, or Adaptive
 (alpha), H.264 the host fits to
 the browser's link, over the whole desktop or only where it moves like video.
 The gateway has no H.264 decoder and is not given one. Adaptive reaches only a
@@ -1581,7 +1581,7 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   the frame rate, and both come back as the link clears. See
   [wlshare's stream, passed through](#wlshares-stream-passed-through).
 - **A Windows host** has no quality dial for a client to turn, but it has its
-  own network detection. Every session with the pipeline takes part in it and
+  own network detection. An adaptive session takes part in it and
   claims UDP, which it turns down when the host takes it up, so all of it stays
   on TCP. For such a
   client the host rate-controls its H.264 to the bandwidth it is told, and sends
@@ -1597,10 +1597,7 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   region* the desktop is mostly RemoteFX Progressive, which this does not
   rate-control: behind a 1 Mbit/s page the frame rate held, the delay fell from
   1.6 s to 0.56 s, and over a LAN every region went to the finest quality. A
-  High quality session answers with what the gateway's own connection to the
-  host measures, so the host draws its finest for that link whatever the
-  page's: measured with a stand-in page on 27 Mbit/s, 12 frames a second, every
-  tile whole at full quality, where a page on a free link got 31. See
+  High quality session takes neither. See
   [The connection sequence](rdp-client.md#the-connection-sequence). Beside that,
   the host adapts in two more ways. It draws no more than about eleven frames ahead of its
   acknowledgements, so a page that composes slowly sets the frame rate. It sends
@@ -1880,10 +1877,9 @@ and `GET /api/targets` carries it:
   codecs without H.264, for a LAN, which is the default, and Adaptive (alpha), H.264 the
   host fits to the browser's link; under Adaptive, *H.264 full screen*, the
   default, asks for the whole desktop in H.264 (`AVC_THINCLIENT`), and *H.264
-  region* for H.264 only where the desktop moves like video. Both take the
-  host's network detection and claim UDP: an adaptive session answers at the
-  page's pace, and a high quality one with what the gateway's connection
-  measures ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
+  region* for H.264 only where the desktop moves like video. An adaptive session
+  takes the host's network detection and claims UDP, answered at the page's
+  pace; a high quality one takes neither ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
 - **The VP9 is coded by libvpx unless the native encoder is chosen.**
   `choices.vp9` says `libvpx` or `native` (`Vp9Encoder` in `src/config.rs`):
   the encoder in Rust, alpha, that `screen-vp9` has written, here for a picture

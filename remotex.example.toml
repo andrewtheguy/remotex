@@ -252,7 +252,7 @@ site_passwd = ""
 # is shown why and offered End session, not a different session.
 #
 # Graphics is how an "rdp" host draws its pipeline: High quality, the pipeline's
-# codecs without H.264 at the host's finest quality, for a LAN, where a slow link
+# codecs without H.264, for a LAN, where a slow link
 # gets fewer frames and none of them coarser, by default; or Adaptive, ALPHA, H.264 the host fits to
 # the link the browser is on. Under Adaptive, H.264 full screen, the default, has
 # the host draw the whole desktop in H.264 (AVC_THINCLIENT, MS-RDPEGFX 2.2.3.6),
@@ -260,10 +260,9 @@ site_passwd = ""
 # 1 Mbit/s page, 17.5 frames a second at 6.4 KB. H.264 region keeps H.264 to
 # what moves like video, a player or a scrolling page, and the rest as High quality draws it;
 # text stays sharp, but the rest, mostly RemoteFX Progressive, is not
-# rate-controlled, so the same page got 4.4 frames a second. Every session with
-# the pipeline takes part in the host's network detection and
-# claims UDP, which it turns down when the host offers it, so it stays on TCP.
-# An adaptive session answers the detection at the page's pace:
+# rate-controlled, so the same page got 4.4 frames a second. An adaptive session
+# takes part in the host's network detection, answered at the page's pace, and
+# claims UDP, which it turns down when the host offers it, so it stays on TCP;
 # the host then draws coarser and at a usable frame rate on a slow link, at its
 # finest quality on a fast one. The browser decodes the H.264 with its own
 # decoder and paints it through the same compositor; the gateway decodes
