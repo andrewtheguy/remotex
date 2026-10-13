@@ -64,10 +64,11 @@ pub struct Connect {
     /// Whether to open Display Control, which is what makes
     /// [`Input::resize`] do anything.
     ///
-    /// A resize is the graphics pipeline's: a server answers a monitor layout with a
+    /// Under the graphics pipeline a server answers a monitor layout with a
     /// graphics reset, which this client reports as one [`Event::Resize`]. Without
-    /// [`Connect::egfx`] the channel is not taken and the desktop keeps its opening
-    /// size.
+    /// it the answer is a Deactivation-Reactivation Sequence, which this client does
+    /// not implement, so without [`Connect::egfx`] the channel is not taken and the
+    /// desktop keeps its opening size.
     pub resize: bool,
     /// Whether to offer the graphics pipeline (MS-RDPEGFX), and hand its commands
     /// to the caller rather than compose them here ([`Event::Graphics`]).
@@ -1402,10 +1403,11 @@ impl<'a> Active<'a> {
     /// The slow path on the I/O channel: everything that is not a picture.
     async fn on_share(&mut self, payload: &[u8]) -> Result<Option<Result<()>>> {
         match share::decode(payload)? {
-            // A resize is a graphics reset and nothing this client asks for rebuilds
-            // the share, so a host that tears it down has ended what this session can
-            // carry. The Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3) is
-            // left out on purpose: see "Bitmap updates" in docs/rdp-client.md.
+            // Nothing this client asks for rebuilds the share: a resize is asked for
+            // only under the pipeline, which answers with a graphics reset, so a host
+            // that tears the share down has ended what this session can carry. The
+            // Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3) is left out on
+            // purpose: see "Bitmap updates" in docs/rdp-client.md.
             Pdu::DeactivateAll => bail!("the host deactivated the share mid-session"),
             Pdu::DemandActive { .. } => {
                 bail!("the host demanded a share this session already has")

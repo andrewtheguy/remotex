@@ -990,10 +990,10 @@ impl TargetConfig {
     /// The choices the picker shows under this target.
     pub fn offers(&self) -> Offers {
         match (self.protocol, self.subtype) {
-            // An RDP resize is a graphics reset, which only the pipeline has: the
-            // bitmap path keeps its opening size. MS-RDPEDISP's other answer, a
-            // Deactivation-Reactivation Sequence, is left out on purpose: see
-            // "Bitmap updates" in docs/rdp-client.md.
+            // Under the pipeline a resize is a graphics reset; without it,
+            // MS-RDPEDISP's other answer, a Deactivation-Reactivation Sequence,
+            // which this client leaves out on purpose, so the bitmap path keeps
+            // its opening size: see "Bitmap updates" in docs/rdp-client.md.
             // The passthrough is the pipeline's, however many displays the host
             // lays out: the browser composes the span the host draws and shows
             // one display of it, and paints the second display's tab from the same

@@ -142,8 +142,8 @@ touch.
   pipeline, high quality or adaptive H.264 (alpha), is chosen at the picker.
 - `egfx = false` makes the host draw with bitmap updates instead, which the
   gateway encodes as VP9: the target for a browser that cannot compose the
-  pipeline. The desktop then keeps its size, since an RDP resize is the
-  pipeline's graphics reset.
+  pipeline. The desktop then keeps its size: without the pipeline Windows
+  resizes by rebuilding the share, which this gateway does not take.
 - **Alpha:** `virtual_displays = 2` asks the host for two displays, each the
   session's size. Where the second sits against the first is chosen under the
   target at the picker, **Second display**: right, left, top or bottom, to match

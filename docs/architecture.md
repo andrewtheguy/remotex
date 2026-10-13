@@ -2767,7 +2767,9 @@ advertise
 `egfx = false` is the bitmap path: the
 server draws with bitmap updates, damage is flushed on the 16 ms guess because those
 carry no frame boundary, and the desktop keeps its opening size — resize is
-not offered beside it, because an RDP resize is the pipeline's graphics reset.
+not offered beside it, because without the pipeline a resize is MS-RDPEDISP's
+Deactivation-Reactivation Sequence, which this client leaves out
+([Bitmap updates](rdp-client.md#bitmap-updates)).
 On either path the pointer travels as its own shape rather than in the framebuffer.
 
 Read [The RDP client, written here](rdp-client.md) for the whole of it: the
