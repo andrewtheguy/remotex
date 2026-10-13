@@ -1010,7 +1010,11 @@ Three controls with similar names therefore remain separate:
   the gateway sends `screenUnavailable` with `active: true`, and the page says
   "Screen not available" over the canvas and sends no input meanwhile: the
   pointer and keys would land on a display nobody can see, so the page drops its
-  input listeners and releases what was held. The Mac's ZRLE rectangles
+  input listeners and releases what was held. Where the Mac's own report says it
+  sends no picture of the display at all, which it does of one too low for its
+  four strips, the gateway adds `pictureWithheld`, the page asks for a larger
+  size in that notice's place, and the session waits for one
+  ([In strips](apple-vnc-889.md#in-strips)). The Mac's ZRLE rectangles
   are stepped over by their length (`Decoders::step_over`), never inflated and
   never handed to `VideoSink::damage`, so a session that passes the stream
   builds no VP9 encoder: one held idle for a session's life was some 240 MB at
@@ -2408,6 +2412,20 @@ them exactly when `connected` said `resize` — on every window change, with no
 toggle and no manual button in the session. Standard `ard` does not offer
 resize, because it shares physical displays, and a plain `vnc` target does not,
 because its server's answer is not known before it is dialled.
+
+A Mac is reported no window under 800×600 points, the smallest Apple's own
+client allows (`remoteMinimum.ts`). The page holds that bound on every size it
+reports, the session's window, a second display's tab and a tablet's one
+request, and a window smaller than the display scrolls. The gateway never
+adjusts a size on its way to the Mac: what it sends is a size a client asked
+for, or nothing. Behind the page it refuses what is under the minimum where it
+arrives (`vnc_apple::MIN_DISPLAY_POINTS`): a window report for a Mac's virtual
+display is logged and dropped and the display keeps its size, a client screen
+that small is not an opening size and the session opens at the default as for
+a client that named none, and a configured `size` that small fails
+`check-config`. Behind that, a Mac that sends no picture of a display says so
+in its stream, which the gateway reads and tells the page
+(`pictureWithheld`, [Apple VNC](apple-vnc-889.md#in-strips)).
 
 The opening size is one rule for every engine that can ask for one
 (`TargetConfig::opening_size`). A session that keeps its size opens at it: the

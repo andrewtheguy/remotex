@@ -74,6 +74,7 @@ import {
 } from "./protocol.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { decodesRdpH264 } from "./rdpH264.ts";
+import { macSubtype, reportedSize } from "./remoteMinimum.ts";
 import { remotePoint } from "./remotePoint.ts";
 import { pageModuleFor } from "./softwareDecoder.ts";
 import { runnableDecoders } from "./softwareSupport.ts";
@@ -748,6 +749,10 @@ export function useRemoteDesktop(
   // A High Performance Mac's media stream has sent no picture of this display —
   // the gateway's `screenUnavailable`. Reset as `remoteResizing` is.
   const [screenUnavailable, setScreenUnavailable] = useState(false);
+  // The Mac has said it sends no picture of this display at its size — the
+  // gateway's `pictureWithheld`, which says why the screen is not available.
+  // Reset as `remoteResizing` is.
+  const [pictureWithheld, setPictureWithheld] = useState(false);
   // Either notice is over the desktop, which is what input and focus follow: a
   // key or a click sent to a Mac whose picture is not on screen lands wherever
   // the display that comes back happens to put it.
@@ -1308,6 +1313,12 @@ export function useRemoteDesktop(
     // the target handed its size to this window — an engine drops the request
     // otherwise, and there is no manual control that could ask for one.
     let lastViewport: { w: number; h: number } | null = null;
+    // Whether the remote is a Mac, which is reported no window under its own
+    // client's smallest (remoteMinimum.ts): from `connected` on the session's
+    // socket, and from `remoteOs`, which every display socket is told right
+    // after its size. Null until one has said, and a tab's window is not
+    // reported until then: its socket has no `connected`.
+    let remoteMac: boolean | null = null;
     const sendViewport = () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
@@ -1316,7 +1327,12 @@ export function useRemoteDesktop(
         return;
       }
       const el = document.documentElement;
-      const msg = viewportMsg({ w: el.clientWidth, h: el.clientHeight });
+      const msg = viewportMsg(
+        reportedSize(
+          { w: el.clientWidth, h: el.clientHeight },
+          remoteMac === true,
+        ),
+      );
       if (
         lastViewport &&
         lastViewport.w === msg.w &&
@@ -1336,7 +1352,7 @@ export function useRemoteDesktop(
       }
       const guest = mobileGuestSize();
       if (guest) {
-        sendRef.current(viewportMsg(guest));
+        sendRef.current(viewportMsg(reportedSize(guest, remoteMac === true)));
       }
     };
     // The screen this window is on, deduped the same way. Mid-session only its
@@ -1460,13 +1476,16 @@ export function useRemoteDesktop(
       if (
         tabDisplay === null ||
         CAN_PINCH_ZOOM ||
+        remoteMac === null ||
         !displayWs ||
         displayWs.readyState !== WebSocket.OPEN
       ) {
         return;
       }
       const el = document.documentElement;
-      const msg = viewportMsg({ w: el.clientWidth, h: el.clientHeight });
+      const msg = viewportMsg(
+        reportedSize({ w: el.clientWidth, h: el.clientHeight }, remoteMac),
+      );
       if (lastTabViewport?.w === msg.w && lastTabViewport.h === msg.h) {
         return;
       }
@@ -1530,8 +1549,14 @@ export function useRemoteDesktop(
       unavailableSeq += 1;
       setRemoteResizing(false);
       setScreenUnavailable(false);
+      setPictureWithheld(false);
       paintSocket = socket;
       socket.binaryType = "arraybuffer";
+      // A tab's socket says what the remote is again before its window is
+      // reported on it.
+      if (tabDisplay !== null) {
+        remoteMac = null;
+      }
       displayWs = socket;
       if (tabDisplay !== null) {
         // The input made over this page goes on its one socket.
@@ -2018,6 +2043,9 @@ export function useRemoteDesktop(
       setRenderPlan(msg.render);
       setOversize(null);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
+      // The two Apple subtypes are the Macs; `remoteOs` says the same once the
+      // desktop is up, and the first report goes out before then.
+      remoteMac = macSubtype(msg.subtype);
       lastViewport = null;
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
@@ -2084,6 +2112,7 @@ export function useRemoteDesktop(
       unavailableSeq += 1;
       setRemoteResizing(false);
       setScreenUnavailable(false);
+      setPictureWithheld(false);
       setDisplays([]);
       setActiveDisplayId(null);
       if (tabDisplay === null) {
@@ -2242,6 +2271,11 @@ export function useRemoteDesktop(
           // Command or become remote Control. Only meaningful on a Mac host, and
           // only for the Command chords in macKeys.ts.
           setRemoteIsMac(msg.macos);
+          // And what size a window is reported as, which a tab's has waited
+          // for. Deduped, so a remote that was already known sends nothing.
+          remoteMac = msg.macos;
+          sendViewport();
+          sendTabViewport();
           break;
         case "touchReady":
           setCanTouch(true);
@@ -2251,6 +2285,9 @@ export function useRemoteDesktop(
           break;
         case "screenUnavailable":
           screenUnavailableSaid(msg.active);
+          break;
+        case "pictureWithheld":
+          setPictureWithheld(msg.active);
           break;
         case "oversize":
           setOversize(msg.cause);
@@ -3233,6 +3270,7 @@ export function useRemoteDesktop(
     // The cover over a settling High Performance resize.
     remoteResizing,
     screenUnavailable,
+    pictureWithheld,
     viewOnly,
     setViewOnly,
     onLocalShortcut,

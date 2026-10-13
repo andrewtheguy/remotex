@@ -50,6 +50,8 @@ export type ClientMsg =
   // false — they express case through an explicit Shift code instead.
   | { type: "key"; code: string; pressed: boolean; caps: boolean }
   // Requested desktop size in points (CSS pixels). Engines apply their own policy.
+  // The page reports a Mac no size under its own client's smallest
+  // (remoteMinimum.ts); the gateway passes on what it is told.
   | { type: "viewport"; w: number; h: number }
   // Restore the target-defined default size; distinct from sending no request.
   // The screen this browser window is on: its full resolution in CSS pixels
@@ -331,6 +333,15 @@ export type ControlMsg =
   // under `resizing`: nobody can see what it would do. Pushed by the gateway
   // and again on reattach while it holds; the page never infers it.
   | { type: "screenUnavailable"; active: boolean }
+  // A High Performance Mac has said it sends no picture of the display shown,
+  // at the size the `resize` before this describes: true once the Mac's own
+  // report on its running stream says so, false at the display's next offer or
+  // its first picture. The Mac gives no reason; a display too low for the
+  // strips it is sent in is the known one. The page is under
+  // `screenUnavailable` meanwhile and asks for another size in that notice's
+  // place. Pushed by the gateway and again on reattach while it holds; the
+  // page never infers it.
+  | { type: "pictureWithheld"; active: boolean }
   // Why the desktop the `resize` before this describes has no picture, or null
   // when it has one: past what a video stream encodes, or a Mac's Combined Display
   // over more than two screens. No picture follows until a `resize` without a

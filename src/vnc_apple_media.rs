@@ -51,8 +51,10 @@
 //!   arriving as its own shape over RFB;
 //! - `tilesPerFrame` is Apple's 4, which codes the display as four strips
 //!   ([`Strips`]), for a stream decoded here and for one passed to the browser
-//!   alike. It is 1, each picture one HEVC picture of the whole display, for a
-//!   display too low for strips and for a passed session that asked for it.
+//!   alike, whatever the display's size. It is 1, each picture one HEVC picture
+//!   of the whole display, for a passed session that asked for it. A display the
+//!   Mac sends no picture of in strips is the Mac's to say
+//!   ([`MediaStream::withheld`]).
 //!
 //! Its bitrate entries are Apple's, and so is what bounds them: the Mac's rate
 //! controller walks the picture between 20 and 60 Mbit/s by the one-way delay this
@@ -193,19 +195,6 @@ const STRIPS: usize = 4;
 /// that end short of its last rows: 208 at 834, 432 at 1730.
 fn strip_rows(height: u16) -> usize {
     (usize::from(height) / STRIPS).next_multiple_of(16)
-}
-
-/// Whether a display `height` rows high is offered in strips. The rounding can
-/// leave the last strip starting past the display's last row, and offered four
-/// tiles for such a display the Mac answers, its encoder refuses every frame,
-/// and no picture comes: at 80, 90 and 136 rows, where one tile brought the
-/// picture. Those are heights under 48 rows, from 68 to 95 and from 132 to 143,
-/// which are offered one tile. A last strip that starts just at the end, as at
-/// 96 and 144 rows, is sent, with nothing of the display in it. Neither side's
-/// negotiation looks at the size: the tile count is the lesser of the two
-/// sides', so this is for the viewer to avoid.
-fn in_strips(height: u16) -> bool {
-    strip_rows(height) * (STRIPS - 1) <= usize::from(height)
 }
 
 /// Minimal protocol-buffers writer: varints and length-delimited fields are the
@@ -515,7 +504,7 @@ struct Offers {
     /// then its second.
     videos: Vec<VideoOffer>,
     /// Whether what takes the picture takes it in strips, and so is offered
-    /// them where the display's height allows ([`in_strips`]).
+    /// them, whatever the display's size.
     strips: bool,
     /// The codec the video offers ask for.
     codec: Codec,
@@ -552,11 +541,6 @@ impl Offers {
         }
     }
 
-    /// Whether the leg of a display of `size` is offered in strips.
-    fn strips(&self, size: (u16, u16)) -> bool {
-        self.strips && in_strips(size.1)
-    }
-
     /// The `0x1c` message for displays of `sizes` backing pixels, one per video
     /// leg. Every stream carries the session's one call id, as Apple's viewer's do.
     fn configuration(&self, sizes: &[(u16, u16)]) -> Vec<u8> {
@@ -566,7 +550,7 @@ impl Offers {
             .iter()
             .zip(sizes)
             .map(|(video, size)| {
-                let tiles = if self.strips(*size) { STRIPS } else { 1 };
+                let tiles = if self.strips { STRIPS } else { 1 };
                 offer(MODE_VIDEO, &video_offer_blob(video.ssrc, *size, tiles as u64, self.codec), &self.call_id)
             })
             .collect();
@@ -914,10 +898,17 @@ impl SrtcpReceiver {
     }
 }
 
+/// RTCP's packet type for a receiver report, which is also what a sender that
+/// has sent nothing since its last report sends (RFC 3550 §6.4).
+const RTCP_RECEIVER_REPORT: u8 = 201;
+
+/// RTCP's packet type for a sender report: media went out since the last report.
+const RTCP_SENDER_REPORT: u8 = 200;
+
 /// An RTCP receiver report with no report blocks, from `ssrc`. The Mac stops a
 /// stream that hears nothing from its receiver for a few seconds.
 pub fn rtcp_receiver_report(ssrc: u32) -> [u8; 8] {
-    let mut report = [0x80, 201, 0, 1, 0, 0, 0, 0];
+    let mut report = [0x80, RTCP_RECEIVER_REPORT, 0, 1, 0, 0, 0, 0];
     report[4..].copy_from_slice(&ssrc.to_be_bytes());
     report
 }
@@ -2761,6 +2752,42 @@ struct Leg {
     offered: std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>,
     /// Whether that offer asked for the display in strips.
     strips: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// When the Mac's report on the leg last said it had sent nothing since its
+    /// report before: a receiver report where a sender's would be. With no
+    /// picture since the offer it is the Mac withholding the display
+    /// ([`MediaStream::withheld`]); behind a picture it is a still screen.
+    unsent: Heard,
+    /// When the Mac last reported on the leg as a sender: it had sent pictures
+    /// since its report before. One since the offer is a stream that sends, so
+    /// a picture missing from it was lost on the way and is not withheld,
+    /// whatever its later reports say of a screen gone still.
+    sent: Heard,
+    /// Whether such a report has woken the session since the last offer, which
+    /// clears it: the receiver carries on across offers, and each one's first
+    /// is what the session looks at.
+    reported: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Signalled at that report, for the session to look.
+    told: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Leg {
+    /// An authentic report of RTCP packet type `kind` came from the Mac on the
+    /// leg at `at`: the leg is alive, a sender's report says the Mac sent
+    /// pictures since its last, and a receiver's that it sent none, which is what
+    /// a sender with nothing sent sends. The first of those since an offer wakes
+    /// the session.
+    fn report(&self, kind: u8, at: std::time::Instant) {
+        *self.heard.lock().unwrap() = Some(at);
+        if kind == RTCP_SENDER_REPORT {
+            *self.sent.lock().unwrap() = Some(at);
+        }
+        if kind == RTCP_RECEIVER_REPORT {
+            *self.unsent.lock().unwrap() = Some(at);
+            if !self.reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                self.told.notify_one();
+            }
+        }
+    }
 }
 
 /// Where the receiver and its decoder threads leave the first reason they stopped.
@@ -2785,7 +2812,8 @@ enum Owed {
     /// changed since. No other offer can go out until it comes.
     Answer(std::time::Instant),
     /// Every leg, for the offer that went at `offered`: the first picture of each
-    /// display and the first sound within [`STREAM_START`] of it, and after them
+    /// display, or the Mac's word that it sends none ([`MediaStream::withheld`]),
+    /// and the first sound within [`STREAM_START`] of it, and after them
     /// a packet on each leg within [`STREAM_SILENCE`] of the last. `pictured` is
     /// when the latest picture of each display came.
     Stream { offered: std::time::Instant, pictured: [Option<std::time::Instant>; MAX_DISPLAYS] },
@@ -2818,6 +2846,7 @@ impl MediaStream {
     ) -> (Self, Vec<Pictures>) {
         let strips = !matches!(receive, Receive::Pass { strips: false, .. });
         let offers = Offers::new(displays, strips, receive.codec());
+        let offer_made = std::sync::Arc::<tokio::sync::Notify>::default();
         let (legs, pictures) = (0..offers.videos.len())
             .map(|index| {
                 let (pictures, rx) = if matches!(receive, Receive::Pass { .. }) {
@@ -2835,6 +2864,10 @@ impl MediaStream {
                     shown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(index == 0)),
                     offered: std::sync::Arc::default(),
                     strips: std::sync::Arc::default(),
+                    unsent: Heard::default(),
+                    sent: Heard::default(),
+                    reported: std::sync::Arc::default(),
+                    told: std::sync::Arc::clone(&offer_made),
                 };
                 (leg, rx)
             })
@@ -2848,7 +2881,7 @@ impl MediaStream {
             invited: false,
             offered: None,
             owed: Owed::Nothing,
-            offer_made: std::sync::Arc::default(),
+            offer_made,
             receiver: None,
             legs,
             swapped: false,
@@ -2925,7 +2958,8 @@ impl MediaStream {
         let by_leg: Vec<(u16, u16)> = (0..sizes.len()).map(|leg| sizes[self.leg_of(leg)]).collect();
         for (leg, size) in self.legs.iter().zip(&by_leg) {
             *leg.offered.lock().unwrap() = Some(*size);
-            leg.strips.store(self.offers.strips(*size), std::sync::atomic::Ordering::Relaxed);
+            leg.strips.store(self.offers.strips, std::sync::atomic::Ordering::Relaxed);
+            leg.reported.store(false, std::sync::atomic::Ordering::Relaxed);
         }
         Some(Offer::Configuration(self.offers.configuration(&by_leg)))
     }
@@ -3034,6 +3068,73 @@ impl MediaStream {
         Some(heard_since(&shared.heard, pictured).unwrap_or(pictured))
     }
 
+    /// Whether the Mac withholds display `leg`'s picture: the running stream has
+    /// brought no picture of it since its offer, and the Mac's own reports on its
+    /// leg say it has sent none: a receiver's, and no sender's since the offer.
+    /// A receiver's report speaks only of the time since the report before it,
+    /// so one behind a sender's is a stream that sent and went still, whose
+    /// missing picture was lost and is owed as any other. The Mac gives no reason and no error. The one
+    /// known is a display too low for the strips it was offered: its encoder
+    /// refuses a strip that would start past the display's last row, every frame
+    /// fails, and the stream otherwise runs, sound and all. The session holds
+    /// for the display's next size ([`Self::deadline`]) and says so
+    /// ([`crate::protocol::ServerMsg::PictureWithheld`]).
+    pub fn withheld(&self, leg: usize) -> bool {
+        let Owed::Stream { offered, .. } = self.owed else {
+            return false;
+        };
+        self.withheld_last(self.leg_of(leg), offered).is_some()
+    }
+
+    /// A stream offered for displays of `sizes` and answered, as the session's
+    /// tests find one: no port is bound, which takes an address of this host's.
+    #[cfg(test)]
+    pub(crate) fn test_answered(&mut self, sizes: &[(u16, u16)]) {
+        self.asked = true;
+        self.invited = true;
+        assert!(matches!(self.offer(sizes), Some(Offer::Configuration(_))), "no offer for {sizes:?}");
+        self.pending = false;
+    }
+
+    /// The Mac's report of RTCP packet type `kind` on display `leg`'s leg, as
+    /// the receiver notes one off the wire.
+    #[cfg(test)]
+    pub(crate) fn test_report(&self, leg: usize, kind: u8) {
+        self.legs[self.leg_of(leg)].report(kind, std::time::Instant::now());
+    }
+
+    /// A picture's packet on display `leg`'s leg, as the receiver notes one.
+    #[cfg(test)]
+    pub(crate) fn test_pictured(&self, leg: usize) {
+        *self.legs[self.leg_of(leg)].pictured.lock().unwrap() = Some(std::time::Instant::now());
+    }
+
+    /// When a leg whose picture the Mac withholds ([`Self::withheld`]) last
+    /// brought a report, which is what such a leg delivers. Never of an offer
+    /// still unanswered, which owes its answer whatever a leg reports meanwhile:
+    /// the stream reporting is not that offer's yet.
+    fn withheld_last(&self, leg: usize, offered: std::time::Instant) -> Option<std::time::Instant> {
+        let shared = self.legs.get(leg)?;
+        if self.pending
+            || heard_since(&shared.pictured, offered).is_some()
+            || heard_since(&shared.sent, offered).is_some()
+        {
+            return None;
+        }
+        heard_since(&shared.unsent, offered)
+    }
+
+    /// When display `leg` last delivered: its picture ([`Self::picture_last`]),
+    /// or the Mac's word that it sends none ([`Self::withheld`]).
+    fn leg_last(
+        &self,
+        leg: usize,
+        offered: std::time::Instant,
+        pictured: Option<std::time::Instant>,
+    ) -> Option<std::time::Instant> {
+        self.picture_last(leg, offered, pictured).or_else(|| self.withheld_last(leg, offered))
+    }
+
     /// When the sound leg last delivered: its latest packet, once sound has come
     /// since the offer at `offered`, which a report before it cannot stand in for.
     fn sound_last(&self, offered: std::time::Instant) -> Option<std::time::Instant> {
@@ -3054,7 +3155,7 @@ impl MediaStream {
             Owed::Nothing => None,
             Owed::Ports(since) | Owed::Answer(since) => Some(since + STREAM_START),
             Owed::Stream { offered, pictured } => (0..self.legs.len())
-                .map(|leg| leg_due(offered, self.picture_last(leg, offered, pictured[leg])))
+                .map(|leg| leg_due(offered, self.leg_last(leg, offered, pictured[leg])))
                 .chain([leg_due(offered, self.sound_last(offered))])
                 .min(),
         }
@@ -3098,7 +3199,7 @@ impl MediaStream {
             Owed::Stream { offered, pictured } => (offered, pictured),
         };
         for (leg, pictured) in pictured.into_iter().enumerate().take(self.legs.len()) {
-            let last = self.picture_last(leg, offered, pictured);
+            let last = self.leg_last(leg, offered, pictured);
             if now < leg_due(offered, last) {
                 continue;
             }
@@ -3513,7 +3614,8 @@ impl VideoLeg {
             // sends no picture.
             Err(SrtpError::Rtcp) => {
                 if self.reports.authenticate(data).is_ok() {
-                    *self.shared.heard.lock().unwrap() = Some(std::time::Instant::now());
+                    // Its header is in the clear.
+                    self.shared.report(data[1], std::time::Instant::now());
                 }
                 return Ok(Took::Nothing);
             }
@@ -3827,7 +3929,10 @@ impl Receiver {
                             );
                             leg.pictures = 0;
                         }
-                        if leg.packets == 0 && !warned_silent && started.elapsed() >= SILENT_START {
+                        // A leg whose reports arrive is not behind a firewall: the
+                        // Mac has said it sends none.
+                        let unsent = leg.shared.unsent.lock().unwrap().is_some();
+                        if leg.packets == 0 && !unsent && !warned_silent && started.elapsed() >= SILENT_START {
                             warned_silent = true;
                             log::warn!(
                                 "vnc: the Mac named UDP {} for its {} but nothing has \
@@ -4900,25 +5005,22 @@ mod tests {
         assert_eq!(request.due(tokio::time::Instant::now()), None, "the keyframe came whole");
     }
 
-    /// The strip heights the Mac sent, and the display heights it sent no picture
-    /// for when offered four tiles.
+    /// The strip heights the Mac sent, and four tiles offered whatever the
+    /// display's height: one the Mac sends no picture of is the Mac's to say.
     #[test]
-    fn a_display_is_offered_in_strips_unless_its_last_would_start_past_its_end() {
+    fn a_display_is_offered_in_strips_whatever_its_size() {
         for (height, rows) in [(64, 16), (96, 32), (120, 32), (144, 48), (600, 160), (800, 208), (801, 208), (833, 208), (834, 208), (835, 208), (836, 224), (900, 240), (1000, 256), (1080, 272), (1730, 432), (1800, 464)] {
             assert_eq!(strip_rows(height), rows, "{height} rows");
-            assert!(in_strips(height), "{height} rows");
         }
-        for height in [80, 90, 136] {
-            assert!(!in_strips(height), "{height} rows");
-        }
-        let tiles = |offers: &Offers, size| {
-            let blob = video_offer_blob(7, size, if offers.strips(size) { STRIPS } else { 1 } as u64, Codec::Hevc);
-            let stream = fields(&blob).iter().find_map(|(f, v)| (*f == 5).then(|| v.clone().unwrap_err())).unwrap();
-            fields(&stream).iter().find_map(|(f, v)| (*f == 6).then(|| *v.as_ref().unwrap())).unwrap()
+        // Whether the configuration for a display of `size` holds a video offer
+        // of `tiles` tiles.
+        let offered = |offers: &Offers, size, tiles| {
+            let want = offer(MODE_VIDEO, &video_offer_blob(offers.videos[0].ssrc, size, tiles, Codec::Hevc), &offers.call_id);
+            offers.configuration(&[size]).windows(want.len()).any(|at| at == want)
         };
-        assert_eq!(tiles(&Offers::new(1, true, Codec::Hevc), (1600, 1000)), 4);
-        assert_eq!(tiles(&Offers::new(1, true, Codec::Hevc), (160, 90)), 1);
-        assert_eq!(tiles(&Offers::new(1, false, Codec::Hevc), (1600, 1000)), 1, "a passed stream");
+        assert!(offered(&Offers::new(1, true, Codec::Hevc), (1600, 1000), 4));
+        assert!(offered(&Offers::new(1, true, Codec::Hevc), (160, 90), 4), "the Mac says what it sends none of");
+        assert!(offered(&Offers::new(1, false, Codec::Hevc), (1600, 1000), 1), "a passed stream");
     }
 
     /// Each strip's SSRC has sequence numbers of its own, so its own rollover.
@@ -5360,7 +5462,7 @@ mod tests {
             1,
         );
         assert_eq!(offers.offers.codec, Codec::H264);
-        assert!(offers.offers.strips((1600, 1000)));
+        assert!(offers.offers.strips);
     }
 
     /// A report sent to a port nobody has open yet, as the first after an offer
@@ -5591,6 +5693,145 @@ mod tests {
         assert!(m.overdue(next + STREAM_SILENCE).is_none());
         offer_on_ports(&mut m, (1280, 800));
         assert!(m.deadline().is_some(), "until its own offer");
+    }
+
+    /// The Mac's word that it sends no picture of a display holds the session
+    /// where a missing picture would end it: a report on the picture's leg that
+    /// is a receiver's, with no picture since the offer. A picture ends it, and
+    /// so does the next offer, and the leg still owes its reports.
+    #[test]
+    fn a_display_the_mac_withholds_holds_the_session() {
+        let mut m = media();
+        // The receiver carries on across offers, and so does what it last heard.
+        *m.legs[0].unsent.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        m.legs[0].reported.store(true, std::sync::atomic::Ordering::Relaxed);
+        offer_on_ports(&mut m, (320, 136));
+        assert!(!m.legs[0].reported.load(std::sync::atomic::Ordering::Relaxed), "an offer's first report wakes the session");
+        let unanswered = m.deadline().expect("an offer owes its answer");
+        *m.legs[0].heard.lock().unwrap() = Some(std::time::Instant::now());
+        *m.legs[0].unsent.lock().unwrap() = Some(std::time::Instant::now());
+        assert!(!m.withheld(0), "an unanswered offer has no stream to report on");
+        assert_eq!(m.deadline(), Some(unanswered), "and still owes its answer");
+        assert!(m.overdue(unanswered).expect("overdue unanswered").to_string().contains("did not answer"));
+        *m.legs[0].unsent.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(!m.withheld(0), "nor is a report from before the offer its stream's");
+        let sound = std::time::Instant::now();
+        *m.sounded.lock().unwrap() = Some(sound);
+        *m.sound_heard.lock().unwrap() = Some(sound);
+        let first = m.deadline().expect("the picture is owed");
+        assert!(m.overdue(first).is_some(), "and overdue without it");
+
+        let said = std::time::Instant::now();
+        *m.legs[0].heard.lock().unwrap() = Some(said);
+        *m.legs[0].unsent.lock().unwrap() = Some(said);
+        assert!(m.withheld(0));
+        assert!(m.overdue(first).is_none(), "the Mac's word stands for the picture");
+        assert_eq!(m.deadline(), Some(sound + STREAM_SILENCE).min(Some(said + STREAM_SILENCE)));
+        let silent = m.overdue(said + STREAM_SILENCE).expect("a leg that stops reporting is overdue");
+        assert!(silent.to_string().contains("sent nothing on"), "{silent}");
+
+        *m.legs[0].pictured.lock().unwrap() = Some(std::time::Instant::now());
+        assert!(!m.withheld(0), "a picture came after all");
+        *m.legs[0].pictured.lock().unwrap() = None;
+        assert!(m.withheld(0));
+        m.stopped();
+        assert!(!m.withheld(0), "a display change owes nothing");
+        offer_on_ports(&mut m, (1600, 1000));
+        assert!(!m.withheld(0), "nor does its offer, until its own stream reports");
+    }
+
+    /// What the receiver reads off the Mac's report is its packet type, which
+    /// SRTCP leaves in the clear: a receiver's, from a stream that has brought
+    /// no picture, withholds the display, and a sender's does not. A still
+    /// screen's stream reports as a receiver too, behind its first picture.
+    #[test]
+    fn the_macs_report_as_a_receiver_withholds_a_display_and_as_a_sender_does_not() {
+        let mut mac = SrtcpSender::new(&master());
+        let mut reports = SrtcpReceiver::new(&master());
+        let receiver = mac.protect(&rtcp_receiver_report(0x0102_0304));
+        reports.authenticate(&receiver).expect("authentic");
+        assert_eq!(receiver[1], RTCP_RECEIVER_REPORT, "the type is readable under SRTCP");
+        let mut sender_report = [0u8; 28];
+        sender_report[..8].copy_from_slice(&[0x80, 200, 0, 6, 1, 2, 3, 4]);
+        let sender = mac.protect(&sender_report);
+        reports.authenticate(&sender).expect("authentic");
+        assert_eq!(sender[1], 200);
+
+        let mut m = media();
+        offer_on_ports(&mut m, (320, 136));
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        let sound = std::time::Instant::now();
+        *m.sounded.lock().unwrap() = Some(sound);
+        *m.sound_heard.lock().unwrap() = Some(sound);
+        let first = m.deadline().expect("the picture is owed");
+        m.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(m.withheld(0), "a receiver's, with no picture, is the Mac sending none");
+        assert!(m.overdue(first).is_none(), "which holds the session");
+
+        // A sender's report after it: the Mac has sent pictures, so the one
+        // missing was lost, and is owed within the offer's time again.
+        m.legs[0].report(sender[1], std::time::Instant::now());
+        assert!(!m.withheld(0), "a sender's report is a stream that sends pictures");
+        assert!(m.overdue(first).is_some(), "and the picture is owed again");
+        m.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(!m.withheld(0), "and a receiver's behind it is that stream gone still");
+
+        // The other order: a sender's first, its pictures lost, then a still screen.
+        let mut lost = media();
+        offer_on_ports(&mut lost, (1600, 1000));
+        assert!(!lost.on_reply(&unhex(ANSWER)).unwrap());
+        lost.legs[0].report(sender[1], std::time::Instant::now());
+        assert!(!lost.withheld(0));
+        assert!(heard_since(&lost.legs[0].heard, std::time::Instant::now() - std::time::Duration::from_secs(1)).is_some());
+        lost.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(!lost.withheld(0), "a stream that sent is not one the Mac withholds");
+        let first = lost.deadline().expect("the picture is owed");
+        *lost.sounded.lock().unwrap() = Some(std::time::Instant::now());
+        *lost.sound_heard.lock().unwrap() = Some(std::time::Instant::now());
+        assert!(lost.overdue(first).is_some(), "and overdue without it");
+
+        // A sender's report from before the offer is the last display's stream's.
+        let mut next = media();
+        next.legs[0].report(sender[1], std::time::Instant::now() - std::time::Duration::from_secs(1));
+        offer_on_ports(&mut next, (320, 136));
+        assert!(!next.on_reply(&unhex(ANSWER)).unwrap());
+        next.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(next.withheld(0));
+
+        let mut still = media();
+        offer_on_ports(&mut still, (1600, 1000));
+        assert!(!still.on_reply(&unhex(ANSWER)).unwrap());
+        *still.legs[0].pictured.lock().unwrap() = Some(std::time::Instant::now());
+        still.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(!still.withheld(0), "behind a picture it is a still screen");
+    }
+
+    /// The session is woken at the first report that says nothing was sent, once
+    /// for each offer: the receiver carries on across offers, and a later
+    /// display's first such report is as much news as the first's.
+    #[tokio::test]
+    async fn each_offers_first_report_of_nothing_sent_wakes_the_session() {
+        let woken = |m: &MediaStream| {
+            let wake = m.offered();
+            async move { tokio::time::timeout(std::time::Duration::from_millis(50), wake.notified()).await.is_ok() }
+        };
+        let mut m = media();
+        offer_on_ports(&mut m, (320, 136));
+        assert!(woken(&m).await, "the offer's own wake");
+        m.legs[0].report(200, std::time::Instant::now());
+        assert!(!woken(&m).await, "a sender's report wakes nobody");
+        m.legs[0].report(RTCP_RECEIVER_REPORT, std::time::Instant::now());
+        assert!(woken(&m).await, "the first receiver's report");
+        m.legs[0].report(RTCP_RECEIVER_REPORT, std::time::Instant::now());
+        assert!(!woken(&m).await, "and not the next");
+
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        m.stopped();
+        offer_on_ports(&mut m, (1600, 1000));
+        assert!(woken(&m).await, "the next offer's own wake");
+        m.legs[0].report(RTCP_RECEIVER_REPORT, std::time::Instant::now());
+        assert!(woken(&m).await, "and its first receiver's report, on the receiver that carried on");
     }
 
     /// A session with two virtual displays offers a video leg for each in the one

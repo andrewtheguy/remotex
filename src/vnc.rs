@@ -722,6 +722,10 @@ struct DesktopState {
     /// that picture is on its way ([`uncover`]). Input goes to the Mac all the
     /// while: its display is there, only its picture is not.
     covered: bool,
+    /// The browser has been told the Mac sends no picture of the canvas's
+    /// display ([`ServerMsg::PictureWithheld`]), as the Mac's stream last said
+    /// ([`tell_withheld`]).
+    withheld: bool,
     /// The list the Mac holds names the media stream first, so it sends this
     /// session no pixels ([`vnc_apple_media::encodings_preferring_media_stream`]):
     /// from the `SetEncodings` that asks for the stream's ports to the session's
@@ -1733,6 +1737,9 @@ struct TabFeed {
     /// The tab has been told its screen is not available, as the session's canvas
     /// is ([`DesktopState::covered`]).
     covered: bool,
+    /// The tab has been told the Mac sends no picture of its display, as the
+    /// session's canvas is ([`DesktopState::withheld`]).
+    withheld: bool,
 }
 
 /// The tab showing the second display, shared by the engine's two loops: the
@@ -1831,6 +1838,53 @@ async fn tab_send(tab: &SharedTab, media: Option<&SharedMedia>, msgs: Vec<Server
             return tab_gone(tab, media, &e);
         }
     }
+}
+
+/// Tell the browser what the Mac's stream says of each display shown: that it
+/// sends no picture of it ([`MediaStream::withheld`]), or that it no longer says
+/// so. The canvas's display on its socket, and the second's in its tab. Looked at
+/// every turn of the read loop, which the stream wakes at its first such report
+/// and at every offer.
+async fn tell_withheld(
+    desktop: &SharedDesktop,
+    media: &SharedMedia,
+    sink: &VideoSink,
+    tab: &SharedTab,
+) -> anyhow::Result<()> {
+    let canvas = desktop.lock().unwrap().view.active;
+    let (canvas, second) = {
+        let media = media.lock().unwrap();
+        (media.withheld(canvas), media.withheld(1))
+    };
+    let (told, size) = {
+        let mut d = desktop.lock().unwrap();
+        (std::mem::replace(&mut d.withheld, canvas) != canvas, d.size)
+    };
+    if told {
+        if canvas {
+            warn!(
+                "vnc: the Mac sends no picture of the {}x{} display: its stream runs and its \
+                 report says it has sent none",
+                size.0, size.1
+            );
+        }
+        sink.msg(ServerMsg::PictureWithheld { active: canvas }).await?;
+    }
+    let told = tab
+        .lock()
+        .unwrap()
+        .as_mut()
+        .is_some_and(|tab| std::mem::replace(&mut tab.withheld, second) != second);
+    if told {
+        if second {
+            warn!(
+                "vnc: the Mac sends no picture of its second display: its stream runs and its \
+                 report says it has sent none"
+            );
+        }
+        tab_send(tab, Some(media), vec![ServerMsg::PictureWithheld { active: second }]).await;
+    }
+    Ok(())
 }
 
 /// Tell the tab its screen is not available until its display's next picture: the
@@ -2999,6 +3053,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         canvas_live: false,
         media_live: false,
         covered: media_stream,
+        withheld: false,
         media_preferred: false,
         in_update: false,
         media_stream,
@@ -3265,7 +3320,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             // The tab's window: the second display's size, in
                             // points, as the session's own viewport is the first's.
                             (ClientMsg::Viewport { w, h }, Some(_)) => {
-                                if resize && w > 0 && h > 0 {
+                                if resize && virtual_display && vnc_apple::under_minimum((w, h)) {
+                                    refused_small("second display's window", (w, h));
+                                } else if resize && w > 0 && h > 0 {
                                     desktop.lock().unwrap().second_points = Some((w, h));
                                     if let Err(e) =
                                         request_resize(&uplink, &desktop, ResizeAsk::Density, virtual_display).await
@@ -3473,12 +3530,17 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                     // A stream still to deliver, or a resize in progress, is said
                     // to the new browser too.
-                    let (resizing, covered) = {
+                    let (resizing, covered, withheld) = {
                         let d = desktop.lock().unwrap();
-                        (d.hp.shown, d.covered)
+                        (d.hp.shown, d.covered, d.withheld)
                     };
                     if covered
                         && let Err(e) = sink.msg(ServerMsg::ScreenUnavailable { active: true }).await
+                    {
+                        break Err(e);
+                    }
+                    if withheld
+                        && let Err(e) = sink.msg(ServerMsg::PictureWithheld { active: true }).await
                     {
                         break Err(e);
                     }
@@ -3741,7 +3803,21 @@ enum ResizeAsk {
     Density,
 }
 
+/// Log a size reported for a Mac's virtual display that is less than a Mac is
+/// asked for ([`vnc_apple::MIN_DISPLAY_POINTS`]) and so is not acted on.
+fn refused_small(what: &str, points: (u16, u16)) {
+    let (w, h) = vnc_apple::MIN_DISPLAY_POINTS;
+    warn!(
+        "vnc: a {what} of {}x{} points is under the {w}x{h} a Mac is asked for at least; \
+         the display keeps its size",
+        points.0, points.1
+    );
+}
+
 /// Handle a browser viewport report (dynamic resize).
+///
+/// A report under what a Mac is asked for at least is refused for a virtual
+/// display, as a zero side is for every server: logged, and nothing recorded.
 ///
 /// A High Performance Mac owns a virtual display, so replacing its one-mode
 /// `SetDisplayConfiguration` is the resize request — and the mode it requests is
@@ -3766,6 +3842,12 @@ async fn request_resize(
         let mut d = desktop.lock().unwrap();
         let want = match ask {
             ResizeAsk::Viewport((0, _) | (_, 0)) => return Ok(()),
+            // Less than a Mac is asked for: refused, not raised. The page
+            // reports no such window, so this is another client's.
+            ResizeAsk::Viewport(points) if virtual_display && vnc_apple::under_minimum(points) => {
+                refused_small("window", points);
+                return Ok(());
+            }
             ResizeAsk::Viewport(points) => points,
             // The current size, in the points it is rendered from: the one
             // request that starts from pixels, and from this end's own. A size
@@ -4392,6 +4474,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
         // [`MediaStream::overdue`]. Read here, once a turn, like the deadline above,
         // and read again at an offer, which may come from the input loop while this
         // one waits behind a still screen.
+        if let Some(media) = media.as_ref() {
+            tell_withheld(desktop, media, &sink, &shared.tab).await?;
+        }
         let media_deadline = media.as_ref().and_then(|m| m.lock().unwrap().deadline());
         let media_due = async {
             match media_deadline {
@@ -6476,6 +6561,18 @@ async fn tab_repaint(shared: &Shared, macos: bool) {
     msgs.extend(cursor_msg(&shared.cursor));
     // No picture until the stream's next of the display.
     msgs.push(ServerMsg::ScreenUnavailable { active: true });
+    // What the Mac's stream says of the display now, which a tab that has just
+    // come is told with its size, not at the read loop's next turn.
+    let withheld = media.is_some_and(|media| media.lock().unwrap().withheld(leg));
+    let told = shared
+        .tab
+        .lock()
+        .unwrap()
+        .as_mut()
+        .is_some_and(|tab| std::mem::replace(&mut tab.withheld, withheld) != withheld);
+    if told {
+        msgs.push(ServerMsg::PictureWithheld { active: withheld });
+    }
     // A resize in progress covers the tab as it covers the canvas.
     if shared.desktop.lock().unwrap().hp.shown {
         msgs.push(ServerMsg::Resizing { active: true });
@@ -6537,6 +6634,7 @@ async fn hp_tab_shown(
         shadow: Arc::new(std::sync::Mutex::new(Shadow::new("vnc", shown.size.0, shown.size.1))),
         live: false,
         covered: true,
+        withheld: false,
     });
     tab_repaint(shared, macos).await;
 }
@@ -6608,6 +6706,12 @@ async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> 
     };
     if let Some(msg) = msg {
         sink.msg(msg).await?;
+    }
+    // What the Mac's stream says of the display now on the canvas, which it may
+    // have said while nobody was shown it: the read loop was woken for that
+    // then, and is not for this.
+    if let Some(media) = media {
+        tell_withheld(desktop, media, sink, &shared.tab).await?;
     }
     if resize && was.all && !now.all {
         request_resize(uplink, desktop, ResizeAsk::Density, true).await?;
@@ -9716,6 +9820,7 @@ mod tests {
             canvas_live: false,
             media_live: false,
             covered: false,
+            withheld: false,
             media_preferred: false,
             in_update: false,
             media_stream: false,
@@ -10203,6 +10308,26 @@ mod tests {
         let mut sent = vnc_apple::auto_framebuffer_update(interval, HP_HOLD_REQUEST);
         sent.extend_from_slice(&hp_config((800, 600), 1.0));
         assert_eq!(written(&wire), sent);
+    }
+
+    /// A window under the smallest Apple's own client allows is not asked of a
+    /// Mac's virtual display, and is not raised to it either: the report is
+    /// refused whole. Any other server takes the size it is given.
+    #[tokio::test]
+    async fn a_mac_is_not_asked_for_less_than_its_own_clients_smallest_window() {
+        let (uplink, wire) = test_uplink();
+        let desktop = shared_desktop((1024, 768), None, None);
+        for small in [(320, 68), (799, 600), (800, 599), (640, 400)] {
+            request_resize(&uplink, &desktop, ResizeAsk::Viewport(small), true).await.unwrap();
+            assert_eq!(desktop.lock().unwrap().hp.newest_points(), None, "{small:?}");
+        }
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), true).await.unwrap();
+        assert_eq!(desktop.lock().unwrap().hp.newest_points(), Some((800, 600)));
+        assert!(written(&wire).is_empty(), "a virtual display's size waits for the window to settle");
+
+        let generic = shared_desktop((1024, 768), None, None);
+        request_resize(&uplink, &generic, ResizeAsk::Viewport((320, 68)), false).await.unwrap();
+        assert_eq!(generic.lock().unwrap().pending, Some((320, 68)));
     }
 
     #[test]
@@ -12860,6 +12985,120 @@ mod tests {
             listed(rx.try_recv().unwrap()),
             (DisplayState::COMBINED, vec![first, second(Some(2)), all])
         );
+    }
+
+    /// The `PictureWithheld` words on a channel, in order, once its sink has
+    /// sent what it holds.
+    async fn withheld_said(sink: &VideoSink, rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<bool> {
+        sink.flush().await;
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                ServerMsg::PictureWithheld { active } => Some(active),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the Mac's stream says of a display it sends no picture of reaches the
+    /// browser: nothing for a stream that reports as a sender, the word once when
+    /// it reports as a receiver with no picture, and its lifting at a picture.
+    /// No window size enters it: the Mac's report is the whole of the decision.
+    #[tokio::test]
+    async fn a_display_the_mac_withholds_is_told_to_the_browser_once_and_lifted() {
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((1600, 1200), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_stream = true;
+            d.covered = true;
+        }
+        let addr = "127.0.0.1:5900".parse().unwrap();
+        let media: SharedMedia =
+            Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Decode, 1).0));
+        let tab = SharedTab::default();
+
+        media.lock().unwrap().test_answered(&[(1600, 1200)]);
+        tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
+        assert!(withheld_said(&sink, &mut rx).await.is_empty(), "a stream that has reported nothing");
+
+        media.lock().unwrap().test_report(0, 201);
+        tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
+        tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
+        assert_eq!(withheld_said(&sink, &mut rx).await, [true], "said once");
+        assert!(desktop.lock().unwrap().withheld);
+
+        media.lock().unwrap().test_pictured(0);
+        tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
+        assert_eq!(withheld_said(&sink, &mut rx).await, [false], "a picture came after all");
+        assert!(!desktop.lock().unwrap().withheld);
+
+        // Nor is a stream that reports as a sender one the Mac withholds, though
+        // its picture is lost and its screen then goes still.
+        media.lock().unwrap().stopped();
+        media.lock().unwrap().test_answered(&[(1600, 1200)]);
+        media.lock().unwrap().test_report(0, 200);
+        media.lock().unwrap().test_report(0, 201);
+        tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
+        assert!(withheld_said(&sink, &mut rx).await.is_empty(), "a sender's report since the offer");
+    }
+
+    /// A second display the Mac withholds is told to whichever socket shows it:
+    /// the canvas as the display comes onto it, though the Mac said so while
+    /// nobody was shown it, and its tab as the tab attaches. The first display's
+    /// socket hears nothing of it.
+    #[tokio::test]
+    async fn a_second_display_the_mac_withholds_is_told_where_it_is_shown() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((100, 100), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.hp_displays = 2;
+            d.media_stream = true;
+        }
+        let addr = "127.0.0.1:5900".parse().unwrap();
+        let media: SharedMedia =
+            Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Decode, 2).0));
+        let shared = Shared {
+            media: Some(Arc::clone(&media)),
+            ..test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)))
+        };
+        let two = layout_payload(None, &[(9, (160, 100), (160, 100), 0x01), (10, (128, 80), (128, 80), 0x00)]);
+        read_display_layout(&mut two.as_slice(), &shared, true, &sink).await.unwrap();
+        hp_select(&shared, 0, &sink, false).await.unwrap();
+
+        // The Mac says so of the second display while the first is on the canvas.
+        media.lock().unwrap().test_answered(&[(160, 100), (128, 80)]);
+        media.lock().unwrap().test_report(1, 201);
+        tell_withheld(&desktop, &media, &sink, &shared.tab).await.unwrap();
+        assert!(withheld_said(&sink, &mut rx).await.is_empty(), "not the first display's to hear");
+
+        hp_select(&shared, 1, &sink, false).await.unwrap();
+        assert_eq!(withheld_said(&sink, &mut rx).await, [true], "said as it comes onto the canvas");
+        hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
+        assert_eq!(withheld_said(&sink, &mut rx).await, [false], "the first display is back on it");
+
+        let plan = crate::config::RenderPlan {
+            quality: 60,
+            adaptive: false,
+            apple_media: false,
+            apple_h264: false,
+            rdp_graphics: false,
+            rdp_h264: false,
+            native_vp9: false,
+        };
+        let (frames, mut tab_rx) = mpsc::channel(8);
+        let feed = crate::session::DisplayFeed { frames, feedback: Arc::new(crate::feedback::LinkFeedback::new()) };
+        hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(feed), plan, true).await;
+        let (tab_sink, _) = tab_parts(&shared.tab).expect("the tab is fed");
+        assert_eq!(withheld_said(&tab_sink, &mut tab_rx).await, [true], "said as the tab attaches");
+        tell_withheld(&desktop, &media, &sink, &shared.tab).await.unwrap();
+        assert!(withheld_said(&tab_sink, &mut tab_rx).await.is_empty(), "and once");
+        assert!(withheld_said(&sink, &mut rx).await.is_empty());
+
+        media.lock().unwrap().test_pictured(1);
+        tell_withheld(&desktop, &media, &sink, &shared.tab).await.unwrap();
+        assert_eq!(withheld_said(&tab_sink, &mut tab_rx).await, [false]);
     }
 
     /// The second display's tab is sent its own display: its size and the
