@@ -3278,6 +3278,86 @@ const VIDEO_RECEIVE_BUFFER: usize = 4 << 20;
 /// ports is what that looks like, and the session ends at [`STREAM_START`].
 const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long the receive loop may go without turning before the log says so. It
+/// turns at least once a second, for its reports, and the Mac drops a stream
+/// some 30 s after its reports stop, with nothing on this side to say why.
+const LOOP_STALL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Where the receive loop last was, and when, for [`watch`] to read.
+struct Pulse {
+    epoch: std::time::Instant,
+    /// Milliseconds from `epoch` to the last step.
+    at: std::sync::atomic::AtomicU64,
+    step: std::sync::atomic::AtomicU8,
+}
+
+/// The steps of the receive loop, by [`Pulse::step`].
+const STEPS: [&str; 8] = [
+    "waiting",
+    "sending its reports",
+    "sending a rate report",
+    "taking a sound packet",
+    "taking a picture packet",
+    "taking a second display's picture packet",
+    "taking a keyframe request",
+    "acknowledging or asking for a picture",
+];
+
+impl Pulse {
+    fn new() -> Self {
+        Self { epoch: std::time::Instant::now(), at: 0.into(), step: 0.into() }
+    }
+
+    fn beat(&self, step: u8) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.at.store(self.epoch.elapsed().as_millis() as u64, Relaxed);
+        self.step.store(step, Relaxed);
+    }
+
+    /// How long since the last step, and which it was.
+    fn idle(&self) -> (std::time::Duration, &'static str) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let at = std::time::Duration::from_millis(self.at.load(Relaxed));
+        let step = STEPS.get(usize::from(self.step.load(Relaxed))).copied().unwrap_or("?");
+        (self.epoch.elapsed().saturating_sub(at), step)
+    }
+}
+
+/// Say when the receive loop stops turning, where it stopped, and when it turns
+/// again, for as long as the receiver holds `pulse`.
+async fn watch(pulse: std::sync::Weak<Pulse>) {
+    let mut every = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut stalled: Option<std::time::Duration> = None;
+    loop {
+        every.tick().await;
+        let Some(pulse) = pulse.upgrade() else { return };
+        let (idle, step) = pulse.idle();
+        if idle >= LOOP_STALL {
+            if stalled.is_none() {
+                log::warn!(
+                    "vnc: the Mac's media receiver has not turned in {}s, stopped {step}: \
+                     no report reaches the Mac while it stays so",
+                    idle.as_secs()
+                );
+            }
+            stalled = Some(idle);
+        } else if let Some(longest) = stalled.take() {
+            log::warn!("vnc: the Mac's media receiver turns again, after about {}s", longest.as_secs());
+        }
+    }
+}
+
+/// Count a report or request to the Mac that failed to go, saying so the first
+/// few times: the reports are what keeps the Mac sending.
+fn sent(result: std::io::Result<usize>, failures: &mut u64, port: u16) {
+    if let Err(e) = result {
+        *failures += 1;
+        if *failures <= 3 {
+            log::warn!("vnc: a report to the Mac's UDP {port} failed to go: {e}");
+        }
+    }
+}
+
 /// `REMOTEX_HP_DUMP=<dir>`: the stream as it arrives, for replay outside the
 /// gateway (`tests/hp_capture.sh`). `video.h265` is every access unit the
 /// depacketizer completes, as Annex B, or `video.h264` of a session passed the
@@ -3393,6 +3473,10 @@ struct Receiver {
     sound_heard: Heard,
     sounded: Heard,
     sound: Option<std::sync::Arc<crate::audio::AudioBridge>>,
+    audio_port: u16,
+    /// Reports on the sound leg that failed to go.
+    audio_failures: u64,
+    pulse: std::sync::Arc<Pulse>,
 }
 
 /// One display's video leg in the receiver: its socket and keys, and where its
@@ -3431,6 +3515,8 @@ struct VideoLeg {
     counted: Option<u32>,
     /// Refreshes and keyframes asked of the Mac.
     asks: u64,
+    /// Reports and requests on the leg that failed to go.
+    failures: u64,
 }
 
 /// The picture a leg's stream needs before it can go on.
@@ -3636,7 +3722,7 @@ impl VideoLeg {
             (Ask::Refresh, Some(size)) => self.rtcp.protect(&rtcp_refresh(self.ssrc, self.media_ssrc, size)),
             _ => self.rtcp.protect(&rtcp_pli(self.ssrc, self.media_ssrc)),
         };
-        let _ = self.socket.send(&request).await;
+        sent(self.socket.send(&request).await, &mut self.failures, self.port);
     }
 
     /// Tell the Mac's encoder of the picture just handed on, which it may then
@@ -3644,7 +3730,7 @@ impl VideoLeg {
     async fn acknowledge(&mut self) {
         if let Some(timestamp) = self.unacknowledged.take() {
             let ack = self.rtcp.protect(&rtcp_reference_ack(self.ssrc, timestamp));
-            let _ = self.socket.send(&ack).await;
+            sent(self.socket.send(&ack).await, &mut self.failures, self.port);
         }
     }
 }
@@ -3773,6 +3859,7 @@ impl Receiver {
                     pictures: 0,
                     counted: None,
                     asks: 0,
+                    failures: 0,
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -3787,6 +3874,9 @@ impl Receiver {
             sound_heard: std::sync::Arc::clone(&media.sound_heard),
             sounded: std::sync::Arc::clone(&media.sounded),
             sound: media.sound.clone(),
+            audio_port: ports.audio,
+            audio_failures: 0,
+            pulse: std::sync::Arc::new(Pulse::new()),
         })
     }
 
@@ -3803,16 +3893,19 @@ impl Receiver {
         let mut second_datagram = vec![0u8; if alone { 0 } else { 65_536 }];
         let mut sound_datagram = vec![0u8; 2048];
         let mut dump = MediaDump::from_env(self.videos.first().map_or(Codec::Hevc, |leg| leg.codec));
+        tokio::spawn(watch(std::sync::Arc::downgrade(&self.pulse)));
         let failure = loop {
             let mut want_keyframe = [None; MAX_DISPLAYS];
+            self.pulse.beat(0);
             tokio::select! {
                 _ = rtcp.tick() => {
+                    self.pulse.beat(1);
                     let audio = self.audio_rtcp.protect(&rtcp_receiver_report(self.audio_ssrc));
-                    let _ = self.audio.send(&audio).await;
+                    sent(self.audio.send(&audio).await, &mut self.audio_failures, self.audio_port);
                     ticks += 1;
                     for leg in &mut self.videos {
                         let report = leg.rtcp.protect(&rtcp_receiver_report(leg.ssrc));
-                        let _ = leg.socket.send(&report).await;
+                        sent(leg.socket.send(&report).await, &mut leg.failures, leg.port);
                         if ticks.is_multiple_of(RATE_REPORT) && leg.pictures > 0 {
                             log::debug!(
                                 "vnc: {:.1} pictures a second of the Mac's {} over the last {RATE_REPORT}s, \
@@ -3841,14 +3934,16 @@ impl Receiver {
                     }
                 }
                 _ = rate.tick() => {
+                    self.pulse.beat(2);
                     for leg in &mut self.videos {
                         if let Some(report) = leg.feedback.report(leg.ssrc, std::time::Instant::now()) {
                             let report = leg.rtcp.protect(&report);
-                            let _ = leg.socket.send(&report).await;
+                            sent(leg.socket.send(&report).await, &mut leg.failures, leg.port);
                         }
                     }
                 }
                 received = self.audio.recv(&mut sound_datagram) => {
+                    self.pulse.beat(3);
                     let len = match received {
                         Ok(len) => len,
                         Err(e) if unreachable(&e) => continue,
@@ -3880,6 +3975,7 @@ impl Receiver {
                     }
                 }
                 received = self.videos[0].socket.recv(&mut datagram) => {
+                    self.pulse.beat(4);
                     let arrived = std::time::Instant::now();
                     let len = match received {
                         Ok(len) => len,
@@ -3895,6 +3991,7 @@ impl Receiver {
                     }
                 }
                 received = second_received(&self.videos, &mut second_datagram) => {
+                    self.pulse.beat(5);
                     let arrived = std::time::Instant::now();
                     let len = match received {
                         Ok(len) => len,
@@ -3911,10 +4008,12 @@ impl Receiver {
                     }
                 }
                 leg = keyframe_wanted(&self.videos) => {
+                    self.pulse.beat(6);
                     self.videos[leg].assembly.resync();
                     self.videos[leg].keyframe_request.want(Ask::Keyframe);
                 }
             }
+            self.pulse.beat(7);
             for (leg, wanted) in self.videos.iter_mut().zip(want_keyframe) {
                 let failed = leg.keyframe.swap(false, std::sync::atomic::Ordering::Relaxed);
                 if failed {
