@@ -1876,6 +1876,12 @@ async fn tell_withheld(
         .as_mut()
         .is_some_and(|tab| std::mem::replace(&mut tab.withheld, second) != second);
     if told {
+        if second {
+            warn!(
+                "vnc: the Mac sends no picture of its second display: its stream runs and its \
+                 report says it has sent none"
+            );
+        }
         tab_send(tab, Some(media), vec![ServerMsg::PictureWithheld { active: second }]).await;
     }
     Ok(())
