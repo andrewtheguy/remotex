@@ -2413,6 +2413,14 @@ toggle and no manual button in the session. Standard `ard` does not offer
 resize, because it shares physical displays, and a plain `vnc` target does not,
 because its server's answer is not known before it is dialled.
 
+A Mac is reported no window under 800×600 points, the smallest Apple's own
+client allows (`remoteMinimum.ts`). The page holds that bound on every size it
+reports, the session's window, a second display's tab and a tablet's one
+request; the gateway applies what it is told and does not adjust it, and a
+window smaller than the display scrolls. A Mac asked for less sends no picture
+of some sizes ([Apple VNC](apple-vnc-889.md#in-strips)), which the gateway
+still reads and says (`pictureWithheld`) for a client that reports one.
+
 The opening size is one rule for every engine that can ask for one
 (`TargetConfig::opening_size`). A session that keeps its size opens at it: the
 target's `size`, else `DEFAULT_SIZE`, 1440×900 points, or that default on a

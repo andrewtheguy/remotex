@@ -537,6 +537,18 @@ A backing size twice the logical one makes a 2x display.
 - **The maximum is a ceiling.** Putting the current mode there made the Mac refuse
   anything larger. With 3840×2160 it accepted every size asked for, including
   bursts of them and sizes below the 800×600 Apple's own UI allows.
+- **800×600 points is the least Apple's viewer asks for,** at 1x and at 2x
+  alike: its window goes no smaller. Below it the virtual Mac sent no picture
+  of some displays. At 1x it made whatever it was asked, and its encoder
+  refused the heights too low for four strips ([In strips](#in-strips)). At 2x
+  it answered with a display of its own choosing, 800×600 points for 320×30
+  and 960×600 for 640×400, and after the first of those its screen capture
+  lost the display and no picture came at all, with no encoder error. Remotex's
+  page reports a Mac no window under 800×600 points, so neither is asked for:
+  the bound is on what the browser reports, and the gateway passes on what it
+  is told. A smaller window scrolls the display. What the Mac says of a
+  display it sends no picture of is still read
+  ([In strips](#in-strips)), for a client that reports less.
 - **Ask for 1x or 2x only.** The Mac does not round a fractional ratio. 1.5x and
   1.25x modes produced 2x displays of fewer points, with zoomed text and a Dock
   shrunk to fit.

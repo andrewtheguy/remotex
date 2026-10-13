@@ -266,7 +266,10 @@ pub enum ClientMsg {
     /// follows the window, and dropped by every other. A desktop client
     /// sends one when it connects and on every window change after
     /// [`ServerMsg::Connected`] says `resize`; the backend simply applies each
-    /// valid report it receives.
+    /// valid report it receives. It holds no minimum of its own: the page
+    /// reports a Mac no window under 800×600 points, the least Apple's own
+    /// client asks for, and what a Mac sent less says of its picture is read
+    /// ([`ServerMsg::PictureWithheld`]).
     Viewport { w: u16, h: u16 },
     /// The screen this client's window is on: its full resolution in points
     /// (`w`/`h`, CSS pixels) and its density in hundredths — 100 for a 1x
