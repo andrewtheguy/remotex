@@ -2750,12 +2750,15 @@ struct Leg {
     /// Whether that offer asked for the display in strips.
     strips: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// When the Mac's report on the leg last said it had sent nothing since its
-    /// report before: a receiver report where a sender's would be. Of the
-    /// receiver that runs, so of the stream last answered. With no picture since
-    /// the offer it is the Mac withholding the display
+    /// report before: a receiver report where a sender's would be. With no
+    /// picture since the offer it is the Mac withholding the display
     /// ([`MediaStream::withheld`]); behind a picture it is a still screen.
     unsent: Heard,
-    /// Signalled at the stream's first such report, for the session to look.
+    /// Whether such a report has woken the session since the last offer, which
+    /// clears it: the receiver carries on across offers, and each one's first
+    /// is what the session looks at.
+    reported: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Signalled at that report, for the session to look.
     told: std::sync::Arc<tokio::sync::Notify>,
 }
 
@@ -2834,6 +2837,7 @@ impl MediaStream {
                     offered: std::sync::Arc::default(),
                     strips: std::sync::Arc::default(),
                     unsent: Heard::default(),
+                    reported: std::sync::Arc::default(),
                     told: std::sync::Arc::clone(&offer_made),
                 };
                 (leg, rx)
@@ -2926,6 +2930,7 @@ impl MediaStream {
         for (leg, size) in self.legs.iter().zip(&by_leg) {
             *leg.offered.lock().unwrap() = Some(*size);
             leg.strips.store(self.offers.strips, std::sync::atomic::Ordering::Relaxed);
+            leg.reported.store(false, std::sync::atomic::Ordering::Relaxed);
         }
         Some(Offer::Configuration(self.offers.configuration(&by_leg)))
     }
@@ -3046,14 +3051,16 @@ impl MediaStream {
         let Owed::Stream { offered, .. } = self.owed else {
             return false;
         };
-        !self.pending && self.withheld_last(self.leg_of(leg), offered).is_some()
+        self.withheld_last(self.leg_of(leg), offered).is_some()
     }
 
     /// When a leg whose picture the Mac withholds ([`Self::withheld`]) last
-    /// brought a report, which is what such a leg delivers.
+    /// brought a report, which is what such a leg delivers. Never of an offer
+    /// still unanswered, which owes its answer whatever a leg reports meanwhile:
+    /// the stream reporting is not that offer's yet.
     fn withheld_last(&self, leg: usize, offered: std::time::Instant) -> Option<std::time::Instant> {
         let shared = self.legs.get(leg)?;
-        if heard_since(&shared.pictured, offered).is_some() {
+        if self.pending || heard_since(&shared.pictured, offered).is_some() {
             return None;
         }
         heard_since(&shared.unsent, offered)
@@ -3553,10 +3560,11 @@ impl VideoLeg {
                     *self.shared.heard.lock().unwrap() = Some(now);
                     // Its header is in the clear. A sender that sent nothing since
                     // its last report sends a receiver's.
-                    if data[1] == RTCP_RECEIVER_REPORT
-                        && self.shared.unsent.lock().unwrap().replace(now).is_none()
-                    {
-                        self.shared.told.notify_one();
+                    if data[1] == RTCP_RECEIVER_REPORT {
+                        *self.shared.unsent.lock().unwrap() = Some(now);
+                        if !self.shared.reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            self.shared.told.notify_one();
+                        }
                     }
                 }
                 return Ok(Took::Nothing);
@@ -3776,8 +3784,6 @@ impl Receiver {
             .zip(&ports.videos)
             .enumerate()
             .map(|(index, ((shared, offer), port))| {
-                // What the last stream's reports said is not this one's.
-                *shared.unsent.lock().unwrap() = None;
                 let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let onward = match &shared.pictures {
                     Outlet::Decoded(pictures) => {
@@ -5646,14 +5652,20 @@ mod tests {
     #[test]
     fn a_display_the_mac_withholds_holds_the_session() {
         let mut m = media();
-        let offered = std::time::Instant::now();
+        // The receiver carries on across offers, and so does what it last heard.
+        *m.legs[0].unsent.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        m.legs[0].reported.store(true, std::sync::atomic::Ordering::Relaxed);
         offer_on_ports(&mut m, (320, 136));
-        *m.legs[0].unsent.lock().unwrap() = Some(offered);
+        assert!(!m.legs[0].reported.load(std::sync::atomic::Ordering::Relaxed), "an offer's first report wakes the session");
+        let unanswered = m.deadline().expect("an offer owes its answer");
+        *m.legs[0].heard.lock().unwrap() = Some(std::time::Instant::now());
+        *m.legs[0].unsent.lock().unwrap() = Some(std::time::Instant::now());
         assert!(!m.withheld(0), "an unanswered offer has no stream to report on");
-        // The receiver an answer starts forgets the last stream's reports.
-        *m.legs[0].unsent.lock().unwrap() = None;
+        assert_eq!(m.deadline(), Some(unanswered), "and still owes its answer");
+        assert!(m.overdue(unanswered).expect("overdue unanswered").to_string().contains("did not answer"));
+        *m.legs[0].unsent.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
         assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
-        assert!(!m.withheld(0), "nor has a stream that has reported nothing");
+        assert!(!m.withheld(0), "nor is a report from before the offer its stream's");
         let sound = std::time::Instant::now();
         *m.sounded.lock().unwrap() = Some(sound);
         *m.sound_heard.lock().unwrap() = Some(sound);

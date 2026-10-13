@@ -6539,6 +6539,18 @@ async fn tab_repaint(shared: &Shared, macos: bool) {
     msgs.extend(cursor_msg(&shared.cursor));
     // No picture until the stream's next of the display.
     msgs.push(ServerMsg::ScreenUnavailable { active: true });
+    // What the Mac's stream says of the display now, which a tab that has just
+    // come is told with its size, not at the read loop's next turn.
+    let withheld = media.is_some_and(|media| media.lock().unwrap().withheld(leg));
+    let told = shared
+        .tab
+        .lock()
+        .unwrap()
+        .as_mut()
+        .is_some_and(|tab| std::mem::replace(&mut tab.withheld, withheld) != withheld);
+    if told {
+        msgs.push(ServerMsg::PictureWithheld { active: withheld });
+    }
     // A resize in progress covers the tab as it covers the canvas.
     if shared.desktop.lock().unwrap().hp.shown {
         msgs.push(ServerMsg::Resizing { active: true });
