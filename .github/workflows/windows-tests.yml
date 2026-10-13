@@ -1,0 +1,36 @@
+name: Windows tests
+
+# What ci/windows/ci.ps1 runs on the Windows CI box, on a GitHub runner instead:
+# clippy and the tests, natively on Windows. Run by hand (Actions, or
+# `gh workflow run windows-tests.yml --ref <branch>`), never on a push, so no
+# other workflow waits on it. It publishes nothing; the release installer and
+# its install stay with release.yml.
+on:
+  workflow_dispatch:
+
+jobs:
+  frontend:
+    uses: ./.github/workflows/frontend-dist.yml
+
+  test:
+    needs: frontend
+    runs-on: windows-latest
+    env:
+      REMOTEX_PREBUILT_FRONTEND: frontend/dist
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download prebuilt frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
