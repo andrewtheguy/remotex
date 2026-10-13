@@ -560,22 +560,82 @@ With `egfx = false` the pipeline is not advertised, so the server draws with bit
 updates, decoded by the planar bitmap codec (`proto/planar.rs`) into the
 client's framebuffer, the only picture it decodes, which the gateway encodes as
 VP9. The client announces no drawing orders either, so the path is bitmaps
-throughout. The desktop keeps its opening size: a resize is the pipeline's
-graphics reset, Display Control is not taken without it, and a target with
-`egfx = false` offers no resize at the picker. Every server that is not Windows
-takes this path whatever the key, as do the bitmap updates a Windows host sends
-before it confirms the pipeline.
+throughout. The desktop keeps its opening size: without the pipeline a resize is
+the Deactivation-Reactivation Sequence, which this client does not implement, so
+Display Control is not taken without it, and a target with `egfx = false` offers
+no resize at the picker. Every server that is not Windows takes this path whatever
+the key, as do the bitmap updates a Windows host sends before it confirms the
+pipeline.
 
-That is a deliberate narrowing, not an oversight. MS-RDPEDISP 1.3 has a server
-without the pipeline answer a monitor layout with a Deactivation-Reactivation
-Sequence (MS-RDPBCGR 1.3.1.3), and the client does not implement it: rebuilding the
-share mid-session meant holding channel PDUs until it was live again, answering the
-clipboard in place meanwhile, and correcting Wave Confirm timestamps for the time
-held, all for a resize the pipeline does with one graphics reset. MS-RDPBCGR also
-allows the sequence when a logon is attached to an existing session. Windows does not
-use it there on either graphics path, measured by reclaiming a session left at another
-size, so a mid-session Deactivate All or second Demand Active ends the session with an
-error naming it rather than being carried.
+That is a deliberate narrowing, not an oversight, and not a limit of the protocol.
+MS-RDPEDISP 1.3 has a server without the pipeline answer a monitor layout with a
+Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3): a Deactivate All, then
+the Capabilities Exchange and Connection Finalization phases again on the same
+connection, the server's Demand Active naming the new size. The client's Bitmap
+capability set already says it takes one (`desktopResizeFlag`, MS-RDPBCGR
+2.2.7.1.2). On a Deactivate All the client disables only its graphics and input
+handlers (MS-RDPBCGR 3.2.5.5.1): the static channels and the dynamic channel
+transport are joined in phases the sequence does not re-run, and MS-RDPEA 1.5 and
+MS-RDPEDISP 1.5 end sound and Display Control only when their transport ends, so
+nothing in the specifications stops the clipboard and sound while the share is
+rebuilt, and a Wave Confirm is still due at once (MS-RDPEA 3.2.5.2.1.6).
+MS-RDPEDISP 1.5 keeps Display Control from a session drawn with the RemoteFX
+codec, which this path never advertises. What the client lacks is a session loop
+that re-runs the capability exchange and finalization mid-session — without the
+Persistent Key List (MS-RDPBCGR 3.2.5.3.17), under a new share ID — while the
+channels stay served, and resizes the framebuffer once the share is live again.
+
+Measured on 2026-10-13 against a physical Windows 11 Enterprise host, with a
+sound playing on it, through a probe build of this client that took Display
+Control without the pipeline and answered each Deactivate All with a Confirm
+Active and the finalization PDUs (the patch is kept in `tmp/` beside the test
+configs). The host answered every layout with a Deactivate All and a Demand
+Active naming the new size, 0.1 to 0.9 s after the layout, and repainted the
+whole desktop at it; sizes went 1280×800 through 1600×900 and 1920×1080 and
+back, six times a run. The sound did not keep up: the host's audio redirection,
+on its `AUDIO_PLAYBACK_DVC` channel, stopped at one of the reactivations in eight
+runs of nine — the first, the second or the third, at random — its two-second
+training probes with it, and once at a close of the channel, and it never
+returned for the rest of the connection, while the next connection had sound at
+once. Under the pipeline the same host kept the sound through ten resizes of
+ten, with a gap of at most 300 ms at each. Holding the client's channel replies
+while the share was down, sending the last Wave Confirms again once it was live,
+and skipping the repaint request after it changed nothing; no reply was ever in
+flight during the gap. The loss is the host's. The probe's reactivation was
+compared step by step with FreeRDP's, the reference client that resizes this way
+when its pipeline is off (`libfreerdp/core/activation.c`, `connection.c` and
+`rdp.c`): on a Deactivate All it sets a flag and waits for the Demand Active,
+answers with its usual Confirm Active, skips the Persistent Key List, sends the
+same four finalization PDUs, waits for the server's four, and leaves every
+channel as it was — its sound, dynamic channel and Display Control plugins have
+no hook for the sequence at all. Nothing in it differs from what the probe sent.
+
+The host's own records, read over SSH (`tmp/rdp-host-events.ps1`, and the
+`RdpCoreTS/Debug`, `RdpSoundDriver/Playback` and `Audio/Informational` logs
+enabled for one run and disabled again), say the same from its side. Its core
+logged every reactivation as a clean run of its state machine — Demand Active,
+Monitor Layout, Confirm Active received, Synchronize, Control, Font Map — with
+no error at the one where the sound stopped; its sound driver logged the
+negotiation at connect and nothing after, neither at the resize the sound
+survived nor at the one it did not; its `Remote Audio` endpoints stayed present
+and `OK` for the rest of the connection; and its audio engine was still
+rendering the player's stream into that endpoint, positions advancing at 44.1
+kHz, forty seconds after the last wave reached this end. The host had the
+sound and chose not to send it. Nothing from this end revives it: a close of the
+sound channel from the client is not answered with a new one, and the static
+`rdpsnd` channel, taken instead of the dynamic one, stalls the same way on the
+fifth resize. What does move the odds is the length of the gap: with the
+Confirm Active held back 400 ms the sound died at the first reactivation in six
+runs of six, where the immediate answer loses about half of them. Whatever the
+host's audio sender does while its share is down, it does not survive doing it
+for long, and the shortest gap a client can offer is the host's own turnaround.
+A resize that silences the sound half the time is no resize to offer. That,
+beside the loop above, is why the sequence is left out for a resize the pipeline
+does with one graphics reset. MS-RDPBCGR also allows the
+sequence when a logon is attached to an existing session. Windows does not use it
+there on either graphics path, measured by reclaiming a session left at another
+size, so a mid-session Deactivate All or second Demand Active ends the session with
+an error naming it rather than being carried.
 
 The path is 32 bits per pixel and nothing else: the planar codec is the only one
 decoded, and the interleaved run-length coding a shallower session would use is
