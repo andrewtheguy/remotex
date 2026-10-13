@@ -1457,8 +1457,19 @@ other failures (see [Liveness](#the-stream)).
 
 Offered `tilesPerFrame` 4, as Apple's viewer offers it, the Mac answers 4 and
 sends the display in four strips. Seen on the virtual Mac, at sizes from
-160×120 to 1920×1080. The count the Mac answers is the lesser of its own and
-the offer's, whatever the display's size.
+160×120 to 3840×2160. The Mac's own count for Screen Sharing is 4, a constant that
+neither the display's size nor the Mac's hardware enters, and it answers the
+lesser of that and the offer's:
+
+| Offered `tilesPerFrame` | The Mac's answer | What it sends |
+|---|---|---|
+| 4, or more (5, 8, 9 and 16 seen) | 4 | Four strips |
+| 2 or 3 | The same | That many strips, each under an SSRC of its own |
+| 1, or the field left out | The field left out | One picture of the whole display on the one SSRC |
+| 0 | No answer, and the media stream's error message | Nothing |
+
+Offered 4, the Mac never answers or sends fewer, whatever the display: where
+four strips do not fit it sends no picture at all (below).
 
 - **The strips.** Each is the display's whole width and a quarter of its
   height, in whole rows, rounded up to a multiple of 16: 208, 240, 256 and 272
@@ -1476,15 +1487,22 @@ the offer's, whatever the display's size.
   SSRC with sequence numbers of its own, and so a rollover counter of its own.
   The strips of one frame share its timestamp and the header extension's frame
   counter, and the marker bit ends each strip's picture.
-- **Some small displays get no picture.** Where the rounding leaves the last
-  strip starting past the display's last row, the Mac answers the offer, its
-  encoder fails every frame (`VCPCompressionSessionEncodeFrame failed`,
-  error -12902), and no picture packet is sent: seen at 80, 90 and 136 rows,
-  where an offer of one tile brought the picture. By that rule the heights are
-  those under 48 rows, 68 to 95 and 132 to 143. A last strip that starts
-  exactly at the end is sent, with nothing of the display in it: 96 and 144
-  rows worked, as did 64, 100, 104, 112, 120 and 128. Remotex offers one tile
-  for a display of those heights.
+- **Some small displays get no picture.** The Mac's encoder takes the count
+  as it was negotiated and does not lower it for a display too low for it. It
+  cuts each strip from the frame at the strip's number times the strip's
+  height, and refuses a strip whose first row would lie past the frame's last.
+  So where three strips are taller than the display, the Mac answers the offer
+  with 4, its encoder fails every frame (`Offset is outside frame dimensions`
+  and `Encoder failed to create tile id 3` in the Mac's log, then
+  `VCPCompressionSessionEncodeFrame failed`, error -12902), and no picture
+  packet is sent. Those are the heights under 48 rows, 68 to 95 and 132 to
+  143, and none from 144 up. Seen on both sides of each edge: 46, 68, 94, 132
+  and 142 rows brought no packet, and 48, 66, 96, 130 and 144 brought four
+  strips, as 80, 90 and 136 had failed and 64, 100, 104, 112, 120 and 128
+  worked. An offer of one tile brings the picture at a failing height. A last
+  strip that starts exactly at the end passes the check and is sent, with
+  nothing of the display in it, as at 48, 96 and 144 rows. Remotex offers one
+  tile for a display of the failing heights.
 - **Only what changed.** A frame carries the strips that changed and no
   others. Under a moving pointer and a clock, 112 of 648 frames carried all
   four. Nothing in a packet says how many strips a frame has.
