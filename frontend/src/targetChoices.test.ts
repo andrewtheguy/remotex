@@ -51,6 +51,7 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     encoded: true,
     placement: false,
     pipeline: false,
+    vp9: false,
     ...offers,
   };
 }
@@ -177,6 +178,7 @@ test("only what the target's type offers has a row", () => {
     passthrough: null,
     placement: "right",
     pipeline: "high-quality",
+    vp9: "libvpx",
   });
   assert.equal(standard.blocked, null);
 });
@@ -215,6 +217,7 @@ test("no sound is taken until somebody ticks it", () => {
     passthrough: null,
     placement: "right",
     pipeline: "high-quality",
+    vp9: "libvpx",
   });
   assert.equal(rdp.sound, false);
   assert.equal(rdp.soundRow?.checked, false);
@@ -229,6 +232,7 @@ test("what was chosen last time is what Start sends", () => {
     passthrough: null,
     placement: "right",
     pipeline: "high-quality",
+    vp9: "libvpx",
   });
   assert.equal(options.sound, true);
   assert.equal(options.soundRow?.checked, true);
@@ -254,10 +258,46 @@ test("what was chosen last time is what Start sends", () => {
     passthrough: null,
     placement: "right",
     pipeline: "high-quality",
+    vp9: "libvpx",
   });
   // Nor is something this page never wrote there.
   const stale = targetOptions(RDP, { audio: true as never }, ABLE);
   assert.equal(stale.choices.audio, "off");
+});
+
+test("the VP9 encoder is libvpx until somebody chooses the native one", () => {
+  const wlshare = target({ subtype: "wlshare", vp9: true });
+  const options = targetOptions(wlshare, undefined, ABLE);
+  assert.deepEqual(
+    options.encoders?.map((encoder) => encoder.value),
+    ["libvpx", "native"],
+  );
+  assert.match(options.encoders?.[1].note ?? "", /^wlshare codes/);
+  assert.equal(options.choices.vp9, "libvpx");
+  assert.equal(
+    targetOptions(wlshare, { vp9: "native" }, ABLE).choices.vp9,
+    "native",
+  );
+  // The gateway codes it on any other target.
+  const plain = targetOptions(target({ vp9: true }), undefined, ABLE);
+  assert.match(plain.encoders?.[1].note ?? "", /^The gateway codes/);
+  // Not offered, not shown and not sent.
+  const unoffered = targetOptions(target({}), { vp9: "native" }, ABLE);
+  assert.equal(unoffered.encoders, null);
+  assert.equal(unoffered.choices.vp9, "libvpx");
+  // A Mac's passed picture is no VP9: the row is there for the picture encoded here.
+  const mac = { ...HIGH_PERFORMANCE, vp9: true };
+  const passed = targetOptions(mac, { vp9: "native" }, ABLE);
+  assert.equal(passed.choices.passthrough, "apple-media");
+  assert.equal(passed.encoders, null);
+  assert.equal(passed.choices.vp9, "libvpx");
+  const encoded = targetOptions(
+    mac,
+    { passthrough: null, vp9: "native" },
+    ABLE,
+  );
+  assert.equal(encoded.encoders?.length, 2);
+  assert.equal(encoded.choices.vp9, "native");
 });
 
 test("High Performance's sound has no row and is always carried", () => {

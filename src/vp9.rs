@@ -52,9 +52,9 @@ pub fn codec_string(w: u16, h: u16, fps: u64) -> Option<String> {
 }
 
 /// The encoder a stream is coded with: libvpx, or for a plan that asks
-/// (`experimental_native_vp9`) screen-vp9's own in Rust, EXPERIMENTAL. A build
-/// without the `native-vp9` feature has libvpx alone, and its config refuses
-/// the key on every target whose stream is coded here.
+/// ([`crate::config::Vp9Encoder::Native`]) screen-vp9's own in Rust, ALPHA. A
+/// build without the `native-vp9` feature has libvpx alone, and offers no
+/// choice on a target whose stream is coded here.
 fn coder(native: bool) -> screen_vp9::Coder {
     #[cfg(feature = "native-vp9")]
     if native {
@@ -89,7 +89,7 @@ impl Stream {
     /// The refusal of a picture too large is [`check_picture`]'s.
     ///
     /// `native` is the plan's [`crate::config::RenderPlan::native_vp9`]: coded by
-    /// screen-vp9's encoder in Rust, EXPERIMENTAL, where this build has it.
+    /// screen-vp9's encoder in Rust, ALPHA, where this build has it.
     pub fn new(size: (u16, u16), quality: u8, native: bool) -> anyhow::Result<Self> {
         check_picture(size)?;
         // Every core but one for the one stream, which has nothing to overlap with. See

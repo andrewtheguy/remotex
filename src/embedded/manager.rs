@@ -761,6 +761,9 @@ fn describe_offers(target: &TargetConfig) -> String {
     if offers.pipeline {
         choices.push("high quality or adaptive H.264".to_owned());
     }
+    if offers.vp9 {
+        choices.push("libvpx or the alpha native VP9 encoder".to_owned());
+    }
     if choices.is_empty() {
         "nothing to choose".to_owned()
     } else {
@@ -1733,8 +1736,8 @@ mod tests {
             "what a session's starter chooses is the type's to offer, and the pipeline is passed unasked: {page}"
         );
         assert!(
-            page.lines().any(|line| line == spec("picker", "offers resize, sound")),
-            "a wlshare target's picture is not a choice: {page}"
+            page.lines().any(|line| line == spec("picker", "offers resize, sound, libvpx or the alpha native VP9 encoder")),
+            "a wlshare target's picture is not a choice, and its encoder is: {page}"
         );
 
         // A config the gateway would refuse says so, instead of a page of

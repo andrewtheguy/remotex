@@ -1676,6 +1676,7 @@ mod tests {
                     passthrough: Some(crate::config::Passthrough::AppleH264),
                     placement: crate::config::Placement::Right,
                     pipeline: crate::config::Pipeline::HighQuality,
+                    vp9: crate::config::Vp9Encoder::Libvpx,
                     whole: false,
                 }
             ),

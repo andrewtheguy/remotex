@@ -123,8 +123,8 @@ filenames, which the container build selects by release version.
 An x86-64 gateway is built for x86-64-v3 (AVX2, BMI1 and BMI2, LZCNT, MOVBE
 and FMA: Intel's processors from Haswell, AMD's from Excavator), and a machine
 under it is the fallback build below. The default `native-vp9` feature is
-screen-vp9's experimental VP9 encoder in Rust, which a target's
-`experimental_native_vp9` asks for; it is written for that level with no
+screen-vp9's alpha VP9 encoder in Rust, which a session asks for at the
+picker; it is written for that level with no
 choosing at run time, and it refuses to build under it. Cargo cannot set a
 flag by feature, so `.cargo/config.toml` sets `-C target-cpu=x86-64-v3` for
 every x86-64 build, and every release artifact for x86-64, the container's
@@ -141,9 +141,9 @@ RUSTFLAGS='-C target-cpu=x86-64' RUSTDOCFLAGS='-C target-cpu=x86-64' \
 
 For a container's binary it is the same environment with
 `REMOTEX_CONTAINER_FEATURES=` set empty. Such a gateway has libvpx alone, says
-so in `--help` (`Features:` without `native-vp9`), and refuses
-`experimental_native_vp9` on every target but a `wlshare` one, whose encoder
-is wlshare's own.
+so in `--help` (`Features:` without `native-vp9`), and offers the native
+encoder at the picker on a `wlshare` target alone, whose encoder is wlshare's
+own.
 
 A Cargo feature may need a CPU level of the machine this way, x86-64-v3 or another:
 its flag goes in `.cargo/config.toml` beside it, and the fallback is the

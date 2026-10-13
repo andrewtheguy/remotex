@@ -691,6 +691,9 @@ struct TargetInfo {
     /// Whether how the host draws the graphics pipeline, high quality or adaptive
     /// H.264, is a choice.
     pipeline: bool,
+    /// Whether which encoder codes the VP9, libvpx or the alpha one in Rust, is a
+    /// choice.
+    vp9: bool,
 }
 
 /// A desktop size in points, as the picker shows it before Start.
@@ -733,6 +736,7 @@ impl TargetInfo {
                 && (!target.media_stream() || apple_decoders),
             placement: offers.placement,
             pipeline: offers.pipeline,
+            vp9: offers.vp9,
         }
     }
 }
@@ -1101,7 +1105,6 @@ mod tests {
                 microphone: false,
                 video_quality: None,
                 render_adaptive: None,
-                experimental_native_vp9: false,
                 virtual_display: false,
                 audio_bitrate: None,
                 audio_adaptive: None,
@@ -1342,7 +1345,6 @@ mod tests {
             microphone: false,
             video_quality: None,
             render_adaptive: None,
-            experimental_native_vp9: false,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
@@ -1478,29 +1480,41 @@ mod tests {
             serde_json::to_string(&TargetInfo::of(target, apple_decoders, Default::default())).unwrap()
         };
 
-        // Standard mode offers nothing: physical displays, which no session
-        // sizes, no sound, no stream.
+        // Standard mode offers nothing but the VP9's encoder, in a build with the
+        // one in Rust: physical displays, which no session sizes, no sound, no
+        // stream.
+        let native = cfg!(feature = "native-vp9");
         assert_eq!(
             entry("mac", true),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":[],"encoded":true,"placement":false,"pipeline":false}"#
+            format!(
+                r#"{{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":[],"encoded":true,"placement":false,"pipeline":false,"vp9":{native}}}"#
+            )
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"encoded":false,"placement":false,"pipeline":true}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"encoded":false,"placement":false,"pipeline":true,"vp9":false}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // picture is, in either codec, and can only be passed on a host without
         // its decoders.
         let fast = entry("fast", true);
-        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"encoded":true,"placement":false,"pipeline":false}"#), "{fast}");
-        assert!(entry("fast", false).ends_with(r#""encoded":false,"placement":false,"pipeline":false}"#));
+        assert!(
+            fast.ends_with(&format!(
+                r#""resize":true,"size":null,"defaultSize":{{"w":1440,"h":900}},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"encoded":true,"placement":false,"pipeline":false,"vp9":{native}}}"#
+            )),
+            "{fast}"
+        );
+        assert!(entry("fast", false).ends_with(&format!(r#""encoded":false,"placement":false,"pipeline":false,"vp9":{native}}}"#)));
         // An RDP host's pipeline, on unless `egfx` turns it off, is passed in
-        // every session, whatever this host decodes.
-        assert!(entry("win", false).ends_with(r#""encoded":false,"placement":false,"pipeline":true}"#));
+        // every session, whatever this host decodes, so it has no VP9 to choose
+        // an encoder for.
+        assert!(entry("win", false).ends_with(r#""encoded":false,"placement":false,"pipeline":true,"vp9":false}"#));
         // Where the second display sits is offered by a host asked for two.
-        assert!(entry("two", true).ends_with(r#""placement":true,"pipeline":true}"#));
+        assert!(entry("two", true).ends_with(r#""placement":true,"pipeline":true,"vp9":false}"#));
+        // wlshare's own encoder is a choice in any build.
+        assert!(entry("sway", true).ends_with(r#""pipeline":false,"vp9":true}"#));
         // The page's HEVC decoder is a choice where the gateway has it and the
         // target has a Mac's picture to pass.
         assert!(entry("fast", true).contains(r#""software":false,"#));

@@ -94,7 +94,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             microphone: false,
             video_quality: None,
             render_adaptive: None,
-            experimental_native_vp9: false,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
