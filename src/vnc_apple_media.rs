@@ -902,6 +902,9 @@ impl SrtcpReceiver {
 /// has sent nothing since its last report sends (RFC 3550 §6.4).
 const RTCP_RECEIVER_REPORT: u8 = 201;
 
+/// RTCP's packet type for a sender report: media went out since the last report.
+const RTCP_SENDER_REPORT: u8 = 200;
+
 /// An RTCP receiver report with no report blocks, from `ssrc`. The Mac stops a
 /// stream that hears nothing from its receiver for a few seconds.
 pub fn rtcp_receiver_report(ssrc: u32) -> [u8; 8] {
@@ -2754,6 +2757,11 @@ struct Leg {
     /// picture since the offer it is the Mac withholding the display
     /// ([`MediaStream::withheld`]); behind a picture it is a still screen.
     unsent: Heard,
+    /// When the Mac last reported on the leg as a sender: it had sent pictures
+    /// since its report before. One since the offer is a stream that sends, so
+    /// a picture missing from it was lost on the way and is not withheld,
+    /// whatever its later reports say of a screen gone still.
+    sent: Heard,
     /// Whether such a report has woken the session since the last offer, which
     /// clears it: the receiver carries on across offers, and each one's first
     /// is what the session looks at.
@@ -2764,11 +2772,15 @@ struct Leg {
 
 impl Leg {
     /// An authentic report of RTCP packet type `kind` came from the Mac on the
-    /// leg at `at`: the leg is alive, and a receiver's report says the Mac has
-    /// sent nothing since its last, which is what a sender with nothing sent
-    /// sends. The first of those since an offer wakes the session.
+    /// leg at `at`: the leg is alive, a sender's report says the Mac sent
+    /// pictures since its last, and a receiver's that it sent none, which is what
+    /// a sender with nothing sent sends. The first of those since an offer wakes
+    /// the session.
     fn report(&self, kind: u8, at: std::time::Instant) {
         *self.heard.lock().unwrap() = Some(at);
+        if kind == RTCP_SENDER_REPORT {
+            *self.sent.lock().unwrap() = Some(at);
+        }
         if kind == RTCP_RECEIVER_REPORT {
             *self.unsent.lock().unwrap() = Some(at);
             if !self.reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -2853,6 +2865,7 @@ impl MediaStream {
                     offered: std::sync::Arc::default(),
                     strips: std::sync::Arc::default(),
                     unsent: Heard::default(),
+                    sent: Heard::default(),
                     reported: std::sync::Arc::default(),
                     told: std::sync::Arc::clone(&offer_made),
                 };
@@ -3056,8 +3069,11 @@ impl MediaStream {
     }
 
     /// Whether the Mac withholds display `leg`'s picture: the running stream has
-    /// brought no picture of it since its offer, and the Mac's own report on its
-    /// leg says it has sent none. The Mac gives no reason and no error. The one
+    /// brought no picture of it since its offer, and the Mac's own reports on its
+    /// leg say it has sent none: a receiver's, and no sender's since the offer.
+    /// A receiver's report speaks only of the time since the report before it,
+    /// so one behind a sender's is a stream that sent and went still, whose
+    /// missing picture was lost and is owed as any other. The Mac gives no reason and no error. The one
     /// known is a display too low for the strips it was offered: its encoder
     /// refuses a strip that would start past the display's last row, every frame
     /// fails, and the stream otherwise runs, sound and all. The session holds
@@ -3099,7 +3115,10 @@ impl MediaStream {
     /// the stream reporting is not that offer's yet.
     fn withheld_last(&self, leg: usize, offered: std::time::Instant) -> Option<std::time::Instant> {
         let shared = self.legs.get(leg)?;
-        if self.pending || heard_since(&shared.pictured, offered).is_some() {
+        if self.pending
+            || heard_since(&shared.pictured, offered).is_some()
+            || heard_since(&shared.sent, offered).is_some()
+        {
             return None;
         }
         heard_since(&shared.unsent, offered)
@@ -5742,11 +5761,43 @@ mod tests {
         let mut m = media();
         offer_on_ports(&mut m, (320, 136));
         assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
-        m.legs[0].report(sender[1], std::time::Instant::now());
-        assert!(!m.withheld(0), "a sender's report is a stream that sends pictures");
-        assert!(heard_since(&m.legs[0].heard, std::time::Instant::now() - std::time::Duration::from_secs(1)).is_some());
+        let sound = std::time::Instant::now();
+        *m.sounded.lock().unwrap() = Some(sound);
+        *m.sound_heard.lock().unwrap() = Some(sound);
+        let first = m.deadline().expect("the picture is owed");
         m.legs[0].report(receiver[1], std::time::Instant::now());
         assert!(m.withheld(0), "a receiver's, with no picture, is the Mac sending none");
+        assert!(m.overdue(first).is_none(), "which holds the session");
+
+        // A sender's report after it: the Mac has sent pictures, so the one
+        // missing was lost, and is owed within the offer's time again.
+        m.legs[0].report(sender[1], std::time::Instant::now());
+        assert!(!m.withheld(0), "a sender's report is a stream that sends pictures");
+        assert!(m.overdue(first).is_some(), "and the picture is owed again");
+        m.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(!m.withheld(0), "and a receiver's behind it is that stream gone still");
+
+        // The other order: a sender's first, its pictures lost, then a still screen.
+        let mut lost = media();
+        offer_on_ports(&mut lost, (1600, 1000));
+        assert!(!lost.on_reply(&unhex(ANSWER)).unwrap());
+        lost.legs[0].report(sender[1], std::time::Instant::now());
+        assert!(!lost.withheld(0));
+        assert!(heard_since(&lost.legs[0].heard, std::time::Instant::now() - std::time::Duration::from_secs(1)).is_some());
+        lost.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(!lost.withheld(0), "a stream that sent is not one the Mac withholds");
+        let first = lost.deadline().expect("the picture is owed");
+        *lost.sounded.lock().unwrap() = Some(std::time::Instant::now());
+        *lost.sound_heard.lock().unwrap() = Some(std::time::Instant::now());
+        assert!(lost.overdue(first).is_some(), "and overdue without it");
+
+        // A sender's report from before the offer is the last display's stream's.
+        let mut next = media();
+        next.legs[0].report(sender[1], std::time::Instant::now() - std::time::Duration::from_secs(1));
+        offer_on_ports(&mut next, (320, 136));
+        assert!(!next.on_reply(&unhex(ANSWER)).unwrap());
+        next.legs[0].report(receiver[1], std::time::Instant::now());
+        assert!(next.withheld(0));
 
         let mut still = media();
         offer_on_ports(&mut still, (1600, 1000));

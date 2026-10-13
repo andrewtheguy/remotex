@@ -1527,12 +1527,17 @@ four strips do not fit it sends no picture at all (below).
   first picture.
 - **Remotex takes the Mac's word.** It offers four tiles at every size and
   holds no list of heights. A receiver's report on a display's leg, from a
-  stream that has brought no picture of the display since its offer, is the Mac
-  withholding it: the session stays open where a missing picture would end it
+  stream that has brought no picture of the display since its offer and has
+  not reported as a sender since it either, is the Mac withholding it. A
+  receiver's report speaks only of the second before it, so a stream that
+  reported as a sender and then as a receiver sent pictures that were lost on
+  the way, and is held to the 10 s like any other. For a withheld display
+  the session stays open where a missing picture would end it
   ([Liveness](#the-stream)), the gateway sends `pictureWithheld`, and the page
   says "No picture at this size" in the place of "Screen not available" and
   asks for a larger one. It lifts at the display's next offer, which a resize
-  brings, or at a picture. The leg still owes its reports.
+  brings, at a picture, or at a sender's report. The leg still owes its
+  reports.
 - **Only what changed.** A frame carries the strips that changed and no
   others. Under a moving pointer and a clock, 112 of 648 frames carried all
   four. Nothing in a packet says how many strips a frame has.

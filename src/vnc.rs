@@ -13020,9 +13020,6 @@ mod tests {
         media.lock().unwrap().test_answered(&[(1600, 1200)]);
         tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
         assert!(withheld_said(&sink, &mut rx).await.is_empty(), "a stream that has reported nothing");
-        media.lock().unwrap().test_report(0, 200);
-        tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
-        assert!(withheld_said(&sink, &mut rx).await.is_empty(), "a sender's report");
 
         media.lock().unwrap().test_report(0, 201);
         tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
@@ -13034,6 +13031,15 @@ mod tests {
         tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
         assert_eq!(withheld_said(&sink, &mut rx).await, [false], "a picture came after all");
         assert!(!desktop.lock().unwrap().withheld);
+
+        // Nor is a stream that reports as a sender one the Mac withholds, though
+        // its picture is lost and its screen then goes still.
+        media.lock().unwrap().stopped();
+        media.lock().unwrap().test_answered(&[(1600, 1200)]);
+        media.lock().unwrap().test_report(0, 200);
+        media.lock().unwrap().test_report(0, 201);
+        tell_withheld(&desktop, &media, &sink, &tab).await.unwrap();
+        assert!(withheld_said(&sink, &mut rx).await.is_empty(), "a sender's report since the offer");
     }
 
     /// A second display the Mac withholds is told to whichever socket shows it:
