@@ -553,7 +553,8 @@ async fn uplink_signal(ws: &mut common::Socket) -> serde_json::Value {
 /// Connect to the target and read the session socket up to `connected`, which is
 /// returned; after it the socket is only drained, so nothing backs up behind it.
 async fn open_session(ws: &mut common::Ws) -> serde_json::Value {
-    common::connect_target_with(ws, TARGET, r#"{"size":"window"}"#).await;
+    let choices = format!(r#"{{"size":"window","vp9":"{}"}}"#, vp9_choice());
+    common::connect_target_with(ws, TARGET, &choices).await;
     loop {
         if let Message::Text(text) = ws.next().await.expect("session socket open").expect("websocket receive") {
             let msg: serde_json::Value = serde_json::from_str(&text).expect("control message is JSON");
