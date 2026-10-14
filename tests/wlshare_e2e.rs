@@ -435,8 +435,7 @@ async fn all_displays_shows_the_second_output_in_a_tab_of_its_own() {
 /// gateway lists nothing of wlshare's, so wlshare is never asked for its VP9 and
 /// sends ZRLE, which is encoded here; the 2x browser is shown the output at the
 /// 1x generic VNC is presented at, and no output list arrives. Its size is the
-/// one the target keeps, asked for once through SetDesktopSize and never the
-/// browser's window.
+/// server's own: a plain target is never sent a SetDesktopSize.
 #[tokio::test]
 #[ignore = "requires Docker or Podman"]
 async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
@@ -453,9 +452,19 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
     )))
     .await
     .unwrap();
-    let (w, h) = remotex::config::DEFAULT_SIZE;
-    view.until(&mut ws, "the desktop at the size the target keeps", |v| {
-        v.decode.is_some() && v.sizes.last().is_some_and(|size| (size.w, size.h) == (w.into(), h.into()))
+    view.until(&mut ws, "the desktop at the server's own size", |v| v.decode.is_some()).await;
+    // A while longer, for a resize that should never come.
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Text(text) => view.control(&text),
+                Message::Binary(frame) => {
+                    view.units(&frame);
+                    ws.send(Message::text(common::paint_ack(&frame))).await.expect("acknowledge a batch");
+                }
+                _ => {}
+            }
+        }
     })
     .await;
 
@@ -465,7 +474,9 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
         "a plain target takes no density from the server or the browser: {:?}",
         view.sizes
     );
-    assert_eq!(sway_output(&container, "HEADLESS-1"), (w.into(), h.into(), 1.0), "the output is at the kept size, at its own 1x");
+    let first = view.sizes[0];
+    assert!(view.sizes.iter().all(|size| (size.w, size.h) == (first.w, first.h)), "a plain target was resized: {:?}", view.sizes);
+    assert_eq!(sway_output(&container, "HEADLESS-1"), (first.w, first.h, 1.0), "the output is at its own size, at its own 1x");
     assert!(view.displays.is_none(), "a plain target is sent no output list");
     assert!(
         !container.logs().contains("asked for VP9"),

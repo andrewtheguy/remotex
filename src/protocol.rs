@@ -280,11 +280,13 @@ pub enum ClientMsg {
     /// error. Its density is a ratio the client *has*; what a remote is asked
     /// to render at is [`render_density`] of it.
     ///
-    /// Mid-session it is a *density* report, and only sessions started with
-    /// resize act on it — a density is a resize. RDP asks the host for twice the
-    /// pixels at 200% UI scaling, quantized at a midpoint; a High Performance
-    /// Apple virtual display re-renders the same points at the new density.
-    /// Both report what they got back through [`ServerMsg::Resize`]. The
+    /// Mid-session it is a *density* report, acted on whatever the session's
+    /// size — a density is a resize. RDP with the graphics pipeline asks the
+    /// host for twice the pixels at 200% UI scaling, quantized at a midpoint; an
+    /// Apple virtual display re-renders the same points at the new density; a
+    /// `wlshare` server is declared it; Apple Standard asks the Mac to scale its
+    /// picture. Each reports what it got back through [`ServerMsg::Resize`].
+    /// RDP without the pipeline and a plain `vnc` target ignore it. The
     /// size fields matter at session-open, where [`ClientMsg::Connect`]
     /// carries the same shape.
     HostDisplay(HostDisplay),
