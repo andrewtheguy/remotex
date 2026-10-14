@@ -14,6 +14,7 @@ import type { ComposedRun, EgfxCompositor, Scanned } from "./egfxCompositor.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { EgfxVideo } from "./egfxVideo.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
+import { placedAfter } from "./planesPicture.ts";
 
 const OP_VIDEO = 0x03;
 
@@ -137,7 +138,10 @@ class FakeVideoDecoder {
     this.state = "configured";
   }
 
-  decode(chunk: { type: string; data?: Uint8Array }) {
+  decode(
+    chunk: { type: string; data?: Uint8Array },
+    strip?: { index: number },
+  ) {
     const last = chunk.data?.[chunk.data.length - 1];
     if (rejected !== null && last === rejected) {
       throw new TypeError("this chunk is not acceptable");
@@ -159,7 +163,9 @@ class FakeVideoDecoder {
     decoded.push(frame);
     this.output({
       // What marks a software decoder's picture from a `VideoFrame`.
-      ...(planar ? { planes: [] } : {}),
+      ...(planar
+        ? { planes: [], strip: strip?.index, keyframe: chunk.type === "key" }
+        : {}),
       close() {
         frame.closed = true;
       },
@@ -196,7 +202,7 @@ beforeEach(() => {
   rejected = null;
   configured = [];
   planar = false;
-  planes = { made: 0, closed: 0, drawn: [] };
+  planes = { made: 0, closed: 0, placed: [], drawn: [] };
   globals.VideoDecoder = FakeVideoDecoder;
   globals.EncodedVideoChunk = class {
     type: string;
@@ -1282,10 +1288,19 @@ test("a pipeline that starts after one ended is composed", async () => {
   assert.equal(videoErrors.at(-1), null, "the next pipeline retracts it");
 });
 
-/** A software decoder's picture: how many were made and closed, and the sizes drawn. */
-let planes: { made: number; closed: number; drawn: number[][] } = {
+/**
+ * A software decoder's picture: how many were made and closed, the strips placed
+ * in it (-1 for a picture whole), and the sizes drawn.
+ */
+let planes: {
+  made: number;
+  closed: number;
+  placed: number[];
+  drawn: number[][];
+} = {
   made: 0,
   closed: 0,
+  placed: [],
   drawn: [],
 };
 
@@ -1303,12 +1318,21 @@ function planesPainter(options: { refuses?: boolean } = {}) {
     },
     makePlanesPicture: () => {
       planes.made += 1;
+      let placed = 0;
       return {
-        draw(_planes, w, h) {
+        place(picture) {
           if (options.refuses) {
             throw new Error("the GPU refused the picture");
           }
+          planes.placed.push(picture.strip ?? -1);
+          placed = placedAfter(placed, picture);
+        },
+        draw(w, h) {
+          if (placed !== 0b1111) {
+            return false;
+          }
           planes.drawn.push([w, h]);
+          return true;
         },
         close() {
           planes.closed += 1;
@@ -1338,6 +1362,34 @@ test("the software decoder's pictures are drawn over the desktop's canvas, and c
   assert.deepEqual(
     decoded.map((frame) => frame.closed),
     [true, true],
+  );
+});
+
+test("the software decoder's strips are placed as they decode, and drawn at a frame's last once all have come", async () => {
+  const p = planesPainter();
+  const strip = (index: number, ends: boolean, keyframe = false) => ({
+    w: 640,
+    h: 480,
+    payload: [index],
+    keyframe,
+    strip: { index, ends },
+  });
+  // A frame of two strips after the keyframe: the display is not whole yet.
+  await p.draw(batchFrame([strip(0, false, true), strip(1, true)]));
+  assert.deepEqual(planes.drawn, []);
+  assert.deepEqual(shown, [], "nothing to show of a display not whole");
+  await p.draw(batchFrame([strip(2, false), strip(3, true)]));
+  // A frame is the strips that changed: the others are in the picture already.
+  await p.draw(batchFrame([strip(2, true)]));
+  assert.deepEqual(planes.placed, [0, 1, 2, 3, 2]);
+  assert.deepEqual(planes.drawn, [
+    [640, 480],
+    [640, 480],
+  ]);
+  assert.deepEqual(shown, [true]);
+  assert.ok(
+    decoded.every((frame) => frame.closed),
+    "every strip's picture is closed once placed",
   );
 });
 

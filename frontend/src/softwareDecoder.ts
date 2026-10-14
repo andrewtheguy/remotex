@@ -32,9 +32,16 @@
 // drawing it on the desktop's canvas had the GPU convert and copy it again: on an
 // Intel UHD 630 that was well over twice the GPU's time and three times the
 // workers'. Copying the planes out here instead is no way around it: a copy out
-// of a shared memory took longer than the rest of presenting together. The price
-// is that the decoder waits: it reuses a picture's memory from its next unit on,
-// so it starts that unit only once the picture is closed.
+// of a shared memory took longer than the rest of presenting together. So the
+// decoder holds each picture's memory until the picture is closed, and decodes
+// the units after it into other memory meanwhile: the next unit decodes while the
+// paint worker uploads one (`HELD` in softwareDecoder.worker.ts).
+//
+// A High Performance Mac's display may come in four strips, each a unit and each
+// decoded to a picture of its own. The decode worker says where in the display a
+// strip's planes go, and the paint worker uploads them there, into textures of the
+// display's size, and draws the display at its frame's last strip
+// (planesPicture.ts): the strips that did not change are on the GPU already.
 
 /** The modules: which stream each decodes is `softwareModuleFor`'s to say. */
 export type SoftwareModule = "hevc" | "vp9";
@@ -79,17 +86,16 @@ export type DecoderCommand =
   /** A stream's decoder, in `module`: the one module a decode worker ever loads. */
   | { type: "create"; id: number; module: SoftwareModule }
   | { type: "decode"; id: number; data: ArrayBuffer; strip?: PictureStrip }
-  /** The paint worker is done reading the picture last answered with. */
-  | { type: "release"; id: number }
+  /** The paint worker is done reading the picture of that serial. */
+  | { type: "release"; id: number; serial: number }
   | { type: "destroy"; id: number };
 
 /**
  * A unit that is one strip of a picture of `rows` rows and not the whole of it
- * (`VideoStrip` in protocol.ts): the HEVC module puts the picture together.
+ * (`VideoStrip` in protocol.ts): the decode worker says where its planes go.
  */
 export interface PictureStrip {
   index: number;
-  ends: boolean;
   rows: number;
 }
 
@@ -101,14 +107,32 @@ export interface PicturePlane {
   rows: number;
 }
 
-/** A decoded picture as the decode worker describes it: 8-bit Y'CbCr planes. */
+/**
+ * A decoded picture as the decode worker describes it: 8-bit Y'CbCr planes, of
+ * the whole picture or of one strip of it.
+ */
 export interface DecodedPlanes {
   /** The module's memory, which the planes are in until the picture is released. */
   memory: SharedArrayBuffer;
+  /** The picture's size: the display's, for a strip. */
   width: number;
   height: number;
-  /** Luma, then the two chroma planes, which may be half its size either way. */
+  /**
+   * Luma, then the two chroma planes, as many of their rows as are of the
+   * picture: the chroma may be half the luma's size either way.
+   */
   planes: PicturePlane[];
+  /** How the chroma is subsampled, which sizes its planes of the picture. */
+  subsampling: "4:4:4" | "4:2:2" | "4:2:0";
+  /** The picture's row the luma's first is: 0, but for a strip below the first. */
+  row: number;
+  /**
+   * The strip of the picture these are, from 0 at the top, of four: a picture
+   * shown once each has come since a keyframe. None for a picture whole.
+   */
+  strip?: number;
+  /** Predicted from nothing before it: the strips placed before it are of no frame since. */
+  keyframe: boolean;
   fullRange: boolean;
   /** Which coefficients made the luma: BT.709's, or BT.601's. */
   matrix: "bt709" | "smpte170m";
@@ -137,7 +161,9 @@ export function isSoftwarePlanes(
  * frame, and none otherwise.
  */
 export type DecoderEvent =
-  | { type: "decoded"; id: number; picture: DecodedPlanes | null }
+  | { type: "decoded"; id: number; picture: null }
+  /** `serial` is the picture's, which its release names. */
+  | { type: "decoded"; id: number; picture: DecodedPlanes; serial: number }
   /**
    * The decoder is over. `name` follows WebCodecs: `NotSupportedError` for a
    * module or a picture this browser cannot run at all, `EncodingError` for a unit
@@ -166,9 +192,10 @@ export interface VideoDecoderLike {
   readonly state: CodecState;
   configure(config: VideoDecoderConfig): void;
   /**
-   * `strip` is for a software decoder that puts a picture together from its
-   * strips. `VideoDecoder` has no such argument: it outputs each strip as a
-   * picture of its own, which the painter places (framePainter.ts).
+   * `strip` is for a software decoder, whose decode worker says where in the
+   * picture the strip's planes go. `VideoDecoder` has no such argument: the
+   * painter places each strip it outputs by the strip's number
+   * (framePainter.ts).
    */
   decode(chunk: EncodedVideoChunk, strip?: PictureStrip): void;
   close(): void;
@@ -302,6 +329,7 @@ export function createSoftwareDecoder(
             fail(event.name, event.message);
           } else if (event.picture) {
             let open = true;
+            const { serial } = event;
             init.output({
               ...event.picture,
               close() {
@@ -310,6 +338,7 @@ export function createSoftwareDecoder(
                   workers[module]?.postMessage({
                     type: "release",
                     id,
+                    serial,
                   } satisfies DecoderCommand);
                 }
                 open = false;

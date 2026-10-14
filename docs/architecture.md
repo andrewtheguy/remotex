@@ -942,8 +942,9 @@ Three controls with similar names therefore remain separate:
   stream's primaries, Display P3, so the browser takes the picture to the display
   as it takes a video frame. A session sent gateway-encoded VP9 paints the desktop's
   own canvas instead; a media-stream session never switches between the two. The
-  decoder reuses a picture's memory from its next unit on, so it starts that unit
-  only once the paint worker has released the picture. A `VideoFrame` over the
+  decoder holds a picture's memory until the paint worker releases it, and
+  decodes the next unit into other memory meanwhile, two pictures out at most,
+  so one decodes while the paint worker uploads another. A `VideoFrame` over the
   planes was a copy of the picture, and drawing it on the desktop's canvas had
   the GPU convert and copy it again: on an Intel UHD 630, with a synthetic 4:4:4
   stream at 2880×1800 and twenty pictures a second, that was 29% of the GPU
@@ -981,18 +982,20 @@ Three controls with similar names therefore remain separate:
   strips its pictures come in (`strips`: 4, and 1 for whole pictures), which
   the Info panel's video row repeats. A keyframe is strip 0's IDR; the other
   strips' intra pictures follow it as ordinary units, so a restart drops to
-  that IDR as it drops to any. For the page's software decoder, the decode
-  worker has the module decode each
-  unit as its strip (`decodeStrip`), which copies it to its place in a picture
-  of the display's size, and answers a frame's last strip with the picture and
-  every other strip with none. Which strip is a frame's last is the gateway's to
+  that IDR as it drops to any. For the page's software decoder, each strip
+  decodes to a picture of its own, which the decode worker answers with where
+  its rows go in the display, and the paint worker uploads it there, into
+  textures of the display's size, and draws the display at the frame's last
+  strip, once every strip has come since the keyframe
+  (`frontend/src/planesPicture.ts`): a strip that did not change is on the GPU
+  already, and nothing copies a strip into a picture of the display first.
+  Which strip is a frame's last is the gateway's to
   say, and nothing in a strip says it: the read loop's queue holds a strip until
   the next unit comes, the frame's fourth strip being its last at once, or 8 ms
   pass with none, the wait the gateway's own decoder gives a frame. The page
   cannot make that wait itself: its paint worker draws one batch at a time, so
-  an answer that waited for the next strip would hold that strip back, and each
-  strip would be shown alone. The paint worker is handed the whole display each
-  time and uploads it as it uploads a picture sent whole. The browser's own
+  a draw that waited for the next strip would hold that strip back, and each
+  strip would be shown alone. The browser's own
   `VideoDecoder` has no such call and outputs each strip as a picture of its
   own, so there the paint worker holds a frame's pictures and draws them at the
   frame's last strip, each a strip's rows below the one before and the last cut

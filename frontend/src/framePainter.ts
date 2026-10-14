@@ -454,19 +454,27 @@ export function createFramePainter(options: {
     );
   };
 
-  // One of a software decoder's pictures, onto the canvas over the desktop's.
-  // False when the GPU would not take it, which is said and ends the presenting.
+  // One of a software decoder's pictures, placed in the picture on the canvas
+  // over the desktop's, which is drawn where the unit ends its frame: true when
+  // it was drawn. A strip that is not its frame's last is placed and not drawn,
+  // as one that would show the desktop between two frames. False too when the
+  // GPU would not take it, which is said and ends the presenting.
   const presentPlanes = (
-    planes: Parameters<PlanesPicture["draw"]>[0],
-    w: number,
-    h: number,
+    planes: Parameters<PlanesPicture["place"]>[0],
+    record: VideoMsg,
   ): boolean => {
     if (planar.broken || !options.makePlanesPicture) {
       return false;
     }
     try {
       planar.picture ??= options.makePlanesPicture();
-      planar.picture.draw(planes, w, h);
+      planar.picture.place(planes);
+      if (record.strip && !record.strip.ends) {
+        return false;
+      }
+      if (!planar.picture.draw(record.w, record.h)) {
+        return false;
+      }
     } catch (error) {
       hidePlanes();
       planar.picture?.close();
@@ -489,8 +497,8 @@ export function createFramePainter(options: {
   // `VideoFrame` each, with the desktop they are strips of. A `VideoDecoder`
   // outputs each strip as a picture of its own, so the page places them, and all
   // at the frame's last strip: one drawn as it decoded would show the desktop
-  // between two frames. The software decoder puts its picture together itself
-  // and none of its strips come here.
+  // between two frames. The software decoder's strips are placed in its picture
+  // as they decode (`presentPlanes`), and none of them come here.
   let strips: { frame: VideoFrame; index: number; w: number; h: number }[] = [];
 
   const releaseStrips = () => {
@@ -555,7 +563,7 @@ export function createFramePainter(options: {
 
   const paint = (record: VideoMsg, image: DecodedPicture) => {
     if (isSoftwarePlanes(image)) {
-      if (!presentPlanes(image, record.w, record.h)) {
+      if (!presentPlanes(image, record)) {
         return;
       }
     } else {
@@ -591,9 +599,8 @@ export function createFramePainter(options: {
       return;
     }
     if (!image) {
-      // No picture: of a strip, the software decoder's answer to all but a
-      // frame's last, which holds nothing here, or the browser's decoder
-      // gone, whose strips held are of a frame it will not finish.
+      // No picture: of a strip, the browser's decoder gone, whose strips held
+      // are of a frame it will not finish.
       releaseStrips();
       return;
     }

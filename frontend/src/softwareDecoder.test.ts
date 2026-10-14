@@ -48,7 +48,7 @@ test("another codec is refused as VideoDecoder refuses one: asynchronously, NotS
 /** The decode worker, as far as the decoder talks to it: what it was posted. */
 class FakeWorker {
   static made: FakeWorker[] = [];
-  posted: { type: string; id: number; module?: string }[] = [];
+  posted: { type: string; id: number; module?: string; serial?: number }[] = [];
   onmessage: ((ev: { data: unknown }) => void) | null = null;
   onerror: unknown = null;
   name: string;
@@ -56,7 +56,12 @@ class FakeWorker {
     this.name = options.name;
     FakeWorker.made.push(this);
   }
-  postMessage(command: { type: string; id: number; module?: string }) {
+  postMessage(command: {
+    type: string;
+    id: number;
+    module?: string;
+    serial?: number;
+  }) {
     this.posted.push(command);
   }
   terminated = false;
@@ -70,6 +75,9 @@ const PLANES = {
   width: 2,
   height: 2,
   planes: [0, 4, 8].map((offset) => ({ offset, stride: 2, width: 2, rows: 2 })),
+  subsampling: "4:4:4",
+  row: 0,
+  keyframe: true,
   fullRange: true,
   matrix: "bt709",
   colorSpace: "display-p3",
@@ -96,23 +104,26 @@ test("a picture is released to the decode worker when it is closed, once", () =>
     const worker = FakeWorker.made[0];
     const id = worker.posted[0].id;
     const types = () => worker.posted.map((command) => command.type);
-    const answer = () =>
-      worker.onmessage?.({ data: { type: "decoded", id, picture: PLANES } });
+    const answer = (serial: number) =>
+      worker.onmessage?.({
+        data: { type: "decoded", id, picture: PLANES, serial },
+      });
 
-    // The decoder holds the picture's memory until then, and decodes no further.
+    // The decoder holds the picture's memory until then.
     decoder.decode(chunk);
-    answer();
+    answer(7);
     assert.equal(pictures.length, 1);
     assert.equal(pictures[0].memory, PLANES.memory);
     assert.deepEqual(types(), ["create", "decode"]);
     pictures[0].close();
     pictures[0].close();
     assert.deepEqual(types(), ["create", "decode", "release"]);
+    assert.deepEqual(worker.posted[2], { type: "release", id, serial: 7 });
 
     // A stream that ends releases with its `destroy`: a picture closed after it
     // says nothing to a decoder that is gone.
     decoder.decode(chunk);
-    answer();
+    answer(8);
     decoder.close();
     pictures[1].close();
     assert.deepEqual(types(), [
