@@ -729,7 +729,7 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
 /// the picker offers following it.
 fn describe_size(target: &TargetConfig) -> String {
     if !target.sized() {
-        return "the Mac's displays as they are".to_owned();
+        return "the remote's own".to_owned();
     }
     let (w, h) = DEFAULT_SIZE;
     match (target.size, target.offers().resize) {

@@ -1,8 +1,7 @@
 # HiDPI over standard RFB
 
 Why a VNC server read over standard RFB is shown at 1x whatever scale its
-desktop renders at, and the one wayvnc rule that makes a size request come back
-*prohibited*. Standard RFB is what a `vnc` target with no `subtype` speaks.
+desktop renders at, and at whatever size it has. Standard RFB is what a `vnc` target with no `subtype` speaks.
 Measured against Debian 13's stock packages — wayvnc 0.9.1 on neatvnc 0.9.1
 (server name `WayVNC`), serving a `HEADLESS-1` output of sway 1.10.1 on wlroots
 0.18 — through the gateway, with `tests/ws_probe.py` reading the control
@@ -38,8 +37,8 @@ from there:
   double (`src/vnc_apple.rs`), and remotex reads it off every layout.
 - **wlshare** — the server *reports* it and takes the client's. A `wlshare`
   target lists wlshare's density extension: the server reports its output's
-  scale, and in a session started with resize the browser's density is declared
-  back to it with the window, so the output changes mode and scale at once
+  scale, and the browser's density is declared back to it with the window, or
+  with the size the session keeps, so the output changes mode and scale at once
   ([`wlshare-density.md`](wlshare-density.md)).
 
 The density a framebuffer is *labelled* with — `Resize.scale` — is the wire's
@@ -54,58 +53,23 @@ can confirm is one the server may not have honoured, and a desktop presented at
 it is shown at the wrong size. For a wlroots desktop that should be shown at its
 scale, run wlshare and name it with `subtype = "wlshare"`.
 
-The consequence on a sway output at `scale 2` behind a plain target is that it is
-*worse* than at `scale 1`: the session asks once for the size it keeps, 1440×900
-points unless the target's `size` says otherwise, as 1440×900 pixels, sway makes
-that a 720×450 logical desktop, and the browser shows its pixels at 1x. Half the
-workspace, still soft on a 2x screen.
-Run the output wayvnc captures at `scale 1` for a plain target. Applying that is
+A size and a density go together, so a plain target states neither: it is never
+asked for a size, takes no `size` key and is offered no window to follow
+(`TargetConfig::sized` in `src/config.rs`). It is shown at the size its server has,
+and a server-initiated size change is still read off the `DesktopSize` and
+`ExtendedDesktopSize` rects it lists, which is how a server says its framebuffer
+changed. On a sway output at `scale 2` that is a framebuffer of twice the
+output's logical size shown at 1x: every window at twice the size it was drawn
+for. Run the output wayvnc captures at `scale 1` for a plain target. Applying that is
 live and keeps every window — `swaymsg output HEADLESS-1 scale 1` over the IPC
 socket, which a headless sway started by a user service leaves at
 `/run/user/<uid>/sway-ipc.*.sock` — so there is no reason to re-render the sway
 config and restart the service for it.
 
 Without a browser, the probe starts the session and prints the size and scale
-each `resize` announces, the server's own first and then the one it was asked
-for:
+each `resize` announces:
 
 ```sh
 uv run --with websockets --with requests tests/ws_probe.py \
   --port <gateway port> --target sway --user <user>
 ```
-
-A plain target follows no window: the picker does not offer it one, because
-whether a server takes a size is known only once it is dialled. So the one
-`SetDesktopSize` of a session is its kept size, sent when the server declares
-support.
-
-## wayvnc grants the layout to one client
-
-The finding that looked like a regression and was not. wayvnc's resize callback
-(`on_client_resize` in its `main.c`) remembers the **first client that resized**
-as its *master layout client* and returns false for every other client until
-that one disconnects. neatvnc turns the false into `ExtendedDesktopSize`
-status 1, *prohibited*. So a session on one gateway whose size was granted — the
-installed release beside a development build, say — makes the size request of a
-second gateway against the same wayvnc come back prohibited, and the second
-desktop simply stays its size. The bytes on the wire are identical; only the
-order of arrival differs. The fix is to disconnect the other client, not to debug
-the gateway.
-
-neatvnc's status codes, as `remotex serve` names them on stderr:
-
-| Status | Meaning | On stderr |
-|---|---|---|
-| 0 | success | applied, `desktop resized from … to …` |
-| 1 | prohibited — another client holds the layout, or the output is not headless | `server prohibited the SetDesktopSize; wayvnc grants the layout to the first client that resized…` |
-| 2 | out of resources | `rejected … out of resources` |
-| 3 | invalid layout | `rejected … invalid layout` |
-| 4 | **request forwarded** — neatvnc's own code: the size went to the compositor and the real resize arrives as a server-initiated rect a moment later | `server forwarded the SetDesktopSize; the new size arrives as its own rect` (debug) |
-
-A granted resize therefore looks like a status 4 reply immediately followed by a
-`reason=0` rect at the new size; that is success, not a refusal followed by a
-coincidence. Run with `RUST_LOG=remotex=debug` to see the `ExtendedDesktopSize`
-rects and the *holding … until the server declares SetDesktopSize support* line
-that precedes the first request on every connection — wayvnc declares support with
-its first framebuffer update, about a second after connect, and the size the
-session keeps, held until then, is sent on it.

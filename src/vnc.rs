@@ -638,12 +638,6 @@ struct DesktopState {
     /// generic rect from then on. `None` on every other server and until the
     /// first report: generic RFB is [`UNSCALED`] by default.
     wire_scale: Option<f32>,
-    /// Whether the browser's density is declared to a reporting server
-    /// ([`Flags::declares`]): in a session whose window drives the desktop size,
-    /// and for a pinch-zoom client whatever the size. A declaration carries the
-    /// size in pixels at that density — the window, or the points the session
-    /// keeps — so the server sets its output's mode and scale together.
-    declares: bool,
     /// A `ClientDensity` is out, and the server has not answered it yet. The
     /// declaration carries the window in pixels at the declared density, and the
     /// server sets the output's mode and scale to it in one configuration — one
@@ -1300,9 +1294,9 @@ impl DesktopState {
         Some(set_desktop_size(pixels, screen))
     }
 
-    /// The `ClientDensity` declaring `declared` to a reporting server, or `None`
-    /// in a session that states no density — see [`Self::declares`]. It carries
-    /// the window in pixels at that density — the newest one the browser asked
+    /// The `ClientDensity` declaring `declared` to a reporting server, in every
+    /// session whatever its size, as a High Performance Mac and an RDP host open
+    /// at the browser's density. It carries the window in pixels at that density — the newest one the browser asked
     /// for, the size the session keeps, or the desktop's own points before
     /// either — so the server changes mode and scale together. Every
     /// declaration opens a follow ([`Self::following`]): the server answers it
@@ -1310,9 +1304,6 @@ impl DesktopState {
     /// carries is no longer held: the answer asks again only if it was not
     /// granted.
     fn declare_density(&mut self, declared: f32) -> Option<[u8; 10]> {
-        if !self.declares {
-            return None;
-        }
         // The reported scale, not the canvas's label: a first report is declared
         // back before it relabels the canvas.
         let points = self.pending.take().or(self.viewport).unwrap_or_else(|| {
@@ -2147,8 +2138,7 @@ async fn session(
         Flags {
             macos,
             resize: choices.resize(),
-            declares: choices.resize() || display.is_some_and(|screen| screen.fit),
-            kept: (!apple && !choices.resize())
+            kept: (config.wlshare() && !choices.resize())
                 .then(|| config.opening_size(choices.size, display)),
             apple,
             virtual_display,
@@ -2185,23 +2175,17 @@ async fn session(
 struct Flags {
     macos: bool,
     resize: bool,
-    /// Whether this end states the session's density to a `wlshare` target: in a
-    /// session that follows the window, and for a pinch-zoom client
-    /// ([`HostDisplay::fit`]) whatever the size, which sees the desktop fitted to
-    /// its width on what is usually a 2x or 3x screen, where a 1x desktop is a
-    /// blurred one. An RDP session states it on the same terms (`states_density`
-    /// in src/rdp.rs).
-    declares: bool,
-    /// The size the session keeps, in points, on a plain or wlshare target that
-    /// does not follow a window: the configured size or the default
+    /// The size the session keeps, in points, on a wlshare target that does not
+    /// follow a window: the configured size or the default
     /// ([`TargetConfig::opening_size`]). The desktop is asked for it once, as
-    /// soon as the server declares SetDesktopSize support; a server that never
-    /// declares it, or refuses, keeps its own size.
+    /// soon as the server declares SetDesktopSize support; a physical output
+    /// refuses, and keeps its own size.
     ///
     /// `None` in a session that follows the window, whose first viewport report
-    /// is the request, and on both Apple subtypes, where the size is either
-    /// stated by [`opening_mode`] at connect (a virtual display) or never
-    /// stated at all (Standard `ard` exposes physical displays).
+    /// is the request; on a plain target, which is shown at its server's own
+    /// size ([`TargetConfig::sized`]); and on both Apple subtypes, where the
+    /// size is either stated by [`opening_mode`] at connect (a virtual display)
+    /// or never stated at all (Standard `ard` exposes physical displays).
     kept: Option<(u16, u16)>,
     /// Whether this is Apple's revision, 003.889, with the metadata encodings both
     /// Apple subtypes negotiate: the read loop's ZRLE stream, cursor cache and
@@ -2669,8 +2653,8 @@ fn rfb38_encoding_list() -> Vec<i32> {
     // Cursor With Alpha, which only improves on it, and so are the two size
     // pseudo-encodings. They are how a server *tells* this end its
     // framebuffer changed size, which is not the same as being asked to change it:
-    // that is asked for where a SetDesktopSize is decided, by the window where
-    // it drives the size and once at session-open where a size is kept. A server whose size
+    // that is asked of a wlshare server alone, by the window where it drives the
+    // size and once at session-open where a size is kept. A server whose size
     // changes under a client that listed neither has no way to say so and hangs
     // up.
     //
@@ -2761,9 +2745,7 @@ fn wlshare_beside_encoding_list() -> Vec<i32> {
 /// size and windows squeezed together onto a small opening display do not
 /// spread back out when it grows. The density is the client screen's whatever
 /// named the points, as Apple's client has it, so a Retina client gets a sharp
-/// desktop even at a kept size, where an RDP host is left at its own scaling as
-/// Microsoft's client leaves it with "Optimize for Retina displays" unchecked,
-/// except for a pinch-zoom client (`states_density` in src/rdp.rs) — quantized to
+/// desktop even at a kept size, as an RDP session opens too — quantized to
 /// the 1x or 2x a virtual display can be backed at
 /// ([`crate::protocol::render_density`]): a Mac asked for 1.25x or 1.5x
 /// answers with a small 2x display rather than a rounded one.
@@ -2987,7 +2969,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let Flags {
         macos,
         resize,
-        declares,
         kept,
         apple,
         virtual_display,
@@ -3036,7 +3017,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         // whose listing came back from the preface.
         density: if passthrough.is_some() { Density::Asked } else { Density::Off },
         wire_scale: None,
-        declares,
         following: false,
         declared: None,
         repaint_owed: false,
@@ -3199,7 +3179,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 }
             }
             // A High Performance resize has something due — see [`HpResize`].
-            () = hp_resize_due(&desktop, &hp_wake), if virtual_display && resize => {
+            () = hp_resize_due(&desktop, &hp_wake), if virtual_display => {
                 if let Err(e) = hp_resize_step(&uplink, &desktop, media.as_ref(), &tab, &sink).await {
                     break Err(e);
                 }
@@ -3336,7 +3316,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             // display's density, as the session's own report
                             // is the first's.
                             (ClientMsg::HostDisplay(screen), Some(_)) => {
-                                if resize {
+                                if resize || virtual_display {
                                     let density = crate::protocol::render_density(screen.scale);
                                     desktop.lock().unwrap().second_density = Some(density);
                                     if let Err(e) =
@@ -3413,9 +3393,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 // Viewport reports drive dynamic resize, not an input event.
                 //
                 // `HostDisplay` is that request with no size of its own:
-                // mid-session it is a *density* report. High Performance can
-                // render its virtual display at the new density when resize is
-                // granted. Standard cannot reconfigure a physical display, but
+                // mid-session it is a *density* report. A virtual display is
+                // rendered at the new density in every session, at a kept size
+                // too. Standard cannot reconfigure a physical display, but
                 // does ask the Mac to scale the framebuffer before encoding it.
                 // The size it carries mattered only at session-open.
                 let ask = match input {
@@ -3437,7 +3417,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         }
                         None
                     }
-                    ClientMsg::HostDisplay(screen) if virtual_display && resize => {
+                    ClientMsg::HostDisplay(screen) if virtual_display => {
                         let density = crate::protocol::render_density(screen.scale);
                         let mut d = desktop.lock().unwrap();
                         let changed = (d.host_density - density).abs() > 0.005;
@@ -3469,7 +3449,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     _ => None,
                 };
                 let sent = if let Some(ask) = ask {
-                    if resize {
+                    // A window drives the size only in a session that follows
+                    // it; a density is restated in every one.
+                    if resize || matches!(ask, ResizeAsk::Density) {
                         request_resize(&uplink, &desktop, ask, virtual_display).await
                     } else {
                         Ok(())
@@ -3668,7 +3650,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     } else if hp_two {
                         // Two virtual displays are a stream each, and the choice
                         // between them is answered here.
-                        hp_select(&shared_here, id, &sink, resize).await
+                        hp_select(&shared_here, id, &sink).await
                     } else if apple {
                         // `COMBINED` is this gateway's own list entry, not a
                         // screen the Mac named, so it maps back to the
@@ -3822,10 +3804,10 @@ fn refused_small(what: &str, points: (u16, u16)) {
 /// A High Performance Mac owns a virtual display, so replacing its one-mode
 /// `SetDisplayConfiguration` is the resize request — and the mode it requests is
 /// the resolved points at the client screen's density, which is how moving the
-/// window to a Retina display re-renders the same desktop at 2x. Generic VNC uses
+/// window to a Retina display re-renders the same desktop at 2x. wlshare uses
 /// `SetDesktopSize` once the server declares support via an ExtendedDesktopSize
-/// rect; until then, its report is stashed for replay. It has no density to
-/// apply, so its points are its pixels — and they are held under the video
+/// rect; until then, its report is stashed for replay. Its points are taken to
+/// pixels at the scale the server reported — and they are held under the video
 /// stream's picture ceiling ([`crate::video::fit_ceiling`])
 /// before anything is sent or stashed, so the desktop asked for is one the encoder
 /// takes. A High Performance display needs no such hold: the Mac's own 3840×2160
@@ -6118,18 +6100,13 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
         // was — the rect's own dimensions are not trusted for it.
         //
         // The statuses are the extension's — 1 prohibited, 2 out of resources, 3
-        // invalid layout — plus neatvnc's own 4, "request forwarded": wayvnc has
-        // handed the size to the compositor and the resize arrives as a
-        // server-initiated rect a moment later, so that one is not a refusal.
-        // Its 1 has a cause worth naming: wayvnc lets only the first client that
-        // resized change the layout while that client stays connected — a browser
-        // on another gateway against the same server, say — and every other
-        // client's request is prohibited until it disconnects.
+        // invalid layout. Only a wlshare server is asked, and its 1 has a cause
+        // worth naming: it resizes a headless output alone, and only with its
+        // own `resize = true`.
         match status {
-            4 => debug!("vnc: server forwarded the SetDesktopSize; the new size arrives as its own rect"),
             1 => warn!(
-                "vnc: server prohibited the SetDesktopSize; wayvnc grants the layout to the \
-                 first client that resized and refuses every other while it stays connected"
+                "vnc: server prohibited the SetDesktopSize; wlshare resizes only a headless \
+                 output, and only with resize = true"
             ),
             2 => warn!("vnc: server rejected SetDesktopSize: out of resources"),
             3 => warn!("vnc: server rejected SetDesktopSize: invalid layout"),
@@ -6138,7 +6115,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
         // A scale report may have cleared the browser's canvas on the strength
         // of this request's rect repainting it — see [`read_output_scale`].
         // Refused, it repaints nothing, so the pixels are asked for as they are.
-        if status != 4 && std::mem::take(&mut desktop.lock().unwrap().repaint_owed) {
+        if std::mem::take(&mut desktop.lock().unwrap().repaint_owed) {
             let size = desktop.lock().unwrap().size;
             debug!("vnc: asking for the whole framebuffer; the relabelled canvas is still blank");
             send(uplink, &update_request(false, size)).await?;
@@ -6644,7 +6621,7 @@ async fn hp_tab_shown(
 /// second in a tab of its own. The Mac sends a stream for each whatever is chosen,
 /// so it is asked for nothing but the keyframe a display coming into view starts
 /// at; the canvas is told its screen is not available until that picture.
-async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> anyhow::Result<()> {
+async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink) -> anyhow::Result<()> {
     let Shared { uplink, desktop, shadow, display, tab, hp_wake, .. } = shared;
     let media = shared.media.as_ref();
     let _switch = shared.switch.lock().await;
@@ -6713,7 +6690,10 @@ async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> 
     if let Some(media) = media {
         tell_withheld(desktop, media, sink, &shared.tab).await?;
     }
-    if resize && was.all && !now.all {
+    // The second display goes back to the first's size and density, which a tab
+    // may have changed: its window in a session that follows one, its screen in
+    // any.
+    if was.all && !now.all {
         request_resize(uplink, desktop, ResizeAsk::Density, true).await?;
         hp_wake.notify_one();
     }
@@ -9803,7 +9783,6 @@ mod tests {
             viewport: None,
             density: Density::Off,
             wire_scale: None,
-            declares: true,
             following: false,
             declared: None,
             repaint_owed: false,
@@ -10049,7 +10028,7 @@ mod tests {
         assert_eq!(desktop.lock().unwrap().viewport, Some((640, 480)));
     }
 
-    /// The size a plain or wlshare session keeps is seeded as a held request, so
+    /// The size a wlshare session keeps is seeded as a held request, so
     /// the desktop is asked for it as soon as the server declares SetDesktopSize
     /// support, in a session the window does not drive.
     #[tokio::test]
@@ -10060,7 +10039,6 @@ mod tests {
         // What `active_loop` builds for a session kept at 1440×900, against a
         // server whose desktop is 1920x1080.
         let desktop = shared_desktop((1920, 1080), None, Some((1440, 900)));
-        desktop.lock().unwrap().declares = false;
 
         // wlshare's opening announcement: reason 0, the server's own size.
         let payload = eds_payload(screen);
@@ -10899,14 +10877,14 @@ mod tests {
         assert!(!desktop.lock().unwrap().repaint_owed);
     }
 
-    /// A pinch-zoom client's session at a kept size declares its density with the
-    /// kept size in pixels at it, and asks for nothing more once the server has
-    /// settled on those pixels.
+    /// A session at a kept size declares the client's density with the kept size
+    /// in pixels at it, and asks for nothing more once the server has settled on
+    /// those pixels.
     #[tokio::test]
-    async fn a_kept_size_is_declared_at_a_pinch_zoom_clients_density() {
+    async fn a_kept_size_is_declared_at_the_clients_density() {
         let (uplink, wire) = test_uplink();
         let (sink, _rx) = test_sink();
-        // What `active_loop` builds for a phone's session kept at 1440×900.
+        // What `active_loop` builds for a session kept at 1440×900 on a 2x screen.
         let desktop =
             shared_desktop((1920, 1080), Some(Screen { id: 3, flags: 0 }), Some((1440, 900)));
         {
@@ -10934,32 +10912,6 @@ mod tests {
             .unwrap();
         assert_eq!(written(&wire), client_density((2880, 1800), 2.0));
         assert!(!desktop.lock().unwrap().following);
-    }
-
-    /// A pointer client's session at a kept size declares nothing: the desktop
-    /// stays at the scaling the server has.
-    #[tokio::test]
-    async fn a_fixed_size_target_labels_by_the_report_and_declares_nothing() {
-        let (uplink, wire) = test_uplink();
-        let (sink, mut rx) = test_sink();
-        let desktop = shared_desktop((1920, 1080), Some(Screen { id: 3, flags: 0 }), None);
-        {
-            let mut d = desktop.lock().unwrap();
-            d.density = Density::Asked;
-            d.host_density = 2.0;
-            d.declares = false;
-        }
-
-        let body = output_scale_body((1920, 1080), 1.0);
-        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
-            .await
-            .unwrap();
-        assert!(written(&wire).is_empty(), "no declaration, no request");
-        assert!(forwarded(&sink, &mut rx).await.is_none());
-        let d = desktop.lock().unwrap();
-        assert_eq!(d.density, Density::Reported);
-        assert_eq!(d.wire_scale, Some(1.0));
-        assert!(!d.following);
     }
 
     /// A report naming a size the framebuffer does not have yet is the label for
@@ -12962,7 +12914,7 @@ mod tests {
 
         // The second display alone: the canvas is its size, with no picture
         // until its stream's first.
-        hp_select(&shared, 1, &sink, false).await.unwrap();
+        hp_select(&shared, 1, &sink).await.unwrap();
         assert_eq!(desktop.lock().unwrap().size, (1280, 800));
         sink.flush().await;
         assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 1280, h: 800, .. })));
@@ -12973,11 +12925,11 @@ mod tests {
             assert_eq!(d.hp_origin(d.view.active), (1600, 0), "a position on it is offset into the span");
         }
         // An id the list does not have changes nothing.
-        hp_select(&shared, 7, &sink, false).await.unwrap();
+        hp_select(&shared, 7, &sink).await.unwrap();
         assert!(forwarded(&sink, &mut rx).await.is_none());
 
         // All of them: the first on the canvas, the second named for a tab.
-        hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
+        hp_select(&shared, DisplayState::COMBINED, &sink).await.unwrap();
         assert_eq!(desktop.lock().unwrap().size, (1600, 1000));
         sink.flush().await;
         assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 1600, h: 1000, .. })));
@@ -13065,7 +13017,7 @@ mod tests {
         };
         let two = layout_payload(None, &[(9, (160, 100), (160, 100), 0x01), (10, (128, 80), (128, 80), 0x00)]);
         read_display_layout(&mut two.as_slice(), &shared, true, &sink).await.unwrap();
-        hp_select(&shared, 0, &sink, false).await.unwrap();
+        hp_select(&shared, 0, &sink).await.unwrap();
 
         // The Mac says so of the second display while the first is on the canvas.
         media.lock().unwrap().test_answered(&[(160, 100), (128, 80)]);
@@ -13073,9 +13025,9 @@ mod tests {
         tell_withheld(&desktop, &media, &sink, &shared.tab).await.unwrap();
         assert!(withheld_said(&sink, &mut rx).await.is_empty(), "not the first display's to hear");
 
-        hp_select(&shared, 1, &sink, false).await.unwrap();
+        hp_select(&shared, 1, &sink).await.unwrap();
         assert_eq!(withheld_said(&sink, &mut rx).await, [true], "said as it comes onto the canvas");
-        hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
+        hp_select(&shared, DisplayState::COMBINED, &sink).await.unwrap();
         assert_eq!(withheld_said(&sink, &mut rx).await, [false], "the first display is back on it");
 
         let plan = crate::config::RenderPlan {
@@ -13137,12 +13089,12 @@ mod tests {
             )
         };
         // No tab while one display is chosen: the list names none.
-        hp_select(&shared, 0, &sink, false).await.unwrap();
+        hp_select(&shared, 0, &sink).await.unwrap();
         let (early, _early_rx) = feed();
         hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(early), plan, true).await;
         assert!(shared.tab.lock().unwrap().is_none());
 
-        hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
+        hp_select(&shared, DisplayState::COMBINED, &sink).await.unwrap();
         let (shown, mut tab_rx) = feed();
         hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(shown), plan, true).await;
         let (tab_sink, _) = tab_parts(&shared.tab).expect("the tab is fed");

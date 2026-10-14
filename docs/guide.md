@@ -73,7 +73,9 @@ amd64 machine under x86-64-v3.
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
   or 1440×900 where it sets none, or follows the window: the remote is asked to
   render at the window's size and the browser's density, rather than being
-  scaled on the client. A phone is offered the kept sizes only.
+  scaled on the client. A kept size follows the browser's density too. A phone
+  is offered the kept sizes only. A plain `vnc` target and `ard` on the Mac's
+  physical displays are shown at the remote's own size and take no `size`.
 - **Sound.** Opus, or FLAC, which is lossless. A session started without
   sound asks the remote for none, so the host keeps playing where it did. In the
   session, Mute and Unmute change only whether this browser listens. A phone,
@@ -311,8 +313,8 @@ vnc_password = "change-me"
 A plain target takes `vnc_password` for classic VNC authentication, or
 `username` and `password` for RSA-AES. The gateway asks for ZRLE, which every
 current VNC server has, and reads nothing else but Raw; the older standard
-encodings, Tight and the other vendor or lossy ones are not listed. The target is asked for its size once,
-shown at 1x, and carries no sound, camera or microphone. Standard RFB cannot say
+encodings, Tight and the other vendor or lossy ones are not listed. The target is shown at its
+server's own size, at 1x, and carries no sound, camera or microphone. Standard RFB cannot say
 that its pixels are HiDPI; see [HiDPI over standard RFB](standard-rfb-hidpi.md).
 
 ## Camera and microphone

@@ -397,20 +397,14 @@ function sizeOptions(
       {
         value: "target",
         label: "The remote's own size",
-        note: "This target shares its displays as they are.",
+        note: "This target is shown at the size its server has.",
       },
     ];
   }
-  // A plain VNC server is asked, and whether it takes a size is known only once
-  // it is dialled.
-  const asked =
-    target.protocol === "vnc" && target.subtype === null
-      ? " A server that takes no size keeps its own."
-      : "";
   const kept = (size: Points, value: Sizing, what: string): SizeOption => ({
     value,
     label: `${size.w}×${size.h}`,
-    note: `${what} The desktop stays at it.${asked}`,
+    note: `${what} The desktop stays at it.`,
   });
   const configured = target.size
     ? [kept(target.size, "target", "The size set for this target.")]
