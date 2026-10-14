@@ -273,7 +273,7 @@ export function createDesktopVideo(
         data,
         held.timestamp,
         keyframe,
-        strip && { ...strip, rows: size.h },
+        strip && { index: strip.index, rows: size.h },
       );
     },
     restart() {

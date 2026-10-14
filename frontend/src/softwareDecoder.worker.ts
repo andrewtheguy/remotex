@@ -11,16 +11,19 @@
 //
 // A picture leaves as where its planes are in the module's memory, which is
 // shared, and the paint worker uploads them to the GPU from there
-// (planesPicture.ts). The decoder holds a picture until its next unit is put in,
-// so that unit waits here until the paint worker has released the picture.
+// (planesPicture.ts). The decoder holds a picture until the paint worker releases
+// it, and decodes the units after it into other memory meanwhile, so the next unit
+// decodes while the paint worker uploads one: up to `HELD` pictures a stream are
+// out at once, and a unit past that waits here for a release.
 //
 // A High Performance Mac's picture may come in four strips, each a unit, a frame
-// being the strips that changed. The HEVC module puts the picture together, and
-// it is shown a frame at a time, not a strip at a time: a strip is answered with
-// the picture where the gateway says it is its frame's last, and with none
-// otherwise. No answer waits for the unit after it, which the paint worker sends
-// only once this one is answered.
+// being the strips that changed. Each decodes to a picture of its own, the strip,
+// answered with where its rows go in the display, which the paint worker uploads
+// them to; it draws the display at the frame's last strip. Nothing in a strip says
+// which it is: the unit comes with that and the display's rows, and a picture that
+// is not such a strip fails the stream.
 
+import { stripRows } from "./protocol.ts";
 import {
   type DecodedPlanes,
   type DecoderCommand,
@@ -139,60 +142,134 @@ const PRIMARIES: Record<number, PredefinedColorSpace> = {
 const TRANSFERS = [1, UNSPECIFIED, 6, 13];
 const FULL_RANGE = 2;
 
-/** The picture `decode` just completed, as its planes. */
+// 0 is 4:2:0, 1 is 4:2:2, 2 is 4:4:4.
+const SUBSAMPLING = ["4:2:0", "4:2:2", "4:4:4"] as const;
+
+// The strips a picture sent in strips comes in.
+const STRIPS = 4;
+
+/**
+ * The picture `decode` just completed, as its planes and its serial: of the
+ * whole picture, or for a unit that is `strip`, its rows of the display. An
+ * error says what the page cannot present, or for a strip what does not fit.
+ */
 function picture(
   module: LoadedModule,
   decoder: ModuleDecoder,
-): DecodedPlanes | string {
+  strip: PictureStrip | undefined,
+): { planes: DecodedPlanes; serial: number } | { error: string; name: string } {
   // Read afresh: a memory that grew is a new buffer.
   const memory = module.memory.buffer;
   const p = new Int32Array(memory, decoder.picture(), 16);
   const [w, h, layout, range, matrix, primaries, transfer] = p;
-  if (layout < 0 || layout > 2) {
-    return "the stream's pictures are not 8-bit Y'CbCr, which the page presents";
+  const subsampling = SUBSAMPLING[layout];
+  if (!subsampling) {
+    return {
+      name: "NotSupportedError",
+      error:
+        "the stream's pictures are not 8-bit Y'CbCr, which the page presents",
+    };
   }
   const made = MATRIX[matrix];
   const colorSpace = PRIMARIES[primaries];
   if (!made || !colorSpace || !TRANSFERS.includes(transfer)) {
-    return `the stream's colors are not ones the page presents (matrix ${matrix}, primaries ${primaries}, transfer ${transfer})`;
+    return {
+      name: "NotSupportedError",
+      error: `the stream's colors are not ones the page presents (matrix ${matrix}, primaries ${primaries}, transfer ${transfer})`,
+    };
   }
-  // 0 is 4:2:0, 1 is 4:2:2, 2 is 4:4:4.
+  // A strip is the display's whole width and a strip's rows, which the last
+  // runs past the display's end with; only the rows of the display go.
+  let [height, row, rows] = [h, 0, h];
+  if (strip) {
+    row = strip.index * stripRows(strip.rows);
+    if (
+      strip.index >= STRIPS ||
+      h !== stripRows(strip.rows) ||
+      row >= strip.rows
+    ) {
+      return {
+        name: "EncodingError",
+        error: `a ${w}x${h} picture is not strip ${strip.index} of a display of ${strip.rows} rows`,
+      };
+    }
+    height = strip.rows;
+    rows = Math.min(h, strip.rows - row);
+  }
   const chromaW = layout === 2 ? w : (w + 1) >> 1;
-  const chromaH = layout === 0 ? (h + 1) >> 1 : h;
+  const chromaRows = layout === 0 ? (rows + 1) >> 1 : rows;
   return {
-    memory,
-    width: w,
-    height: h,
-    planes: [0, 1, 2].map((i) => ({
-      offset: p[7 + i],
-      stride: p[10 + i],
-      width: i === 0 ? w : chromaW,
-      rows: i === 0 ? h : chromaH,
-    })),
-    fullRange: range === FULL_RANGE,
-    matrix: made,
-    colorSpace,
+    serial: p[14],
+    planes: {
+      memory,
+      width: w,
+      height,
+      planes: [0, 1, 2].map((i) => ({
+        offset: p[7 + i],
+        stride: p[10 + i],
+        width: i === 0 ? w : chromaW,
+        rows: i === 0 ? rows : chromaRows,
+      })),
+      subsampling,
+      row,
+      strip: strip?.index,
+      keyframe: p[13] === 1,
+      fullRange: range === FULL_RANGE,
+      matrix: made,
+      colorSpace,
+    },
   };
 }
 
+// The pictures out at once for a stream, the paint worker's to release: the one
+// it is uploading, and the next, decoded meanwhile. Each holds its memory in the
+// module, which the units after it cannot use.
+const HELD = 2;
+
 const decoders = new Map<number, ModuleDecoder>();
-
-// The pictures the paint worker is reading, by stream: what ends each wait.
-const held = new Map<number, () => void>();
-
-function release(id: number) {
-  held.get(id)?.();
-  held.delete(id);
-}
 
 // Streams whose end has been asked for and not yet reached: a unit still queued
 // for one is not decoded, since nothing would release its picture.
 const ending = new Set<number>();
 
+// The serials of the pictures each stream's decoder holds for the paint worker.
+const held = new Map<number, Set<number>>();
+
+// A unit waiting for one of them to be released, by stream.
+const waiting = new Map<number, () => void>();
+
+function wake(id: number) {
+  waiting.get(id)?.();
+  waiting.delete(id);
+}
+
+function release(id: number, serial: number) {
+  if (held.get(id)?.delete(serial)) {
+    decoders.get(id)?.release(serial);
+    wake(id);
+  }
+}
+
+/** Until fewer than `HELD` of the stream's pictures are out, or it ends. */
+async function room(id: number): Promise<void> {
+  while ((held.get(id)?.size ?? 0) >= HELD && !ending.has(id)) {
+    await new Promise<void>((resolve) => waiting.set(id, resolve));
+  }
+}
+
 const reason = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 function failed(id: number, name: string, message: string) {
   scope.postMessage({ type: "failed", id, name, message });
+}
+
+/** The stream's decoder and every picture it holds, given back. */
+function drop(id: number) {
+  const decoder = decoders.get(id);
+  decoders.delete(id);
+  held.delete(id);
+  wake(id);
+  decoder?.free();
 }
 
 async function create(id: number, decoder: SoftwareModule): Promise<void> {
@@ -210,24 +287,12 @@ async function create(id: number, decoder: SoftwareModule): Promise<void> {
     return;
   }
   decoders.set(id, new module.glue.Decoder(THREADS));
+  held.set(id, new Set());
 }
 
 async function destroy(id: number): Promise<void> {
-  const decoder = decoders.get(id);
-  decoders.delete(id);
+  drop(id);
   ending.delete(id);
-  decoder?.free();
-}
-
-/**
- * Answer a unit with its picture, and wait for the paint worker to have read
- * it: the decoder writes over the picture with its next unit, and frees it with
- * its end.
- */
-async function show(id: number, picture: DecodedPlanes): Promise<void> {
-  const released = new Promise<void>((resolve) => held.set(id, resolve));
-  scope.postMessage({ type: "decoded", id, picture });
-  await released;
 }
 
 async function decode(
@@ -243,15 +308,14 @@ async function decode(
   }
   // Loaded: the stream's `create` waited for it.
   const module = await loading;
-  if (!module || ending.has(id)) {
+  await room(id);
+  if (!module || ending.has(id) || decoders.get(id) !== decoder) {
     return;
   }
   const fail = (name: string, message: string) => {
-    decoders.delete(id);
-    decoder.free();
+    drop(id);
     failed(id, name, message);
   };
-  const { strip } = command;
   const size = command.data.byteLength;
   const input = decoder.input(size);
   new Uint8Array(module.memory.buffer, input, size).set(
@@ -259,7 +323,7 @@ async function decode(
   );
   let completed: boolean;
   try {
-    completed = strip ? decodeStrip(decoder, strip) : decoder.decode();
+    completed = decoder.decode();
   } catch (e) {
     fail(
       "EncodingError",
@@ -267,26 +331,22 @@ async function decode(
     );
     return;
   }
-  // A strip that is not its frame's last leaves the picture between two frames.
-  const planes =
-    completed && (!strip || strip.ends) ? picture(module, decoder) : null;
-  if (typeof planes === "string") {
-    fail("NotSupportedError", planes);
-    return;
-  }
-  if (!planes) {
+  if (!completed) {
     scope.postMessage({ type: "decoded", id, picture: null });
     return;
   }
-  await show(id, planes);
-}
-
-/** Decode the unit written as a strip, which only the HEVC module does. */
-function decodeStrip(decoder: ModuleDecoder, strip: PictureStrip): boolean {
-  if (!decoder.decodeStrip) {
-    throw new Error(`the ${codec()} decoder takes no picture in strips`);
+  const decoded = picture(module, decoder, command.strip);
+  if ("error" in decoded) {
+    fail(decoded.name, decoded.error);
+    return;
   }
-  return decoder.decodeStrip(strip.index, strip.rows);
+  held.get(id)?.add(decoded.serial);
+  scope.postMessage({
+    type: "decoded",
+    id,
+    picture: decoded.planes,
+    serial: decoded.serial,
+  });
 }
 
 function handle(command: DecoderCommand): Promise<void> {
@@ -307,15 +367,15 @@ function handle(command: DecoderCommand): Promise<void> {
 let queue: Promise<void> = Promise.resolve();
 scope.onmessage = (ev) => {
   const command = ev.data;
-  // Not queued: a release is what the queue is waiting for, and a stream that
-  // ends has closed its picture with it.
+  // Not queued: a release is what a unit waiting in the queue is waiting for,
+  // and a stream that ends has closed its pictures with it.
   if (command.type === "release") {
-    release(command.id);
+    release(command.id, command.serial);
     return;
   }
   if (command.type === "destroy") {
     ending.add(command.id);
-    release(command.id);
+    wake(command.id);
   }
   queue = queue.then(() =>
     handle(command).catch((e) => {

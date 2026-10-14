@@ -29,22 +29,27 @@ export interface PoolSeat {
 export interface ModuleDecoder {
   /**
    * Room for a unit of `size` bytes in the memory, where it is written before
-   * `decode`. The previous picture is released here.
+   * `decode`.
    */
   input(size: number): number;
   /**
-   * Decode the unit written: true when it completed a picture that is shown.
-   * Throws for a unit that does not decode.
+   * Decode the unit written: true when it completed a picture that is shown,
+   * which `picture` describes and which is held until `release`d. Throws for a
+   * unit that does not decode.
    */
   decode(): boolean;
   /**
-   * The HEVC module's alone: decode the unit written as strip `strip`, from 0
-   * at the top, of a picture of `rows` rows sent in four. True when the picture
-   * has every strip since its keyframe, and `picture` then describes it whole.
+   * Where the sixteen numbers describing the picture the last unit completed
+   * are in the memory: its size, layout, colour, each plane's start and
+   * stride, whether it is a keyframe, and its serial.
    */
-  decodeStrip?(strip: number, rows: number): boolean;
-  /** Where the picture's sixteen numbers are in the memory. */
   picture(): number;
+  /**
+   * The paint worker is done with picture `serial`, whose memory the decoder
+   * may have back. The units after a picture decode into other memory while it
+   * is held.
+   */
+  release(serial: number): void;
   free(): void;
 }
 
