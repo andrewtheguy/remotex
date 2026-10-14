@@ -397,7 +397,7 @@ The header, after that prefix:
 | `+0x02` | `u16` × 2: the whole desktop's size in points |
 | `+0x06` | `u16` × 2: the framebuffer's size in pixels, which changes with the selection |
 | `+0x0a` | `u32`: the screen being sent, or `0xffffffff` for all of them |
-| `+0x0e` | `u32`: session state (on console, obscured, locked, login pending) |
+| `+0x0e` | `u32` flags: bit 0 the session is on a virtual display, bit 1 the viewer may switch it between virtual and physical, bit 2 on console, bit 3 the login window's lock screen, bit 4 at the login window. High Performance sends `0x5`, and `0x15` at the login window; Standard sends `0x4`. |
 | `+0x12` | `u16`: display count, 1–25 |
 
 ### A display record, as sent
@@ -843,7 +843,7 @@ A published description says it reads bit 20 alone.
 | 10 | only observing is allowed, on `ViewerInfo` |
 | 11, 12 | the pointer is hidden, and shown again |
 | 13, 14 | the Mac's two busy-cursor notifications |
-| 17 | the Mac's user session changed |
+| 17 | the Mac's user session changed: a login or a logout ([A login or logout at the Mac](#a-login-or-logout-at-the-mac)) |
 
 A published description has 12 as the heartbeat and 11 as the user session
 changing. The heartbeat is 4, 11 is the pointer hiding, and the session change is
@@ -1224,7 +1224,7 @@ one field, and a second in a session that passes the picture:
 
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
-| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
+| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. It sets the frame rate the stream is configured for, 60 with it and 30 without, which is what the encoder spaces four strips by ([Rate control](#rate-control)). |
 | `tilesPerFrame` (video stream field 6) | 4 | 4, decoded here or passed, whatever the display's size; 1 for a passed session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together, or the page. One tile is one picture of the whole display on the one SSRC. |
 | The video stream's codecs (field 3) | H.264 (123) and HEVC (100) | Both, and H.264 alone for a session started with the H.264 passthrough | Offered both the Mac sends HEVC; offered 123 alone, H.264. |
 
@@ -1406,16 +1406,34 @@ other failures (see [Liveness](#the-stream)).
 - **RTCP.** The viewer sends a receiver report on both legs every second. A PLI or
   FIR brings an IDR within about 30 ms. Besides sender and receiver reports, the
   Mac accepts a compound packet that starts with PT 192, 193, 204, 205 or 206.
+  - **The Mac reads a datagram only from the viewer's SSRC.** The sender SSRC
+    of its first packet must be the one the viewer's video offer names; a
+    datagram naming any other, the Mac's own stream SSRC included, is dropped
+    before its packets are read, and nothing is logged. This holds for every
+    report and request, `RCTL` among them. Only the first packet is checked:
+    the rest of a compound packet is read whatever SSRC it names.
+  - **The Mac does not retransmit.** Every stream it configures has
+    retransmission off. It reads a Generic NACK (PT 205, FMT 1) from the
+    viewer's SSRC and resends nothing: it resends a packet only while the
+    round-trip time it holds for the picture leg is under 200 ms, and that time
+    stays at the 250 ms it starts from. Neither `RCTL` nor receiver reports with
+    report blocks moved it. Nine NACKs of 17 packets each, in a session of four
+    strips, brought no packet a second time. Remotex sends no NACK.
   - **The Mac drops a keyframe request made too soon.** It keeps the time of the
     last keyframe it made, which starts at the stream's own start, and discards
     a PLI or FIR that comes sooner after it than a least gap: 1 s for a stream
     of one tile, 10 ms for one of more. It logs
     `Request key frame too soon, discard` and sends nothing, and nothing later
-    makes up for the request.
+    makes up for the request. Several requests in one datagram therefore bring
+    one keyframe, and the rest are discarded so.
   - **AVConference's FIR** has two forms, chosen by a per-stream setting: RFC
     5104's (PT 206, FMT 4) and its own PT 192. The PT 192 form is the sender's
     SSRC and a list of 16-bit values, not RFC 2032's FIR, which is what a
-    published description calls it.
+    published description calls it. The list may be empty: `80 c0 00 01` and
+    the viewer's SSRC bring an IDR as a PLI does, with one tile and with four.
+    A published description sends the same packet with the Mac's stream SSRC
+    and reports an IDR for it; the Mac drops that packet as above, and the IDR
+    came from the FIR and PLI the description sends in the same datagram.
   - **A loss can be mended without a keyframe.** The viewer acknowledges each
     picture it has whole, with an APP packet alone in its datagram whose name
     is the number 5 and whose four bytes are the picture's RTP timestamp, and
@@ -1651,6 +1669,11 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   Reported loss of up to 44% for 30 s, and the bandwidth estimate, moved nothing,
   though the controller showed both. A TMMBR asking for 2 Mbit/s changed nothing
   and was not answered.
+- **Without reports it stands still.** The controller computes a new target
+  only when a report arrives; receiver reports do not count. Reports stopped
+  mid-session left the target where it was, 58.4 Mbit/s for 30 s, and 27.9
+  Mbit/s for 45 s when they stopped while a reported delay was walking it
+  down. It neither recovered nor fell to the floor.
 - **The receiver's delay.** Apple's receiver takes one sample per picture, from
   its first packet: the lag is the packet's arrival less its RTP timestamp at
   24 kHz, both counted from the stream's first picture, so no clock is shared
@@ -1660,9 +1683,28 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   short one's value and the delay is 0. A lag more than 30 s from either average
   starts the estimate again. It is the delay of a queue building between the
   sender and the receiver's socket, and nothing after the socket enters it.
+- **Which entry is the ceiling.** Each bitrate entry of the offer names, as
+  bits of its third field, the connections and modes it applies to. Screen
+  Sharing's stream matches one of Apple's entries, the 60 Mbit/s one whose
+  third field is 262144; the 100 Mbit/s entry is for another mode, which is why
+  offering more raises nothing. Lowering that entry, or every entry, to a cap
+  makes the cap the ceiling, as measured at 40, 15 and 8 Mbit/s. Deleting it
+  leaves a ceiling of 0, even with a 40 Mbit/s entry for other connections
+  left: the encoder is given a bitrate of 0, fails every frame, and no picture
+  comes.
 - **Below the floor.** An offer capped under 20 Mbit/s pins the controller at
   its floor, and the encoder runs at the cap whatever is reported: an animating
   lock screen came at about 7 Mbit/s under an 8 Mbit/s cap.
+- **Four strips can carry twice the target.** The encoder spaces a frame's
+  strips 1/(4 × the stream's frame rate) apart in time, and charges bits by the
+  time they span. With `0x1c` bit 0 clear the stream's frame rate is 30, so the
+  four strips span 25 ms of a frame captured every 17 ms, and under a screen
+  that changes everywhere (a terminal flood) the stream ran at about twice its
+  target: 15 Mbit/s under an 8 Mbit/s cap, 30 under 15, and 90–99 against a
+  58.4 Mbit/s target. One tile held its target: 5.7–8.2 Mbit/s under 8, and
+  56–59 against 58.4. With bit 0 set, as remotex sends it, the frame rate is
+  60, the strips span 12.5 ms, and four strips held their target under the same
+  flood: 7.8–8.2 Mbit/s under 8, and 51–55 against 58.4.
 - **Remotex.** It offers Apple's entries unchanged and reports as Apple's viewer
   does: `RCTL` every 50 ms once a picture packet has arrived, the delay
   estimated as above from when the receiver reads each picture packet, loss 0
@@ -1793,6 +1835,52 @@ ports, under a new SSRC, with an IDR at the new size. Remotex offers once messag
 display settles, and `screenUnavailable` holds the page at "Screen not
 available", with no input sent to the Mac, until that IDR is on its way to
 the browser. Any rectangle the Mac sends meanwhile is stepped over.
+
+### A login or logout at the Mac
+
+The virtual display belongs to the Mac's user session it was made in: the login
+window and each logged-in user have a capture agent of their own. When the
+session on console changes, the Mac moves the connection to the agent of the
+new one, which has only the physical display. The display configuration the
+viewer sent is not replayed there. Measured on the virtual Mac, whose physical
+display is 1280×800, with sessions asking for 1600×1000 or 1440×900:
+
+- **A login moves the session to the physical display, or closes it.** The
+  password was typed into a session at the login window, which logged in. In 10
+  of 14 runs the viewer was then sent `MiscStatus` 17 and, 2 s later, a layout
+  of the physical display: its own id, its size, and the header flags `0x4`,
+  bit 0 clear, where they had been `0x15`. The stream had stopped. No message 1
+  came then or for the rest of the session, but an offer was answered and
+  streamed the physical display on the ports named at the start. In the other 4,
+  half a second after the login, the login window's agent closed the viewers it
+  served as it went, and the daemon exited. Remotex sessions were closed 3 times
+  in 4, and a probe 1 time in 10. The probe was closed once and switched twice
+  when it sent remotex's opening messages and asked for remotex's stream, so
+  nothing a viewer sends was found to decide it.
+- **A new `SetDisplayConfiguration` brings a virtual display back.** It came
+  11 s later, under a new id and with the flags `0x5`, and again with no message
+  1; an offer brought its stream.
+- **A logout ends the session.** No run of 15 kept a virtual display or a
+  picture. In 11, the session's agent closed the viewers it served, and the
+  daemon closed the connection within a second, exiting in 10 of them. In the
+  other 4, the Mac moved the connection to another agent of the session being
+  ended, which exited within 4 s. One of those logged the physical display
+  first. In another, the viewer was sent `MiscStatus` 17 and then nothing, and
+  the next `SetDisplayConfiguration` closed the connection.
+- **Unlocking a locked session and waking the Mac change no user session,** so,
+  as read from the daemon, they move nothing. Neither was run.
+- **Apple's viewer does not ask again.** Read from its code, a change of the
+  flags' bit 0 changes only its window's controls; going back to a virtual
+  display is the user's choice.
+
+A published description saw the same switch on a 5K Mac, after "a login or
+unlock at the Mac, the Mac waking". Remotex takes every High Performance layout
+as its virtual display and offers only after message 1, so after such a login
+it owes ports the Mac never names. Run through a login on the virtual Mac, it
+listed the physical display as its virtual display and resized the page to
+1280×800. It ended the session 10 s later: "the Mac named no ports for its
+media stream within 10s". Read from its code, a physical display past
+3840×2160 ends the session at once.
 
 ### Reaching the gateway
 
