@@ -1841,21 +1841,28 @@ new one, which has only the physical display. The display configuration the
 viewer sent is not replayed there. Measured on the virtual Mac, whose physical
 display is 1280×800, with sessions asking for 1600×1000:
 
-- **A login moves the session to the physical display.** The password typed
-  into a session at the login window logged in, and in both runs the viewer was
-  sent `MiscStatus` 17 and, 2 s later, a layout of the physical display: its
-  own id, its size, and the header flags `0x4`, bit 0 clear, where they had
-  been `0x15`. The stream had stopped. No message 1 came then or for the rest of
-  the session, but an offer was answered and streamed the physical display on
-  the ports named at the start.
+- **A login moves the session to the physical display, or closes it.** The
+  password was typed into a session at the login window, which logged in. In 8
+  of 11 runs the viewer was then sent `MiscStatus` 17 and, 2 s later, a layout
+  of the physical display: its own id, its size, and the header flags `0x4`,
+  bit 0 clear, where they had been `0x15`. The stream had stopped. No message 1
+  came then or for the rest of the session, but an offer was answered and
+  streamed the physical display on the ports named at the start. In the other 3,
+  half a second after the login, the login window's agent closed the viewers it
+  served as it went, and the daemon exited. Those 3 were remotex sessions, in a
+  row. A fourth remotex session was switched, and so were seven sessions of a
+  probe, four of them sending remotex's opening messages and asking for its
+  stream. What decides it was not found.
 - **A new `SetDisplayConfiguration` brings a virtual display back.** It came
   11 s later, under a new id and with the flags `0x5`, and again with no message
   1; an offer brought its stream.
-- **A logout ends badly.** The Mac moves the connection to an agent of the
-  session being ended. Of three runs, one showed the physical display, in one
-  the daemon exited and closed the connection a second after the logout, and in
-  one the viewer was sent `MiscStatus` 17 and then nothing: the agent was gone,
-  and the next `SetDisplayConfiguration` closed the connection.
+- **A logout ends the session.** No run of 12 kept a virtual display or a
+  picture. In 8, the session's agent closed the viewers it served, and the
+  daemon closed the connection and exited within a second. In the other 4, the
+  Mac moved the connection to another agent of the session being ended, which
+  exited within 4 s. One of those logged the physical display first. In another,
+  the viewer was sent `MiscStatus` 17 and then nothing, and the next
+  `SetDisplayConfiguration` closed the connection.
 - **Unlocking a locked session and waking the Mac change no user session,** so,
   as read from the daemon, they move nothing. Neither was run.
 - **Apple's viewer does not ask again.** Read from its code, a change of the
@@ -1865,9 +1872,11 @@ display is 1280×800, with sessions asking for 1600×1000:
 A published description saw the same switch on a 5K Mac, after "a login or
 unlock at the Mac, the Mac waking". Remotex takes every High Performance layout
 as its virtual display and offers only after message 1, so after such a login
-it owes ports the Mac never names, and the session ends 10 s later. A physical
-display past 3840×2160 ends it at once. This is read from remotex's code and
-was not run.
+it owes ports the Mac never names. Run through a login on the virtual Mac, it
+listed the physical display as its virtual display and resized the page to
+1280×800. It ended the session 10 s later: "the Mac named no ports for its
+media stream within 10s". Read from its code, a physical display past
+3840×2160 ends the session at once.
 
 ### Reaching the gateway
 
