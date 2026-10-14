@@ -1604,13 +1604,14 @@ remote is told how the link is doing. Today two of the three passthroughs are:
   bitmap path the host's updates are decoded here and its socket is read at the
   gateway's own speed: it adapts to the gateway, and the VP9 walk adapts to the
   browser.
-- **A Mac** walks its HEVC by the one-way delay to the gateway, which on a LAN is
-  never behind. A browser that falls behind fills the gateway's queue, which drops
-  to the next IDR and asks the Mac for one. The passthrough is for a LAN; a slow
-  link wants a session started without it, whose VP9 the walk follows. A passed
-  Standard mode with Apple's Adaptive encodings, and High Performance's H.264,
-  are [under consideration](roadmap.md#a-passed-stream-for-a-mac-on-a-slow-link)
-  as slow-link alternatives.
+- **A Mac** walks its HEVC or H.264 by the one-way delay to the gateway, which on
+  a LAN is never behind. A browser that falls behind fills the gateway's queue,
+  which drops to the next IDR and asks the Mac for one. A still screen comes far
+  under the Mac's target, so a slow link carries it; a slow link with much motion
+  wants an `ard` target in Standard mode, whose VP9 the walk follows. A passed
+  Standard mode with Apple's Adaptive encodings is
+  [under consideration](roadmap.md#a-passed-stream-for-a-mac-on-a-slow-link)
+  as a slow-link alternative.
 - **Other VNC servers**, a plain `vnc` target included even when wlshare answers
   it, and a Mac in Standard mode, have no passed stream: their picture is always
   encoded here, and the walk follows the browser's link wherever `render_adaptive`
