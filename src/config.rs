@@ -87,11 +87,10 @@ pub enum Subtype {
     /// The picture and the sound go together — the Mac refuses one without the
     /// other, and mutes its own output while the sound leg runs — so a session
     /// always carries sound and the picker offers no choice of it. The sound goes
-    /// to the browser as the Mac's own AAC-ELD, never decoded here. The picture's
-    /// decoder is loaded from the system when it is needed; a gateway whose host
-    /// lacks it can only pass the picture, as the Mac's HEVC
-    /// ([`Passthrough::AppleMedia`]) to a browser that decodes it, or as its
-    /// H.264 ([`Passthrough::AppleH264`]).
+    /// to the browser as the Mac's own AAC-ELD, never decoded here, and so is the
+    /// picture: as the Mac's HEVC ([`Passthrough::AppleMedia`]) to a browser that
+    /// decodes it, or as its H.264 ([`Passthrough::AppleH264`]), whichever the
+    /// session was started with.
     ArdHighPerformance,
     /// [wlshare](https://github.com/andrewtheguy/wlshare), our own wlroots VNC
     /// server, spoken to as what it is: RFB 3.8 with wlshare's private extensions
@@ -198,8 +197,8 @@ pub struct RenderPlan {
     /// ([`TargetConfig::render_adaptive`]). Off, the congestion walk keeps its
     /// historical shape: pressure only.
     pub adaptive: bool,
-    /// The Mac's picture passes as it came, its HEVC rather than VP9 encoded
-    /// here: [`Passthrough::AppleMedia`], chosen at the picker. None of the fields
+    /// The Mac's picture passes as it came, its HEVC:
+    /// [`Passthrough::AppleMedia`], chosen at the picker. None of the fields
     /// above reach such a picture.
     pub apple_media: bool,
     /// The Mac is asked for H.264 instead, which passes as it came:
@@ -225,9 +224,10 @@ pub struct RenderPlan {
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
 /// here and encoded as VP9. Which a target has to pass is its type's to say
-/// ([`TargetConfig::offers`]); whether a session passes one, and which, is chosen
-/// at the picker ([`Choices::passthrough`]) where [`Self::chosen`] says it is, and
-/// otherwise it passes in every session.
+/// ([`TargetConfig::offers`]); which a session passes is chosen at the picker
+/// ([`Choices::passthrough`]) where [`Self::chosen`] says it is, and otherwise
+/// it passes in every session. A target that offers one has no picture encoded
+/// here.
 ///
 /// The stream is the remote's own, with no quality walk of this gateway's
 /// behind it, so [`TargetConfig::video_quality`] and the adaptive keys do not
@@ -253,8 +253,8 @@ pub enum Passthrough {
     /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] beside it have not
     /// been tried.
     RdpGraphics,
-    /// A High Performance Mac's picture: its HEVC instead of VP9 encoded here from
-    /// decoded pictures. Offered by `ard-high-performance`. The Mac's sound is not
+    /// A High Performance Mac's picture as its HEVC, Range Extensions 4:4:4.
+    /// Offered by `ard-high-performance` beside its H.264. The Mac's sound is not
     /// part of the choice: its AAC-ELD is passed in every session.
     AppleMedia,
     /// A High Performance Mac's picture as H.264, which it sends where its offer
@@ -277,8 +277,9 @@ impl Passthrough {
     }
 
     /// Whether a session passes it only where it was chosen at the picker. The
-    /// Mac's HEVC and its H.264 are choices beside the VP9 encoded here; an RDP
-    /// host's pipeline is not, as the gateway composes none.
+    /// Mac's HEVC and its H.264 are a choice of one from two, either passed in
+    /// every session; an RDP host's pipeline is the only one, as the gateway
+    /// composes none.
     pub fn chosen(self) -> bool {
         match self {
             Self::RdpGraphics => false,
@@ -342,9 +343,10 @@ pub struct Choices {
     /// subscribes, which is what its Mute and Unmute change.
     #[serde(default)]
     pub audio: Sound,
-    /// The [`Passthrough`] of the target's to pass, by its name, where passing
-    /// it is a choice ([`Passthrough::chosen`]); one that passes in every session
-    /// is passed whatever this says.
+    /// The [`Passthrough`] of the target's to pass, by its name, where which is a
+    /// choice ([`Passthrough::chosen`]), as on `ard-high-performance`, which
+    /// refuses a session that names none; one that passes in every session is
+    /// passed whatever this says.
     #[serde(default)]
     pub passthrough: Option<Passthrough>,
     /// Where the second virtual display sits.
@@ -361,7 +363,7 @@ pub struct Choices {
     pub vp9: Vp9Encoder,
     /// Ask a High Performance Mac whose picture is passed, in either codec, for one tile, each
     /// picture the whole display, and not the four strips such a session is
-    /// offered ([`crate::vnc_apple_media::Receive::Pass`]). No picker names it:
+    /// offered ([`crate::vnc_apple_media::Receive`]). No picker names it:
     /// it is a probe's, for a capture or a comparison of the two on one gateway.
     /// Refused where no Mac's picture is passed.
     #[serde(default)]
@@ -726,8 +728,8 @@ pub struct TargetConfig {
     /// the display, and on every target that is not a Mac.
     ///
     /// What it is for: a resizable Mac session, at the window's size and density,
-    /// in a gateway without the Mac's decoders' libraries or on a Mac where the
-    /// media stream cannot reach it.
+    /// on a Mac whose media stream cannot reach the gateway, or for a browser
+    /// whose picture is the gateway's VP9.
     #[serde(default)]
     pub virtual_display: bool,
     /// Whether to offer RDP's graphics pipeline (MS-RDPEGFX); on unless set to
@@ -1037,15 +1039,14 @@ impl TargetConfig {
             }
             // The sound comes with the picture, so it is not a choice, and the
             // Mac places a second virtual display itself. Its picture passes in
-            // either codec the Mac sends.
+            // either codec the Mac sends, and is never VP9.
             (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => Offers {
                 resize: true,
                 audio: false,
                 passthrough: &[Passthrough::AppleMedia, Passthrough::AppleH264],
                 placement: false,
                 pipeline: false,
-                // The VP9 encoded here from its decoded picture, where none is passed.
-                vp9: NATIVE_VP9,
+                vp9: false,
             },
         }
     }
@@ -1063,6 +1064,9 @@ impl TargetConfig {
             ),
             ("sound", choices.audio != Sound::Off && !offers.audio),
             ("a passthrough", choices.passthrough.is_some_and(|named| !offers.passthrough.contains(&named))),
+            // A target with a stream to pass has no picture encoded here, so one
+            // whose stream is a choice is refused a session that names none.
+            ("a picture encoded here", !offers.passthrough.is_empty() && self.passthrough(choices).is_none()),
             (
                 "a picture in one tile",
                 choices.whole
@@ -1110,11 +1114,17 @@ impl TargetConfig {
     /// The render dial for a reader with no browser in front of it — the TUI's
     /// target card, which describes a config file rather than a session.
     ///
-    /// A passthrough that is a choice is a session's and not the file's, so such a
-    /// target's card is the VP9 one, and so is the encoder, so the card is libvpx's. An RDP target with its pipeline on passes it
-    /// in every session, so its card says so; whether with H.264 is a session's
-    /// choice, so the card is the lossless one.
+    /// Which passthrough is passed, where that is a choice, is a session's and not
+    /// the file's, so such a target's card names each it may pass. The encoder is
+    /// a session's choice too, so a VP9 card is libvpx's. An RDP target with its
+    /// pipeline on passes it in every session, so its card says so; whether with
+    /// H.264 is a session's choice, so the card is the lossless one.
     pub fn render_summary(&self) -> String {
+        let offered = self.offers().passthrough;
+        if !offered.is_empty() && self.passthrough(Choices::default()).is_none() {
+            let streams: Vec<&str> = offered.iter().map(|passthrough| passthrough.stream()).collect();
+            return format!("{}, passed through", streams.join(" or "));
+        }
         let decoders = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false };
         self.render_plan(Choices::default(), decoders).describe()
     }
@@ -1530,42 +1540,8 @@ pub struct ConfigFile {
     /// [`Self::branding`]'s reason.
     #[serde(default)]
     pub hevc_wasm: Option<HevcWasmSection>,
-    /// The `[hp_decoders]` table: on Windows, the folders a High Performance
-    /// target's decoders are loaded from, for a gateway that keeps them off
-    /// `PATH`. Absent, they are looked for when a session needs them. Top-level
-    /// for [`Self::branding`]'s reason.
-    #[serde(default)]
-    pub hp_decoders: Option<HpDecoders>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
-}
-
-/// The `[hp_decoders]` table as written, and as resolved: the folders are
-/// absolute, so there is nothing to place. See [`crate::libav`].
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct HpDecoders {
-    /// The folder holding FFmpeg's `avcodec` and `avutil` DLLs, a shared build's
-    /// `bin`. Named, it is the only place FFmpeg is loaded from.
-    pub ffmpeg_dir: Option<PathBuf>,
-}
-
-impl HpDecoders {
-    /// Load each decoder the table names a folder for, before the gateway
-    /// listens: a gateway told where a decoder is refuses to start without it, as
-    /// with `[hevc_wasm]`'s archive. One it names no folder for is still looked
-    /// for when a session needs it.
-    pub fn load(&self) -> anyhow::Result<()> {
-        // Only Windows is let name a folder, and only a build that loads its
-        // decoders: `ConfigFile::parse_with` refuses the table of any other.
-        #[cfg(all(windows, not(feature = "apple-hp-media-static")))]
-        {
-            if let Some(dir) = &self.ffmpeg_dir {
-                crate::libav::load_from(dir)?;
-            }
-        }
-        Ok(())
-    }
 }
 
 /// The `[hevc_wasm]` table as written. See [`crate::hevc_wasm`].
@@ -1635,9 +1611,6 @@ pub struct AppConfig {
     /// `[hevc_wasm]` names, or the one found in the data directory. `None` serves
     /// no decoder.
     pub hevc_wasm: Option<PathBuf>,
-    /// `[hp_decoders]`: the folders the gateway loads the High Performance
-    /// decoders from at start-up. Empty looks for them when a session needs them.
-    pub hp_decoders: HpDecoders,
 }
 
 impl ConfigFile {
@@ -1721,31 +1694,6 @@ impl ConfigFile {
                 "[hevc_wasm].archive is empty — name the release archive, or leave the table \
                  out for {} in the gateway's data directory",
                 crate::hevc_wasm::archive_name()
-            );
-        }
-        if let Some(decoders) = &config.hp_decoders {
-            anyhow::ensure!(
-                cfg!(windows),
-                "[hp_decoders] is for a gateway on Windows, which has no library folder of \
-                 its own. Here the decoders are found by the system loader's search. Remove \
-                 the table."
-            );
-            anyhow::ensure!(
-                !cfg!(feature = "apple-hp-media-static"),
-                "[hp_decoders] names folders to load the decoders from, and this build links \
-                 its own. Remove the table."
-            );
-            let Some(dir) = &decoders.ffmpeg_dir else {
-                anyhow::bail!(
-                    "[hp_decoders] names no folder — set ffmpeg_dir, or leave the table out \
-                     for the decoder found on PATH"
-                );
-            };
-            // Absolute, because a DLL loaded by a relative path is looked for
-            // from wherever the gateway happened to be started.
-            anyhow::ensure!(
-                dir.is_absolute(),
-                "[hp_decoders].ffmpeg_dir must be the folder's whole path, drive included"
             );
         }
         for target in &config.targets {
@@ -1910,6 +1858,22 @@ impl ConfigFile {
                  encoder's bitrate, and no session there has sound to encode. Remove the key.",
                 target.name
             );
+            // The video keys tune the VP9 encoded here, and wlshare's. A High
+            // Performance Mac's picture is always passed as it came, the Mac's own
+            // rate controller behind it, so they could not do anything there.
+            let video = !target.media_stream();
+            anyhow::ensure!(
+                target.video_quality.is_none() || video,
+                "target {:?} is {kind} and sets video_quality — it is the VP9's dial, and \
+                 the Mac's picture there is always passed as it came. Remove the key.",
+                target.name
+            );
+            anyhow::ensure!(
+                target.render_adaptive.is_none() || video,
+                "target {:?} is {kind} and sets render_adaptive — it walks the VP9's dial, \
+                 and the Mac's picture there is always passed as it came. Remove the key.",
+                target.name
+            );
             if let Some(kbps) = target.audio_bitrate {
                 anyhow::ensure!(
                     (6..=510).contains(&kbps),
@@ -2030,7 +1994,6 @@ impl ConfigFile {
             dev_hostname: None,
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
-            hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
 
@@ -2143,7 +2106,6 @@ impl ConfigFile {
                 .context("invalid [server].dev_subdomain")?,
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
-            hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
 }
@@ -2927,41 +2889,8 @@ mod tests {
     fn neither_a_chroma_nor_a_vp9_decoder_switch_is_configured() {
         assert!(parse_target("render_chroma = \"444\"").is_err());
         assert!(ConfigFile::parse(&format!("[vp9_wasm]\nenabled = true\n{}", minimal())).is_err());
-    }
-
-    /// `[hp_decoders]` is Windows': a gateway there names the folder its decoder
-    /// is loaded from, a whole path. Every other gateway refuses the table, its
-    /// loader having a search of its own.
-    #[test]
-    fn hp_decoders_names_whole_folders_on_windows_alone() {
-        let parse = |table: &str| ConfigFile::parse(&format!("{table}\n{}", minimal()));
-        assert_eq!(
-            parse("").unwrap().resolve().unwrap().hp_decoders,
-            HpDecoders::default(),
-            "no table names no folder"
-        );
-        #[cfg(not(windows))]
-        {
-            let err = parse("[hp_decoders]\nffmpeg_dir = \"/opt/ffmpeg/bin\"").expect_err("not Windows");
-            assert!(format!("{err:#}").contains("on Windows"), "{err:#}");
-        }
-        #[cfg(all(windows, not(feature = "apple-hp-media-static")))]
-        {
-            assert_eq!(
-                parse("[hp_decoders]\nffmpeg_dir = 'C:\\ffmpeg\\bin'").unwrap().resolve().unwrap().hp_decoders,
-                HpDecoders { ffmpeg_dir: Some(PathBuf::from(r"C:\ffmpeg\bin")) }
-            );
-            for (bad, says) in [
-                ("", "names no folder"),
-                ("ffmpeg_dir = 'ffmpeg\\bin'", "[hp_decoders].ffmpeg_dir"),
-                ("ffmpeg_dir = '\\ffmpeg'", "[hp_decoders].ffmpeg_dir"),
-                ("fdk_aac_dir = 'C:\\fdk'", "fdk_aac_dir"),
-                ("dir = 'C:\\ffmpeg\\bin'", "dir"),
-            ] {
-                let err = parse(&format!("[hp_decoders]\n{bad}")).expect_err(bad);
-                assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
-            }
-        }
+        // Nor where a High Performance Mac's decoder is: the gateway has none.
+        assert!(ConfigFile::parse(&format!("[hp_decoders]\nffmpeg_dir = \"/opt/ffmpeg\"\n{}", minimal())).is_err());
     }
 
     /// The keys are checked as written, enabled or not: a disabled table is still a
@@ -3540,10 +3469,11 @@ mod tests {
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
     }
 
-    /// The Mac's stream is passed in a session started with the passthrough and in
-    /// no other, whatever the browser decodes: a browser that cannot take it is not
-    /// served that session, rather than sent another. It is the media stream's
-    /// choice, offered by no target without one.
+    /// The Mac's stream is passed in the codec the session was started with,
+    /// whatever the browser decodes: a browser that cannot take it is not served
+    /// that session, rather than sent another. A session that names neither is
+    /// refused, since the gateway encodes no picture of the Mac's. It is the media
+    /// stream's choice, offered by no target without one.
     #[test]
     fn a_high_performance_session_passes_the_macs_stream_where_it_was_chosen() {
         let mac = |subtype: &str| {
@@ -3566,10 +3496,15 @@ mod tests {
             hp.render_plan(passed, takes).describe(),
             "the Mac's HEVC, passed through"
         );
-        assert!(!hp.render_plan(Choices::default(), takes).apple_media, "only the choice passes it");
+        assert_eq!(hp.accepts(passed), Ok(()));
+        assert_eq!(
+            hp.accepts(Choices::default()),
+            Err(NotOffered { target: "mac".to_owned(), choice: "a picture encoded here" }),
+            "neither stream named"
+        );
+        assert!(!hp.offers().vp9, "no VP9 to choose an encoder for");
         assert_eq!(hp.beyond(passed, takes), None);
         assert_eq!(hp.beyond(passed, declines), Some(Passthrough::AppleMedia));
-        assert_eq!(hp.beyond(Choices::default(), declines), None, "VP9 is for every browser");
 
         // The Mac's H.264 is the other stream to pass, and no browser is asked
         // whether it decodes it.
@@ -3585,7 +3520,11 @@ mod tests {
             Err(NotOffered { target: "mac".to_owned(), choice: "a passthrough" }),
             "another type's stream"
         );
-        assert_eq!(hp.render_summary(), "video q90 · libvpx · adaptive", "the file chooses none");
+        assert_eq!(
+            hp.render_summary(),
+            "the Mac's HEVC or the Mac's H.264, passed through",
+            "the file chooses neither"
+        );
 
         // The sound comes with the picture, chosen or not, so it is not offered.
         assert!(!hp.offers().audio);
@@ -3598,12 +3537,12 @@ mod tests {
         // One tile is asked of a Mac whose picture is passed, and of no other.
         assert_eq!(hp.accepts(Choices { whole: true, ..passed }), Ok(()));
         assert_eq!(hp.accepts(Choices { whole: true, ..h264 }), Ok(()));
-        assert_eq!(
-            hp.accepts(Choices { whole: true, ..Choices::default() }),
-            Err(NotOffered { target: "mac".to_owned(), choice: "a picture in one tile" })
-        );
 
         let standard = mac("ard");
+        assert_eq!(
+            standard.accepts(Choices { whole: true, ..Choices::default() }),
+            Err(NotOffered { target: "mac".to_owned(), choice: "a picture in one tile" })
+        );
         assert_eq!(standard.offers().passthrough, []);
         assert_eq!(
             standard.accepts(passed),
@@ -4087,12 +4026,12 @@ vnc_password = \"x\"")).unwrap();
         )
         .unwrap();
         let hp = &hp.targets[0];
+        assert!(!hp.offers().vp9);
         assert_eq!(
             hp.accepts(Choices { passthrough: Some(Passthrough::AppleMedia), ..native }),
             refused("mac"),
             "a passed picture"
         );
-        assert_eq!(hp.accepts(native), if NATIVE_VP9 { Ok(()) } else { refused("mac") }, "the VP9 encoded here");
 
         let rendered = format!(
             "{:#}",
@@ -4305,8 +4244,9 @@ vnc_password = \"x\"")).unwrap();
         assert!(!mac.offers().audio, "so there is nothing to choose");
 
         // The sound is the Mac's own AAC-ELD, so the Opus encoder's keys have
-        // nothing to tune.
-        for key in ["audio_bitrate = 128", "audio_adaptive = false"] {
+        // nothing to tune, and the picture the Mac's HEVC or H.264, so nor have
+        // the VP9's.
+        for key in ["audio_bitrate = 128", "audio_adaptive = false", "video_quality = 60", "render_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");

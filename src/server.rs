@@ -680,12 +680,6 @@ struct TargetInfo {
     /// The streams the target can pass untouched, in the picker's order: none,
     /// an RDP host's pipeline, or a High Performance Mac's HEVC and its H.264.
     passthroughs: &'static [crate::config::Passthrough],
-    /// Whether this gateway can serve the target's picture encoded here, as VP9.
-    /// Not an RDP host's pipeline, which the gateway never composes and passes in
-    /// every session, so a browser that cannot take it cannot start the target;
-    /// and not a High Performance Mac's on a host without the library that
-    /// decodes its picture, where the picker greys that choice.
-    encoded: bool,
     /// Whether where the second virtual display sits is a choice.
     placement: bool,
     /// Whether how the host draws the graphics pipeline, high quality or adaptive
@@ -710,13 +704,8 @@ impl From<(u16, u16)> for Points {
 }
 
 impl TargetInfo {
-    /// `apple_decoders` is whether this gateway's host can decode a Mac's
-    /// picture, and `page_hevc` whether it serves the page's HEVC decoder.
-    fn of(
-        target: &crate::config::TargetConfig,
-        apple_decoders: bool,
-        page_hevc: bool,
-    ) -> Self {
+    /// `page_hevc` is whether this gateway serves the page's HEVC decoder.
+    fn of(target: &crate::config::TargetConfig, page_hevc: bool) -> Self {
         let offers = target.offers();
         Self {
             name: target.name.clone(),
@@ -730,10 +719,6 @@ impl TargetInfo {
             audio: offers.audio,
             software: target.software(page_hevc),
             passthroughs: offers.passthrough,
-            // An RDP host's pipeline, where it is on, passes in every session; a High
-            // Performance Mac's picture is decoded only on a host that can.
-            encoded: offers.passthrough.iter().all(|passthrough| passthrough.chosen())
-                && (!target.media_stream() || apple_decoders),
             placement: offers.placement,
             pipeline: offers.pipeline,
             vp9: offers.vp9,
@@ -744,17 +729,9 @@ impl TargetInfo {
 /// The list of target profiles the browser may pick from the post-login picker,
 /// each with the choices its type offers there. Non-secret info only — credentials
 /// never leave the server.
-///
-/// The Mac's HEVC decoder is looked for here, where a High Performance target is
-/// listed, so the picker can say before Start what the engine would otherwise say
-/// after it. Asked on every listing rather than remembered: a library installed
-/// while the gateway runs is found by the next one.
 async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>> {
-    let targets = &state.config.targets;
-    let apple_decoders = !targets.iter().any(crate::config::TargetConfig::media_stream)
-        || crate::vnc::apple_decoders().is_ok();
     let page_hevc = state.hevc_decoder.is_some();
-    Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders, page_hevc)).collect())
+    Json(state.config.targets.iter().map(|target| TargetInfo::of(target, page_hevc)).collect())
 }
 
 #[derive(Deserialize)]
@@ -1122,7 +1099,6 @@ mod tests {
             dev_hostname: dev_hostname.map(str::to_owned),
             meter: None,
             hevc_wasm: None,
-            hp_decoders: Default::default(),
         }
     }
 
@@ -1431,7 +1407,6 @@ mod tests {
             dev_hostname: None,
             meter: None,
             hevc_wasm: None,
-            hp_decoders: Default::default(),
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1475,9 +1450,9 @@ mod tests {
         ) + &target("two", "protocol = \"rdp\"\nvirtual_displays = 2", "192.0.2.11")
             + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12");
         let targets = crate::config::ConfigFile::parse(&text).expect("the targets parse").targets;
-        let entry = |name: &str, apple_decoders| {
+        let entry = |name: &str| {
             let target = targets.iter().find(|t| t.name == name).unwrap();
-            serde_json::to_string(&TargetInfo::of(target, apple_decoders, Default::default())).unwrap()
+            serde_json::to_string(&TargetInfo::of(target, false)).unwrap()
         };
 
         // Standard mode offers nothing but the VP9's encoder, in a build with the
@@ -1485,49 +1460,44 @@ mod tests {
         // stream.
         let native = cfg!(feature = "native-vp9");
         assert_eq!(
-            entry("mac", true),
+            entry("mac"),
             format!(
-                r#"{{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":[],"encoded":true,"placement":false,"pipeline":false,"vp9":{native}}}"#
+                r#"{{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":[],"placement":false,"pipeline":false,"vp9":{native}}}"#
             )
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
-            entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"encoded":false,"placement":false,"pipeline":true,"vp9":false}"#
+            entry("win"),
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"placement":false,"pipeline":true,"vp9":false}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
-        // picture is, in either codec, and can only be passed on a host without
-        // its decoders.
-        let fast = entry("fast", true);
+        // picture is, in either codec, and is always passed, so it has no VP9 to
+        // choose an encoder for.
+        let fast = entry("fast");
         assert!(
-            fast.ends_with(&format!(
-                r#""resize":true,"size":null,"defaultSize":{{"w":1440,"h":900}},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"encoded":true,"placement":false,"pipeline":false,"vp9":{native}}}"#
-            )),
+            fast.ends_with(
+                r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"placement":false,"pipeline":false,"vp9":false}"#
+            ),
             "{fast}"
         );
-        assert!(entry("fast", false).ends_with(&format!(r#""encoded":false,"placement":false,"pipeline":false,"vp9":{native}}}"#)));
-        // An RDP host's pipeline, on unless `egfx` turns it off, is passed in
-        // every session, whatever this host decodes, so it has no VP9 to choose
-        // an encoder for.
-        assert!(entry("win", false).ends_with(r#""encoded":false,"placement":false,"pipeline":true,"vp9":false}"#));
         // Where the second display sits is offered by a host asked for two.
-        assert!(entry("two", true).ends_with(r#""placement":true,"pipeline":true,"vp9":false}"#));
+        assert!(entry("two").ends_with(r#""placement":true,"pipeline":true,"vp9":false}"#));
         // wlshare's own encoder is a choice in any build.
-        assert!(entry("sway", true).ends_with(r#""pipeline":false,"vp9":true}"#));
+        assert!(entry("sway").ends_with(r#""pipeline":false,"vp9":true}"#));
         // The page's HEVC decoder is a choice where the gateway has it and the
         // target has a Mac's picture to pass.
-        assert!(entry("fast", true).contains(r#""software":false,"#));
+        assert!(entry("fast").contains(r#""software":false,"#));
         let with = |name: &str| {
             let target = targets.iter().find(|target| target.name == name).unwrap();
-            serde_json::to_string(&TargetInfo::of(target, true, true)).unwrap()
+            serde_json::to_string(&TargetInfo::of(target, true)).unwrap()
         };
         assert!(with("win").contains(r#""software":false,"#));
         assert!(with("fast").contains(r#""software":true,"#));
         // wlshare's sound is offered, and a target with no sound to choose
         // offers none.
-        assert!(entry("sway", true).contains(r#""audio":true,"#));
-        assert!(entry("mac", true).contains(r#""audio":false,"#));
+        assert!(entry("sway").contains(r#""audio":true,"#));
+        assert!(entry("mac").contains(r#""audio":false,"#));
     }
 
     /// The exact `/api/config` body. Pinned because the login screen reads the

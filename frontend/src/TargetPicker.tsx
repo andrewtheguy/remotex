@@ -337,7 +337,7 @@ export default function TargetPicker({
                         )
                       }
                     />
-                    {/* Which encoder codes the VP9, while the picture is
+                    {/* Which encoder codes the VP9, where the picture is
                         VP9. */}
                     <EncoderChoice
                       target={t.name}
@@ -395,9 +395,9 @@ export default function TargetPicker({
   );
 }
 
-// How a High Performance Mac's picture reaches this browser: one of its own
-// streams passed through, or VP9 encoded by the gateway. One that cannot be had
-// here is greyed, with the reason. Nothing on a target with no such choice.
+// How a High Performance Mac's picture reaches this browser: which of its own
+// streams is passed through. One that cannot be had here is greyed, with the
+// reason. Nothing on a target with no such choice.
 function PictureChoice({
   target,
   pictures,
@@ -409,7 +409,7 @@ function PictureChoice({
   pictures: PictureOption[] | null;
   chosen: Choices["passthrough"];
   locked: boolean;
-  choose: (passthrough: Choices["passthrough"]) => void;
+  choose: (passthrough: PictureOption["value"]) => void;
 }) {
   if (!pictures) {
     return null;
@@ -419,7 +419,7 @@ function PictureChoice({
       <legend>Picture</legend>
       {pictures.map((picture) => (
         <label
-          key={picture.value ?? "encoded"}
+          key={picture.value}
           className={`picker-option${picture.disabled ? " picker-option-unavailable" : ""}`}
         >
           <input

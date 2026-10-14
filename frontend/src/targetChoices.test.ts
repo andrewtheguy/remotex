@@ -48,7 +48,6 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     audio: false,
     software: false,
     passthroughs: [],
-    encoded: true,
     placement: false,
     pipeline: false,
     vp9: false,
@@ -62,7 +61,6 @@ const RDP = target({
   resize: true,
   audio: true,
   passthroughs: ["rdp-graphics"],
-  encoded: false,
   pipeline: true,
 });
 const HIGH_PERFORMANCE = target({
@@ -198,16 +196,15 @@ test("only what the target's type offers has a row", () => {
   assert.equal(standard.blocked, null);
 });
 
-test("a Mac's picture is its HEVC passed, VP9 encoded here, or its H.264 passed", () => {
+test("a Mac's picture is its HEVC passed or its H.264 passed", () => {
   const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
   assert.deepEqual(pictures(options), [
     ["apple-media", false],
-    [null, false],
     ["apple-h264", false],
   ]);
   assert.equal(options.choices.passthrough, "apple-media", "the first");
   assert.equal(options.passed, null);
-  for (const chosen of ["apple-media", null, "apple-h264"] as const) {
+  for (const chosen of ["apple-media", "apple-h264"] as const) {
     const again = targetOptions(
       HIGH_PERFORMANCE,
       { passthrough: chosen },
@@ -215,13 +212,12 @@ test("a Mac's picture is its HEVC passed, VP9 encoded here, or its H.264 passed"
     );
     assert.equal(again.choices.passthrough, chosen);
   }
-  // Something this page never wrote there is not a choice.
-  const stale = targetOptions(
-    HIGH_PERFORMANCE,
-    { passthrough: true as never },
-    ABLE,
-  );
-  assert.equal(stale.choices.passthrough, "apple-media");
+  // Something this page never wrote there is not a choice, and nor is the
+  // picture encoded here a Mac's once had.
+  for (const stale of [true as never, null]) {
+    const again = targetOptions(HIGH_PERFORMANCE, { passthrough: stale }, ABLE);
+    assert.equal(again.choices.passthrough, "apple-media");
+  }
 });
 
 test("no sound is taken until somebody ticks it", () => {
@@ -300,24 +296,16 @@ test("the VP9 encoder is libvpx until somebody chooses the native one", () => {
   const unoffered = targetOptions(target({}), { vp9: "native" }, ABLE);
   assert.equal(unoffered.encoders, null);
   assert.equal(unoffered.choices.vp9, "libvpx");
-  // A Mac's passed picture is no VP9: the row is there for the picture encoded here.
-  const mac = { ...HIGH_PERFORMANCE, vp9: true };
-  const passed = targetOptions(mac, { vp9: "native" }, ABLE);
+  // A Mac's passed picture is no VP9, so the gateway offers no encoder for it.
+  const passed = targetOptions(HIGH_PERFORMANCE, { vp9: "native" }, ABLE);
   assert.equal(passed.choices.passthrough, "apple-media");
   assert.equal(passed.encoders, null);
   assert.equal(passed.choices.vp9, "libvpx");
-  const encoded = targetOptions(
-    mac,
-    { passthrough: null, vp9: "native" },
-    ABLE,
-  );
-  assert.equal(encoded.encoders?.length, 2);
-  assert.equal(encoded.choices.vp9, "native");
 });
 
 test("High Performance's sound has no row and is always carried", () => {
   const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
-  assert.equal(options.pictures?.length, 3);
+  assert.equal(options.pictures?.length, 2);
   assert.equal(options.soundRow, null);
   assert.equal(options.choices.audio, "off");
   assert.equal(options.sound, true);
@@ -366,6 +354,8 @@ test("a browser with no audio decoder is offered FLAC alone", () => {
 
 test("a Mac's HEVC this browser cannot take is greyed, with the reason", () => {
   // Remembered from a browser that could: still not sent from one that cannot.
+  // The H.264 is what is left, which no browser is asked about: the target
+  // always starts.
   const options = targetOptions(
     HIGH_PERFORMANCE,
     { passthrough: "apple-media" },
@@ -373,40 +363,15 @@ test("a Mac's HEVC this browser cannot take is greyed, with the reason", () => {
   );
   assert.deepEqual(pictures(options), [
     ["apple-media", true],
-    [null, false],
     ["apple-h264", false],
   ]);
   assert.match(options.pictures?.[0].note ?? "", /does not decode/);
-  assert.equal(options.choices.passthrough, null, "the first it can have");
-  assert.equal(options.blocked, null, "the target still starts, encoded");
-});
-
-test("a gateway that cannot decode the Mac's picture can only pass it", () => {
-  const only = { ...HIGH_PERFORMANCE, encoded: false };
-  const able = targetOptions(only, { passthrough: null }, ABLE);
-  assert.deepEqual(pictures(able), [
-    ["apple-media", false],
-    [null, true],
-    ["apple-h264", false],
-  ]);
-  assert.match(
-    able.pictures?.[1].note ?? "",
-    /cannot decode the Mac's picture/,
+  assert.equal(
+    options.choices.passthrough,
+    "apple-h264",
+    "the first it can have",
   );
-  assert.equal(able.choices.passthrough, "apple-media");
-  assert.equal(able.passed, null);
-  assert.equal(able.blocked, null);
-
-  // Where the browser cannot take the HEVC either, the H.264 is what is left,
-  // which no browser is asked about: the target always starts.
-  const unable = targetOptions(only, undefined, UNABLE);
-  assert.deepEqual(pictures(unable), [
-    ["apple-media", true],
-    [null, true],
-    ["apple-h264", false],
-  ]);
-  assert.equal(unable.choices.passthrough, "apple-h264");
-  assert.equal(unable.blocked, null);
+  assert.equal(options.blocked, null);
 });
 
 test("an RDP host's pipeline is always passed, and needs a page that composes it", () => {
@@ -547,7 +512,6 @@ test("decoding in this page is no option: the passthrough is all that is chosen"
     );
     assert.deepEqual(pictures(options), [
       ["apple-media", false],
-      [null, false],
       ["apple-h264", false],
     ]);
     assert.equal(options.choices.passthrough, "apple-media");
@@ -572,6 +536,6 @@ test("a Mac's picture only this page decodes can be passed", () => {
       abilities,
     );
     assert.equal(greyed.pictures?.[0].disabled, true);
-    assert.equal(greyed.choices.passthrough, null);
+    assert.equal(greyed.choices.passthrough, "apple-h264");
   }
 });

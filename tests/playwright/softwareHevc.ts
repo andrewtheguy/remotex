@@ -8,7 +8,8 @@
 // not decode HEVC Range Extensions 4:4:4. So the test asks the browser itself, apart
 // from the page, and asserts the decision that answer calls for
 // (`expectDecodedAsTheBrowserSays`): the browser's own decoder where it says yes,
-// and otherwise the page's where the gateway serves it and VP9 where it does not.
+// and otherwise the page's where the gateway serves it, and where it does not the
+// Mac's H.264, which no browser is asked about.
 // It runs in two browsers, a file each, so one machine can see both sides:
 // software-hevc-chrome.spec.ts, the installed Google Chrome (`channel: "chrome"`;
 // Playwright's bundled Chromium has no HEVC decoder at all), and
@@ -213,10 +214,10 @@ async function ownDecoderTakes(page: Page): Promise<boolean> {
   }, MAC_HEVC);
 }
 
-/// Start the target with its picture passed where this browser can take it, and
+/// Start the target with its HEVC passed where this browser can take it, and
 /// assert the decoder its own answer calls for: its own where it takes the HEVC,
 /// otherwise the page's where the gateway serves it, and otherwise none, the
-/// passthrough greyed and the session sent VP9.
+/// HEVC greyed and the session passed the Mac's H.264.
 export async function expectDecodedAsTheBrowserSays(page: Page): Promise<void> {
   const seen = watchSession(page);
   const native = await ownDecoderTakes(page);
@@ -227,10 +228,10 @@ export async function expectDecodedAsTheBrowserSays(page: Page): Promise<void> {
       ? "the browser's own"
       : SERVES_DECODER
         ? "the page's"
-        : "none: the session takes VP9",
+        : "none: the session takes the Mac's H.264",
   });
   await logInAndConnectTo(page, HEVC_TARGET ?? "", "", {
-    passthrough: passed ? "apple-media" : null,
+    passthrough: passed ? "apple-media" : "apple-h264",
   });
 
   expect(await offered(page)).toBe(SERVES_DECODER);
@@ -239,15 +240,17 @@ export async function expectDecodedAsTheBrowserSays(page: Page): Promise<void> {
   // Stated whatever the browser's own answer: keeping the stream in that decoder
   // is the page's choice and not its only way.
   expect(seen.pageHevc, "this page's").toBe("true");
-  expect(seen.connects.at(-1)?.passthrough).toBe(passed ? "apple-media" : null);
+  expect(seen.connects.at(-1)?.passthrough).toBe(
+    passed ? "apple-media" : "apple-h264",
+  );
 
   if (!passed) {
     await expect
       .poll(() => seen.formats.length, { timeout: 20_000 })
       .toBeGreaterThan(0);
     for (const format of seen.formats) {
-      expect(format.passthrough).toBe(false);
-      expect(format.decode).toMatch(/^vp09\./);
+      expect(format.passthrough).toBe(true);
+      expect(format.decode).toMatch(/^avc1\./);
     }
     expect(seen.decoderFiles).toEqual([]);
     return;

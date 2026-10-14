@@ -148,8 +148,9 @@ async def main() -> int:
         choices=["apple-media", "apple-h264"],
         help="start the session with the target's own stream passed, by its name: a "
         "High Performance Mac's HEVC (apple-media, the default, to a client that states "
-        "--apple-media) or its H.264 (apple-h264). An RDP host's graphics pipeline "
-        "passes in every session and is not named",
+        "--apple-media) or its H.264 (apple-h264), one of which such a target's session "
+        "has to name. An RDP host's graphics pipeline passes in every session and is not "
+        "named",
     )
     parser.add_argument(
         "--placement",

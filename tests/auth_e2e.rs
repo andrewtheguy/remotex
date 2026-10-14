@@ -22,7 +22,6 @@ async fn spawn_app() -> SocketAddr {
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
-        hp_decoders: Default::default(),
         targets: vec![TargetConfig {
             name: "unreachable".to_owned(),
             protocol: Protocol::Vnc,

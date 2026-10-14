@@ -1185,7 +1185,6 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
-        hp_decoders: Default::default(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1241,9 +1240,9 @@ fn mac_target(port: u16) -> TargetConfig {
 }
 
 /// What a fake-Mac session is started with: the window sizing the virtual display,
-/// and the picture passed to the browser [`connect_mac_ws`] stands in for, so the
-/// session needs no decoder and a host without FFmpeg drives it too;
-/// the fake names no ports for the stream anyway.
+/// and the picture passed as its HEVC to the browser [`connect_mac_ws`] stands in
+/// for, as a High Performance session passes one of the Mac's streams; the fake
+/// names no ports for the stream anyway.
 const MAC_CHOICES: &str = r#"{"size":"window","passthrough":"apple-media"}"#;
 
 /// A session started with nothing but the window sizing the desktop.

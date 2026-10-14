@@ -12,13 +12,11 @@
 //! 26.6 and is recorded in `docs/apple-vnc-889.md` ("The media stream: High
 //! Performance's picture and sound").
 //!
-//! A target takes this path with `subtype = "ard-high-performance"`. Everything but
-//! the picture's decoder — offers, replies, SRTP, depacketizing, the receiver, and
-//! passing the stream on — is the gateway's own; the decoder is FFmpeg's
-//! libavcodec, loaded from the system (`crate::libav`). A gateway whose host
-//! lacks it ends a session that does not pass the picture before it dials the
-//! Mac. The sound is never decoded here: its AAC-ELD units go to every browser as
-//! they came ([`PASSED_SOUND`]).
+//! A target takes this path with `subtype = "ard-high-performance"`. Offers,
+//! replies, SRTP, depacketizing, the receiver, and passing the stream on are the
+//! gateway's own, and nothing here decodes: the picture's HEVC or H.264 access
+//! units ([`PassedUnit`]) and the sound's AAC-ELD units ([`PASSED_SOUND`]) go to
+//! every browser as they came.
 //!
 //! The offer is two AVConference negotiation blobs, rebuilt field by field from the
 //! ones Apple's client produced ([`audio_offer_blob`], [`video_offer_blob`]). The
@@ -185,9 +183,13 @@ const CODEC_ENTRIES: &[(u64, u64, Option<u64>)] = &[
 ];
 
 /// The strips Apple's own `tilesPerFrame` of 4 codes a display in, which a stream
-/// decoded here is offered. A stream passed to the browser is offered 1: one
-/// picture of the whole display, which is what a `VideoDecoder` there shows.
+/// is offered where the display's height allows. One asked for whole
+/// ([`crate::config::Choices::whole`]) is offered 1: one picture of the whole
+/// display.
 const STRIPS: usize = 4;
+
+/// Every strip's bit.
+const ALL_STRIPS: u8 = (1 << STRIPS) - 1;
 
 /// The rows of each strip of a display `height` rows high: a quarter of them,
 /// in whole rows, rounded up to a multiple of 16. The quarter is rounded down
@@ -2149,367 +2151,12 @@ fn h264_in_decoding_order(sps: &[u8]) -> Option<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// The decoder
-// ---------------------------------------------------------------------------
-
-/// A decoded picture, as packed RGB888 — what [`crate::encode::VideoSink`] takes.
-pub struct Picture {
-    pub size: (u16, u16),
-    pub rgb: Vec<u8>,
-}
-
-/// The decoder's slice threads. The Mac's stream sets
-/// `entropy_coding_sync_enabled_flag`, so a picture's CTU rows decode in parallel.
-/// Replaying captured 1600×1000 pictures on a six-core host, one thread took
-/// 14–23 ms a picture, too slow for 60 a second, and four took 7–14 ms. Four,
-/// since a larger display has more rows to share out. Frame threads would hold
-/// each picture back by one per thread, so there are none. These threads take no
-/// part in a picture VideoToolbox decodes.
-const DECODE_THREADS: &std::ffi::CStr = c"4";
-
-/// FFmpeg's HEVC decoder, one context for the session: HEVC access units in,
-/// pictures out. libavcodec is the system's or, with `apple-hp-media-static`, the
-/// one linked in (`crate::libav`).
-///
-/// On macOS the context is handed a VideoToolbox device, and FFmpeg's VideoToolbox
-/// hwaccel gives each picture to VideoToolbox, which for HEVC is asked to enable
-/// its hardware decoder, not required to use it. A context with a device is
-/// offered VideoToolbox's pictures first by FFmpeg's own format choice, which
-/// asks again without them when the hwaccel fails to start on a stream, so a
-/// stream VideoToolbox will not take, or a Mac with no device to open, decodes on
-/// the CPU. A picture VideoToolbox fails once started is an error, not decoded on
-/// the CPU instead. Either way the pictures are the same: HEVC decoding is exact.
-struct Hevc {
-    api: &'static crate::libav::Api,
-    ctx: *mut std::ffi::c_void,
-    packet: *mut crate::libav::Packet,
-    frame: *mut crate::libav::Frame,
-    /// A VideoToolbox picture, copied out of its pixel buffer.
-    copy: *mut crate::libav::Frame,
-    /// The pixel formats read, by this libavutil's numbers.
-    formats: PixelFormats,
-    /// The access unit as an Annex B byte stream, kept between units.
-    stream: Vec<u8>,
-    /// What decoded the last picture, logged whenever it changes.
-    decoded_by: Option<DecodedBy>,
-}
-
-/// The pixel formats a picture comes in, looked up by name.
-#[derive(Clone, Copy)]
-struct PixelFormats {
-    yuv444p: std::ffi::c_int,
-    yuv420p: std::ffi::c_int,
-    nv24: std::ffi::c_int,
-    nv12: std::ffi::c_int,
-    videotoolbox: std::ffi::c_int,
-}
-
-/// What decoded a picture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DecodedBy {
-    VideoToolbox,
-    Software,
-}
-
-// SAFETY: the context, packet and frame are created, used and freed on one thread
-// at a time — the decoder thread that owns this value. libavcodec's slice threads
-// work only inside a call to it.
-unsafe impl Send for Hevc {}
-
-impl Hevc {
-    /// `hardware` hands the pictures to VideoToolbox where this is a Mac that has
-    /// it; without it, or anywhere else, they decode on the CPU.
-    fn new(hardware: bool) -> anyhow::Result<Self> {
-        let api = crate::libav::api()?;
-        // SAFETY: every allocation is checked before use, and `Drop` frees each of
-        // them, taking null for any that failed. Names are NUL-terminated.
-        unsafe {
-            // FFmpeg would print its complaints about a damaged unit to stderr,
-            // outside the gateway's log. The failed call is reported instead.
-            (api.av_log_set_level)(crate::libav::LOG_QUIET);
-            let codec = (api.avcodec_find_decoder_by_name)(c"hevc".as_ptr());
-            anyhow::ensure!(!codec.is_null(), "libavcodec has no HEVC decoder");
-            let format = |name: &std::ffi::CStr| (api.av_get_pix_fmt)(name.as_ptr());
-            let decoder = Self {
-                api,
-                ctx: (api.avcodec_alloc_context3)(codec),
-                packet: (api.av_packet_alloc)(),
-                frame: (api.av_frame_alloc)(),
-                copy: (api.av_frame_alloc)(),
-                formats: PixelFormats {
-                    yuv444p: format(c"yuv444p"),
-                    yuv420p: format(c"yuv420p"),
-                    nv24: format(c"nv24"),
-                    nv12: format(c"nv12"),
-                    videotoolbox: format(c"videotoolbox_vld"),
-                },
-                stream: Vec::new(),
-                decoded_by: None,
-            };
-            anyhow::ensure!(
-                !decoder.ctx.is_null()
-                    && !decoder.packet.is_null()
-                    && !decoder.frame.is_null()
-                    && !decoder.copy.is_null(),
-                "libavcodec could not allocate a decoder"
-            );
-            if hardware {
-                attach_videotoolbox(api, decoder.ctx);
-            }
-            // The Mac codes with wavefront parallel processing, so its rows decode
-            // on slice threads. See DECODE_THREADS. A unit that does not decode
-            // fails its call rather than being skipped in silence, so the receive
-            // task asks for a keyframe.
-            for (name, value) in [(c"threads", DECODE_THREADS), (c"thread_type", c"slice"), (c"err_detect", c"+explode")] {
-                let err = (api.av_opt_set)(decoder.ctx, name.as_ptr(), value.as_ptr(), 0);
-                anyhow::ensure!(
-                    err >= 0,
-                    "libavcodec refused {}={}: {}",
-                    name.to_string_lossy(),
-                    value.to_string_lossy(),
-                    text(api, err)
-                );
-            }
-            let err = (api.avcodec_open2)(decoder.ctx, codec, std::ptr::null_mut());
-            anyhow::ensure!(err >= 0, "libavcodec could not open the HEVC decoder: {}", text(api, err));
-            Ok(decoder)
-        }
-    }
-
-    /// Decode one access unit, returning the picture it completed, if any.
-    fn decode(&mut self, unit: &AccessUnit) -> anyhow::Result<Option<Picture>> {
-        use std::ffi::c_int;
-
-        let api = self.api;
-        self.stream.clear();
-        for nal in unit {
-            self.stream.extend_from_slice(&[0, 0, 0, 1]);
-            self.stream.extend_from_slice(nal);
-        }
-        let size = c_int::try_from(self.stream.len()).context("an access unit too large to decode")?;
-        // SAFETY: a live context, packet and frame. The packet owns no buffer, so
-        // `avcodec_send_packet` copies the stream, padded, before it returns.
-        unsafe {
-            (*self.packet).data = self.stream.as_mut_ptr();
-            (*self.packet).size = size;
-            let err = (api.avcodec_send_packet)(self.ctx, self.packet);
-            (*self.packet).data = std::ptr::null_mut();
-            (*self.packet).size = 0;
-            anyhow::ensure!(err >= 0, "libavcodec refused an access unit: {}", text(api, err));
-            let mut picture = None;
-            loop {
-                let err = (api.avcodec_receive_frame)(self.ctx, self.frame);
-                if err == crate::libav::EAGAIN {
-                    break;
-                }
-                anyhow::ensure!(err >= 0, "libavcodec: {}", text(api, err));
-                // A later picture of the same unit replaces an earlier one: only
-                // the newest is shown. The decoder sets the context's range from
-                // the stream's parameters, which a copy out of VideoToolbox does
-                // not carry.
-                let mut range = 0;
-                (api.av_opt_get_int)(self.ctx, c"color_range".as_ptr(), 0, &mut range);
-                let decoded_by = if (*self.frame).format == self.formats.videotoolbox {
-                    DecodedBy::VideoToolbox
-                } else {
-                    DecodedBy::Software
-                };
-                let rgb = match decoded_by {
-                    DecodedBy::VideoToolbox => {
-                        let err = (api.av_hwframe_transfer_data)(self.copy, self.frame, 0);
-                        let rgb = if err < 0 {
-                            Err(anyhow::anyhow!("could not copy a VideoToolbox picture out: {}", text(api, err)))
-                        } else {
-                            to_rgb(api, &self.formats, &*self.copy, range)
-                        };
-                        (api.av_frame_unref)(self.copy);
-                        rgb
-                    }
-                    DecodedBy::Software => to_rgb(api, &self.formats, &*self.frame, range),
-                };
-                (api.av_frame_unref)(self.frame);
-                if self.decoded_by != Some(decoded_by) {
-                    match decoded_by {
-                        DecodedBy::VideoToolbox => log::info!("vnc: the Mac's HEVC is decoded by VideoToolbox"),
-                        DecodedBy::Software => log::info!("vnc: the Mac's HEVC is decoded in software"),
-                    }
-                    self.decoded_by = Some(decoded_by);
-                }
-                picture = Some(rgb?);
-            }
-            Ok(picture)
-        }
-    }
-}
-
-/// Give `ctx` a VideoToolbox device, whose pictures FFmpeg then prefers. A Mac
-/// with no device to open, or a libavcodec whose context this cannot place it in,
-/// decodes in software, and says so.
-///
-/// # Safety
-///
-/// `ctx` must be an allocated context of `api`'s libavcodec that has not been
-/// opened.
-#[cfg(target_os = "macos")]
-unsafe fn attach_videotoolbox(api: &crate::libav::Api, ctx: *mut std::ffi::c_void) {
-    let Some(offset) = crate::libav::hw_device_ctx(api) else {
-        // SAFETY: a plain version query.
-        let version = unsafe { (api.avcodec_version)() } >> 16;
-        log::warn!("vnc: libavcodec {version} is not one VideoToolbox is set up on here, so the Mac's HEVC decodes in software");
-        return;
-    };
-    let mut device = std::ptr::null_mut();
-    // SAFETY: `device` is written only on success, and then owned here.
-    let err = unsafe {
-        let kind = (api.av_hwdevice_find_type_by_name)(c"videotoolbox".as_ptr());
-        (api.av_hwdevice_ctx_create)(&mut device, kind, std::ptr::null(), std::ptr::null_mut(), 0)
-    };
-    if err < 0 {
-        log::warn!("vnc: no VideoToolbox device, so the Mac's HEVC decodes in software: {}", text(api, err));
-        return;
-    }
-    // SAFETY: `offset` is `hw_device_ctx`'s place in this libavcodec's context,
-    // which is null until set. The context takes a reference of its own and frees
-    // it with itself; this one is dropped once it has. A failed reference leaves
-    // the context without a device, which decodes in software.
-    unsafe {
-        ctx.byte_add(offset).cast::<*mut std::ffi::c_void>().write((api.av_buffer_ref)(device));
-        (api.av_buffer_unref)(&mut device);
-    }
-}
-
-/// No VideoToolbox off macOS: the pictures decode in software.
-#[cfg(not(target_os = "macos"))]
-unsafe fn attach_videotoolbox(_api: &crate::libav::Api, _ctx: *mut std::ffi::c_void) {}
-
-impl Drop for Hevc {
-    fn drop(&mut self) {
-        // SAFETY: freed exactly once, here; each call takes null and nulls its
-        // pointer.
-        unsafe {
-            (self.api.avcodec_free_context)(&mut self.ctx);
-            (self.api.av_packet_free)(&mut self.packet);
-            (self.api.av_frame_free)(&mut self.frame);
-            (self.api.av_frame_free)(&mut self.copy);
-        }
-    }
-}
-
-fn text(api: &crate::libav::Api, err: std::ffi::c_int) -> String {
-    let mut text = [0 as std::ffi::c_char; crate::libav::ERROR_TEXT];
-    // SAFETY: `av_strerror` writes a NUL-terminated description of any code, known
-    // or not, within the length it is given.
-    unsafe {
-        (api.av_strerror)(err, text.as_mut_ptr(), text.len());
-        std::ffi::CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned()
-    }
-}
-
-/// A decoded picture as packed RGB888. The Mac sends full-range BT.709, 8-bit, at
-/// 4:4:4; 4:2:0 is taken too, in case it ever chooses it. FFmpeg's own pictures are
-/// planar (`yuv444p`, `yuv420p`), and a VideoToolbox one, copied out, is the same
-/// samples semi-planar (`nv24`, `nv12`). `range` is the decoded picture's, which a
-/// copy out of VideoToolbox does not carry.
-///
-/// # Safety
-///
-/// `frame` must be a picture libavcodec just returned, or a copy of one, and has not
-/// yet been unreferenced.
-unsafe fn to_rgb(
-    api: &crate::libav::Api,
-    formats: &PixelFormats,
-    frame: &crate::libav::Frame,
-    range: i64,
-) -> anyhow::Result<Picture> {
-    use yuv::{YuvBiPlanarImage, YuvConversionMode, YuvPlanarImage, YuvRange, YuvStandardMatrix};
-
-    // (format, planar, 4:4:4)
-    let read = [
-        (formats.yuv444p, true, true),
-        (formats.yuv420p, true, false),
-        (formats.nv24, false, true),
-        (formats.nv12, false, false),
-    ];
-    let Some(&(_, planar, full)) = read.iter().find(|(format, ..)| *format == frame.format) else {
-        // SAFETY: a static string for any known format, and null for any other.
-        let name = unsafe { (api.av_get_pix_fmt_name)(frame.format) };
-        let name = if name.is_null() {
-            format!("pixel format {}", frame.format)
-        } else {
-            // SAFETY: non-null, so one of libavutil's static names.
-            unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned()
-        };
-        anyhow::bail!("the Mac sent video as {name}, and only 8-bit 4:4:4 and 4:2:0 are read");
-    };
-    let (width, height) = (frame.width as usize, frame.height as usize);
-    let chroma_rows = if full { height } else { height.div_ceil(2) };
-    let plane = |channel: usize, rows: usize| {
-        let stride = frame.linesize[channel] as usize;
-        // SAFETY: per this function's contract, a decoded plane of `rows` rows of
-        // `stride` bytes each.
-        (unsafe { std::slice::from_raw_parts(frame.data[channel], stride * rows) }, stride as u32)
-    };
-    let range = if range == crate::libav::RANGE_FULL { YuvRange::Full } else { YuvRange::Limited };
-    let mut rgb = vec![0u8; width * height * 3];
-    let stride = width as u32 * 3;
-    let (y_plane, y_stride) = plane(0, height);
-    if planar {
-        let (u_plane, u_stride) = plane(1, chroma_rows);
-        let (v_plane, v_stride) = plane(2, chroma_rows);
-        let image = YuvPlanarImage {
-            y_plane,
-            y_stride,
-            u_plane,
-            u_stride,
-            v_plane,
-            v_stride,
-            width: width as u32,
-            height: height as u32,
-        };
-        if full {
-            yuv::yuv444_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
-        } else {
-            yuv::yuv420_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
-        }
-    } else {
-        let (uv_plane, uv_stride) = plane(1, chroma_rows);
-        let image = YuvBiPlanarImage { y_plane, y_stride, uv_plane, uv_stride, width: width as u32, height: height as u32 };
-        // Balanced: the mode the planar conversions above use.
-        let mode = YuvConversionMode::Balanced;
-        if full {
-            yuv::yuv_nv24_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709, mode)?;
-        } else {
-            yuv::yuv_nv12_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709, mode)?;
-        }
-    }
-    Ok(Picture { size: (width as u16, height as u16), rgb })
-}
-
-// ---------------------------------------------------------------------------
 // The session's media stream
 // ---------------------------------------------------------------------------
 
-/// What the receiver hands the read loop.
-pub enum Pictures {
-    /// The newest decoded picture, to show. A picture is the whole display, so an
-    /// unshown one is simply replaced. `None` after a picture means the receiver has
-    /// stopped.
-    Decoded(tokio::sync::watch::Receiver<Option<std::sync::Arc<Picture>>>),
-    /// Every access unit, in order, to pass to the browser: a unit depends on the
-    /// ones before it, so none is replaced. `None` means the receiver has stopped.
-    Passed(PassedUnits),
-}
-
-/// The sending half of [`Pictures`], which each receiver the stream binds is handed.
-#[derive(Clone)]
-enum Outlet {
-    Decoded(tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>),
-    Passed(PassQueue),
-}
-
 /// Frames the read loop may be behind by in passing them to the browser, a
 /// frame being a picture sent whole or the strips of one timestamp.
-/// Reaching it drops to the next keyframe, as the decoder's queue does: the loop
+/// Reaching it drops to the next keyframe: the loop
 /// waits on the browser's link ([`crate::encode::VideoSink::pass_media`]), so this is
 /// where a link that cannot carry the stream sheds it. Half a second of the virtual
 /// display's 30 Hz ([`vnc_apple::DISPLAY_HZ`]).
@@ -2526,13 +2173,14 @@ struct PassQueue {
     frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-/// The read loop's end of that queue.
+/// The read loop's end of that queue: what the receiver hands it for a display,
+/// every access unit, in order, to pass to the browser. A unit depends on the
+/// ones before it, so none is replaced.
 ///
 /// A strip is passed on saying whether it is the last of its frame, which the
 /// page shows the display at, and nothing in a strip says so: what follows it
 /// does. So a strip is held here until the next unit comes, or [`STRIP_WAIT`]
-/// has passed, as the decoder holds a frame's picture; a frame's fourth strip
-/// is its last, and is not held.
+/// has passed; a frame's fourth strip is its last, and is not held.
 pub struct PassedUnits {
     units: tokio::sync::mpsc::Receiver<Option<PassedUnit>>,
     frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -2634,29 +2282,16 @@ impl PassQueue {
     }
 }
 
-/// What becomes of the pictures a stream receives.
+/// How the Mac's pictures are passed to the browser, as its access units: in
+/// `codec`, which is what the Mac is offered, and in `strips` where the display's
+/// height allows. The page puts the display together from the strips, in its own
+/// decoder or from what the browser's decodes of each. Whole, each picture the
+/// display, only for a session that asked for it so
+/// ([`crate::config::Choices::whole`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Receive {
-    /// Decoded here, from strips where the display's height allows.
-    Decode,
-    /// Passed to the browser as the Mac's access units, in `codec`, which is
-    /// what the Mac is offered, and in `strips` where the
-    /// display's height allows: the page puts the display together from them,
-    /// in its own decoder or from what the browser's decodes of each. Whole, each
-    /// picture the display, only for a session that asked for it so
-    /// ([`crate::config::Choices::whole`]).
-    Pass { codec: Codec, strips: bool },
-}
-
-impl Receive {
-    /// The codec the Mac is offered: the HEVC to decode here, and whichever is
-    /// passed.
-    fn codec(self) -> Codec {
-        match self {
-            Self::Decode => Codec::Hevc,
-            Self::Pass { codec, .. } => codec,
-        }
-    }
+pub struct Receive {
+    pub codec: Codec,
+    pub strips: bool,
 }
 
 /// What [`MediaStream::offer`] has the session send.
@@ -2687,7 +2322,7 @@ pub enum Offer {
 pub struct MediaStream {
     offers: Offers,
     /// The Mac, as the TCP session reached it: where the streams come from and RTCP
-    /// goes. Read by the receiver alone, which only a build with the decoders has.
+    /// goes. Read by the receiver alone.
     peer: std::net::IpAddr,
     /// This side's address on that connection, which the UDP sockets bind.
     local: std::net::IpAddr,
@@ -2720,7 +2355,7 @@ pub struct MediaStream {
     /// When the sound leg last brought sound, an SRTP packet: what the offer's
     /// first sound is, which a report cannot stand in for.
     sounded: Heard,
-    /// Where the sound leg's decoded PCM goes: the session's audio bridge, when
+    /// Where the sound leg's AAC-ELD units go: the session's audio bridge, when
     /// the browser can be sent sound. `None` drains the leg unread.
     sound: Option<std::sync::Arc<crate::audio::AudioBridge>>,
 }
@@ -2735,7 +2370,8 @@ struct Ports {
 /// One display's video leg, as the stream and its receiver share it.
 #[derive(Clone)]
 struct Leg {
-    pictures: Outlet,
+    /// Where the receiver queues the leg's units for the read loop.
+    units: PassQueue,
     /// Signalled by [`MediaStream::want_keyframe`] and [`MediaStream::show`], for
     /// the receiver to ask the Mac.
     keyframe_wanted: std::sync::Arc<tokio::sync::Notify>,
@@ -2745,7 +2381,7 @@ struct Leg {
     /// first picture of a display nobody is shown ([`MediaStream::show`]).
     pictured: Heard,
     /// Whether anybody is shown this display. The pictures of one nobody is shown
-    /// are authenticated and dropped: neither decoded nor passed on.
+    /// are authenticated and dropped, not passed on.
     shown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The size the leg's stream was last offered for: the display its strips
     /// are put together as.
@@ -2790,7 +2426,7 @@ impl Leg {
     }
 }
 
-/// Where the receiver and its decoder threads leave the first reason they stopped.
+/// Where the receiver leaves the first reason it stopped.
 type Failure = std::sync::Arc<std::sync::Mutex<Option<anyhow::Error>>>;
 
 /// When a leg last brought an authentic packet, SRTP or SRTCP. The Mac sends a
@@ -2834,30 +2470,22 @@ fn leg_due(offered: std::time::Instant, last: Option<std::time::Instant>) -> std
 }
 
 impl MediaStream {
-    /// A stream for `displays` virtual displays, with a [`Pictures`] for each in
-    /// the Mac's order. `receive` says whether the read loop is handed pictures
-    /// decoded here or the Mac's access units — see [`Pictures`]. The first display is
-    /// shown from the start, and any other once [`Self::show`] says so.
+    /// A stream for `displays` virtual displays, with the [`PassedUnits`] of each
+    /// in the Mac's order, offered and passed as `receive` says. The first display
+    /// is shown from the start, and any other once [`Self::show`] says so.
     pub fn new(
         peer: std::net::SocketAddr,
         local: std::net::SocketAddr,
         receive: Receive,
         displays: usize,
-    ) -> (Self, Vec<Pictures>) {
-        let strips = !matches!(receive, Receive::Pass { strips: false, .. });
-        let offers = Offers::new(displays, strips, receive.codec());
+    ) -> (Self, Vec<PassedUnits>) {
+        let offers = Offers::new(displays, receive.strips, receive.codec);
         let offer_made = std::sync::Arc::<tokio::sync::Notify>::default();
-        let (legs, pictures) = (0..offers.videos.len())
+        let (legs, units) = (0..offers.videos.len())
             .map(|index| {
-                let (pictures, rx) = if matches!(receive, Receive::Pass { .. }) {
-                    let (tx, rx) = pass_queue();
-                    (Outlet::Passed(tx), Pictures::Passed(rx))
-                } else {
-                    let (tx, rx) = tokio::sync::watch::channel(None);
-                    (Outlet::Decoded(tx), Pictures::Decoded(rx))
-                };
+                let (tx, rx) = pass_queue();
                 let leg = Leg {
-                    pictures,
+                    units: tx,
                     keyframe_wanted: std::sync::Arc::default(),
                     heard: Heard::default(),
                     pictured: Heard::default(),
@@ -2890,7 +2518,7 @@ impl MediaStream {
             sounded: Heard::default(),
             sound: None,
         };
-        (media, pictures)
+        (media, units)
     }
 
     /// Carry the sound leg to `bridge`, the session's, for every stream from here.
@@ -2970,30 +2598,17 @@ impl MediaStream {
         self.offer_made.notify_one();
     }
 
-    /// The newest decoded picture of display `leg`, for a browser that needs the
-    /// whole desktop again. A passed stream has none: [`Self::want_keyframe`] is
-    /// its repaint.
-    pub fn latest(&self, leg: usize) -> Option<std::sync::Arc<Picture>> {
-        match &self.legs.get(self.leg_of(leg))?.pictures {
-            Outlet::Decoded(pictures) => pictures.borrow().clone(),
-            Outlet::Passed(_) => None,
-        }
-    }
-
     /// Ask the Mac for an IDR of display `leg`, with a PLI on its picture's leg: a
     /// passed stream's browser has to start over, after a reattach or its own
-    /// decoder's failure. The Mac answers within tens of milliseconds. A decoded
-    /// stream asks nothing: its repaint is [`Self::latest`].
+    /// decoder's failure. The Mac answers within tens of milliseconds.
     pub fn want_keyframe(&self, leg: usize) {
-        if let Some(leg) = self.legs.get(self.leg_of(leg))
-            && matches!(leg.pictures, Outlet::Passed(_))
-        {
+        if let Some(leg) = self.legs.get(self.leg_of(leg)) {
             leg.keyframe_wanted.notify_one();
         }
     }
 
     /// Whether anybody is shown display `leg` from here. One coming into view
-    /// starts at an IDR the Mac is asked for, decoded or passed: the pictures since
+    /// starts at an IDR the Mac is asked for: the pictures since
     /// it went out of view were dropped, and every one predicts from the last.
     ///
     /// A display's first picture is owed by its offer, and one coming into view
@@ -3346,13 +2961,6 @@ pub const STREAM_START: std::time::Duration = std::time::Duration::from_secs(10)
 /// change, which stops the stream, owes nothing until its offer.
 pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(48);
 
-/// Frames the HEVC decoder thread may be behind by: ones queued that it has not
-/// begun, a frame being the access units of one timestamp, one for a picture
-/// sent whole and up to [`STRIPS`] for one in strips. A unit that would begin
-/// one more is dropped, which costs a keyframe: every later picture predicts
-/// from it.
-const DECODE_QUEUE: usize = 8;
-
 /// The least time between two keyframe requests. The Mac answers one in tens of
 /// milliseconds; this keeps a burst of losses from asking for one per packet. It
 /// is also how often a request the Mac dropped is made again: with one picture
@@ -3383,8 +2991,8 @@ const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 /// gateway (`tests/hp_capture.sh`). `video.h265` is every access unit the
 /// depacketizer completes, as Annex B, or `video.h264` of a session passed the
 /// Mac's H.264; `audio.eld` is every AAC-ELD unit, each
-/// behind its length as a big-endian u32. Both are written before any decoder
-/// sees them, whether the session decodes the picture or passes it on.
+/// behind its length as a big-endian u32. Both are written before the browser
+/// is passed them.
 ///
 /// The files are written on a thread of their own, so a slow disk never holds up
 /// the sockets the stream is read from: the receiver hands each unit over and
@@ -3480,7 +3088,7 @@ impl MediaDump {
 
 /// The UDP side: RTCP out on every leg once a second and rate reports on each
 /// picture's every [`RATE_FEEDBACK`], video in and depacketized, sound in and
-/// decoded or passed. It runs until the session drops it, and stops early only
+/// passed. It runs until the session drops it, and stops early only
 /// on a failure, which it leaves in `failed` and which ends the session.
 struct Receiver {
     audio: tokio::net::UdpSocket,
@@ -3511,8 +3119,6 @@ struct VideoLeg {
     media_ssrc: u32,
     shared: Leg,
     onward: Onward,
-    /// Set by the decoder thread for a unit that failed to decode.
-    keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The codec the leg's stream was offered in.
     codec: Codec,
     assembly: Assembly,
@@ -3704,9 +3310,8 @@ impl VideoLeg {
                         self.behind += 1;
                         if self.behind <= 3 {
                             log::warn!(
-                                "vnc: {} fell {depth} frames behind the Mac's {}; dropping to \
-                                 its next keyframe",
-                                self.onward.name(),
+                                "vnc: the browser's link fell {depth} frames behind the Mac's {}; \
+                                 dropping to its next keyframe",
                                 self.name(alone)
                             );
                         }
@@ -3714,7 +3319,7 @@ impl VideoLeg {
                         Ok(Took::Wants(Ask::Keyframe))
                     }
                     Sent::Unready => Ok(Took::Wants(Ask::Keyframe)),
-                    Sent::Stopped => Err(anyhow::anyhow!("{} stopped", self.onward.name())),
+                    Sent::Stopped => Err(anyhow::anyhow!("the browser's link stopped")),
                 }
             }
         }
@@ -3834,22 +3439,10 @@ impl Receiver {
             .zip(&ports.videos)
             .enumerate()
             .map(|(index, ((shared, offer), port))| {
-                let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let onward = match &shared.pictures {
-                    Outlet::Decoded(pictures) => {
-                        let (units, decoder) = spawn_decoder(
-                            pictures.clone(),
-                            std::sync::Arc::clone(&keyframe),
-                            std::sync::Arc::clone(&media.failed),
-                            std::sync::Arc::clone(&shared.offered),
-                        );
-                        Onward::Decoder(units, decoder)
-                    }
-                    Outlet::Passed(units) => Onward::Browser(
-                        Passer::new(media.offers.codec),
-                        units.clone(),
-                        std::sync::Arc::clone(&shared.offered),
-                    ),
+                let onward = Onward {
+                    passer: Passer::new(media.offers.codec),
+                    units: shared.units.clone(),
+                    offered: std::sync::Arc::clone(&shared.offered),
                 };
                 Ok(VideoLeg {
                     display: index + 1,
@@ -3862,7 +3455,6 @@ impl Receiver {
                     media_ssrc: 0,
                     shared: shared.clone(),
                     onward,
-                    keyframe,
                     codec: media.offers.codec,
                     assembly: Assembly::new(media.offers.codec, shared.strips.load(std::sync::atomic::Ordering::Relaxed)),
                     feedback: RateFeedback::new(epoch),
@@ -3918,12 +3510,11 @@ impl Receiver {
                         if ticks.is_multiple_of(RATE_REPORT) && leg.pictures > 0 {
                             log::debug!(
                                 "vnc: {:.1} pictures a second of the Mac's {} over the last {RATE_REPORT}s, \
-                                 {} dropped behind {} so far, {} refreshes or keyframes asked for, \
-                                 {:.1} ms of one-way delay reported",
+                                 {} dropped behind the browser's link so far, {} refreshes or \
+                                 keyframes asked for, {:.1} ms of one-way delay reported",
                                 leg.pictures as f64 / f64::from(RATE_REPORT),
                                 leg.name(alone),
                                 leg.behind,
-                                leg.onward.name(),
                                 leg.asks,
                                 leg.feedback.delay() * 1000.0
                             );
@@ -4021,32 +3612,16 @@ impl Receiver {
                 }
             }
             for (leg, wanted) in self.videos.iter_mut().zip(want_keyframe) {
-                let failed = leg.keyframe.swap(false, std::sync::atomic::Ordering::Relaxed);
-                if failed {
-                    leg.assembly.resync();
-                }
                 leg.acknowledge().await;
-                leg.ask_keyframe(if failed { Some(Ask::Keyframe) } else { wanted }).await;
+                leg.ask_keyframe(wanted).await;
             }
         };
         // The stream has failed while the RFB session goes on. The reason, then
-        // `None`, tell the read loop, which ends the session; `None` goes after the
-        // decoder's last picture, or that picture would be the last word.
+        // `None`, tell the read loop, which ends the session.
         log::warn!("vnc: the Mac's media receiver stopped: {failure:#}");
-        fail(&self.failed, failure);
+        *self.failed.lock().unwrap() = Some(failure);
         for leg in self.videos {
-            match leg.onward {
-                Onward::Decoder(units, decoder) => {
-                    drop(units);
-                    let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
-                    if let Outlet::Decoded(pictures) = &leg.shared.pictures {
-                        pictures.send_replace(None);
-                    }
-                }
-                Onward::Browser(_, units, _) => {
-                    let _ = units.units.send(None).await;
-                }
-            }
+            let _ = leg.onward.units.units.send(None).await;
         }
     }
 }
@@ -4060,58 +3635,13 @@ struct Coded {
     timestamp: u32,
 }
 
-/// The decoder thread's queue, as the receive task fills it.
-struct DecodeQueue {
-    /// Deep enough for [`DECODE_QUEUE`] frames in strips behind the one the
-    /// decoder is in the middle of.
-    units: std::sync::mpsc::SyncSender<Coded>,
-    /// The frames queued that the decoder has not begun: counted up here at
-    /// each unit of a new timestamp, and down by the decoder as it takes one.
-    frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// The timestamp of the last unit queued.
-    last: Option<u32>,
-}
-
-impl DecodeQueue {
-    /// Queue `coded`, unless it would begin a frame past [`DECODE_QUEUE`].
-    fn send(&mut self, coded: Coded) -> Sent {
-        use std::sync::atomic::Ordering::Relaxed;
-
-        let timestamp = coded.timestamp;
-        let begins = self.last != Some(timestamp);
-        if begins {
-            // Counted before the unit is queued, so the decoder never counts
-            // down a frame that has not been counted up.
-            if self.frames.fetch_add(1, Relaxed) >= DECODE_QUEUE {
-                self.frames.fetch_sub(1, Relaxed);
-                return Sent::Full(DECODE_QUEUE);
-            }
-        }
-        match self.units.try_send(coded) {
-            Ok(()) => {
-                self.last = Some(timestamp);
-                Sent::Queued
-            }
-            Err(e) => {
-                if begins {
-                    self.frames.fetch_sub(1, Relaxed);
-                }
-                match e {
-                    std::sync::mpsc::TrySendError::Full(_) => Sent::Full(DECODE_QUEUE),
-                    std::sync::mpsc::TrySendError::Disconnected(_) => Sent::Stopped,
-                }
-            }
-        }
-    }
-}
-
-/// Where the receiver sends each access unit it reassembles.
-enum Onward {
-    /// The decoder thread, whose pictures the session encodes as VP9.
-    Decoder(DecodeQueue, std::thread::JoinHandle<()>),
-    /// The read loop, which passes each unit to the browser as it came.
-    /// A strip is described by the size its display was offered at.
-    Browser(Passer, PassQueue, std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>),
+/// Where the receiver sends each access unit it reassembles: the read loop,
+/// which passes each unit to the browser as it came.
+struct Onward {
+    passer: Passer,
+    units: PassQueue,
+    /// The size the display was offered at, which describes a strip.
+    offered: std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>,
 }
 
 /// What became of one access unit sent [`Onward`].
@@ -4128,207 +3658,22 @@ enum Sent {
 
 impl Onward {
     fn send(&mut self, coded: Coded) -> Sent {
-        match self {
-            Self::Decoder(queue, _) => queue.send(coded),
-            Self::Browser(passer, units, offered) => {
-                let display = *offered.lock().unwrap();
-                let passed = match coded.strip {
-                    None => passer.pass_whole(&coded.unit, display),
-                    Some(strip) => display
-                        .and_then(|display| passer.pass_strip(&coded.unit, strip, coded.timestamp, display)),
-                };
-                passed.map_or(Sent::Unready, |passed| units.send(passed))
+        let display = *self.offered.lock().unwrap();
+        let passed = match coded.strip {
+            None => self.passer.pass_whole(&coded.unit, display),
+            Some(strip) => {
+                display.and_then(|display| self.passer.pass_strip(&coded.unit, strip, coded.timestamp, display))
             }
-        }
-    }
-
-    /// What the units go to, for the log.
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Decoder(..) => "the HEVC decoder",
-            Self::Browser(..) => "the browser's link",
-        }
+        };
+        passed.map_or(Sent::Unready, |passed| self.units.send(passed))
     }
 }
 
-/// Leave `error` as why the stream stopped, unless an earlier reason is there: a
-/// decoder thread's own, which the receive task's is only the consequence of.
-fn fail(failed: &Failure, error: anyhow::Error) {
-    let mut failed = failed.lock().unwrap();
-    if failed.is_none() {
-        *failed = Some(error);
-    }
-}
-
-/// How long a frame some of whose strips have come waits for the rest before it
-/// is shown as it stands. Nothing says how many strips a frame has: the next
+/// How long a frame some of whose strips have come waits for the rest before the
+/// last that came is passed on as its frame's last. Nothing says how many strips a frame has: the next
 /// frame's first strip does, or this. The Mac codes a frame's strips one after
 /// another, and they arrived up to 7 ms apart.
 const STRIP_WAIT: std::time::Duration = std::time::Duration::from_millis(8);
-
-/// A display's picture, put together from its strips as they decode.
-struct Canvas {
-    picture: Picture,
-    /// A strip's rows ([`strip_rows`]): the last strip runs past the display's,
-    /// or ends short of them and leaves its last rows unpainted.
-    pitch: usize,
-    /// The strips placed since the canvas was made, a bit each: the display is
-    /// shown once it has them all.
-    placed: u8,
-    /// The strips placed since the display was last shown.
-    fresh: u8,
-}
-
-/// Every strip's bit.
-const ALL_STRIPS: u8 = (1 << STRIPS) - 1;
-
-impl Canvas {
-    /// Put the decoded `part` in as strip `strip` of a display of `size`,
-    /// starting `canvas` over where it is laid out for another. A `keyframe`,
-    /// the first strip's, starts the display over too: what the other strips
-    /// hold is from before whatever the keyframe mends, a loss or a display out
-    /// of view or a new stream, and is not shown beside it.
-    fn place(
-        canvas: &mut Option<Self>,
-        size: Option<(u16, u16)>,
-        strip: usize,
-        part: &Picture,
-        keyframe: bool,
-    ) -> anyhow::Result<()> {
-        let (width, height) = size.context("a strip came for a display no stream was offered for")?;
-        let pitch = usize::from(part.size.1);
-        let rows = usize::from(height);
-        anyhow::ensure!(
-            // Four strips hold the display's rows, or all but its last three
-            // ([`strip_rows`]), and the last strip starts within them, or at
-            // their end only for a display under 180 rows, below the minimum a
-            // session has ([`crate::vnc_apple::MIN_DISPLAY_POINTS`]).
-            part.size.0 == width && pitch * STRIPS + STRIPS > rows && pitch * (STRIPS - 1) <= rows,
-            "a {}\u{d7}{} strip is not a quarter of the {width}\u{d7}{height} display offered",
-            part.size.0,
-            part.size.1
-        );
-        let canvas = match canvas {
-            Some(canvas) if canvas.picture.size == (width, height) && canvas.pitch == pitch => canvas,
-            _ => canvas.insert(Self {
-                picture: Picture { size: (width, height), rgb: vec![0; usize::from(width) * rows * 3] },
-                pitch,
-                placed: 0,
-                fresh: 0,
-            }),
-        };
-        if keyframe {
-            canvas.placed = 0;
-            canvas.fresh = 0;
-        }
-        let row = usize::from(width) * 3;
-        let from = (strip * pitch * row).min(canvas.picture.rgb.len());
-        let into = &mut canvas.picture.rgb[from..];
-        let len = into.len().min(part.rgb.len());
-        into[..len].copy_from_slice(&part.rgb[..len]);
-        canvas.placed |= 1 << strip;
-        canvas.fresh |= 1 << strip;
-        Ok(())
-    }
-
-    /// The display as it stands, once every strip of it has come.
-    fn show(&mut self) -> Option<std::sync::Arc<Picture>> {
-        self.fresh = 0;
-        (self.placed == ALL_STRIPS)
-            .then(|| std::sync::Arc::new(Picture { size: self.picture.size, rgb: self.picture.rgb.clone() }))
-    }
-}
-
-/// The decoder thread: access units in, pictures out to the watch. Its queue's
-/// sender is the handle, and the thread, whose own handle comes with it, ends when
-/// the receive task drops it.
-/// `keyframe` is how it says a unit failed to decode, which the receive task turns
-/// into a PLI. A decoder that cannot be opened leaves why in `failed`.
-///
-/// A stream in strips decodes to its strips, in their one decoding order, and
-/// the display is shown when a frame's strips are all in: every strip has come
-/// for its timestamp, the next unit is another frame's, or [`STRIP_WAIT`] has
-/// passed. `offered` is the display the strips are a quarter each of.
-fn spawn_decoder(
-    pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
-    keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    failed: Failure,
-    offered: std::sync::Arc<std::sync::Mutex<Option<(u16, u16)>>>,
-) -> (DecodeQueue, std::thread::JoinHandle<()>) {
-    use std::sync::mpsc::RecvTimeoutError;
-
-    let (units, inbox) = std::sync::mpsc::sync_channel::<Coded>((DECODE_QUEUE + 1) * STRIPS);
-    let frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let queue = DecodeQueue { units, frames: std::sync::Arc::clone(&frames), last: None };
-    let thread = std::thread::spawn(move || {
-        let mut decoder = match Hevc::new(true) {
-            Ok(decoder) => decoder,
-            Err(e) => return fail(&failed, e.context("no HEVC decoder")),
-        };
-        let mut failures: u64 = 0;
-        let mut canvas: Option<Canvas> = None;
-        // The timestamp of the frame whose strips are placed and not yet shown.
-        let mut waiting: Option<u32> = None;
-        // The timestamp of the last unit taken off the queue.
-        let mut begun: Option<u32> = None;
-        let show = |canvas: &mut Option<Canvas>| {
-            if let Some(picture) = canvas.as_mut().and_then(Canvas::show) {
-                pictures.send_replace(Some(picture));
-            }
-        };
-        loop {
-            let coded = match waiting {
-                None => inbox.recv().map_err(|_| RecvTimeoutError::Disconnected),
-                Some(_) => inbox.recv_timeout(STRIP_WAIT),
-            };
-            let coded = match coded {
-                Ok(coded) => coded,
-                Err(RecvTimeoutError::Timeout) => {
-                    waiting = None;
-                    show(&mut canvas);
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => break,
-            };
-            if begun.replace(coded.timestamp) != Some(coded.timestamp) {
-                frames.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            if waiting.is_some_and(|timestamp| timestamp != coded.timestamp) {
-                waiting = None;
-                show(&mut canvas);
-            }
-            let decoded = decoder.decode(&coded.unit).and_then(|picture| match (picture, coded.strip) {
-                (Some(picture), None) => {
-                    pictures.send_replace(Some(std::sync::Arc::new(picture)));
-                    Ok(())
-                }
-                (Some(part), Some(strip)) => {
-                    let keyframe = strip == 0 && Codec::Hevc.is_keyframe(&coded.unit);
-                    Canvas::place(&mut canvas, *offered.lock().unwrap(), strip, &part, keyframe)?;
-                    if canvas.as_ref().is_some_and(|canvas| canvas.fresh == ALL_STRIPS) {
-                        waiting = None;
-                        show(&mut canvas);
-                    } else {
-                        waiting = Some(coded.timestamp);
-                    }
-                    Ok(())
-                }
-                // Each strip is a picture, and one the decoder kept back would
-                // come out as the next strip's.
-                (None, Some(_)) => anyhow::bail!("the decoder held a strip's picture back"),
-                (None, None) => Ok(()),
-            });
-            if let Err(e) = decoded {
-                failures += 1;
-                if failures <= 3 {
-                    log::warn!("vnc: a screen video picture did not decode: {e:#}");
-                }
-                keyframe.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    });
-    (queue, thread)
-}
 
 /// The sound leg on the receive task's side: authenticated, decrypted access units
 /// out to the bridge as they came ([`crate::audio::AudioBridge::unit`]), for the
@@ -5037,138 +4382,6 @@ mod tests {
         assert_eq!(srtp.guess_roc(3, 0x0006), 0, "a strip not heard from yet");
     }
 
-    /// The decoder's queue is bounded in frames, however many strips each came
-    /// in, and a frame the decoder has begun is no longer one it is behind by.
-    #[test]
-    fn the_decoder_may_be_behind_by_frames_not_by_units() {
-        let (units, inbox) = std::sync::mpsc::sync_channel((DECODE_QUEUE + 1) * STRIPS);
-        let frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut queue = DecodeQueue { units, frames: std::sync::Arc::clone(&frames), last: None };
-        let coded = |timestamp, strip| Coded { unit: vec![TRAIL.to_vec()], strip: Some(strip), timestamp };
-        for frame in 0..DECODE_QUEUE as u32 {
-            for strip in 0..STRIPS {
-                assert!(matches!(queue.send(coded(frame, strip)), Sent::Queued), "frame {frame} strip {strip}");
-            }
-        }
-        assert!(matches!(queue.send(coded(100, 0)), Sent::Full(DECODE_QUEUE)));
-        assert_eq!(frames.load(std::sync::atomic::Ordering::Relaxed), DECODE_QUEUE);
-        // The decoder takes the first frame's first strip, as its thread counts it.
-        assert_eq!(inbox.recv().unwrap().timestamp, 0);
-        frames.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        assert!(matches!(queue.send(coded(100, 0)), Sent::Queued));
-        assert!(matches!(queue.send(coded(100, 1)), Sent::Queued), "a strip of a frame already queued");
-        assert!(matches!(queue.send(coded(101, 0)), Sent::Full(DECODE_QUEUE)));
-        drop(inbox);
-        assert!(matches!(queue.send(coded(100, 2)), Sent::Stopped));
-    }
-
-    /// Strips are placed a strip's height apart, the last one's rows past the
-    /// display's left out, and the display is shown once it has all four.
-    #[test]
-    fn a_display_is_put_together_from_its_strips() {
-        let part = |value: u8| Picture { size: (2, 3), rgb: vec![value; 2 * 3 * 3] };
-        let mut canvas = None;
-        for strip in [0, 1, 3] {
-            Canvas::place(&mut canvas, Some((2, 10)), strip, &part(strip as u8 + 1), false).unwrap();
-        }
-        assert!(canvas.as_mut().unwrap().show().is_none(), "a strip is still to come");
-        Canvas::place(&mut canvas, Some((2, 10)), 2, &part(3), false).unwrap();
-        let shown = canvas.as_mut().unwrap().show().unwrap();
-        assert_eq!(shown.size, (2, 10));
-        let rows: Vec<u8> = shown.rgb.chunks(6).map(|row| row[0]).collect();
-        assert_eq!(rows, [1, 1, 1, 2, 2, 2, 3, 3, 3, 4]);
-        assert!(shown.rgb.chunks(6).all(|row| row.iter().all(|&v| v == row[0])));
-
-        // One strip of the next frame, and the display is whole with it.
-        Canvas::place(&mut canvas, Some((2, 10)), 1, &part(9), false).unwrap();
-        assert_eq!(canvas.as_ref().unwrap().fresh, 0b0010);
-        assert_eq!(canvas.as_mut().unwrap().show().unwrap().rgb[3 * 6], 9);
-
-        // A keyframe starts the display over: its first strip is not shown
-        // beside the three from before it.
-        Canvas::place(&mut canvas, Some((2, 10)), 0, &part(5), true).unwrap();
-        assert!(canvas.as_mut().unwrap().show().is_none());
-        for strip in 1..STRIPS {
-            assert!(canvas.as_mut().unwrap().show().is_none());
-            Canvas::place(&mut canvas, Some((2, 10)), strip, &part(5), false).unwrap();
-        }
-        assert!(canvas.as_mut().unwrap().show().unwrap().rgb.iter().all(|&v| v == 5));
-
-        // A last strip that starts at the display's end has nothing to place.
-        Canvas::place(&mut canvas, Some((2, 9)), 3, &part(7), false).unwrap();
-        assert!(canvas.as_ref().unwrap().picture.rgb.iter().all(|&v| v == 0));
-        // Strips that end within three rows of the display's last are its own.
-        Canvas::place(&mut canvas, Some((2, 14)), 3, &part(7), false).unwrap();
-        let rows: Vec<u8> = canvas.as_ref().unwrap().picture.rgb.chunks(6).map(|row| row[0]).collect();
-        assert_eq!(rows, [0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 0, 0]);
-        assert!(Canvas::place(&mut canvas, Some((2, 16)), 0, &part(1), false).is_err(), "not a quarter of 16 rows");
-        assert!(Canvas::place(&mut canvas, Some((2, 8)), 0, &part(1), false).is_err(), "the last strip past 8 rows");
-        assert!(Canvas::place(&mut canvas, Some((4, 10)), 0, &part(1), false).is_err());
-        assert!(Canvas::place(&mut canvas, None, 0, &part(1), false).is_err());
-    }
-
-    /// A 64×48 4:4:4 stream from x265, full-range BT.709 as the Mac's is, and six
-    /// pixels of its last picture as ffmpeg converts them. The two conversions
-    /// round differently, by a step at most.
-    #[test]
-    fn a_444_stream_decodes_to_the_colours_ffmpeg_converts_it_to() {
-        let (pictures, decoded_by) = decode_fixture(false);
-        assert_eq!(decoded_by, Some(DecodedBy::Software));
-        assert_the_fixture_colours(&pictures);
-    }
-
-    /// The same stream through VideoToolbox: the same pictures, which on a Mac that
-    /// is not virtual must be VideoToolbox's — FFmpeg's fallback to decoding them
-    /// itself would pass the colours too. That is VideoToolbox, not necessarily its
-    /// hardware decoder, which is not asked. A virtual Mac may have no VideoToolbox
-    /// decoder to reach, and elsewhere there is no VideoToolbox, so both decode in
-    /// software.
-    #[test]
-    fn the_same_stream_decodes_to_the_same_colours_through_videotoolbox() {
-        let (pictures, decoded_by) = decode_fixture(true);
-        if cfg!(target_os = "macos") && !virtual_mac() {
-            assert_eq!(decoded_by, Some(DecodedBy::VideoToolbox));
-        }
-        assert_the_fixture_colours(&pictures);
-    }
-
-    /// The fixture's pictures, and what decoded the last.
-    fn decode_fixture(hardware: bool) -> (Vec<Picture>, Option<DecodedBy>) {
-        let units = fixture_units();
-        assert_eq!(units.len(), 3);
-        let mut hevc = Hevc::new(hardware).unwrap();
-        let pictures: Vec<Picture> = units.iter().filter_map(|unit| hevc.decode(unit).unwrap()).collect();
-        assert_eq!(pictures.len(), 3, "each unit yields its picture at once");
-        (pictures, hevc.decoded_by)
-    }
-
-    /// Whether this Mac is a virtual machine, from the kernel's `kern.hv_vmm_present`.
-    fn virtual_mac() -> bool {
-        let out = std::process::Command::new("sysctl").args(["-n", "kern.hv_vmm_present"]).output().unwrap();
-        assert!(out.status.success(), "sysctl -n kern.hv_vmm_present failed");
-        String::from_utf8_lossy(&out.stdout).trim() == "1"
-    }
-
-    fn assert_the_fixture_colours(pictures: &[Picture]) {
-        let last = pictures.last().unwrap();
-        assert_eq!(last.size, (64, 48));
-        for ((x, y), want) in [
-            ((2, 2), [76, 0, 38]),
-            ((20, 10), [0, 60, 8]),
-            ((40, 10), [176, 141, 109]),
-            ((60, 30), [2, 62, 62]),
-            ((10, 40), [255, 4, 0]),
-            ((33, 24), [0, 0, 62]),
-        ] {
-            let at = (y * 64 + x) * 3;
-            let got = &last.rgb[at..at + 3];
-            assert!(
-                got.iter().zip(want).all(|(&g, w): (&u8, u8)| g.abs_diff(w) <= 2),
-                "pixel ({x}, {y}) is {got:?}, ffmpeg says {want:?}"
-            );
-        }
-    }
-
     /// The 64×48 4:4:4 fixture's access units, one per picture.
     fn fixture_units() -> Vec<AccessUnit> {
         let stream = include_bytes!("../tests/fixtures/hevc-444-64x48.h265");
@@ -5462,7 +4675,7 @@ mod tests {
         let (offers, _) = MediaStream::new(
             "192.0.2.1:5900".parse().unwrap(),
             "192.0.2.2:40000".parse().unwrap(),
-            Receive::Pass { codec: Codec::H264, strips: true },
+            Receive { codec: Codec::H264, strips: true },
             1,
         );
         assert_eq!(offers.offers.codec, Codec::H264);
@@ -5558,7 +4771,7 @@ mod tests {
     fn media() -> MediaStream {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
-        MediaStream::new(peer, local, Receive::Decode, 1).0
+        MediaStream::new(peer, local, Receive { codec: Codec::Hevc, strips: true }, 1).0
     }
 
     /// Offer the stream for `size` as the session does once the Mac has named its
@@ -5845,7 +5058,7 @@ mod tests {
     fn two_displays_are_offered_named_and_answered_together() {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
-        let (mut m, pictures) = MediaStream::new(peer, local, Receive::Pass { codec: Codec::Hevc, strips: false }, 2);
+        let (mut m, pictures) = MediaStream::new(peer, local, Receive { codec: Codec::Hevc, strips: false }, 2);
         assert_eq!((m.displays(), pictures.len()), (2, 2));
 
         let sizes = [(1600, 1000), (1280, 800)];
@@ -5885,7 +5098,7 @@ mod tests {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
         let relaxed = std::sync::atomic::Ordering::Relaxed;
-        let (mut m, _pictures) = MediaStream::new(peer, local, Receive::Decode, 2);
+        let (mut m, _units) = MediaStream::new(peer, local, Receive { codec: Codec::Hevc, strips: true }, 2);
         m.asked = true;
         m.invited = true;
         assert_eq!((m.leg_of(0), m.leg_of(1)), (0, 1));
@@ -5922,7 +5135,7 @@ mod tests {
     fn a_display_nobody_is_shown_owes_its_packets_and_one_coming_into_view_its_next() {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
-        let (mut m, _pictures) = MediaStream::new(peer, local, Receive::Decode, 2);
+        let (mut m, _units) = MediaStream::new(peer, local, Receive { codec: Codec::Hevc, strips: true }, 2);
         m.asked = true;
         m.invited = true;
         let offered = std::time::Instant::now();

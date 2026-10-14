@@ -138,9 +138,6 @@ mkdir -p "$deb_root/DEBIAN"
   echo "Section: net"
   echo "Priority: optional"
   echo "Depends: ca-certificates, libc6 (>= 2.39)"
-  # High Performance's HEVC decoder, loaded at run time (src/libav.rs): any
-  # libavcodec the gateway loads.
-  echo "Recommends: libavcodec63 | libavcodec62 | libavcodec61 | libavcodec60"
   echo "Homepage: https://github.com/andrewtheguy/remotex"
   echo "Description: Single-user browser remote desktop gateway"
   echo " Connects a browser to RDP, VNC, and macOS Screen Sharing targets."

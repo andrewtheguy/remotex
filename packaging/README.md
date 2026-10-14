@@ -68,7 +68,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, but with `REMOTEX_CONTAINER_FEATURES`, which is `native-vp9` unless set |
-| `publish-full-image.sh` | add Debian's libavcodec, and the pinned software HEVC decoder's archive, to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
+| `publish-full-image.sh` | add the pinned software HEVC decoder's archive to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -172,25 +172,8 @@ system copies of those libraries, and no artifact carries or depends on one.
 `LIBVPX_PREBUILT_DIR`, `LIBOPUS_PREBUILT_DIR` and `LIBFLAC_PREBUILT_DIR` select
 locally built archives.
 
-`ard-high-performance` targets decode the Mac's picture with a decoder whose
-licence keeps it out of every artifact: FFmpeg's libavcodec
-(LGPL-2.1-or-later), for the HEVC. The Mac's AAC-ELD sound needs none: the
-browser decodes it. Published release
-artifacts neither compile nor link FFmpeg: the gateway loads the system's shared libraries
-when a session needs them, or on Windows the ones in the folder `[hp_decoders]`
-names when it starts (`src/libav.rs`), and a host without them
-runs those targets only with the picture passed through: the Mac's H.264, which
-needs no HEVC decoder in the gateway or the page, to any browser, or its HEVC to
-a browser that decodes it. The `.deb` recommends the Linux one, the public container image does not
-carry it and the private one `publish-full-image.sh` builds carries Debian's;
-elsewhere the operator installs it, as
-[High Performance decoder](../docs/high-performance-decoder.md) says for each
-platform.
-
-The non-default `apple-hp-media-static` feature links private static archives
-instead, and is in no release artifact. No artifact holds the software
-HEVC decoder either, libavcodec in WebAssembly for the page, which FFmpeg's
-licence keeps out as it keeps the native decoder out: an operator
+No artifact holds the software HEVC decoder, the page's decoder of a High
+Performance Mac's passed HEVC, whose licence keeps it out: an operator
 downloads the release that `src/hevc_wasm.rs` pins by version and SHA-256 from
 the private `andrewtheguy/hevc-wasm-archives` through `gh`, and every build
 serves it when it finds it. Every release target looks for it by its release
@@ -200,15 +183,9 @@ name in `share/remotex`, beside the `share/doc/remotex` it installs, unless
 the `.pkg`, `share\remotex` under the `.msi`'s install directory, and
 `/opt/remotex/versions/<version>/share/remotex` in the
 container image. No package owns or makes that directory: the operator does. The
-private image `publish-full-image.sh` builds carries it there.
-`libavcodec-hevc-prebuilt` links FFmpeg's libavcodec and libavutil, configured
-down to the HEVC decoder and parser, and on macOS its VideoToolbox hwaccel, which
-links Apple's VideoToolbox, CoreMedia, CoreVideo and CoreFoundation frameworks;
-its build script downloads the latest release of
-`andrewtheguy/libavcodec-hevc-prebuilt-archives` through `gh`, or takes
-`LIBAVCODEC_HEVC_PREBUILT_DIR`.
-FFmpeg linked statically obliges a distributor of a binary to let its recipient
-relink it against a modified FFmpeg (see that repository's README).
+private image `publish-full-image.sh` builds carries it there. The gateway
+decodes none of the Mac's streams: its HEVC and its H.264 are passed, and its
+AAC-ELD sound too, so no artifact needs FFmpeg.
 Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
