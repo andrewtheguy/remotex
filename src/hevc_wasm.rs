@@ -1,4 +1,4 @@
-//! BETA: the page's software HEVC decoder, for a browser whose own
+//! The page's software HEVC decoder, for a browser whose own
 //! `VideoDecoder` refuses a High Performance Mac's 4:4:4 picture
 //! (`frontend/src/softwareDecoder.ts`).
 //!
@@ -24,10 +24,10 @@ use flate2::read::GzDecoder;
 use sha2::{Digest as _, Sha256};
 
 /// The hevc-wasm release this gateway's page is written against.
-pub const VERSION: &str = "0.0.15";
+pub const VERSION: &str = "0.0.16";
 
 /// The SHA-256 of that release's archive, as its `SHA256SUMS` publishes it.
-const SHA256: &str = "72ed2a4d6a46270309e0ffbed3fb09b32512f717a83ad85708a933468b784b54";
+const SHA256: &str = "13d228759d6494be9ac02e85fa2c94ee8cefe7876738a77f85f2ea1e41398e6a";
 
 /// The archive's name as released, which is also `[hevc_wasm].archive`'s default.
 pub fn archive_name() -> String {

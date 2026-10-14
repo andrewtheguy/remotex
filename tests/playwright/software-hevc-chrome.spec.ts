@@ -1,4 +1,4 @@
-// BETA: the software HEVC decoder's fallback, from the installed Google Chrome,
+// The software HEVC decoder's fallback, from the installed Google Chrome,
 // whose own decoder takes a High Performance Mac's HEVC where the GPU decodes
 // HEVC Range Extensions 4:4:4, as on a Mac, and refuses it elsewhere. Playwright's
 // bundled Chromium has no HEVC decoder at all. What is asserted, and how to run

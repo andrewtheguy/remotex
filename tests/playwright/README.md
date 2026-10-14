@@ -62,7 +62,7 @@ towards the display beside it is open and every outer edge still clamps the
 pointer, without judging whether a remote window visibly followed the drag.
 
 `software-hevc-chrome.spec.ts`, `software-hevc-firefox.spec.ts` and
-`software-hevc-faked.spec.ts` are the BETA software HEVC decoder, which a page
+`software-hevc-faked.spec.ts` are the software HEVC decoder, which a page
 falls back to by itself where the browser's own decoder refuses a High
 Performance Mac's HEVC. Whether it refuses is the machine's to say: Chrome takes
 the HEVC on a Mac and refuses it on a PC whose GPU does not decode HEVC Range
@@ -276,8 +276,8 @@ for it), and names that target with
 `REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
 
 ```sh
-gh release download v0.0.15 --repo andrewtheguy/hevc-wasm-archives \
-  --pattern hevc-wasm-v0.0.15.tar.gz --dir tmp
+gh release download v0.0.16 --repo andrewtheguy/hevc-wasm-archives \
+  --pattern hevc-wasm-v0.0.16.tar.gz --dir tmp
 cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 ```
 

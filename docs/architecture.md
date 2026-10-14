@@ -207,7 +207,7 @@ gateway.
   compositor's do. Keep it a pinned release: do not vendor its files, build it
   here, or take an archive the pin does not name. Do not fold one module into
   another, or add a fourth without a stream that needs it.
-- The only versioned client asset read at run time is the BETA software
+- The only versioned client asset read at run time is the software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
   `/hevc/`. An operator-configured path in `[branding].logo` is read per request
@@ -908,7 +908,7 @@ Three controls with similar names therefore remain separate:
   missing from the device's list), so the "no" was right.
   A browser that decodes the sound but not the picture, as that one did, loses
   nothing by being sent both re-encoded.
-- **BETA: the picture in software.** A gateway that has its release
+- **The picture in software.** A gateway that has its release
   archive serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), a
   decoder written for the Mac's shape of stream and compiled to WebAssembly with
   SIMD128 and threads, bit-exact with FFmpeg's, at `/hevc/`; its threads share
@@ -1342,7 +1342,7 @@ streams a browser's `VideoDecoder` may not take:
 | Stream | Decoder | Who decides | Where |
 |---|---|---|---|
 | The gateway's VP9, 4:4:4, profile 1 | [vp9-wasm](https://github.com/andrewtheguy/vp9-wasm), in the bundle (`frontend/wasm/vp9`) | each page, from its own decoder's answer | wherever the browser's own decoder does not take profile 1 |
-| BETA: a High Performance Mac's passed HEVC | [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), served at `/hevc/` | each page, from its own decoder's answer | wherever the browser's own decoder does not take the Mac's HEVC, on a gateway that read the release archive ([Apple's media stream, passed through](#apples-media-stream-passed-through)) |
+| A High Performance Mac's passed HEVC | [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), served at `/hevc/` | each page, from its own decoder's answer | wherever the browser's own decoder does not take the Mac's HEVC, on a gateway that read the release archive ([Apple's media stream, passed through](#apples-media-stream-passed-through)) |
 
 Both are written for the one shape of stream they decode and compiled with
 SIMD128 and threads.
@@ -1794,7 +1794,7 @@ These things about a session are chosen by whoever starts it, before it starts:
 how the desktop is sized, whether the remote's sound is taken and as what,
 which of a Mac's own streams is passed through if either, where a second virtual display
 sits, how an RDP host draws its graphics pipeline, which encoder codes the VP9
-(alpha), and, BETA, whether a Mac's
+(alpha), and whether a Mac's
 passed HEVC is decoded by the page's
 own software decoder ([Decoded in the page](#decoded-in-the-page)), which is the
 gateway's to offer as well as the target's. Picking a target at the picker opens it,

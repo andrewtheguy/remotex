@@ -4,7 +4,7 @@
 //   decoder, which is in the bundle (frontend/wasm/vp9). Which decodes the VP9 is
 //   each page's to say: the browser's own decoder where it takes profile 1, and
 //   this one where it does not (nativeVp9.ts), so a session's pages may differ.
-// - `hevc`, BETA, a High Performance Mac's passed HEVC: andrewtheguy/hevc-wasm's
+// - `hevc`, a High Performance Mac's passed HEVC: andrewtheguy/hevc-wasm's
 //   decoder, which the gateway serves where it has the release archive. Which
 //   decodes that is each page's to say too: the browser's own decoder where it
 //   takes the Mac's HEVC, and this one where it does not (appleMedia.ts).
