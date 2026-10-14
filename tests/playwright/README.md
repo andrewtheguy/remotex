@@ -276,8 +276,8 @@ for it), and names that target with
 `REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
 
 ```sh
-gh release download v0.0.8 --repo andrewtheguy/hevc-wasm-archives \
-  --pattern hevc-wasm-v0.0.8.tar.gz --dir tmp
+gh release download v0.0.13 --repo andrewtheguy/hevc-wasm-archives \
+  --pattern hevc-wasm-v0.0.13.tar.gz --dir tmp
 cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 ```
 
