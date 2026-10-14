@@ -64,22 +64,24 @@ area and points here; read the area's section before changing what it covers.
   Sharing and wlshare. Behavior specific to one of them is welcome, and when work
   for them and for other servers competes, they come first.
 
-### Server tiers
+### Prioritized servers
 
-The three prioritized servers are ranked in tiers by how seamlessly each
-integrates with remotex and with its host's operating system: how its displays
-are chosen and resized, whether it carries sound and the browser's camera and
-microphone, and how its picture reaches the browser. The ranking is not the
-order work is done in: Windows and macOS are the common use case, so testing
-and optimization prioritize them.
+Three servers are prioritized: Windows' own Remote Desktop, macOS's built-in
+Screen Sharing in both of its modes, and wlshare on Linux. Windows and macOS
+come first: they are what most people connect to, so features are tested and
+optimized on them first. wlshare follows them, though it integrates the most
+seamlessly of the three, since what RFB lacks is added to it. The table compares
+how each integrates with remotex and with its host's operating system: how its
+displays are chosen and resized, whether it carries sound and the browser's
+camera and microphone, and how its picture reaches the browser.
 
-| Tier | Server | Target | Displays | Sound | Camera and microphone | Picture |
-|---|---|---|---|---|---|---|
-| 1 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
-| 2 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; VP9 from the gateway on the bitmap path |
-| 2 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | the Mac's HEVC or its H.264, passed through |
-| 3 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
-| baseline | any other VNC server | `vnc` | one framebuffer at the size the server says, at 1x | none | no | VP9 from the gateway |
+| Server | Target | Displays | Sound | Camera and microphone | Picture |
+|---|---|---|---|---|---|
+| Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; VP9 from the gateway on the bitmap path |
+| macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | the Mac's HEVC or its H.264, passed through |
+| macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
+| wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
+| any other VNC server, not prioritized | `vnc` | one framebuffer at the size the server says, at 1x, never resized from the browser | none | no | VP9 from the gateway |
 
 The three native servers have these in common:
 
@@ -97,20 +99,7 @@ The three native servers have these in common:
   and the browser wears it on its own pointer, so it moves with the hand rather
   than a network round trip behind it.
 
-#### Tier 1: wlshare on Linux
-
-[wlshare](https://github.com/andrewtheguy/wlshare), this project's own VNC
-server for wlroots-based Wayland desktops, is the ideal. It codes the desktop as
-VP9 itself, at 4:4:4 and the quality the target asks for, and walks that quality
-by the browser's link, so the gateway passes its stream through untouched and
-the session still adapts to a slow link. Because wlshare is ours, what RFB
-lacks is added to it as an extension: pixel density, switching outputs,
-sound, and the browser's camera and microphone. It is a `vnc` target with
-`subtype = "wlshare"`, which is what makes the gateway list those extensions and
-ask for the stream. See
-[wlshare's VP9 and the `wlshare` subtype](#wlshares-vp9-and-the-wlshare-subtype).
-
-#### Tier 2: modern Windows' Remote Desktop, and a Mac's High Performance Screen Sharing
+#### Modern Windows' Remote Desktop, and a Mac's High Performance Screen Sharing
 
 The host's own stream, passed through to the browser:
 
@@ -151,21 +140,35 @@ On RDP VP9 serves only the bitmap path: a target with `egfx = false`, and a host
 that answers the offer of the pipeline with plain bitmap updates. The gateway
 composes no graphics pipeline.
 
-#### Tier 3: a Mac's Standard Screen Sharing
+#### A Mac's Standard Screen Sharing
 
 Screen Sharing's Standard mode (`ard`, including the unofficial
 `virtual_display = true`) is decoded in the gateway and encoded as VP9, adapting
 to the link. Nothing of it is passed through.
 
+#### wlshare on Linux
+
+[wlshare](https://github.com/andrewtheguy/wlshare), this project's own VNC
+server for wlroots-based Wayland desktops, integrates the most seamlessly of
+the three, though it follows Windows and macOS in priority. It codes the
+desktop as VP9 itself, at 4:4:4 and the quality the target asks for, and walks
+that quality by the browser's link, so the gateway passes its stream through
+untouched and the session still adapts to a slow link. Because wlshare is ours, what RFB
+lacks is added to it as an extension: pixel density, switching outputs,
+sound, and the browser's camera and microphone. It is a `vnc` target with
+`subtype = "wlshare"`, which is what makes the gateway list those extensions and
+ask for the stream. See
+[wlshare's VP9 and the `wlshare` subtype](#wlshares-vp9-and-the-wlshare-subtype).
+
 #### Other servers, not prioritized
 
 Every other VNC server is a plain `vnc` target, reached through the RFB baseline
-and always encoded as VP9 in the gateway, at 1x and without sound. The gateway
-asks for ZRLE and reads nothing else but Raw, which RFB lets any server send; the
-older standard encodings, Tight and the other vendor or lossy ones are not
-listed. A wlshare server behind a plain target is read the same way: its
+and always encoded as VP9 in the gateway, at 1x, without sound, and at the
+size the server picks: it is never asked to resize. The gateway asks for ZRLE
+and reads nothing else but Raw, which RFB lets any server send; the older
+standard encodings, Tight and the other vendor or lossy ones are not listed. A wlshare server behind a plain target is read the same way: its
 fallback for ordinary VNC clients. Plain VNC stays supported, and is worked on
-as needed rather than ahead of the tiers.
+as needed rather than ahead of the prioritized servers.
 
 Another RDP server, an older Windows or xrdp say, may happen to work if it
 speaks what the client implements ([The RDP client](rdp-client.md)), but it is

@@ -15,6 +15,9 @@ belong in the linked documentation.
   of them is welcome, and when work for them competes with work for other
   servers, they come first. Other RDP and VNC servers remain supported through
   each protocol's baseline.
+- Among the three, Windows and macOS come first: most people connect to them,
+  so features are designed and tested on them first. wlshare follows, even
+  where it integrates more seamlessly.
 - Because wlshare is ours, what RFB lacks can be added to it as an
   extension a `wlshare` target lists, as density, outputs, audio, camera,
   microphone and its VP9 stream were, or as a message it sends, as the scroll

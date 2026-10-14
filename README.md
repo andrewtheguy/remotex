@@ -81,36 +81,37 @@ side.
 
 remotex is built around the remote desktop servers native to each platform:
 Windows' own Remote Desktop, macOS's built-in Screen Sharing, and on Linux
-[wlshare](https://github.com/andrewtheguy/wlshare), our own. They are ranked in
-tiers by how seamlessly each integrates with remotex and with its host's
-operating system. The ranking is not the order work is done in: Windows and
-macOS are the common use case, so testing and optimization prioritize them.
+[wlshare](https://github.com/andrewtheguy/wlshare), our own. Windows and macOS
+come first: they are what most people connect to, so features are tested and
+optimized on them first. wlshare follows them, though it integrates the most
+seamlessly of the three, since what RFB lacks is added to it.
 
-- **Tier 1: wlshare on Linux** (`vnc`, `subtype = "wlshare"`). Because the
-  server is ours, what RFB lacks is added to it: it switches outputs, follows
-  the window at its density, carries Opus or FLAC sound and the browser's camera
-  and microphone, and codes its own VP9 for the gateway to pass through,
-  adapting to the browser's link. Two outputs can be shown at once, the second
-  in a browser tab of its own (alpha).
-- **Tier 2: Windows 10 and 11's Remote Desktop** (`rdp`) **and a Mac's High
-  Performance Screen Sharing** (`vnc`, `subtype = "ard-high-performance"`).
-  Both follow the window at its density and carry sound: Windows as Opus or
-  FLAC, with the camera and microphone beside it; the Mac always as AAC-ELD, on
-  one virtual display or two. Windows' picture is its graphics pipeline, passed
-  through, high quality or, in alpha, adaptive H.264. The Mac's is its HEVC or
-  its H.264 passed through, which the Mac sends at its own rate rather than the
-  browser link's: little on a still screen, much with motion. The H.264 needs
-  nothing added, and the HEVC a browser that decodes it or the page's software
-  decoder.
-- **Tier 3: a Mac's Standard Screen Sharing** (`vnc`, `subtype = "ard"`). The
-  Mac's physical displays, one or all, at their own size and density, as VP9
-  from the gateway, with no sound, camera or microphone.
+- **Windows 10 and 11's Remote Desktop** (`rdp`). Follows the window at its
+  density and carries Opus or FLAC sound, with the camera and microphone beside
+  it. Its picture is its graphics pipeline, passed through, high quality or, in
+  alpha, adaptive H.264.
+- **A Mac's High Performance Screen Sharing** (`vnc`,
+  `subtype = "ard-high-performance"`). Follows the window at its density, on
+  one virtual display or two, and always carries AAC-ELD sound. Its picture is
+  its HEVC or its H.264 passed through, which the Mac sends at its own rate
+  rather than the browser link's: little on a still screen, much with motion.
+  The H.264 needs nothing added, and the HEVC a browser that decodes it or the
+  page's software decoder.
+- **A Mac's Standard Screen Sharing** (`vnc`, `subtype = "ard"`). The Mac's
+  physical displays, one or all, at their own size and density, as VP9 from the
+  gateway, with no sound, camera or microphone.
+- **wlshare on Linux** (`vnc`, `subtype = "wlshare"`). Because the server is
+  ours, what RFB lacks is added to it: it switches outputs, follows the window
+  at its density, carries Opus or FLAC sound and the browser's camera and
+  microphone, and codes its own VP9 for the gateway to pass through, adapting
+  to the browser's link. Two outputs can be shown at once, the second in a
+  browser tab of its own (alpha).
 
 Every other VNC server is a plain `vnc` target reached through the RFB
-baseline: one framebuffer at 1x, no sound, VP9 from the gateway. Another RDP
-server may happen to work but is not tested against. See
-[Server tiers](docs/architecture.md#server-tiers) for the comparison table,
-what the tiers share, and what each passes.
+baseline: one framebuffer at 1x, not resized, no sound, VP9 from the gateway.
+Another RDP server may happen to work but is not tested against. See
+[Prioritized servers](docs/architecture.md#prioritized-servers) for the
+comparison table, what they share, and what each passes.
 
 ## Quick start
 
