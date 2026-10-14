@@ -188,7 +188,7 @@ elsewhere the operator installs it, as
 platform.
 
 The non-default `apple-hp-media-static` feature links private static archives
-instead, and is in no release artifact. No artifact holds the BETA software
+instead, and is in no release artifact. No artifact holds the software
 HEVC decoder either, libavcodec in WebAssembly for the page, which FFmpeg's
 licence keeps out as it keeps the native decoder out: an operator
 downloads the release that `src/hevc_wasm.rs` pins by version and SHA-256 from

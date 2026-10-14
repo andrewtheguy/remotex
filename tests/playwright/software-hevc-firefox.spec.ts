@@ -1,4 +1,4 @@
-// BETA: the software HEVC decoder's fallback, from Playwright's Firefox, whose own
+// The software HEVC decoder's fallback, from Playwright's Firefox, whose own
 // decoder refuses a High Performance Mac's HEVC. What is asserted, and how to run
 // it, is softwareHevc.ts's.
 import { test } from "@playwright/test";

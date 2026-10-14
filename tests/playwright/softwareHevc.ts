@@ -1,4 +1,4 @@
-// BETA: the software HEVC decoder (frontend/src/softwareDecoder.ts), which a
+// The software HEVC decoder (frontend/src/softwareDecoder.ts), which a
 // gateway that has its release archive serves at /hevc/ and which decodes a High
 // Performance Mac's passed stream in a page whose browser's own decoder refuses
 // it. No picker row chooses it: each page falls back to it by itself.

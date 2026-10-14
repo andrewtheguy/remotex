@@ -23,7 +23,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/flac"]
 
 [package]
 name = "remotex"
-version = "0.0.404"
+version = "0.0.405"
 license = "MIT"
 edition = "2024"
 
@@ -195,7 +195,7 @@ sha1 = "0.11"
 # suppresses it. See `deflate_chunk` in src/vnc_encodings.rs; the production
 # deflate and inflate loops are correct under either.
 flate2 = "1"
-# EXPERIMENTAL: the software HEVC decoder's release archive, read once at start-up
+# The software HEVC decoder's release archive, read once at start-up
 # (src/hevc_wasm.rs) and never written. No default features: nothing here reads
 # extended attributes.
 tar = { version = "0.4", default-features = false }

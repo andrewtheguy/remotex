@@ -36,7 +36,7 @@ pub struct AppState {
     pub auth: Arc<AuthSessions>,
     /// Every browser socket's byte counters, and the database `[meter]` records them in.
     pub throughput: Throughput,
-    /// BETA: the software HEVC decoder, read at start-up.
+    /// The software HEVC decoder, read at start-up.
     pub hevc_decoder: Option<HevcDecoder>,
 }
 
@@ -674,7 +674,7 @@ struct TargetInfo {
     default_size: Option<Points>,
     /// Whether the picker offers the remote's sound as a choice.
     audio: bool,
-    /// BETA: whether a page whose own decoder refuses this target's passed HEVC
+    /// Whether a page whose own decoder refuses this target's passed HEVC
     /// can decode it in the software decoder this gateway serves.
     software: bool,
     /// The streams the target can pass untouched, in the picker's order: none,

@@ -532,7 +532,7 @@ test("the second display's place is a choice where the target offers it", () => 
   assert.equal(stale.choices.placement, "right");
 });
 
-// BETA: a Mac's passed HEVC decoded in this page where the browser's own decoder
+// A Mac's passed HEVC decoded in this page where the browser's own decoder
 // does not take it.
 const MAC_PAGE = { ...HIGH_PERFORMANCE, software: true };
 /** A browser whose own decoder does not take the Mac's HEVC, and whose page does. */

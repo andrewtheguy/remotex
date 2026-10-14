@@ -18,7 +18,7 @@
 //! through (`frontend/src/egfxCompositor.ts`), as the software HEVC decoder's do.
 //! It costs the page nothing, since all it loads is this origin's.
 //!
-//! BETA: a gateway that has the archive also serves the software
+//! A gateway that has the archive also serves the software
 //! HEVC decoder ([`crate::hevc_wasm`]), which it read at start-up, at `/hevc/` under
 //! the names it was built with, which the page's decode worker and the decoder's
 //! threads import the glue by. Without it `/hevc/` is a 404 and the

@@ -38,7 +38,7 @@
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 // - Which decoder takes the picture is no choice: the page decodes the VP9, and
-//   BETA a Mac's passed HEVC where the gateway serves the decoder for it, in
+//   a Mac's passed HEVC where the gateway serves the decoder for it, in
 //   WebAssembly wherever the browser's own decoder does not take it
 //   (softwareDecoder.ts).
 
@@ -69,7 +69,7 @@ export interface TargetInfo {
   /** Whether the remote's sound is a choice. */
   audio: boolean;
   /**
-   * BETA: whether a page whose own decoder refuses this target's passed HEVC can
+   * Whether a page whose own decoder refuses this target's passed HEVC can
    * decode it in the software decoder the gateway serves.
    */
   software: boolean;

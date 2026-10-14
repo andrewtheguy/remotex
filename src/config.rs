@@ -554,7 +554,7 @@ pub struct Decoders {
     /// Whether it decodes a High Performance Mac's picture, the HEVC, Range
     /// Extensions 4:4:4 ([`Passthrough::AppleMedia`]): in the browser's own
     /// decoder, or, where that refuses it, in the page's WebAssembly one this
-    /// gateway serves (BETA, [`Self::stated`]).
+    /// gateway serves ([`Self::stated`]).
     pub apple_media: bool,
     /// Whether it composes an RDP host's graphics pipeline
     /// ([`Passthrough::RdpGraphics`]): the page's compositor needs shared memory,
@@ -986,7 +986,7 @@ impl TargetConfig {
         }
     }
 
-    /// BETA: whether a page whose own decoder refuses this target's passed HEVC
+    /// Whether a page whose own decoder refuses this target's passed HEVC
     /// can decode it in the software decoder the gateway serves, where it serves
     /// one (`page_hevc`): on a target with a Mac's picture to pass.
     pub fn software(&self, page_hevc: bool) -> bool {
@@ -1524,7 +1524,7 @@ pub struct ConfigFile {
     /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
     #[serde(default)]
     pub meter: Option<MeterSection>,
-    /// The `[hevc_wasm]` table: BETA, where the page's software HEVC
+    /// The `[hevc_wasm]` table: where the page's software HEVC
     /// decoder is, for a gateway that keeps it outside its data directory. Absent,
     /// the decoder is served if its archive is there. Top-level for
     /// [`Self::branding`]'s reason.

@@ -819,7 +819,7 @@ pub struct SessionParams {
     /// can decode it, and a socket that does not say is refused at the door rather
     /// than answered with a guess.
     apple_media: bool,
-    /// BETA: whether this page runs the software HEVC decoder, which decodes the
+    /// Whether this page runs the software HEVC decoder, which decodes the
     /// Mac's picture where the browser's own decoder does not, on a gateway that
     /// serves it ([`Decoders::stated`]). Asked and required as the others are.
     page_hevc: bool,

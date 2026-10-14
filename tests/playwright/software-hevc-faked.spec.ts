@@ -1,4 +1,4 @@
-// BETA: the software HEVC decoder's fallback, with the browser's own decoder's
+// The software HEVC decoder's fallback, with the browser's own decoder's
 // answer faked, so both sides of it run in any browser on any machine: a "no",
 // which the page decodes with the gateway's decoder where it serves one, and a
 // "yes", which the page keeps in a stand-in for the browser's own decoder. What is
