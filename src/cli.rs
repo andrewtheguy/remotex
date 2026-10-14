@@ -13,15 +13,12 @@ use clap::{Parser, Subcommand};
 
 /// The optional cargo features this binary was built with, for `--help` and the log
 /// of a starting gateway: `embedded-gateway` decides whether it accepts `tui`,
-/// `apple-hp-media-static` whether it links the Mac's HEVC decoder statically
-/// instead of loading it, and `native-vp9` whether it has the alpha VP9
-/// encoder in Rust, and nothing else about the binary says so. Not in
+/// and `native-vp9` whether it has the alpha VP9 encoder in Rust, and nothing
+/// else about the binary says so. Not in
 /// `--version`, which packaging compares to the release's.
 pub const FEATURES: &[&str] = &[
     #[cfg(feature = "embedded-gateway")]
     "embedded-gateway",
-    #[cfg(feature = "apple-hp-media-static")]
-    "apple-hp-media-static",
     #[cfg(feature = "native-vp9")]
     "native-vp9",
 ];
@@ -133,7 +130,6 @@ mod tests {
         let help = command.render_help().to_string();
         assert!(help.trim_end().ends_with(&format!("Features: {}", features_line())), "{help}");
         assert_eq!(FEATURES.contains(&"embedded-gateway"), cfg!(feature = "embedded-gateway"));
-        assert_eq!(FEATURES.contains(&"apple-hp-media-static"), cfg!(feature = "apple-hp-media-static"));
         assert_eq!(FEATURES.contains(&"native-vp9"), cfg!(feature = "native-vp9"));
         assert_eq!(
             command.render_version(),

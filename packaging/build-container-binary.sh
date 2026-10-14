@@ -3,8 +3,7 @@
 # `serve` shape; the process-local managed-instance surface is a native concern.
 #
 # REMOTEX_CONTAINER_FEATURES names the features the binary has, which unset is
-# `native-vp9` alone, as release CI leaves it: an operator's own image names
-# that and what it adds (`native-vp9 apple-hp-media-static`), and one for an
+# `native-vp9` alone, as release CI leaves it, and one for an
 # amd64 machine under x86-64-v3 sets it empty beside the RUSTFLAGS that
 # packaging/README.md ("x86-64 CPU compatibility") gives.
 # Whatever it names, the checks below still refuse a binary that carries the

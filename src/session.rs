@@ -2718,9 +2718,18 @@ mod tests {
         assert!(hook_rx.try_recv().is_err(), "nothing was started");
         assert!(mgr.state.lock().unwrap().selected.is_none());
 
-        // Without it, the same browser starts the target, encoded here.
-        mgr.connect(att.id, "mac", None, RESIZE).await.unwrap();
-        assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { apple_media: false, .. })));
+        // Nor one that names neither of the Mac's streams: no picture of the
+        // Mac's is encoded here.
+        assert!(matches!(
+            mgr.connect(att.id, "mac", None, RESIZE).await,
+            Err(ConnectError::NotOffered(_))
+        ));
+        assert!(matches!(recv(&mut att.events).await, AttachEvent::Msg(ServerMsg::Error { .. })));
+
+        // The Mac's H.264, which no browser is asked about, starts the target.
+        let h264 = Choices { passthrough: Some(Passthrough::AppleH264), ..RESIZE };
+        mgr.connect(att.id, "mac", None, h264).await.unwrap();
+        assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { apple_media: false, apple_h264: true, .. })));
     }
 
     /// A passed graphics pipeline is never resumed: the host draws against what its
@@ -3508,10 +3517,10 @@ mod tests {
 
     /// A High Performance Mac's sound is passed whichever way its picture goes:
     /// the engine's own units reach the socket as they came, behind the Mac's
-    /// format, in a session started with the passthrough and in one without.
+    /// format, in a session passed its HEVC and in one passed its H.264.
     #[tokio::test]
     async fn a_macs_sound_is_passed_behind_its_own_format() {
-        for apple_media in [true, false] {
+        for picture in [Passthrough::AppleMedia, Passthrough::AppleH264] {
             let (hook_tx, hooks) = std_mpsc::channel();
             let spawner: EngineSpawner = Box::new(
                 move |_target, _choices, _plan, _display, input_rx, frame_tx, audio, camera, _feedback| {
@@ -3522,12 +3531,12 @@ mod tests {
             let token = mgr.claim(false, None, "login").unwrap();
             let mut att = mgr.attach(&token, None, TAKES).await.unwrap();
             expect_picker(&mut att.events).await;
-            let choices = Choices { passthrough: apple_media.then_some(Passthrough::AppleMedia), ..Choices::default() };
+            let choices = Choices { passthrough: Some(picture), ..Choices::default() };
             mgr.connect(att.id, "mac", None, choices).await.unwrap();
             match recv(&mut att.events).await {
                 AttachEvent::Msg(ServerMsg::Connected { audio, passthrough, .. }) => {
                     assert!(audio, "the Mac's sound comes with its picture");
-                    assert_eq!(passthrough.is_some(), apple_media);
+                    assert_eq!(passthrough, Some(picture.name()));
                 }
                 other => panic!("expected connected(mac), got {other:?}"),
             }

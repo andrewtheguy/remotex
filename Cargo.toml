@@ -23,7 +23,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/flac"]
 
 [package]
 name = "remotex"
-version = "0.0.405"
+version = "0.0.406"
 license = "MIT"
 edition = "2024"
 
@@ -33,11 +33,6 @@ edition = "2024"
 # expose process supervision or its private worker surface.
 default = ["embedded-gateway", "native-vp9"]
 embedded-gateway = ["dep:crossterm", "dep:libc", "dep:windows-sys"]
-# Apple High Performance's HEVC decoder (src/libav.rs), FFmpeg's libavcodec
-# (LGPL), is loaded from the system's shared libraries when a session needs it,
-# so every build has it and none compiles or links it. This links it from its
-# private static archive instead, for a build that brings its own.
-apple-hp-media-static = ["dep:avcodec-hevc-sys"]
 # ALPHA: screen-vp9's encoder written in Rust, which a session started with the
 # picker's native VP9 encoder codes its stream with in libvpx's place. On by
 # default, in a container's build as in a native one. It is built for NEON on
@@ -101,24 +96,6 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # Its `native` feature, the ALPHA encoder it has written in Rust, is this
 # crate's `native-vp9` above.
 screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.18" }
-# YUV→RGB for the HEVC pictures High Performance's media stream decodes to
-# (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
-# no C, no assembler, the same bargain as above.
-yuv = "0.8"
-# High Performance's decoder, loaded from the system's shared libraries:
-# libavcodec for the Mac's HEVC picture, re-encoded here as VP9 (src/libav.rs
-# names it per platform), so the default build compiles and links none. The
-# Mac's AAC-ELD sound is decoded by the browser.
-libloading = "0.9"
-# `apple-hp-media-static` links it instead, from the prebuilt bargain `opus`
-# and `screen-vp9` make: static archives the sys crate downloads, compiling no
-# C. They are configured down to the HEVC decoder and parser (and on
-# macOS its VideoToolbox hwaccel); that FFmpeg is LGPL-2.1-or-later, linked
-# statically, and the prebuilt repository's README says what that obliges. The
-# archives are private: building needs `gh` logged in to an account that can
-# read them, or `LIBAVCODEC_HEVC_PREBUILT_DIR`.
-# The tag pins the crate; the archives are the latest release's.
-avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://github.com/andrewtheguy/libavcodec-hevc-prebuilt", tag = "v9.0.2-20260928041244-5fdbab1", optional = true }
 # Remote audio: resample redirected PCM and encode bare Opus packets, as wlshare
 # codes its own: sound-opus, the one crate that codes a desktop's sound as Opus
 # for this gateway and for wlshare, its own repository pinned at a release tag by

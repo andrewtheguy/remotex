@@ -151,14 +151,14 @@ export function readRemoteClipboard(): string {
 // follows the window whatever is asked, since that is the one size it has here.
 //
 // `passthrough` is which of a High Performance Mac's streams is passed, its HEVC
-// or its H.264, the ones that are a choice; without it the picture is VP9
-// encoded by the gateway, where the gateway can. An RDP target with its pipeline
+// or its H.264, the one choice of its picture; without it the picker's own pick
+// stands, the HEVC where this browser can take it. An RDP target with its pipeline
 // on (egfx not false) passes it in every session, which is said and not offered.
 // `pipeline` is how the host draws that pipeline, high quality unless asked.
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
-  passthrough?: "apple-media" | "apple-h264" | null;
+  passthrough?: "apple-media" | "apple-h264";
   pipeline?: "high-quality" | "adaptive-desktop" | "adaptive-region";
 }
 
@@ -278,19 +278,18 @@ export async function startTarget(
       })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
-  // A High Performance Mac's picture: one of its streams passed, or VP9 encoded
-  // by the gateway where nothing is asked for and the gateway can.
-  const wanted = choices.passthrough ?? null;
-  const picture = item.getByRole("group", { name: "Picture" }).getByRole("radio", {
-    name:
-      wanted === "apple-media"
-        ? /^HEVC, passed through/
-        : wanted === "apple-h264"
-          ? /^H\.264, passed through/
-          : /^VP9, encoded by the gateway/,
-  });
-  if (wanted || ((await picture.count()) > 0 && (await picture.isEnabled()))) {
-    await picture.check({ timeout: LEAVE_TIMEOUT_MS });
+  // A High Performance Mac's picture: which of its streams is passed, where one
+  // is asked for.
+  if (choices.passthrough) {
+    await item
+      .getByRole("group", { name: "Picture" })
+      .getByRole("radio", {
+        name:
+          choices.passthrough === "apple-media"
+            ? /^HEVC, passed through/
+            : /^H\.264, passed through/,
+      })
+      .check({ timeout: LEAVE_TIMEOUT_MS });
   }
   await item.getByRole("button", { name: "Start", exact: true }).click();
 }

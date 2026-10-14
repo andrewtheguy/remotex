@@ -1551,11 +1551,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libavcodec-hevc-prebuilt-sys"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libavcodec-hevc-prebuilt?tag=v9.0.2-20260928041244-5fdbab1#5fdbab13fc1a63986344185565c1208847c09880"
-
-[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1565,16 +1560,6 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 name = "libflac-prebuilt-sys"
 version = "0.1.0"
 source = "git+https://github.com/andrewtheguy/libflac-prebuilt?tag=v1.5.0-20261002034056-4ba69e8#4ba69e821e60fca68657abdb3968c21dab01e747"
-
-[[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
 
 [[package]]
 name = "libopus-prebuilt-sys"
@@ -2291,7 +2276,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.405"
+version = "0.0.406"
 dependencies = [
  "aes",
  "anyhow",
@@ -2307,9 +2292,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hmac",
- "libavcodec-hevc-prebuilt-sys",
  "libc",
- "libloading",
  "log",
  "md-5",
  "num-bigint 0.4.8",
@@ -2343,7 +2326,6 @@ dependencies = [
  "tower",
  "uuid",
  "windows-sys 0.61.2",
- "yuv",
 ]
 
 [[package]]

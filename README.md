@@ -97,11 +97,11 @@ macOS are the common use case, so testing and optimization prioritize them.
   Both follow the window at its density and carry sound: Windows as Opus or
   FLAC, with the camera and microphone beside it; the Mac always as AAC-ELD, on
   one virtual display or two. Windows' picture is its graphics pipeline, passed
-  through, high quality or, in alpha, adaptive H.264. The Mac's is VP9 from the
-  gateway or, for a LAN, its HEVC or its H.264 passed through, which do not
-  adapt to the browser's link. Only the H.264 needs nothing added: the VP9
-  takes FFmpeg on the gateway's host, and the HEVC a browser that decodes it or
-  the page's software decoder.
+  through, high quality or, in alpha, adaptive H.264. The Mac's is its HEVC or
+  its H.264 passed through, which the Mac sends at its own rate rather than the
+  browser link's: little on a still screen, much with motion. The H.264 needs
+  nothing added, and the HEVC a browser that decodes it or the page's software
+  decoder.
 - **Tier 3: a Mac's Standard Screen Sharing** (`vnc`, `subtype = "ard"`). The
   Mac's physical displays, one or all, at their own size and density, as VP9
   from the gateway, with no sound, camera or microphone.
@@ -173,7 +173,6 @@ removal.
 - [Using remotex](docs/guide.md): the browser client, starting a session, setting up Windows, Mac, wlshare and VNC targets, `remotex tui`
 - [Installing remotex](docs/install.md): packages, first configuration, upgrade, removal
 - [`remotex.example.toml`](remotex.example.toml): every configuration key, annotated
-- [High Performance decoder](docs/high-performance-decoder.md): the FFmpeg library a High Performance Mac target needs to be sent as VP9
 - [Known issues](docs/known-issues.md): faults worth recognising rather than re-investigating
 - [Roadmap](docs/roadmap.md): what is planned, and what is not
 - [Architecture](docs/architecture.md): the design and its constraints, the client protocol, the engines

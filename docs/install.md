@@ -151,10 +151,6 @@ remotex serve
 Then open <http://localhost:52380>. [Using remotex](guide.md) says how each
 kind of target is set up and how the page is reached from another machine.
 
-A Mac target with `subtype = "ard-high-performance"` needs a library on the
-gateway's host that no package contains, FFmpeg. See
-[High Performance decoder](high-performance-decoder.md) for installing it.
-
 ## Container
 
 ```sh

@@ -5,8 +5,8 @@
 //! It is andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and
 //! compiled to WebAssembly, a release published to the private
 //! andrewtheguy/hevc-wasm-archives, and no build of this binary holds it, since
-//! its licence keeps it out of every artifact as the native decoder's keeps that
-//! out ([`crate::libav`]): an operator who wants it downloads the release archive
+//! its licence keeps it out of every artifact: an operator who wants it downloads
+//! the release archive
 //! into the gateway's data directory, or anywhere else and names it in
 //! `[hevc_wasm]`. The
 //! gateway reads that archive once at start-up, refuses it unless it is exactly the

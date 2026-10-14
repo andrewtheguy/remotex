@@ -18,7 +18,6 @@ pub mod error;
 pub mod feedback;
 pub mod hevc_wasm;
 pub mod keymap;
-pub mod libav;
 pub mod mic;
 pub mod opus_stream;
 pub mod pcm48;

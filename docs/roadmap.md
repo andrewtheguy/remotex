@@ -141,8 +141,10 @@ tested, on a physical Mac.
 
 ### A passed stream for a Mac on a slow link
 
-A Mac's passed HEVC is for a LAN, and a browser on a slow link is served by a
-session started without the passthrough, re-encoded here as VP9
+A High Performance Mac's passed stream does not follow the browser's link: a
+still screen comes far under its 20–60 Mbit/s target, but a slow link falls
+behind one in motion, and such a link is served today by an `ard` target, its
+ZRLE re-encoded here as VP9
 ([A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link)).
 A stream the Mac makes itself could be passed in its place, chosen at the
 picker as an RDP host's H.264 is. It has only been probed, and has not been

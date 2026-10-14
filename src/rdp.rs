@@ -48,7 +48,7 @@ use crate::rdp_client::{
     Placed, Session,
 };
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
-use crate::shadow::{self, Rect, Shadow};
+use crate::shadow::{Rect, Shadow};
 
 // A layout — a size, a density, or both — the remote has been asked for and has
 // not answered.
@@ -2727,18 +2727,10 @@ async fn send_damage(
         return Ok(());
     };
 
-    let Some(changed) = shadow.accept(local, &buf) else {
-        return Ok(());
-    };
-    if changed == local {
-        return sink.damage(local, &buf).await;
+    match shadow.changed(local, &buf) {
+        Some((changed, pixels)) => sink.damage(changed, &pixels).await,
+        None => Ok(()),
     }
-    // Cropped out of the pack already made rather than repacked from the frame — the
-    // changed rows are not contiguous in `buf`, but they are row copies, where a
-    // repack is another per-pixel swizzle over the same pixels.
-    let mut pixels = Vec::new();
-    shadow::crop(&buf, local, changed, &mut pixels);
-    sink.damage(changed, &pixels).await
 }
 
 /// Pack `rect` out of the framebuffer into `buf` as RGB888.

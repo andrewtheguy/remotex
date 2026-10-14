@@ -5,7 +5,7 @@
 # ///
 """A High Performance Mac's capture in four strips, as a video of the display to watch.
 
-``tests/hp_capture.sh --strips`` writes ``video.h265`` with each picture one strip of
+``tests/hp_capture.sh`` writes ``video.h265`` with each picture one strip of
 the display, and nothing in it saying which. A player shows the strips one after
 another; this puts each where it belongs and writes the display as it stood after every
 picture, as H.264:

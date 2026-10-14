@@ -65,7 +65,7 @@ config key.
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
 | `vnc`, `ard` | no | none | — | — | libvpx or native\* |
 | `vnc`, `ard` with `virtual_display` | yes | none | — | — | libvpx or native\* |
-| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264 | — | libvpx or native\*, for VP9 |
+| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — | — |
 
 \* Not in a gateway built without the `native-vp9` feature, the build for an
 amd64 machine under x86-64-v3.
@@ -84,16 +84,17 @@ amd64 machine under x86-64-v3.
   button reads *Audio not supported* in such a browser, and *AAC-ELD not
   supported* in one that cannot decode the Mac's AAC-ELD.
 - **Passthrough.** Sends the remote's own stream to the browser as it came
-  instead of VP9 encoded by the gateway. On a Mac it is a choice, for a LAN,
-  between its HEVC, greyed where the browser cannot take the stream, and its
-  H.264, which is offered to every browser and needs no HEVC decoder in the
-  gateway or the page. On an `rdp` target with the
+  instead of VP9 encoded by the gateway. A High Performance Mac's picture is
+  always passed, and which stream is the choice: its HEVC, greyed where the
+  browser cannot take it, or its H.264, which is offered to every browser and
+  needs no HEVC decoder in the page. On an `rdp` target with the
   pipeline on it is no choice: the picker says it is always passed, with no box
   to tick, and a browser that
   cannot compose the pipeline cannot start the target. A passed RDP pipeline
   follows the browser's link: the Windows host draws fewer and smaller frames
-  for a browser that falls behind. A Mac's passed stream does not: on a slow link,
-  start that session without it.
+  for a browser that falls behind. A Mac's passed stream does not: the Mac sends
+  at its own rate, little on a still screen and much with motion. For a slow
+  link with much motion, an `ard` target's VP9 follows the link.
   See [A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link).
 - **Graphics.** How an RDP host draws its pipeline. *High quality*, the default,
   is the pipeline's codecs without H.264, for a
@@ -107,8 +108,8 @@ amd64 machine under x86-64-v3.
   *Native* (alpha), the encoder in Rust that `screen-vp9` has written. On a
   `wlshare` target wlshare codes it, and needs a wlshare that has the encoder:
   an older one codes with libvpx. The stream is the same to the browser either
-  way, so starting one target with each compares the two. On a High Performance
-  Mac it is shown while the Picture is VP9.
+  way, so starting one target with each compares the two. A High Performance
+  Mac's picture is never VP9, so it has no such choice.
 
 One gateway holds one session. A reload or a dropped connection normally
 resumes it; an RDP session with the graphics pipeline on instead reconnects the engine,
@@ -229,8 +230,8 @@ connection with the same error as wrong credentials. See
     first here and opens the second at `/display/2` in a new tab of the same
     browser, as on an RDP target, and the picker shows either alone; on a session that follows the window that
     tab's window sizes the second display. The Mac sends a stream for each
-    display, the second to UDP port 5902, and the gateway decodes or passes
-    only the displays shown. As on RDP, a window dragged over the edge between
+    display, the second to UDP port 5902, and the gateway passes only the
+    displays shown. As on RDP, a window dragged over the edge between
     the two tabs arrives on the other display, and the second display's tab is not
     recommended on a client with one physical display, and not supported on a
     phone or tablet.
@@ -239,15 +240,13 @@ connection with the same error as wrong credentials. See
   - A Linux gateway needs `net.core.rmem_max` of at least 4194304 for the
     picture's socket, and the log warns when it is lower: the stock 212992
     loses keyframes at Retina sizes.
-  - The gateway decodes the picture with the host's FFmpeg (libavcodec), which
-    no release artifact contains: install it as
-    [High Performance decoder](high-performance-decoder.md) says. Without it the
-    picture can only be passed through.
-  - The H.264 passthrough needs nothing added, on the gateway or in the page:
-    the Mac is asked for H.264 in place of its HEVC, and the browser decodes it
-    with its own decoder, which more browsers have for H.264 than for HEVC. So
-    a default build serves the target with no FFmpeg and no software decoder,
-    and the picker offers the H.264 to every browser.
+  - The gateway decodes neither of the Mac's streams: the picture is passed, as
+    the HEVC or the H.264 chosen at the picker.
+  - The H.264 passthrough needs nothing added in the page: the Mac is asked for
+    H.264 in place of its HEVC, and the browser decodes it with its own decoder,
+    which more browsers have for H.264 than for HEVC. So a default build serves
+    the target to any browser, Firefox included, with no software decoder, and
+    the picker offers the H.264 to every browser.
   - The HEVC passthrough sends the HEVC only when the page's startup probe finds a
     decoder path. Support depends on the browser, platform and GPU, so the
     picker is authoritative. The gateway can also serve the optional software

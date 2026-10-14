@@ -145,7 +145,7 @@ impl Shadow {
     /// nowhere: sending pixels that did not need sending wastes bytes, where
     /// suppressing ones that were needed leaves the client showing pixels the
     /// remote no longer has.
-    pub fn accept(&mut self, rect: Rect, rgb: &[u8]) -> Option<Rect> {
+    fn accept(&mut self, rect: Rect, rgb: &[u8]) -> Option<Rect> {
         self.examined += 1;
         let w = usize::from(rect.w());
         let h = usize::from(rect.h());
@@ -218,6 +218,21 @@ impl Shadow {
         Some(changed)
     }
 
+    /// What of `rect` the client lacks, as [`Self::accept`] finds it, with its
+    /// pixels: `rgb` itself where all of `rect` changed, and otherwise the
+    /// changed part cropped out of it, which is row copies where a repack from the
+    /// source would be another swizzle over the same pixels. What an engine hands
+    /// the video sink, from ZRLE and from RDP's bitmap path alike.
+    pub fn changed<'a>(&mut self, rect: Rect, rgb: &'a [u8]) -> Option<(Rect, std::borrow::Cow<'a, [u8]>)> {
+        let changed = self.accept(rect, rgb)?;
+        if changed == rect {
+            return Some((rect, std::borrow::Cow::Borrowed(rgb)));
+        }
+        let mut pixels = Vec::new();
+        crop(rgb, rect, changed, &mut pixels);
+        Some((changed, std::borrow::Cow::Owned(pixels)))
+    }
+
     /// The pixels of `rect` as packed RGB888, or `None` when any of them is
     /// unknown: what a test asks to learn what the client has been sent.
     #[cfg(test)]
@@ -285,7 +300,7 @@ impl Shadow {
 ///
 /// `sub` must be inside `rect`; `out` is left empty if it is not, which shows up
 /// as a payload-length error at the mirror rather than as wrong pixels.
-pub fn crop(src: &[u8], rect: Rect, sub: Rect, out: &mut Vec<u8>) {
+fn crop(src: &[u8], rect: Rect, sub: Rect, out: &mut Vec<u8>) {
     out.clear();
     if sub.left < rect.left
         || sub.top < rect.top

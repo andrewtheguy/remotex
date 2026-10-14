@@ -73,10 +73,10 @@ for:
 - The browser's own decoder takes it: the session socket says so, the passed
   HEVC is decoded there, and nothing under `/hevc/` is asked for.
 - It does not, on a gateway with the decoder's archive: the target is listed as
-  offering the decoder, the page states it runs it, the passthrough is sent, and
+  offering the decoder, the page states it runs it, the HEVC is sent, and
   the decode worker loads the decoder, with nothing asking for it beforehand.
 - It does not, on a gateway without: the target offers no such decoder, the
-  session starts without the passthrough and is sent VP9, and nothing under
+  session starts with the Mac's H.264 passed instead, and nothing under
   `/hevc/` is asked for.
 
 A passed stream's first keyframe batch must be acknowledged with no video error

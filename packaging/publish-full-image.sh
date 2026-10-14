@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
-# Build the image release CI never publishes — the public image with Debian's
-# libavcodec61 installed, the High Performance decoder its gateway loads at run
-# time — and the EXPERIMENTAL
+# Build the image release CI never publishes — the public image with the
 # software HEVC decoder's release archive, which no release artifact holds — and
 # push it to the operator's private registry, ghcr.io/andrewtheguy/remotex-full,
 # under the tag's own name (v0.0.294).
 #
 # The tags it builds are release tags, and it builds nothing of remotex: the
 # release workflow has published the public image of the tag, and this is one
-# layer over that image's linux/amd64 half, installing the library and
-# placing the archive the tag's src/hevc_wasm.rs pins, downloaded from the
+# layer over that image's linux/amd64 half, placing the archive the tag's
+# src/hevc_wasm.rs pins, downloaded from the
 # private andrewtheguy/hevc-wasm-archives through `gh` and checked against that
 # pin, in /opt/remotex/versions/<version>/share/remotex, the release tree's data
 # directory, where the gateway looks for it (src/config.rs, data_dir) and,
 # finding it, serves it: the mounted config says nothing of it.
 #
-# A tag whose gateway links the decoder rather than loading it, still decodes
-# the Mac's sound with fdk-aac, pins no software decoder, or looks for it
-# elsewhere, is refused.
+# A tag whose gateway still decodes the Mac's picture with FFmpeg or its sound
+# with fdk-aac, pins no software decoder, or looks for it elsewhere, is refused.
 #
 # The package must stay private: the public image leaves the decoder out, and a
 # public package is a release artifact. The first push creates it `internal` —
@@ -55,8 +52,10 @@ esac
 
 commit="$(git rev-parse --verify --quiet "refs/tags/${tag}^{commit}")" \
   || { echo "this checkout has no tag ${tag}: git fetch --tags" >&2; exit 1; }
-git cat-file -e "${commit}:src/libav.rs" 2>/dev/null \
-  || { echo "${tag} links the decoder rather than loading it: there is no library to add to its image" >&2; exit 1; }
+if git cat-file -e "${commit}:src/libav.rs" 2>/dev/null; then
+  echo "${tag} decodes the Mac's picture with FFmpeg, which this image no longer carries: build it from that tag's own script" >&2
+  exit 1
+fi
 if git grep -q 'libfdk-aac' "${commit}" -- src/aac_eld.rs; then
   echo "${tag} decodes the Mac's sound with fdk-aac, which this image no longer carries: build it from that tag's own script" >&2
   exit 1
@@ -98,9 +97,6 @@ ARG BASE
 FROM ${BASE}
 ARG VERSION
 ARG WASM_ARCHIVE
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libavcodec61 \
-    && rm -rf /var/lib/apt/lists/*
 COPY ${WASM_ARCHIVE} /opt/remotex/versions/${VERSION}/share/remotex/${WASM_ARCHIVE}
 CONTAINERFILE
 

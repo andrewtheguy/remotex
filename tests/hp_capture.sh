@@ -13,12 +13,12 @@
 # Serve OUT to try them: `cd OUT && uv run python -m http.server 8000`, then open
 # http://localhost:8000/ (localhost is a secure context, which WebCodecs needs).
 #
-# With --strips the session is started as a browser takes it, passed and in four strips
+# The session is started as a browser takes it, its HEVC passed and in four strips
 # where the display's height allows, each picture of video.h265 one strip.
 # tests/hp_strips_video.py makes a video of the display from such a capture, and
 # tests/hp_motion/ holds scripts to run on the Mac for something to capture. With --whole
-# the probe asks for one tile instead (ws_probe.py --whole), passed and each picture the
-# whole display. With neither the gateway decodes the picture itself, from strips.
+# the probe asks for one tile instead (ws_probe.py --whole), each picture the whole
+# display.
 #
 # The probe asks for no resize: the stream is offered only once the display has
 # settled, and a resize in flight on a slow Mac can outlast the session. Play
@@ -27,7 +27,7 @@
 #   REMOTEX_PROBE_PASSWORD=... tests/hp_capture.sh \
 #       [--config tmp/test_uat_hp.toml] [--port 52888] [--target macvmhighperf] \
 #       [--user admin] [--seconds 45] [--display 1440x900@200] [--out tmp/hp-capture] \
-#       [--strips | --whole]
+#       [--whole]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -39,7 +39,7 @@ user=admin
 seconds=45
 display=1440x900@200
 out=tmp/hp-capture
-passed=()
+passed=(--passthrough --apple-media)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -50,8 +50,7 @@ while [[ $# -gt 0 ]]; do
     --seconds) seconds=$2 ;;
     --display) display=$2 ;;
     --out) out=$2 ;;
-    --strips) passed=(--passthrough --apple-media); shift; continue ;;
-    --whole) passed=(--passthrough --apple-media --whole); shift; continue ;;
+    --whole) passed+=(--whole); shift; continue ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift 2

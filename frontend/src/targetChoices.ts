@@ -14,15 +14,13 @@
 //   there are two: see `sizeOptions`.
 // - An option the target's type does not offer has no row.
 // - One it offers that cannot be had here is greyed, with the reason: Opus in
-//   a browser with no audio decoder, a passthrough this browser cannot take, or
-//   a picture this gateway cannot encode.
+//   a browser with no audio decoder, or a passthrough this browser cannot take.
 // - An RDP host's graphics pipeline is passed in every session, which is said and
 //   not offered: the gateway composes none.
-// - A High Performance Mac's picture is one of three: its HEVC passed through,
-//   VP9 encoded by the gateway, or its H.264 passed through, in that order: see
-//   `pictureOptions`. The first this browser and this gateway can do is taken
-//   until another is chosen. The H.264 is never greyed: no browser is asked
-//   whether it decodes it.
+// - A High Performance Mac's picture is one of two, both passed through: its
+//   HEVC, or its H.264, in that order: see `pictureOptions`. The first this
+//   browser can take is taken until another is chosen. The H.264 is never
+//   greyed: no browser is asked whether it decodes it.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
 //   or lossless: see `soundRow`. In a browser with no audio decoder only the
 //   lossless one plays, which the page decodes itself, so ticking takes it.
@@ -33,8 +31,7 @@
 //   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
 //   offered high quality alone.
 // - Which encoder codes the VP9, libvpx or the native one in Rust (alpha), is a
-//   choice on a target that offers it, while the picture chosen is VP9: see
-//   `encoderOptions`.
+//   choice on a target that offers it: see `encoderOptions`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 // - Which decoder takes the picture is no choice: the page decodes the VP9, and
@@ -78,12 +75,6 @@ export interface TargetInfo {
    * graphics pipeline, or a High Performance Mac's HEVC and its H.264.
    */
   passthroughs: Passthrough[];
-  /**
-   * Whether this gateway can serve the target's picture encoded here. Not an RDP
-   * host's graphics pipeline, which no gateway composes and every session passes,
-   * and not a High Performance Mac's on a host that cannot decode its stream.
-   */
-  encoded: boolean;
   /** Whether where the second virtual display sits is a choice. */
   placement: boolean;
   /** Whether how the host draws the graphics pipeline is a choice. */
@@ -136,9 +127,9 @@ export interface Choices {
   size: Sizing;
   audio: Sound;
   /**
-   * The stream of the target's to pass, where passing it is a choice: a Mac's
-   * HEVC or its H.264. Null for a picture encoded by the gateway, and for a
-   * stream that is passed in every session, which is not named.
+   * The stream of the target's to pass, where which is a choice: a Mac's HEVC
+   * or its H.264. Null on a target with no such choice: a picture encoded by
+   * the gateway, or a stream passed in every session, which is not named.
    */
   passthrough: Passthrough | null;
   placement: Placement;
@@ -240,8 +231,8 @@ export interface PassedNote {
 
 /** One way a High Performance Mac's picture can reach this browser. */
 export interface PictureOption {
-  /** What `connect` names: the stream passed, or null for VP9 encoded here. */
-  value: Choices["passthrough"];
+  /** What `connect` names: the stream passed. */
+  value: Exclude<Passthrough, "rdp-graphics">;
   label: string;
   /** What choosing it does, or why it cannot be chosen here. */
   note: string;
@@ -271,10 +262,7 @@ export interface TargetOptions {
    * choice: null otherwise.
    */
   pictures: PictureOption[] | null;
-  /**
-   * The encoders the VP9 can be coded with: null where that is no choice, and
-   * where the picture chosen is passed rather than VP9.
-   */
+  /** The encoders the VP9 can be coded with: null where that is no choice. */
   encoders: EncoderOption[] | null;
   /** What Start sends. */
   choices: Choices;
@@ -295,14 +283,12 @@ const RDP_GRAPHICS: PassedNote & { blocked: string } = {
 
 /**
  * The ways a High Performance Mac's picture can reach this browser, in the
- * order the picker shows them: its HEVC passed through, VP9 encoded by the
- * gateway, and its H.264 passed through.
+ * order the picker shows them: its HEVC passed through, and its H.264.
  *
  * - The HEVC is greyed in a browser whose own decoder does not take it, unless
  *   the page decodes it itself, which it then does (softwareDecoder.ts). The
  *   socket states both answers, and the gateway passes the picture to a page that
  *   has either.
- * - The VP9 is greyed on a gateway that cannot decode the Mac's picture.
  * - The H.264 is never greyed: no browser is asked whether it decodes it.
  */
 function pictureOptions(
@@ -326,19 +312,9 @@ function pictureOptions(
       disabled: false,
     },
   };
-  const encoded: PictureOption = {
-    value: null,
-    label: "VP9, encoded by the gateway",
-    note: target.encoded
-      ? "The Mac's HEVC decoded by the gateway and encoded again, at a rate that follows the link."
-      : "This gateway cannot decode the Mac's picture: install FFmpeg on its host.",
-    disabled: !target.encoded,
-  };
-  const passed = target.passthroughs.flatMap((passthrough) =>
+  return target.passthroughs.flatMap((passthrough) =>
     passthrough === "rdp-graphics" ? [] : [options[passthrough]],
   );
-  // Encoded here goes second, after the stream the type lists first.
-  return [...passed.slice(0, 1), encoded, ...passed.slice(1)];
 }
 
 /**
@@ -573,9 +549,7 @@ export function targetOptions(
     (able.find((option) => option.value === remembered?.passthrough) ?? able[0])
       ?.value ?? null;
   const placements = target.placement ? PLACEMENTS : null;
-  // A passed picture is no VP9, so its encoder is no choice.
-  const encoders =
-    target.vp9 && passthrough === null ? encoderOptions(target) : null;
+  const encoders = target.vp9 ? encoderOptions(target) : null;
   const choices: Choices = {
     size,
     audio: sound.audio,

@@ -26,13 +26,12 @@ layer.
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
 | `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
-| `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
+| `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC, or H.264, over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
 
-`ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
-picture needs FFmpeg on the gateway's host; without it the gateway runs it only
-with the picture passed through, for browsers that decode it. Its sound is
-always passed, for the browser to decode.
+`ard-high-performance` is High Performance as Apple's viewer has it. Its picture
+and its sound are always passed, for the browser to decode: the picture as the
+Mac's HEVC, or as the H.264 it sends where it is asked for that.
 
 **Unofficial:** `virtual_display = true` on an `ard` target keeps that row's
 picture and sound — ZRLE, none — and takes the display from the other: the same
@@ -1143,7 +1142,7 @@ AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with 
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
 (`src/vnc_apple_media.rs`). The stream alone is the picture. The Mac's ZRLE
 rectangles are stepped over by their length, never inflated and never encoded,
-so a session that passes the stream builds no VP9 encoder, with the worker
+so a session builds no VP9 encoder, with the worker
 threads and frame buffers one holds for a session's life. Until the stream
 delivers, at connect, across display changes and across a stream the Mac
 restarts, the gateway sends `screenUnavailable` and the page says "Screen not
@@ -1153,22 +1152,15 @@ picture of the display. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
-Remotex decodes the picture and encodes it as VP9, unless the session was
-started with the picture passed through, which the picker offers a browser that
-decodes the Mac's HEVC: then each access unit goes to the browser as it came,
-described by the stream's own sequence parameter set, and a PLI is its repaint.
-The sound is never decoded here: in every session each sound unit goes on
+Remotex passes the picture to the browser in every session, as the Mac's HEVC,
+which the picker offers a browser that decodes it, or as its H.264, offered to
+any: each access unit goes to the browser as it came, described by the stream's
+own sequence parameter set, and a PLI is its repaint.
+The sound is never decoded here either: in every session each sound unit goes on
 `/ws/audio` as it came, described by the AudioSpecificConfig below. Either
 way the stream's gaps show nothing: ZRLE's rectangles are stepped over, the
 page says the screen is not available, and the stream comes back at an IDR. See
 [Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
-
-The one decoder is FFmpeg's HEVC decoder for the picture (libavcodec,
-LGPL-2.1-or-later), loaded from the system's shared libraries when a session
-needs it, so published release artifacts do not link it; the
-`apple-hp-media-static` Cargo feature links it statically instead. A gateway
-that finds it missing ends a session started without the passthrough before it
-dials the Mac.
 
 ### Negotiation
 
@@ -1225,7 +1217,7 @@ one field, and a second in a session that passes the picture:
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. It sets the frame rate the stream is configured for, 60 with it and 30 without, which is what the encoder spaces four strips by ([Rate control](#rate-control)). |
-| `tilesPerFrame` (video stream field 6) | 4 | 4, decoded here or passed, whatever the display's size; 1 for a passed session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the gateway's decoder puts together, or the page. One tile is one picture of the whole display on the one SSRC. |
+| `tilesPerFrame` (video stream field 6) | 4 | 4, whatever the display's size; 1 for a session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the page puts together. One tile is one picture of the whole display on the one SSRC. |
 | The video stream's codecs (field 3) | H.264 (123) and HEVC (100) | Both, and H.264 alone for a session started with the H.264 passthrough | Offered both the Mac sends HEVC; offered 123 alone, H.264. |
 
 The video offer names two codecs by their RTP payload numbers, 123 for H.264
@@ -1362,18 +1354,8 @@ other failures (see [Liveness](#the-stream)).
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
   transfer, Display P3 primaries, with wavefront parallel processing
   (`entropy_coding_sync_enabled_flag`) and no HEVC tiles, whatever
-  `tilesPerFrame` is. libavcodec (FFmpeg 9.0.2,
-  the prebuilt one configured down to the HEVC decoder) decodes it. Remotex
-  gives the decoder four slice threads, which decode a picture's rows in
-  parallel; frame threads would hold each picture back. On macOS the decoder
-  is given a VideoToolbox device, and the archive's VideoToolbox hwaccel hands
-  each picture to VideoToolbox. FFmpeg asks it to enable its hardware decoder
-  for HEVC, not to require it, so nothing here checks that the media engine
-  did the work. When the hwaccel fails to start, FFmpeg asks for a format
-  again and the gateway takes a software one, falling back to the slice
-  threads; a picture VideoToolbox fails once started is an error, as below.
-  The log says which decoded it. A unit that fails to decode is an error, not
-  a skipped picture, and brings a keyframe request.
+  `tilesPerFrame` is. The browser decodes it, in its own decoder or the page's
+  software one; a unit it fails to decode brings a keyframe request.
 - **Rate.** A picture goes out when the screen changes, at most once per refresh
   of the virtual display. Under a full-screen animation, a 60 Hz display sent
   about 57 pictures a second, with the `0x1c` 60 fps flag or without it, and the
@@ -1710,9 +1692,8 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   estimated as above from when the receiver reads each picture packet, loss 0
   and a bandwidth estimate of 60000 kbit/s, and the count and the delay starting
   again with each stream's SSRC. A receiver too busy to read its socket shows as
-  delay too, which lowers the rate as a slow link would. It is the same for a decoded session
-  and a passed one: what the browser's link does, the VP9 walk and the passed
-  stream's queue answer, not the Mac's controller.
+  delay too, which lowers the rate as a slow link would. What the browser's
+  link does, the passed stream's queue answers, not the Mac's controller.
 - **Apple's viewer.** It offers up to 100 Mbit/s and four tiles, sends `RCTL`
   every 50 ms, and acknowledges each decoded tile picture for the encoder's
   long-term references ([The stream](#the-stream)). On a quiet link its target sat

@@ -88,7 +88,7 @@
 # page then decodes the picture with it; a browser whose own decoder takes the
 # picture keeps decoding it there. Nothing at the picker chooses it. It is
 # andrewtheguy/hevc-wasm's decoder compiled to WebAssembly, whose licence keeps
-# it out of every remotex build as the native decoder's keeps that out: download
+# it out of every remotex build: download
 # the release this gateway pins from the private andrewtheguy/hevc-wasm-archives,
 #
 #   gh release download v0.0.16 --repo andrewtheguy/hevc-wasm-archives \
@@ -112,18 +112,6 @@
 #
 #[hevc_wasm]
 #archive = "/srv/remotex/hevc-wasm-v0.0.16.tar.gz"
-
-# On Windows, the folder an `ard-high-performance` target's HEVC decoder is
-# loaded from: FFmpeg's avcodec and avutil DLLs. With nothing set here the
-# gateway looks for them when a session needs them, beside remotex.exe and on
-# PATH, which is where the recommended install puts them. This table is the override for any other install: the
-# key names a folder by its whole path, and that folder is then the only place
-# the decoder is loaded from. The gateway loads it at start-up, and refuses to
-# start if it is not there. A gateway on another platform refuses the table: its
-# system loader has a search of its own. See docs/high-performance-decoder.md.
-#
-#[hp_decoders]
-#ffmpeg_dir = 'C:\ffmpeg\bin'
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,
@@ -557,37 +545,31 @@ password = "change-me"
 # that cannot decode the AAC-ELD still runs the session without sound and says why
 # under Audio. No encoder touches it, so the audio_* keys are refused here.
 #
-# EXPERIMENTAL. Decoding the picture here takes the host's FFmpeg (libavcodec 60
-# to 63), which the gateway loads when it is needed.
-# docs/high-performance-decoder.md says how to install it on Linux, macOS and
-# Windows. Without it the picture can only be passed: the picker says so, with
-# no box to tick, and a browser that cannot decode the HEVC
-# cannot start the target, which Start says. See docs/apple-vnc-889.md, "The
-# media stream".
+# EXPERIMENTAL. The picture is always passed to the browser as the Mac sent it,
+# in the codec chosen at the picker: its HEVC, or its H.264. The gateway decodes
+# neither, and encodes no VP9 of the Mac's. Every picture the Mac sends goes, up
+# to 30 a second, at the Mac's own quality. Its ZRLE rectangles are never read or
+# shown, so a session builds no video encoder here, and the video keys below are
+# refused on this target. See docs/apple-vnc-889.md, "The media stream".
 #
-# The HEVC passthrough, chosen at the picker, sends the Mac's picture to the browser as
-# the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded
-# here from decoded pictures. Every picture the
-# Mac sends goes, up to 30 a second, at the Mac's own quality. Its ZRLE rectangles
-# are never read or shown, so such a session builds no video encoder here.
-# The HEVC's target is
-# walked between 20 and 60 Mbit/s, which a screen with little movement comes far under,
-# by the Mac's own rate controller, from the delay this gateway reports as Apple's
-# viewer does, which ends at the gateway: the browser's link does not slow it. High
-# Performance has no Adaptive/Full choice, and the video keys below reach only the
-# whole VP9 picture of a session started without the passthrough. Chrome and
-# Safari's native decoders, desktop and mobile, were measured taking it where the
-# GPU decodes HEVC 4:4:4; Firefox's native decoder does not. Where the native
-# decoder refuses it, the optional software decoder above may supply the picture
-# path, which the page then uses by itself. Without either, that choice is greyed
-# and the browser is sent VP9, where this gateway can decode the Mac's picture,
-# or the Mac's H.264.
+# The Mac's own rate controller walks the stream's target between 20 and 60
+# Mbit/s, from the delay this gateway reports as Apple's viewer does, which ends at
+# the gateway: the browser's link does not slow it. That is a target and not a
+# floor: a screen with little movement comes far under it, about a megabit a
+# second over two near-still displays as seen once, roughly. So a slow link
+# carries a still screen and falls behind one in motion. High Performance has no
+# Adaptive/Full choice.
 #
-# The picker's other passthrough has the Mac send H.264 in place of its HEVC, and
-# passes that. It needs no HEVC decoder in the gateway or in the page, and more
-# browsers decode H.264 than HEVC, so a default build with no FFmpeg and no
-# software decoder serves this target to every browser: the H.264 is never
-# greyed.
+# The HEVC passthrough sends the Mac's HEVC. Chrome and Safari's native
+# decoders, desktop and mobile, were measured taking it where the GPU decodes
+# HEVC 4:4:4; Firefox's native decoder does not. Where the native decoder refuses
+# it, the software decoder above supplies the picture, which the page then uses by
+# itself. Without either, that choice is greyed and the H.264 is taken.
+#
+# The H.264 passthrough has the Mac send H.264 in place of its HEVC, and passes
+# that. It needs no HEVC decoder in the page, and more browsers decode H.264
+# than HEVC, so a default build serves this target to every browser, Firefox
+# included: the H.264 is never greyed.
 # [[targets]]
 # name = "mac-high-performance"
 # protocol = "vnc"
@@ -599,8 +581,8 @@ password = "change-me"
 # How this target's VP9 stream is configured. The gateway applies the plan when it
 # encodes a desktop, and wlshare applies the same plan to the VP9 it makes and the
 # gateway passes through. A passed Mac media stream or RDP graphics pipeline keeps
-# the remote's own quality; the VP9 plan applies to a Mac session started without
-# the passthrough, and on RDP only to the bitmap path. Every key below is per target, so it belongs
+# the remote's own quality, so the keys are refused on an ard-high-performance
+# target, and on RDP apply only to the bitmap path. Every key below is per target, so it belongs
 # *inside* a [[targets]] table and not in a section of their own — uncommented here
 # they would attach to whichever [[targets]] block precedes them, which is the
 # "example" one at the top of this file. There is no global render setting, and
