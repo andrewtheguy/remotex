@@ -690,7 +690,10 @@ is drawn at twice the pixels and 100%, every window at half its final size. The
 opening density counts as applied only when the desktop comes back at the size that
 asked for it; otherwise the session is 1x and the client's `hostDisplay` asks again
 through Display Control. RDP reports no scale factor back, so the density here is
-declared rather than measured.
+declared rather than measured. A session at a kept size asks only for its points
+at 1x or at 2x, never the live desktop re-expressed, so the size the host lays out
+says which density it is at; one laid out at another density than its screen's,
+answering a layout the screen has since moved on from, is asked for again.
 Each monitor of a layout carries its own scale factor ([MS-RDPEDISP] 2.2.2.2.1,
 `DISPLAYCONTROL_MONITOR_LAYOUT`), and a second monitor shown in a browser tab of
 its own states the density of the screen that tab's window is on, with its

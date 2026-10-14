@@ -209,6 +209,10 @@ async fn session(
 ) {
     let sizing = choices.size;
     let resize = choices.resize();
+    let kept = (!resize).then(|| {
+        let (w, h) = config.opening_size(sizing, None);
+        (u32::from(w), u32::from(h))
+    });
     let opening = opening_layout(&config, sizing, display);
     let (session, mut events) = Session::start(connect_config(&config, choices, opening, plan, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
@@ -267,7 +271,7 @@ async fn session(
     if let Err(e) = active_loop(
         &session,
         events,
-        Flags { resize, restates: config.egfx(), pass_graphics: plan.rdp_graphics, plan, monitors: narrow(asked) },
+        Flags { resize, kept, restates: config.egfx(), pass_graphics: plan.rdp_graphics, plan, monitors: narrow(asked) },
         applied,
         view,
         input_rx,
@@ -362,15 +366,13 @@ async fn await_desktop(
 ///
 /// The density is the client screen's whatever names the points, as a High
 /// Performance Mac opens its virtual display (`opening_mode` in src/vnc.rs): a
-/// Retina client gets a sharp desktop at a kept size too, stated once at connect,
-/// since only a session started with resize has the Display Control channel that
-/// restates it later.
+/// Retina client gets a sharp desktop at a kept size too, and with the graphics
+/// pipeline follows the screen's density later as a session started with resize
+/// does, over Display Control ([`Flags::kept`]).
 fn opening_layout(config: &TargetConfig, sizing: Sizing, display: Option<HostDisplay>) -> Layout {
     let (width, height) = config.opening_size(sizing, display);
     let density = display.map_or(Density::One, |screen| Density::from_host(screen.scale));
-    Layout { w: u32::from(width), h: u32::from(height), density: Density::One, second: None }
-        .at_density(density)
-        .held()
+    Layout::points(u32::from(width), u32::from(height)).at_density(density).held()
 }
 
 /// Everything the RDP client needs to open this target's session.
@@ -433,6 +435,12 @@ fn connect_config(
 struct Flags {
     /// Whether the window drives the desktop's size ([`Choices::resize`]).
     resize: bool,
+    /// The points every monitor is kept at where the window does not drive the
+    /// size. A density change asks for these points at the new density, never the
+    /// live desktop re-expressed, so the only layouts such a session asks for are
+    /// them at 1x and at 2x — which differ in size, so the desktop the host lays
+    /// out also says which density it is at ([`kept_densities`]).
+    kept: Option<(u32, u32)>,
     /// Whether the client screen's density is restated on the live session, in
     /// every session whatever its size: Display Control is open, which it is
     /// whenever the pipeline is ([`connect_config`]). A session without the
@@ -576,6 +584,11 @@ impl Densities {
 }
 
 impl Layout {
+    /// A window of `w` by `h` points, at 1x.
+    fn points(w: u32, h: u32) -> Self {
+        Self { w, h, density: Density::One, second: None }
+    }
+
     /// `second`, as `None` when it is the first monitor over again.
     fn normalized(self) -> Self {
         let first = Second { w: self.w, h: self.h, density: self.density };
@@ -1428,7 +1441,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, restates, pass_graphics, plan, monitors } = flags;
+    let Flags { resize, kept, restates, pass_graphics, plan, monitors } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -1487,6 +1500,10 @@ async fn active_loop(
     // [`PendingLayout`] for why one retry rather than two.
     let mut pending_layout: Option<PendingLayout> = None;
     let mut layout_retry_at: Option<Instant> = None;
+    // The density of the screen the window is on, as it last reported it: what a
+    // session at a kept size is laid out at again whenever the host lays out
+    // anything else ([`Flags::kept`]).
+    let mut screen_density: Option<Density> = None;
 
     // Both ends of the clipboard bridge.
     let mut clipboard = ClipboardState::default();
@@ -1671,11 +1688,16 @@ async fn active_loop(
                         // fault `applied` is documented against: the density of
                         // a layout the server had just thrown away became the
                         // `scale` announced for the desktop it built instead.
+                        // At a kept size the size says the density outright,
+                        // whichever layout the host is answering: one asked for
+                        // before the screen changed again included.
                         if let Some(pending) =
                             pending_layout.take_if(|p| confirms(p, &monitors))
                         {
                             applied = pending.layout.densities();
                             layout_retry_at = None;
+                        } else if let Some(known) = kept.and_then(|points| kept_densities(points, &monitors)) {
+                            applied = known;
                         }
                         info!(
                             "rdp: resized, desktop {}x{} over {} display(s)",
@@ -1707,6 +1729,24 @@ async fn active_loop(
                         }
                         if let Some(msg) = view.displays(applied) {
                             sink.msg(msg).await?;
+                        }
+                        // A kept size laid out at another density than its screen's,
+                        // an answer to a layout the screen has since moved on from,
+                        // is asked for at the screen's again.
+                        if let (Some((w, h)), Some(density)) = (kept, screen_density)
+                            && restates
+                            && pending_layout.is_none()
+                        {
+                            let current = view.current(applied);
+                            install_layout(
+                                Layout::points(w, h)
+                                    .at_density(density)
+                                    .with_second(current.tab_second(view.all && tab.is_some()))
+                                    .held(),
+                                current,
+                                &mut pending_layout,
+                                &mut layout_retry_at,
+                            );
                         }
                         // The framebuffer was cleared by the resize and a server
                         // is not obliged to repaint, so ask — through the queue,
@@ -1947,7 +1987,7 @@ async fn active_loop(
                         if restates {
                             let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
                             let density = Density::from_host(screen.scale);
-                            let second = tab_points.map_or_else(
+                            let second = kept.or(tab_points).map_or_else(
                                 || base.second().at_density(density),
                                 |(w, h)| Second::points(w, h).at_density(density),
                             );
@@ -1977,19 +2017,22 @@ async fn active_loop(
                 if let ClientMsg::HostDisplay(screen) = msg {
                     if restates {
                         // Only the density changes; the size the desktop should be
-                        // stays what it is. Re-express whatever size is already
-                        // pending at the new density, or the live desktop when
-                        // nothing is — so a size still waiting for the channel is
-                        // carried along by a screen change rather than dropped.
+                        // stays what it is. At a kept size that is the kept points.
+                        // Otherwise re-express whatever size is already pending at
+                        // the new density, or the live desktop when nothing is — so
+                        // a size still waiting for the channel is carried along by
+                        // a screen change rather than dropped.
                         let want = Density::from_host(screen.scale);
+                        screen_density = Some(want);
                         let base = pending_layout
                             .as_ref()
                             .map_or_else(|| view.current(applied), |p| p.layout);
                         // The first monitor's: a second shown in a tab is on
                         // that tab's screen, which this report says nothing of.
                         let second = base.tab_second(view.all && tab.is_some());
+                        let first = kept.map_or(base, |(w, h)| Layout::points(w, h));
                         install_layout(
-                            base.at_density(want).with_second(second).held(),
+                            first.at_density(want).with_second(second).held(),
                             view.current(applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
@@ -2266,6 +2309,23 @@ fn install_layout(
 fn confirms(pending: &PendingLayout, monitors: &[Placed]) -> bool {
     let sizes: Vec<(u32, u32)> = monitors.iter().map(|monitor| (monitor.w, monitor.h)).collect();
     pending.layout.adjusted().row(narrow(monitors.len() as u32)) == sizes
+}
+
+/// Each monitor's density, read off the size the host laid it out at, in a
+/// session kept at `points`: those points at 1x or at 2x, as [`Layout::points`]
+/// held and adjusted make them, are the only layouts it asks for. `None` for any
+/// other size, or where the two are the same size, held under the ceiling alike.
+fn kept_densities((w, h): (u32, u32), monitors: &[Placed]) -> Option<Densities> {
+    let size = |density| Layout::points(w, h).at_density(density).held().adjusted().size();
+    if size(Density::One) == size(Density::Two) {
+        return None;
+    }
+    let of = |monitor: &Placed| {
+        [Density::One, Density::Two].into_iter().find(|density| size(*density) == (monitor.w, monitor.h))
+    };
+    let first = of(monitors.first()?)?;
+    let second = monitors.get(1).map_or(Some(first), of)?;
+    Some(Densities { first, second })
 }
 
 fn request_layout(input: &Input, ready: bool, current: Layout, wanted: Layout, monitors: u16) -> Asked {
@@ -3702,6 +3762,26 @@ mod tests {
             request_layout(input, true, current, Layout { w: 1281, h: 800, density: Density::One, second: None }, 1),
             Asked::Redundant
         );
+    }
+
+    /// A session at a kept size asks only for its points at 1x and at 2x, so the
+    /// desktop the host lays out says its density whichever request it answers:
+    /// 1920x980 is 1x, never 2x drawn at half its points.
+    #[test]
+    fn a_kept_size_says_its_density() {
+        let points = (1920, 980);
+        assert_eq!(kept_densities(points, &row(&[(1920, 980)])), Some(Densities::even(Density::One)));
+        assert_eq!(kept_densities(points, &row(&[(3840, 1960)])), Some(Densities::even(Density::Two)));
+        assert_eq!(kept_densities(points, &row(&[(960, 490)])), None, "not a size the session asks for");
+        assert_eq!(
+            kept_densities(points, &row(&[(1920, 980), (3840, 1960)])),
+            Some(Densities { first: Density::One, second: Density::Two }),
+        );
+        assert_eq!(kept_densities(points, &row(&[(1920, 980), (1280, 800)])), None);
+        // Held under the ceiling, 2x is still not 1x's size.
+        assert_eq!(kept_densities((2560, 1440), &row(&[(3840, 2400)])), Some(Densities::even(Density::Two)));
+        // Where both are held to one size, the size says nothing.
+        assert_eq!(kept_densities((3840, 2400), &row(&[(3840, 2400)])), None);
     }
 
     /// A resize is the only acknowledgment a layout gets, and the same event
