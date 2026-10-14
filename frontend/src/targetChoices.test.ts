@@ -99,17 +99,32 @@ function sizes(offered: TargetInfo, abilities: Abilities): string[][] {
 }
 
 test("a target the window cannot drive keeps one size, on every client", () => {
-  // A plain VNC server, and an RDP host on bitmap updates.
+  // An RDP host on bitmap updates.
+  const bitmap = { protocol: "rdp" as const, port: 3389 };
   for (const abilities of [ABLE, TABLET, PHONE]) {
-    assert.deepEqual(sizes(target({}), abilities), [["target", "1440×900"]]);
-    assert.deepEqual(sizes(target({ size: SIZED }), abilities), [
+    assert.deepEqual(sizes(target(bitmap), abilities), [
+      ["target", "1440×900"],
+    ]);
+    assert.deepEqual(sizes(target({ ...bitmap, size: SIZED }), abilities), [
       ["target", "1920×1080"],
     ]);
   }
-  // A plain server's answer to a size is not known before it is dialled.
-  const plain = targetOptions(target({}), undefined, ABLE);
-  assert.match(plain.sizes[0].note, /takes no size keeps its own/);
-  assert.equal(plain.choices.size, "target");
+});
+
+test("a target that states no size is shown at its server's own", () => {
+  // A plain VNC server, and a Mac sharing its physical displays.
+  for (const abilities of [ABLE, TABLET, PHONE]) {
+    const plain = targetOptions(
+      target({ defaultSize: null }),
+      undefined,
+      abilities,
+    );
+    assert.deepEqual(
+      plain.sizes.map((s) => [s.value, s.label]),
+      [["target", "The remote's own size"]],
+    );
+    assert.equal(plain.choices.size, "target");
+  }
 });
 
 test("a desktop browser and a tablet follow, beside a configured size", () => {

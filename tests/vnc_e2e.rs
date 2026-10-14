@@ -30,13 +30,10 @@ use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
+/// Xtigervnc's own desktop, which a plain target is shown at: it is never asked
+/// for another.
 const DESKTOP_W: u32 = 1024;
 const DESKTOP_H: u32 = 768;
-
-/// The target's configured size, which the session is kept at. Deliberately not
-/// the server's own 1024x768, so an assertion on it cannot pass by accident.
-const DEFAULT_W: u32 = 1280;
-const DEFAULT_H: u32 = 800;
 
 /// Wait until the VNC server actually answers RFB on the published port.
 ///
@@ -85,9 +82,8 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             password: String::new(),
             vnc_password: "secret42".to_owned(),
             domain: None,
-            // The configured size: asked for once the server declares
-            // SetDesktopSize support, after it has announced its own.
-            size: Some((DEFAULT_W as u16, DEFAULT_H as u16)),
+            // A plain target states no size: it is shown at the server's own.
+            size: None,
             egfx: None,
             virtual_displays: 1,
             camera: false,
@@ -180,7 +176,7 @@ fn check_cursor_msg(text: &str) {
 
 #[tokio::test]
 #[ignore = "requires Docker or Podman"]
-async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
+async fn vnc_session_streams_the_full_desktop_at_the_servers_own_size() {
     common::init_logging();
     let runtime = common::container_runtime();
     let (_container, vnc_port) =
@@ -192,11 +188,12 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     // The fresh attach lands on the picker; pick the target to start the engine.
-    // A plain target never follows a window: it is asked once for its size.
+    // A plain target never follows a window, and is never asked for a size: the
+    // server's own desktop is the only one announced, though Xtigervnc would take
+    // a SetDesktopSize.
     common::connect_target(&mut ws, "tigervnc-dummy").await;
 
     let mut got_resize = false;
-    let mut pinned = false;
     let mut painted = false;
     let mut cursor: Option<String> = None;
 
@@ -211,20 +208,10 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
                         "session failed: {text}"
                     );
                     if text.contains(r#""type":"resize""#) {
-                        if got_resize {
-                            // The configured size, asked for on the server's
-                            // declaration of SetDesktopSize support; its repaint
-                            // starts afresh.
-                            assert_resize(&text, DEFAULT_W, DEFAULT_H, "the configured size");
-                            pinned = true;
-                            painted = false;
-                        } else {
-                            assert!(!painted, "resize arrived after frames");
-                            // The first size announced must be the VNC server's
-                            // actual desktop, before its size is asked for.
-                            assert_resize(&text, DESKTOP_W, DESKTOP_H, "the VNC server's own desktop");
-                            got_resize = true;
-                        }
+                        assert!(!got_resize, "a plain target was resized: {text}");
+                        assert!(!painted, "resize arrived after frames");
+                        assert_resize(&text, DESKTOP_W, DESKTOP_H, "the VNC server's own desktop");
+                        got_resize = true;
                     }
                     if text.contains(r#""type":"cursor""#) {
                         check_cursor_msg(&text);
@@ -233,20 +220,18 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
                 }
                 Message::Binary(frame) => {
                     assert!(got_resize, "a frame arrived before resize");
-                    let (w, h) = if pinned { (DEFAULT_W, DEFAULT_H) } else { (DESKTOP_W, DESKTOP_H) };
-                    painted |= check_unit_frame(&frame, w, h);
-                    // The desktop at the configured size must start a stream of its
-                    // own; once its keyframe has arrived, the raw->video path is
-                    // proven. The Cursor pseudo-encoding rides the opening
-                    // update, so wait for the pointer shape too.
-                    if pinned && painted && cursor.is_some() {
+                    painted |= check_unit_frame(&frame, DESKTOP_W, DESKTOP_H);
+                    // Once the desktop's keyframe has arrived, the raw->video
+                    // path is proven. The Cursor pseudo-encoding rides the
+                    // opening update, so wait for the pointer shape too.
+                    if painted && cursor.is_some() {
                         return;
                     }
                 }
                 _ => {}
             }
         }
-        panic!("websocket closed without a keyframe at the configured size");
+        panic!("websocket closed without a keyframe of the server's desktop");
     })
     .await
     .expect("timed out waiting for the full-desktop paint and pointer shape");
@@ -255,8 +240,8 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
 
     // Detach/reattach: drop the browser, reclaim the slot with the
     // same token, and reattach. The still-running engine must re-announce the
-    // geometry the session is *now* at — the configured size, not the server's
-    // own before it — and repaint the full desktop through a real server.
+    // geometry the session is at and repaint the full desktop through a real
+    // server.
     futures_util::SinkExt::close(&mut ws).await.unwrap();
     drop(ws);
 
@@ -281,7 +266,7 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
                         "session failed: {text}"
                     );
                     if text.contains(r#""type":"resize""#) {
-                        assert_resize(&text, DEFAULT_W, DEFAULT_H, "reattach must announce the session's current size");
+                        assert_resize(&text, DESKTOP_W, DESKTOP_H, "reattach must announce the session's current size");
                         reannounced = true;
                     }
                     if text.contains(r#""type":"cursor""#) {
@@ -299,7 +284,7 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
                     if !reannounced {
                         continue;
                     }
-                    repainted |= check_unit_frame(&frame, DEFAULT_W, DEFAULT_H);
+                    repainted |= check_unit_frame(&frame, DESKTOP_W, DESKTOP_H);
                     if repainted && replayed_cursor {
                         return;
                     }

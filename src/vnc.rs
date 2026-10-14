@@ -2138,7 +2138,7 @@ async fn session(
         Flags {
             macos,
             resize: choices.resize(),
-            kept: (!apple && !choices.resize())
+            kept: (config.wlshare() && !choices.resize())
                 .then(|| config.opening_size(choices.size, display)),
             apple,
             virtual_display,
@@ -2175,16 +2175,17 @@ async fn session(
 struct Flags {
     macos: bool,
     resize: bool,
-    /// The size the session keeps, in points, on a plain or wlshare target that
-    /// does not follow a window: the configured size or the default
+    /// The size the session keeps, in points, on a wlshare target that does not
+    /// follow a window: the configured size or the default
     /// ([`TargetConfig::opening_size`]). The desktop is asked for it once, as
-    /// soon as the server declares SetDesktopSize support; a server that never
-    /// declares it, or refuses, keeps its own size.
+    /// soon as the server declares SetDesktopSize support; a physical output
+    /// refuses, and keeps its own size.
     ///
     /// `None` in a session that follows the window, whose first viewport report
-    /// is the request, and on both Apple subtypes, where the size is either
-    /// stated by [`opening_mode`] at connect (a virtual display) or never
-    /// stated at all (Standard `ard` exposes physical displays).
+    /// is the request; on a plain target, which is shown at its server's own
+    /// size ([`TargetConfig::sized`]); and on both Apple subtypes, where the
+    /// size is either stated by [`opening_mode`] at connect (a virtual display)
+    /// or never stated at all (Standard `ard` exposes physical displays).
     kept: Option<(u16, u16)>,
     /// Whether this is Apple's revision, 003.889, with the metadata encodings both
     /// Apple subtypes negotiate: the read loop's ZRLE stream, cursor cache and
@@ -2652,8 +2653,8 @@ fn rfb38_encoding_list() -> Vec<i32> {
     // Cursor With Alpha, which only improves on it, and so are the two size
     // pseudo-encodings. They are how a server *tells* this end its
     // framebuffer changed size, which is not the same as being asked to change it:
-    // that is asked for where a SetDesktopSize is decided, by the window where
-    // it drives the size and once at session-open where a size is kept. A server whose size
+    // that is asked of a wlshare server alone, by the window where it drives the
+    // size and once at session-open where a size is kept. A server whose size
     // changes under a client that listed neither has no way to say so and hangs
     // up.
     //
@@ -3801,10 +3802,10 @@ fn refused_small(what: &str, points: (u16, u16)) {
 /// A High Performance Mac owns a virtual display, so replacing its one-mode
 /// `SetDisplayConfiguration` is the resize request — and the mode it requests is
 /// the resolved points at the client screen's density, which is how moving the
-/// window to a Retina display re-renders the same desktop at 2x. Generic VNC uses
+/// window to a Retina display re-renders the same desktop at 2x. wlshare uses
 /// `SetDesktopSize` once the server declares support via an ExtendedDesktopSize
-/// rect; until then, its report is stashed for replay. It has no density to
-/// apply, so its points are its pixels — and they are held under the video
+/// rect; until then, its report is stashed for replay. Its points are taken to
+/// pixels at the scale the server reported — and they are held under the video
 /// stream's picture ceiling ([`crate::video::fit_ceiling`])
 /// before anything is sent or stashed, so the desktop asked for is one the encoder
 /// takes. A High Performance display needs no such hold: the Mac's own 3840×2160
@@ -6097,18 +6098,13 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
         // was — the rect's own dimensions are not trusted for it.
         //
         // The statuses are the extension's — 1 prohibited, 2 out of resources, 3
-        // invalid layout — plus neatvnc's own 4, "request forwarded": wayvnc has
-        // handed the size to the compositor and the resize arrives as a
-        // server-initiated rect a moment later, so that one is not a refusal.
-        // Its 1 has a cause worth naming: wayvnc lets only the first client that
-        // resized change the layout while that client stays connected — a browser
-        // on another gateway against the same server, say — and every other
-        // client's request is prohibited until it disconnects.
+        // invalid layout. Only a wlshare server is asked, and its 1 has a cause
+        // worth naming: it resizes a headless output alone, and only with its
+        // own `resize = true`.
         match status {
-            4 => debug!("vnc: server forwarded the SetDesktopSize; the new size arrives as its own rect"),
             1 => warn!(
-                "vnc: server prohibited the SetDesktopSize; wayvnc grants the layout to the \
-                 first client that resized and refuses every other while it stays connected"
+                "vnc: server prohibited the SetDesktopSize; wlshare resizes only a headless \
+                 output, and only with resize = true"
             ),
             2 => warn!("vnc: server rejected SetDesktopSize: out of resources"),
             3 => warn!("vnc: server rejected SetDesktopSize: invalid layout"),
@@ -6117,7 +6113,7 @@ async fn read_extended_desktop_size<R: AsyncRead + Unpin>(
         // A scale report may have cleared the browser's canvas on the strength
         // of this request's rect repainting it — see [`read_output_scale`].
         // Refused, it repaints nothing, so the pixels are asked for as they are.
-        if status != 4 && std::mem::take(&mut desktop.lock().unwrap().repaint_owed) {
+        if std::mem::take(&mut desktop.lock().unwrap().repaint_owed) {
             let size = desktop.lock().unwrap().size;
             debug!("vnc: asking for the whole framebuffer; the relabelled canvas is still blank");
             send(uplink, &update_request(false, size)).await?;
@@ -10027,7 +10023,7 @@ mod tests {
         assert_eq!(desktop.lock().unwrap().viewport, Some((640, 480)));
     }
 
-    /// The size a plain or wlshare session keeps is seeded as a held request, so
+    /// The size a wlshare session keeps is seeded as a held request, so
     /// the desktop is asked for it as soon as the server declares SetDesktopSize
     /// support, in a session the window does not drive.
     #[tokio::test]

@@ -215,8 +215,8 @@ site_passwd = ""
 #   - A phone is never offered its window, which is no desktop's shape: it is
 #     offered the target's `size` and the 1440×900 default, or the default alone.
 #
-# A plain "vnc" target keeps its size: whether its server takes one is known only
-# once it is dialled, which is too late for the picker to offer the window.
+# A plain "vnc" target is shown at its server's own size: generic RFB carries no
+# density, and a size without one is no size to state.
 # Standard Apple `ard` shares physical displays, shown as they are, unless the
 # unofficial `virtual_display = true` below puts it on a virtual one. Apple
 # `ard-high-performance` uses Apple's dynamic-resolution feature to replace its
@@ -294,10 +294,11 @@ password = "change-me"
 # desktop is 1440×900.
 #
 # RDP connects at the size, "ard-high-performance" creates its virtual display at
-# it, and a plain or wlshare VNC server is asked for it once, as soon as it
-# declares SetDesktopSize support; a server that never does, or refuses, keeps
-# its own. Refused on `subtype = "ard"` without `virtual_display`, which shows the
-# Mac's physical displays as they are. A Mac's virtual display takes at most
+# it, and a wlshare server is asked for it once, as soon as it declares
+# SetDesktopSize support; on a physical output it refuses and keeps its own.
+# Refused on a plain "vnc" target, shown at its server's own size, and on
+# `subtype = "ard"` without `virtual_display`, which shows the Mac's physical
+# displays as they are. A Mac's virtual display takes at most
 # "1920x1080", the points its 3840×2160 backing ceiling holds on a Retina client.
 #
 # A session that follows the client's window does not use it: that one opens at

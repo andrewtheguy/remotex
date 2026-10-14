@@ -531,9 +531,8 @@ pub enum Sizing {
     /// [`TargetConfig::virtual_display`] — the setup descriptor always enables the
     /// Mac's dynamic geometry; this decides only whether the window keeps driving
     /// it after the open. Standard `ard` without one does not offer it, because it
-    /// exposes physical displays. Neither does a plain `vnc` target: whether its
-    /// server accepts a size is known only after it is dialled, which is too late
-    /// for a picker to offer it.
+    /// exposes physical displays. Neither does a plain `vnc` target, which is
+    /// shown at its server's own size ([`TargetConfig::sized`]).
     Window,
 }
 
@@ -704,13 +703,14 @@ pub struct TargetConfig {
     /// ([`Sizing::Window`]) does not use it — see [`Self::opening_size`].
     ///
     /// How a kept size is stated depends on the engine: RDP connects at it, a
-    /// Mac's virtual display is created at it, and a plain or wlshare VNC server
-    /// is asked for it with one `SetDesktopSize`, as soon as it declares support
-    /// (`Flags::kept` in src/vnc.rs) — a server that never does, or refuses,
-    /// keeps its own. Standard `ard` shares the Mac's physical displays, which
-    /// this gateway never resizes, so the key is refused there
-    /// ([`ConfigFile::parse`]); with [`Self::virtual_display`] it sizes the
-    /// virtual display, as on High Performance.
+    /// Mac's virtual display is created at it, and a wlshare server is asked for
+    /// it with one `SetDesktopSize`, as soon as it declares support
+    /// (`Flags::kept` in src/vnc.rs) — on a physical output it refuses, and keeps
+    /// its own. The key is refused where no session states a size
+    /// ([`Self::sized`], [`ConfigFile::parse`]): a plain `vnc` target, shown at
+    /// its server's own size, and Standard `ard`, which shares the Mac's physical
+    /// displays; with [`Self::virtual_display`] it sizes `ard`'s virtual display,
+    /// as on High Performance.
     ///
     /// Points rather than pixels, because the density can move underneath it:
     /// a High Performance Mac opens at the client's density whatever the size,
@@ -937,10 +937,13 @@ impl TargetConfig {
         self.size.unwrap_or(DEFAULT_SIZE)
     }
 
-    /// Whether a session states this target's size at all. Standard `ard` on
-    /// the Mac's physical displays does not: it shows them as they are.
+    /// Whether a session states this target's size at all: RDP, wlshare and a
+    /// Mac's virtual display. A plain `vnc` target does not, since a size and a
+    /// density go together and generic RFB carries no density: it is shown at
+    /// whatever size its server has. Nor does Standard `ard` on the Mac's
+    /// physical displays, which it shows as they are.
     pub fn sized(&self) -> bool {
-        !self.apple() || self.has_virtual_display()
+        self.protocol == Protocol::Rdp || self.wlshare() || self.has_virtual_display()
     }
 
     /// Whether RDP's graphics pipeline is on: unless the operator turned it off.
@@ -1013,8 +1016,8 @@ impl TargetConfig {
                 // The pipeline passes in every session: only the bitmap path is VP9.
                 vp9: !self.egfx() && NATIVE_VP9,
             },
-            // Read as any VNC server, which carries no sound, and whose answer
-            // to a size is not known until it is dialled.
+            // Read as any VNC server, which carries no sound and is shown at its
+            // own size.
             (Protocol::Vnc, None) => {
                 Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false, vp9: NATIVE_VP9 }
             }
@@ -1806,14 +1809,24 @@ impl ConfigFile {
                 crate::video::MAX_LONG_SIDE,
                 crate::video::MAX_SHORT_SIDE
             );
-            // Standard mode shows the Mac's physical displays as they are, so a
-            // size there is one no session would ever state.
-            anyhow::ensure!(
-                target.size.is_none() || target.sized(),
-                "target {:?} sets size on subtype \"ard\", which shares the Mac's physical \
-                 displays and never sizes them. Remove the key, or set virtual_display = true.",
-                target.name
-            );
+            // A size no session would ever state: a plain target is shown at its
+            // server's own size, and Standard mode shows the Mac's physical
+            // displays as they are.
+            if target.size.is_some() && !target.sized() {
+                if target.apple() {
+                    anyhow::bail!(
+                        "target {:?} sets size on subtype \"ard\", which shares the Mac's physical \
+                         displays and never sizes them. Remove the key, or set virtual_display = true.",
+                        target.name
+                    );
+                }
+                anyhow::bail!(
+                    "target {:?} sets size on a plain vnc target, which is shown at its server's \
+                     own size and never sizes it. Remove the key, or set subtype = \"wlshare\" \
+                     for a wlshare server.",
+                    target.name
+                );
+            }
             // A virtual display opens at the client's density under a ceiling of
             // pixels, so a size past the ceiling's points at 2x would be shrunk for
             // a Retina client after the picker had stated it.
@@ -3619,9 +3632,9 @@ mod tests {
         let screen = HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
         let phone = HostDisplay { w: 430, h: 932, scale: 300, fit: true };
 
-        let sized = &ConfigFile::parse(&vnc_toml("size = \"1600x1000\"")).unwrap().targets[0];
+        let sized = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nsize = \"1600x1000\"")).unwrap().targets[0];
         assert_eq!(sized.kept_size(), (1600, 1000));
-        let unsized_ = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        let unsized_ = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"")).unwrap().targets[0];
         assert_eq!(unsized_.kept_size(), DEFAULT_SIZE);
 
         for display in [Some(screen), Some(phone), None] {
@@ -3667,7 +3680,8 @@ mod tests {
                 assert!(format!("{err:#}").contains("at most 1920x1080"), "{err:#}");
             }
         }
-        ConfigFile::parse(&vnc_toml("size = \"2560x1440\"")).expect("no ceiling of points elsewhere");
+        ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nsize = \"2560x1440\""))
+            .expect("no ceiling of points elsewhere");
     }
 
     /// Standard mode shows the Mac's physical displays as they are, so a size there
@@ -3684,6 +3698,18 @@ mod tests {
                 .unwrap()
                 .targets[0];
         assert!(virtual_display.sized());
+    }
+
+    /// A plain target is shown at its server's own size, so a size there would
+    /// never be stated either.
+    #[test]
+    fn a_size_is_refused_on_a_plain_vnc_target() {
+        let plain = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        assert!(!plain.sized());
+        let err = ConfigFile::parse(&vnc_toml("size = \"1600x1000\"")).unwrap_err();
+        assert!(format!("{err:#}").contains("own size and never sizes it"), "{err:#}");
+        let wlshare = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nsize = \"1600x1000\"")).unwrap().targets[0];
+        assert!(wlshare.sized());
     }
 
     /// A count of virtual displays is one unless asked, at most two, and a key
@@ -3742,8 +3768,8 @@ vnc_password = \"x\"")).unwrap();
         let built_in = Choices { size: Sizing::BuiltIn, ..Choices::default() };
         let refused = |choice| Err(NotOffered { target: "mac".to_owned(), choice });
 
-        // A plain target is asked for a size once and never follows a window.
-        let plain = &ConfigFile::parse(&vnc_toml("size = \"1600x1000\"")).unwrap().targets[0];
+        // A plain target is shown at its server's own size and never follows a window.
+        let plain = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
         assert!(!plain.offers().resize);
         assert_eq!(plain.accepts(Choices::default()), Ok(()));
         assert_eq!(plain.accepts(window), refused("resize"));
@@ -3784,14 +3810,15 @@ vnc_password = \"x\"")).unwrap();
         for size in ["640x480", "800x599", "799x600"] {
             let err = ConfigFile::parse(&vnc_toml(&format!("{hp}size = \"{size}\""))).unwrap_err();
             assert!(format!("{err:#}").contains("800x600"), "{err:#}");
-            ConfigFile::parse(&vnc_toml(&format!("size = \"{size}\""))).expect("a plain VNC target takes it");
+            ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nsize = \"{size}\"")))
+                .expect("a wlshare target takes it");
         }
         let mac = &ConfigFile::parse(&vnc_toml(&format!("{hp}size = \"800x600\""))).unwrap().targets[0];
         assert_eq!(mac.kept_size(), (800, 600));
-        let plain = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        let wlshare = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"")).unwrap().targets[0];
         let small = HostDisplay { w: 640, h: 480, scale: 100, fit: false };
         assert_eq!(mac.opening_size(Sizing::Window, Some(small)), DEFAULT_SIZE, "refused, not raised");
-        assert_eq!(plain.opening_size(Sizing::Window, Some(small)), (640, 480));
+        assert_eq!(wlshare.opening_size(Sizing::Window, Some(small)), (640, 480));
         let least = HostDisplay { w: 800, h: 600, scale: 200, fit: false };
         assert_eq!(mac.opening_size(Sizing::Window, Some(least)), (800, 600));
     }

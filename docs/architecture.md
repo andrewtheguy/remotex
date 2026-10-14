@@ -288,8 +288,9 @@ gateway.
   pixel density, not a fit factor. A session started with resize has the window
   continuously driving the remote size, and any other keeps the size it opened
   at; the choice is made once, at the picker, so do not add a resize toggle to
-  the session, and do not offer the window to a plain `vnc` target, whose answer
-  to a size is not known before it is dialled. Density is the wire's word
+  the session, and do not size a plain `vnc` target: a size and a density go
+  together, and generic RFB carries no density, so it is shown at its server's
+  own size. Density is the wire's word
   alone, and a plain `vnc` target, or a `wlshare` one whose density request goes
   unanswered, is presented at 1x: do not add a client-side density control, and never label a framebuffer with a density the
   server has not confirmed. Read
@@ -726,8 +727,8 @@ trip that pins the difference, through the archive's own decoder.
 A desktop past the picture ceiling is one a video stream will not encode
 (`video::check_picture`). The gateway sizes every desktop it asks for under it, so
 only a remote it cannot size gets there: a Mac in Standard mode on Combined Display —
-5376×2287 over a 2x screen beside a 1x one, measured — or a plain or wlshare VNC
-server whose desktop is simply that large.
+5376×2287 over a 2x screen beside a 1x one, measured — a plain VNC server, or a
+wlshare one on a physical output, whose desktop is simply that large.
 
 Such a desktop has no picture. `Oversize` in `src/encode.rs` is the source's side
 of it, fixed when the engine starts:
@@ -1831,11 +1832,10 @@ and `GET /api/targets` carries it:
   operator set is the size until somebody chooses another. A phone is offered no
   window, because a portrait screen that small is no desktop's shape. A tablet's
   window is its screen: it asks once, in landscape, and rotating does not ask
-  again. A plain `vnc` target is not offered the window either: whether its
-  server takes a size is known only once it is dialled, which is too late for a
-  picker, so it is asked once for the size it keeps and the picker says a server
-  that takes none keeps its own. A Mac sharing its physical displays is shown at
-  their size and takes no `size` key. A Mac's virtual display takes one of at
+  again. A plain `vnc` target states no size at all: a size and a density go
+  together, generic RFB carries no density, and a plain server is shown at the
+  size it has and takes no `size` key, as a Mac sharing its physical displays
+  is shown at their size and takes none either. A Mac's virtual display takes one of at
   most 1920×1080: it opens at the client's density under a 3840×2160 ceiling of
   pixels, so a larger size would be shrunk for a Retina client after the picker
   had stated it, and is refused at parse instead. A `connect` always names its
@@ -2442,12 +2442,12 @@ tablet that starts a session with resize opens it at the default and then asks
 once for its screen in landscape, and a phone is never offered resize.
 
 A kept size is stated the way each engine states one. RDP connects at it, a Mac's
-virtual display is created at it, and a plain or `wlshare` target asks for it
-with a single `SetDesktopSize` as soon as the server declares support — seeded
-into the same held-request slot a viewport report uses, so it goes out on the
-first `ExtendedDesktopSize` rect and no earlier. A server that never declares
-support, or refuses the request, keeps its own size. Standard `ard` is the only
-engine with no size to state, and `size` is refused on it at config load.
+virtual display is created at it, and a `wlshare` target asks for it with a
+single `SetDesktopSize` as soon as the server declares support — seeded into the
+same held-request slot a viewport report uses, so it goes out on the first
+`ExtendedDesktopSize` rect and no earlier. A physical output refuses the request
+and keeps its own size. A plain `vnc` target and Standard `ard` have no size to
+state (`TargetConfig::sized`), and `size` is refused on both at config load.
 
 A kept size opens at the client screen's density whatever names the points, on
 RDP and a High Performance Mac alike, which is how Apple's Screen Sharing opens a
@@ -2462,7 +2462,7 @@ What is engine-specific is the mechanism:
 
 | Engine | Started with resize |
 |---|---|
-| Plain VNC | not offered: it is asked once for the size it keeps |
+| Plain VNC | not offered: it is shown at its server's own size |
 | wlshare | applies a requested size, and the client's reported display density |
 | Apple Standard VNC | not offered: it shares physical displays |
 | Apple High Performance VNC | applies dynamic-resolution sizes within its fixed 3840×2160 backing ceiling |
@@ -2470,7 +2470,7 @@ What is engine-specific is the mechanism:
 
 Every desktop is also held under the gateway's 3840-pixel long
 side by 2400-pixel short side ceiling at the negotiated density. RDP opening and
-layout sizes and the sizes a plain or `wlshare` target asks for all pass through
+layout sizes and the sizes a `wlshare` target asks for all pass through
 `video::fit_ceiling`; High Performance separately keeps its native 3840×2160
 backing ceiling. This changes what the remote is asked to render, not how the
 browser scales it: a 5K window receives at most a 3840×2400 desktop at 100%, with
