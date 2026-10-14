@@ -4200,7 +4200,9 @@ impl Canvas {
         let rows = usize::from(height);
         anyhow::ensure!(
             // Four strips hold the display's rows, or all but its last three
-            // ([`strip_rows`]), and the last strip starts within them.
+            // ([`strip_rows`]), and the last strip starts within them, or at
+            // their end only for a display under 180 rows, below the minimum a
+            // session has ([`crate::vnc_apple::MIN_DISPLAY_POINTS`]).
             part.size.0 == width && pitch * STRIPS + STRIPS > rows && pitch * (STRIPS - 1) <= rows,
             "a {}\u{d7}{} strip is not a quarter of the {width}\u{d7}{height} display offered",
             part.size.0,
@@ -5007,6 +5009,8 @@ mod tests {
 
     /// The strip heights the Mac sent, and four tiles offered whatever the
     /// display's height: one the Mac sends no picture of is the Mac's to say.
+    /// The heights under 180 are below the minimum a session has, measured
+    /// from probes below it.
     #[test]
     fn a_display_is_offered_in_strips_whatever_its_size() {
         for (height, rows) in [(64, 16), (96, 32), (120, 32), (144, 48), (600, 160), (800, 208), (801, 208), (833, 208), (834, 208), (835, 208), (836, 224), (900, 240), (1000, 256), (1080, 272), (1730, 432), (1800, 464)] {

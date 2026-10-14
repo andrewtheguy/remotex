@@ -179,7 +179,9 @@ function picture(
     };
   }
   // A strip is the display's whole width and a strip's rows, which the last
-  // runs past the display's end with; only the rows of the display go.
+  // runs past the display's end with; only the rows of the display go. A last
+  // strip that starts at the display's end, holding none of it, comes only for a
+  // display under 180 rows, below the 600 the gateway allows, and is refused.
   let [height, row, rows] = [h, 0, h];
   if (strip) {
     row = strip.index * stripRows(strip.rows);

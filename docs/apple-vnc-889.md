@@ -1517,6 +1517,19 @@ four strips do not fit it sends no picture at all (below).
   worked. An offer of one tile brings the picture at a failing height. A last
   strip that starts exactly at the end passes the check and is sent, with
   nothing of the display in it, as at 48, 96 and 144 rows.
+- **Those heights are all below the minimum.** Both cases, no picture and a
+  last strip with nothing of the display, need three strips at least as tall
+  as the display. A strip is a quarter of the height rounded up by at most 15
+  rows, and three of them reach the display's end only where those 15 rows are
+  a twelfth of its height or more: under 180 rows. The least display asked for
+  is 800×600 points, 600 rows at 1x
+  ([The High Performance virtual display](#the-high-performance-virtual-display)),
+  and even a 640×480 minimum would be far above 180. The gateway
+  refuses a size under 800×600 points, so these heights never come in a
+  session. They are what the virtual Mac did when probed below the minimum,
+  kept as a record of its behaviour, and nothing in the gateway or the page
+  depends on them. Every display in a session has a last strip that starts
+  within the display.
 - **The Mac says it sends none, and only that.** Nothing of the failure
   reaches the wire as an error: the answer is 4, no media-stream error message
   follows (none in 70 s), and the sound runs. What the Mac does say is in its
