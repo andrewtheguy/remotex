@@ -1413,8 +1413,12 @@ other failures (see [Liveness](#the-stream)).
     report and request, `RCTL` among them. Only the first packet is checked:
     the rest of a compound packet is read whatever SSRC it names.
   - **The Mac does not retransmit.** Every stream it configures has
-    retransmission off. Remotex sends no NACK, and whether the Mac answers one
-    regardless was not tested.
+    retransmission off. It reads a Generic NACK (PT 205, FMT 1) from the
+    viewer's SSRC and resends nothing: it resends a packet only while the
+    round-trip time it holds for the picture leg is under 200 ms, and that time
+    stays at the 250 ms it starts from. Neither `RCTL` nor receiver reports with
+    report blocks moved it. Nine NACKs of 17 packets each, in a session of four
+    strips, brought no packet a second time. Remotex sends no NACK.
   - **The Mac drops a keyframe request made too soon.** It keeps the time of the
     last keyframe it made, which starts at the stream's own start, and discards
     a PLI or FIR that comes sooner after it than a least gap: 1 s for a stream
