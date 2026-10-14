@@ -638,12 +638,6 @@ struct DesktopState {
     /// generic rect from then on. `None` on every other server and until the
     /// first report: generic RFB is [`UNSCALED`] by default.
     wire_scale: Option<f32>,
-    /// Whether the browser's density is declared to a reporting server
-    /// ([`Flags::declares`]): in a session whose window drives the desktop size,
-    /// and for a pinch-zoom client whatever the size. A declaration carries the
-    /// size in pixels at that density — the window, or the points the session
-    /// keeps — so the server sets its output's mode and scale together.
-    declares: bool,
     /// A `ClientDensity` is out, and the server has not answered it yet. The
     /// declaration carries the window in pixels at the declared density, and the
     /// server sets the output's mode and scale to it in one configuration — one
@@ -1300,9 +1294,9 @@ impl DesktopState {
         Some(set_desktop_size(pixels, screen))
     }
 
-    /// The `ClientDensity` declaring `declared` to a reporting server, or `None`
-    /// in a session that states no density — see [`Self::declares`]. It carries
-    /// the window in pixels at that density — the newest one the browser asked
+    /// The `ClientDensity` declaring `declared` to a reporting server, in every
+    /// session whatever its size, as a High Performance Mac and an RDP host open
+    /// at the browser's density. It carries the window in pixels at that density — the newest one the browser asked
     /// for, the size the session keeps, or the desktop's own points before
     /// either — so the server changes mode and scale together. Every
     /// declaration opens a follow ([`Self::following`]): the server answers it
@@ -1310,9 +1304,6 @@ impl DesktopState {
     /// carries is no longer held: the answer asks again only if it was not
     /// granted.
     fn declare_density(&mut self, declared: f32) -> Option<[u8; 10]> {
-        if !self.declares {
-            return None;
-        }
         // The reported scale, not the canvas's label: a first report is declared
         // back before it relabels the canvas.
         let points = self.pending.take().or(self.viewport).unwrap_or_else(|| {
@@ -2147,7 +2138,6 @@ async fn session(
         Flags {
             macos,
             resize: choices.resize(),
-            declares: choices.resize() || display.is_some_and(|screen| screen.fit),
             kept: (!apple && !choices.resize())
                 .then(|| config.opening_size(choices.size, display)),
             apple,
@@ -2185,13 +2175,6 @@ async fn session(
 struct Flags {
     macos: bool,
     resize: bool,
-    /// Whether this end states the session's density to a `wlshare` target: in a
-    /// session that follows the window, and for a pinch-zoom client
-    /// ([`HostDisplay::fit`]) whatever the size, which sees the desktop fitted to
-    /// its width on what is usually a 2x or 3x screen, where a 1x desktop is a
-    /// blurred one. An RDP session states it on the same terms (`states_density`
-    /// in src/rdp.rs).
-    declares: bool,
     /// The size the session keeps, in points, on a plain or wlshare target that
     /// does not follow a window: the configured size or the default
     /// ([`TargetConfig::opening_size`]). The desktop is asked for it once, as
@@ -2761,9 +2744,7 @@ fn wlshare_beside_encoding_list() -> Vec<i32> {
 /// size and windows squeezed together onto a small opening display do not
 /// spread back out when it grows. The density is the client screen's whatever
 /// named the points, as Apple's client has it, so a Retina client gets a sharp
-/// desktop even at a kept size, where an RDP host is left at its own scaling as
-/// Microsoft's client leaves it with "Optimize for Retina displays" unchecked,
-/// except for a pinch-zoom client (`states_density` in src/rdp.rs) — quantized to
+/// desktop even at a kept size, as an RDP session opens too — quantized to
 /// the 1x or 2x a virtual display can be backed at
 /// ([`crate::protocol::render_density`]): a Mac asked for 1.25x or 1.5x
 /// answers with a small 2x display rather than a rounded one.
@@ -2987,7 +2968,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let Flags {
         macos,
         resize,
-        declares,
         kept,
         apple,
         virtual_display,
@@ -3036,7 +3016,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         // whose listing came back from the preface.
         density: if passthrough.is_some() { Density::Asked } else { Density::Off },
         wire_scale: None,
-        declares,
         following: false,
         declared: None,
         repaint_owed: false,
@@ -9803,7 +9782,6 @@ mod tests {
             viewport: None,
             density: Density::Off,
             wire_scale: None,
-            declares: true,
             following: false,
             declared: None,
             repaint_owed: false,
@@ -10060,7 +10038,6 @@ mod tests {
         // What `active_loop` builds for a session kept at 1440×900, against a
         // server whose desktop is 1920x1080.
         let desktop = shared_desktop((1920, 1080), None, Some((1440, 900)));
-        desktop.lock().unwrap().declares = false;
 
         // wlshare's opening announcement: reason 0, the server's own size.
         let payload = eds_payload(screen);
@@ -10899,14 +10876,14 @@ mod tests {
         assert!(!desktop.lock().unwrap().repaint_owed);
     }
 
-    /// A pinch-zoom client's session at a kept size declares its density with the
-    /// kept size in pixels at it, and asks for nothing more once the server has
-    /// settled on those pixels.
+    /// A session at a kept size declares the client's density with the kept size
+    /// in pixels at it, and asks for nothing more once the server has settled on
+    /// those pixels.
     #[tokio::test]
-    async fn a_kept_size_is_declared_at_a_pinch_zoom_clients_density() {
+    async fn a_kept_size_is_declared_at_the_clients_density() {
         let (uplink, wire) = test_uplink();
         let (sink, _rx) = test_sink();
-        // What `active_loop` builds for a phone's session kept at 1440×900.
+        // What `active_loop` builds for a session kept at 1440×900 on a 2x screen.
         let desktop =
             shared_desktop((1920, 1080), Some(Screen { id: 3, flags: 0 }), Some((1440, 900)));
         {
@@ -10934,32 +10911,6 @@ mod tests {
             .unwrap();
         assert_eq!(written(&wire), client_density((2880, 1800), 2.0));
         assert!(!desktop.lock().unwrap().following);
-    }
-
-    /// A pointer client's session at a kept size declares nothing: the desktop
-    /// stays at the scaling the server has.
-    #[tokio::test]
-    async fn a_fixed_size_target_labels_by_the_report_and_declares_nothing() {
-        let (uplink, wire) = test_uplink();
-        let (sink, mut rx) = test_sink();
-        let desktop = shared_desktop((1920, 1080), Some(Screen { id: 3, flags: 0 }), None);
-        {
-            let mut d = desktop.lock().unwrap();
-            d.density = Density::Asked;
-            d.host_density = 2.0;
-            d.declares = false;
-        }
-
-        let body = output_scale_body((1920, 1080), 1.0);
-        read_output_scale(&mut body.as_slice(), &uplink, &desktop, &test_shadow((1920, 1080)), &sink)
-            .await
-            .unwrap();
-        assert!(written(&wire).is_empty(), "no declaration, no request");
-        assert!(forwarded(&sink, &mut rx).await.is_none());
-        let d = desktop.lock().unwrap();
-        assert_eq!(d.density, Density::Reported);
-        assert_eq!(d.wire_scale, Some(1.0));
-        assert!(!d.following);
     }
 
     /// A report naming a size the framebuffer does not have yet is the label for

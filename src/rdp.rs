@@ -210,15 +210,7 @@ async fn session(
     let sizing = choices.size;
     let resize = choices.resize();
     let opening = opening_layout(&config, sizing, display);
-    let (session, mut events) = Session::start(connect_config(
-        &config,
-        choices,
-        states_density(sizing, display),
-        opening,
-        plan,
-        audio,
-        &uplinks,
-    ));
+    let (session, mut events) = Session::start(connect_config(&config, choices, opening, plan, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
     // go before the desktop does: a plug made while the host is still connecting waits in
     // the session's queue for the enumeration channel.
@@ -368,40 +360,23 @@ async fn await_desktop(
 /// size. Opened at the final layout, the logon — or the reconnection of a session
 /// left at another size — is drawn at it from the start.
 ///
-/// 1x in a pointer client's session at a kept size, where a density is not this
-/// end's to change: the target then keeps its size and scaling as the operator
-/// set them, which is how Microsoft's client on a Mac behaves with "Optimize for
-/// Retina displays" unchecked. See [`states_density`] for the pinch-zoom client.
+/// The density is the client screen's whatever names the points, as a High
+/// Performance Mac opens its virtual display (`opening_mode` in src/vnc.rs): a
+/// Retina client gets a sharp desktop at a kept size too, stated once at connect,
+/// since only a session started with resize has the Display Control channel that
+/// restates it later.
 fn opening_layout(config: &TargetConfig, sizing: Sizing, display: Option<HostDisplay>) -> Layout {
     let (width, height) = config.opening_size(sizing, display);
-    let density = display
-        .filter(|_| states_density(sizing, display))
-        .map_or(Density::One, |screen| Density::from_host(screen.scale));
+    let density = display.map_or(Density::One, |screen| Density::from_host(screen.scale));
     Layout { w: u32::from(width), h: u32::from(height), density: Density::One, second: None }
         .at_density(density)
         .held()
-}
-
-/// Whether this end states the session's density, rather than leaving the host at
-/// the scaling the operator gave it: in a session that follows the window, and for
-/// a pinch-zoom client ([`HostDisplay::fit`]) whatever the size.
-///
-/// The pinch-zoom client — a phone, a tablet, or a touch laptop, which
-/// `CAN_PINCH_ZOOM` does not tell apart — sees the desktop fitted to its width
-/// rather than at 100%, on what is usually a 2x or 3x screen where a 1x desktop is
-/// a blurred one, and the client's density is what a High Performance Mac opens at
-/// for it whatever its size (`opening_mode` in src/vnc.rs). Without resize the
-/// density is stated once, at connect: Display Control, the only way to restate it
-/// on a live session, comes with resize.
-fn states_density(sizing: Sizing, display: Option<HostDisplay>) -> bool {
-    sizing == Sizing::Window || display.is_some_and(|screen| screen.fit)
 }
 
 /// Everything the RDP client needs to open this target's session.
 fn connect_config(
     config: &TargetConfig,
     choices: Choices,
-    stated_density: bool,
     opening: Layout,
     plan: RenderPlan,
     audio: Option<Arc<AudioBridge>>,
@@ -417,10 +392,8 @@ fn connect_config(
         height: opening.h,
         monitors: u32::from(config.virtual_displays),
         placement: choices.placement,
-        // Stated only in a session whose density is this end's to set, where 1x is
-        // a statement too: a session left at 2x reconnects at 100%. Otherwise the
-        // host keeps whatever scaling it was configured with.
-        scale_percent: if stated_density { opening.density.percent() } else { 0 },
+        // Always stated, 1x too: a session left at 2x reconnects at 100%.
+        scale_percent: opening.density.percent(),
         resize: choices.resize(),
         // Passed to the browser whenever it is on: the gateway composes none.
         egfx: config.egfx(),
@@ -3479,10 +3452,9 @@ mod tests {
     /// A session opens at the layout it will stay at: a phone's 3x screen is the
     /// default size at 2x from the handshake, not a 1x desktop waiting for a
     /// Display Control layout that a Windows host applies in two visible steps.
-    /// At a kept size a pointer client's density is not this end's, and it opens
-    /// at 1x; a pinch-zoom client's still is, as on a High Performance Mac.
+    /// At a kept size too, whoever the client is, as on a High Performance Mac.
     #[test]
-    fn a_session_opens_at_the_clients_density_when_it_may_set_one() {
+    fn a_session_opens_at_the_clients_density() {
         let phone = HostDisplay { w: 430, h: 932, scale: 300, fit: true };
         let (w, h) = crate::config::DEFAULT_SIZE;
         let (w, h) = (u32::from(w), u32::from(h));
@@ -3501,7 +3473,7 @@ mod tests {
 
         assert_eq!(
             opening_layout(&target, Sizing::Target, Some(retina)),
-            Layout { w, h, density: Density::One, second: None }
+            Layout { w: w * 2, h: h * 2, density: Density::Two, second: None }
         );
         assert_eq!(
             opening_layout(&target, Sizing::Target, Some(phone)),
@@ -3516,9 +3488,12 @@ mod tests {
         let sized = rdp_target("size = \"1920x1080\"");
         assert_eq!(
             opening_layout(&sized, Sizing::Target, Some(retina)),
-            Layout { w: 1920, h: 1080, density: Density::One, second: None }
+            Layout { w: 3840, h: 2160, density: Density::Two, second: None }
         );
-        assert_eq!(opening_layout(&sized, Sizing::BuiltIn, Some(retina)), Layout { w, h, density: Density::One, second: None });
+        assert_eq!(
+            opening_layout(&sized, Sizing::BuiltIn, Some(retina)),
+            Layout { w: w * 2, h: h * 2, density: Density::Two, second: None }
+        );
         assert_eq!(
             opening_layout(&sized, Sizing::Window, Some(retina)),
             Layout { w: 3456, h: 2234, density: Density::Two, second: None }

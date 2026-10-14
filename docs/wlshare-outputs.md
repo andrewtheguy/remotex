@@ -91,9 +91,8 @@ before the wire.
   shown. The gateway rejects IDs absent from its most recent list before sending a
   request.
 - **Density declaration.** Once an `OutputList` confirms a switch, the gateway
-  repeats the browser's density declaration for the new output when the session
-  follows the window or when a touch client declares density at a kept size. A
-  pointer client at a kept size declares none. The declaration includes the
+  repeats the browser's density declaration for the new output, in every
+  session. The declaration includes the
   browser window's pixel size even when the scale is unchanged: a headless output
   can adopt that size, while a physical monitor retains its user-owned mode and
   reports the resulting `OutputScale`. If an earlier density request is still

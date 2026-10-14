@@ -305,11 +305,9 @@ password = "change-me"
 # window's size. Where the window can be followed, the picker offers this size
 # beside it, and the size is what is chosen until somebody picks the window.
 #
-# These are points, not backing pixels. An RDP session at a kept size leaves the
-# host at its own scaling, as Microsoft's client on a Mac does with "Optimize for
-# Retina displays" unchecked; only one that follows the window renders at the
-# client's density, where a Retina client asks for twice the pixels. A High Performance Mac opens at the
-# connecting client's density whatever the size, as Apple's Screen Sharing does.
+# These are points, not backing pixels. An RDP session and a High Performance Mac
+# open at the connecting client's density whatever the size, as Apple's Screen
+# Sharing does, so a Retina client asks for twice the pixels.
 #size = "1920x1080"
 
 # Whether to offer the RDP graphics pipeline (MS-RDPEGFX): on by default. With it

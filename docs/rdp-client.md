@@ -680,9 +680,9 @@ In a session started with resize, the Display Control Virtual Channel applies ex
 desktop-size requests, and also matches the client's display density: a monitor
 layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
 twice the pixels with the host's UI drawn at 200% rather than the same UI
-stretched. The session also opens at that density: the core data's
-`desktopScaleFactor` (with a `deviceScaleFactor` of 100) and a desktop in pixels at
-it, taken from the screen the connect names. A later layout would not do: a Windows
+stretched. Every session, at a kept size too, opens at the client's density: the
+core data's `desktopScaleFactor` (with a `deviceScaleFactor` of 100) and a desktop
+in pixels at it, taken from the screen the connect names. A later layout would not do: a Windows
 host applies its size and its scale factor as two steps, and in between the desktop
 is drawn at twice the pixels and 100%, every window at half its final size. The
 opening density counts as applied only when the desktop comes back at the size that

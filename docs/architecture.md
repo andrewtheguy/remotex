@@ -2449,20 +2449,14 @@ first `ExtendedDesktopSize` rect and no earlier. A server that never declares
 support, or refuses the request, keeps its own size. Standard `ard` is the only
 engine with no size to state, and `size` is refused on it at config load.
 
-What a kept size says about density follows each vendor's own client on a Mac.
-An RDP session at a kept size states no scale factor to a pointer client's host,
-so the host keeps its own scaling, which is how Microsoft's client behaves with
-"Optimize for Retina displays" unchecked; a session started with resize renders
-at the client's density.
-A High Performance Mac opens its virtual display at the client screen's density
-whatever names the points, which is how Apple's Screen Sharing opens one.
-A `HostDisplay::fit` client gets that on RDP too: it fits the desktop to its
-width, usually on a phone's or tablet's 2x or 3x screen, so an RDP session at a
-kept size states the client's density at connect, as a High Performance Mac opens
-at it. Without resize there is no Display Control channel to restate it later.
-A `wlshare` session at a kept size declares such a client's density too, with
-the kept size in pixels at it, and declares it again if the screen's density
-changes.
+A kept size opens at the client screen's density whatever names the points, on
+RDP and a High Performance Mac alike, which is how Apple's Screen Sharing opens a
+virtual display. An RDP session states it at connect; without resize there is no
+Display Control channel to restate it later, as a High Performance Mac at a kept
+size does not re-render either.
+A `wlshare` session at a kept size declares the client's density too, with the
+kept size in pixels at it, and declares it again if the screen's density
+changes; a physical output refuses the declaration and stays at its own scale.
 
 What is engine-specific is the mechanism:
 
@@ -2507,8 +2501,8 @@ display (`screenUnavailable`), and holds input back the same way. The measuremen
 [Resizing a High Performance display](apple-vnc-889.md#resizing-a-high-performance-display-as-measured).
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
-and its density. Mid-session only the density is acted on, and only in a
-session started with resize, or a `wlshare` one of a pinch-zoom client: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
+and its density. Mid-session only the density is acted on, in a session
+started with resize, and in every `wlshare` one: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
 screen `connect` names), a High Performance virtual
 display re-renders the same points at it, and a `wlshare` target declares it to
 the server over wlshare's density extension, which sets its output's scale; the
