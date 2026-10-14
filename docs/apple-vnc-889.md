@@ -1502,34 +1502,35 @@ four strips do not fit it sends no picture at all (below).
   SSRC with sequence numbers of its own, and so a rollover counter of its own.
   The strips of one frame share its timestamp and the header extension's frame
   counter, and the marker bit ends each strip's picture.
-- **Some small displays get no picture.** The Mac's encoder takes the count
-  as it was negotiated and does not lower it for a display too low for it. It
-  cuts each strip from the frame at the strip's number times the strip's
-  height, and refuses a strip whose first row would lie past the frame's last.
-  So where three strips are taller than the display, the Mac answers the offer
-  with 4, its encoder fails every frame (`Offset is outside frame dimensions`
-  and `Encoder failed to create tile id 3` in the Mac's log, then
-  `VCPCompressionSessionEncodeFrame failed`, error -12902), and no picture
-  packet is sent. Those are the heights under 48 rows, 68 to 95 and 132 to
-  143, and none from 144 up. Seen on both sides of each edge: 46, 68, 94, 132
-  and 142 rows brought no packet, and 48, 66, 96, 130 and 144 brought four
-  strips, as 80, 90 and 136 had failed and 64, 100, 104, 112, 120 and 128
-  worked. An offer of one tile brings the picture at a failing height. A last
-  strip that starts exactly at the end passes the check and is sent, with
-  nothing of the display in it, as at 48, 96 and 144 rows.
-- **Those heights are all below the minimum.** Both cases, no picture and a
-  last strip with nothing of the display, need three strips at least as tall
-  as the display. A strip is a quarter of the height rounded up by at most 15
-  rows, and three of them reach the display's end only where those 15 rows are
-  a twelfth of its height or more: under 180 rows. The least display asked for
-  is 800×600 points, 600 rows at 1x
+- **Displays below the supported minimum can get no picture.** Every height
+  here is under 180 rows, far below the least display Apple's viewer and
+  remotex ask for, 800×600 points, 600 rows at 1x
   ([The High Performance virtual display](#the-high-performance-virtual-display)),
-  and even a 640×480 minimum would be far above 180. The gateway
-  refuses a size under 800×600 points, so these heights never come in a
-  session. They are what the virtual Mac did when probed below the minimum,
-  kept as a record of its behaviour, and nothing in the gateway or the page
-  depends on them. Every display in a session has a last strip that starts
-  within the display.
+  and below any minimum near it: 640×480 would be 480 rows. Such displays are
+  not supported. The gateway refuses a size under 800×600 points, so they never
+  come in a session, and what follows was found only by probing the virtual
+  Mac below the minimum. It is kept as a record of the Mac's behaviour, and
+  nothing in the gateway or the page depends on it.
+
+  The Mac's encoder takes the count as it was negotiated and does not lower
+  it for a display too low for it. It cuts each strip from the frame at the
+  strip's number times the strip's height, and refuses a strip whose first row
+  would lie past the frame's last. So where three strips are taller than the
+  display, the Mac answers the offer with 4, its encoder fails every frame
+  (`Offset is outside frame dimensions` and `Encoder failed to create tile id
+  3` in the Mac's log, then `VCPCompressionSessionEncodeFrame failed`, error
+  -12902), and no picture packet is sent. Those are the heights under 48 rows,
+  68 to 95 and 132 to 143, and none from 144 up. Seen on both sides of each
+  edge: 46, 68, 94, 132 and 142 rows brought no packet, and 48, 66, 96, 130
+  and 144 brought four strips, as 80, 90 and 136 had failed and 64, 100, 104,
+  112, 120 and 128 worked. An offer of one tile brings the picture at a
+  failing height. A last strip that starts exactly at the end passes the check
+  and is sent, with nothing of the display in it, as at 48, 96 and 144 rows.
+
+  None of it can happen at a supported size. A strip is a quarter of the
+  height rounded up by at most 15 rows, so three strips reach the display's
+  end only where those 15 rows are a twelfth of its height or more: under 180
+  rows. Every supported display has a last strip that starts within it.
 - **The Mac says it sends none, and only that.** Nothing of the failure
   reaches the wire as an error: the answer is 4, no media-stream error message
   follows (none in 70 s), and the sound runs. What the Mac does say is in its
