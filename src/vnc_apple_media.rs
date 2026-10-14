@@ -57,7 +57,7 @@
 //!   ([`MediaStream::withheld`]).
 //!
 //! Its bitrate entries are Apple's, and so is what bounds them: the Mac's rate
-//! controller walks the picture between 20 and 60 Mbit/s by the one-way delay this
+//! controller walks the picture's target between 20 and 60 Mbit/s by the one-way delay this
 //! side reports ([`RateFeedback`]), every 50 ms as Apple's viewer does.
 //!
 //! The stream itself is HEVC Range Extensions, 4:4:4, full-range BT.709, RTP payload

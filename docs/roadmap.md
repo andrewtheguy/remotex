@@ -60,7 +60,7 @@ in wlshare and read here.
 ### Apple's passed HEVC at 4K
 
 A High Performance stream is offered Apple's bitrate entries and reported on as
-Apple's viewer reports, so the Mac's rate controller walks it between 20 and
+Apple's viewer reports, so the Mac's rate controller walks its target between 20 and
 60 Mbit/s by the delay between the Mac and the gateway
 ([Rate control](apple-vnc-889.md#rate-control)).
 

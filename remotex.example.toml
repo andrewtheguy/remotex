@@ -570,8 +570,8 @@ password = "change-me"
 # here from decoded pictures. Every picture the
 # Mac sends goes, up to 30 a second, at the Mac's own quality. Its ZRLE rectangles
 # are never read or shown, so such a session builds no video encoder here.
-# The HEVC is
-# walked between 20 and 60 Mbit/s
+# The HEVC's target is
+# walked between 20 and 60 Mbit/s, which a screen with little movement comes far under,
 # by the Mac's own rate controller, from the delay this gateway reports as Apple's
 # viewer does, which ends at the gateway: the browser's link does not slow it. High
 # Performance has no Adaptive/Full choice, and the video keys below reach only the

@@ -98,7 +98,7 @@ modes (see [Connecting](#connecting)).
 
 Standard's **Adaptive** label does not name a High Performance setting. The
 High Performance video profile always enables AVConference's rate adaptation,
-with fixed 20 and 60 Mbit/s bounds, whether or not its reports can make the
+with fixed 20 and 60 Mbit/s bounds on its target, whether or not its reports can make the
 encoder move between them. The viewer exposes no switch for it. See
 [Rate control](#rate-control).
 
@@ -1592,12 +1592,20 @@ configuration, including Apple's viewer's, enables rate adaptation; its audio
 configuration does not. The viewer offers no setting for it.
 
 The Mac's encoder follows a rate controller on the Mac that works from the
-viewer's reports alone. It moves between a floor of 20 Mbit/s and a ceiling of
-the offer's bitrate entries, capped at 60 Mbit/s. The floor and the 60 Mbit/s
-ceiling are fixed by the Mac's screen-sharing video profile, and no offer field
-is known to lower the floor. The daemon logs the controller's state every 5 s:
+viewer's reports alone. Its target moves between a floor of 20 Mbit/s and a
+ceiling of the offer's bitrate entries, capped at 60 Mbit/s. The floor and the
+60 Mbit/s ceiling are fixed by the Mac's screen-sharing video profile, and no
+offer field is known to lower the floor. The daemon logs the controller's state every 5 s:
 target, cap, measured bitrate, round-trip time, one-way delay and loss.
 
+- **The target is a bound.** It is the most the encoder may spend, not what
+  the stream carries, and the floor is the lowest target, not the lowest rate.
+  What the stream carries follows how much of the screen changes: a picture
+  goes out only when something does ([The stream](#the-stream)), and codes
+  only what changed. A screen with little movement, typing or a small
+  animation as much as a still one, comes at about 1 Mbit/s under a
+  target of 20 Mbit/s or more. The stream reaches the target only while enough
+  of the screen moves to spend it, as under video or a full-screen animation.
 - **The report.** An RTCP APP packet named `RCTL` with a 20-byte payload, sent
   on the picture's leg as SRTCP. It must be the only packet in its datagram: the
   Mac rejects one inside a compound packet as a bad APP packet. The payload is

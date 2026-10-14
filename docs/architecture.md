@@ -141,7 +141,7 @@ compose it cannot start that target. The passed pipeline follows the browser's
 link by the host's own pacing: fewer frames for a page that composes slowly, and
 with Adaptive coarser ones too, by the host's rate control and by its socket
 backing up. A High quality session is drawn for the link to the gateway alone.
-A Mac's passed HEVC does not: its rate control keeps it between 20
+A Mac's passed HEVC does not: its rate control keeps its target between 20
 and 60 Mbit/s by the link to the gateway alone, so on a slow link a High
 Performance session is started without it and sent the gateway's VP9, which
 adapts. See
@@ -854,7 +854,8 @@ of this section is about the HEVC, and holds for the H.264 where it does not say
 otherwise. The sound is passed in every session, whichever picture it was
 started with: the gateway has no decoder for the Mac's AAC-ELD, and the browser has.
 The passthrough is for a LAN. High Performance always enables its
-own rate controller, between 20 and 60 Mbit/s
+own rate controller, whose target for the encoder runs between 20 and
+60 Mbit/s and is a bound, what is sent following how much of the screen moves
 ([Rate control](apple-vnc-889.md#rate-control)); this is automatic media-stream
 behavior, not Standard mode's **Adaptive** quality choice. The gateway offers
 Apple's bitrate entries and sends the rate reports Apple's viewer sends, every
@@ -870,7 +871,7 @@ Three controls with similar names therefore remain separate:
 | Control | Selection | What it reaches |
 |---|---|---|
 | Standard **Adaptive** / **Full** | Apple's viewer, in Standard mode only | Which RFB framebuffer encodings the viewer asks for |
-| High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder, within its fixed 20–60 Mbit/s range, by the gateway's reports |
+| High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder's target, within its fixed 20–60 Mbit/s range, by the gateway's reports |
 | `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway, including every picture after local HEVC decoding; it does not reach passed HEVC |
 
 - **The browser says whether it can.** The page asks once, at load (`frontend/src/appleMedia.ts`),
@@ -1579,7 +1580,7 @@ remote is told how the link is doing. Today two of the three passthroughs are:
 |---|---|---|---|
 | wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`, the same walk as here: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
 | An RDP host's graphics pipeline (passed whenever it is on) | The Windows host: frame rate by acknowledgements; with Adaptive, its H.264's rate control by its network detection, and its Progressive quality by its socket | Frames are acknowledged once the page has composed them; with Adaptive, the detection is answered at the page's pace, and while two large frames wait the host's socket goes unread through a small receive buffer; with High quality, nothing more | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
-| A High Performance Mac's HEVC (passthrough) | The Mac's rate controller, 20–60 Mbit/s | Nothing: the delay in its rate reports ends at the gateway | None |
+| A High Performance Mac's HEVC (passthrough) | The Mac's rate controller, a target of 20–60 Mbit/s | Nothing: the delay in its rate reports ends at the gateway | None |
 
 - **wlshare** walks its encoder exactly as the gateway walks its own, so a passed
   stream there is a peer of one encoded here: quality goes down to the floor, then
