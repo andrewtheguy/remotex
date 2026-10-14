@@ -1504,6 +1504,9 @@ async fn active_loop(
     // session at a kept size is laid out at again whenever the host lays out
     // anything else ([`Flags::kept`]).
     let mut screen_density: Option<Density> = None;
+    // And the tab's screen's, for the second monitor, for as long as *All
+    // Displays* is chosen, as `tab_points` is.
+    let mut tab_density: Option<Density> = None;
 
     // Both ends of the clipboard bridge.
     let mut clipboard = ClipboardState::default();
@@ -1542,6 +1545,7 @@ async fn active_loop(
         // never applied it is not asked again every turn.
         if !view.all {
             tab_points = None;
+            tab_density = None;
         }
         if restates
             && !view.all
@@ -1738,11 +1742,15 @@ async fn active_loop(
                             && pending_layout.is_none()
                         {
                             let current = view.current(applied);
+                            // The second at its tab's screen's, where the tab has
+                            // reported one.
+                            let open = view.all && tab.is_some();
+                            let second = tab_density
+                                .filter(|_| open)
+                                .map(|density| Second::points(w, h).at_density(density))
+                                .or_else(|| current.tab_second(open));
                             install_layout(
-                                Layout::points(w, h)
-                                    .at_density(density)
-                                    .with_second(current.tab_second(view.all && tab.is_some()))
-                                    .held(),
+                                Layout::points(w, h).at_density(density).with_second(second).held(),
                                 current,
                                 &mut pending_layout,
                                 &mut layout_retry_at,
@@ -1987,6 +1995,7 @@ async fn active_loop(
                         if restates {
                             let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
                             let density = Density::from_host(screen.scale);
+                            tab_density = Some(density);
                             let second = kept.or(tab_points).map_or_else(
                                 || base.second().at_density(density),
                                 |(w, h)| Second::points(w, h).at_density(density),
