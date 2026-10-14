@@ -1851,8 +1851,8 @@ display is 1280×800, with sessions asking for 1600×1000:
   half a second after the login, the login window's agent closed the viewers it
   served as it went, and the daemon exited. Those 3 were remotex sessions, in a
   row. A fourth remotex session was switched, and so were seven sessions of a
-  probe, four of them sending remotex's opening messages and asking for its
-  stream. What decides it was not found.
+  probe, four of them sending remotex's opening messages. What decides it was
+  not found.
 - **A new `SetDisplayConfiguration` brings a virtual display back.** It came
   11 s later, under a new id and with the flags `0x5`, and again with no message
   1; an offer brought its stream.
