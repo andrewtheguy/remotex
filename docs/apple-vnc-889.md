@@ -1698,8 +1698,9 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   that changes everywhere (a terminal flood) the stream ran at about twice its
   target: 15 Mbit/s under an 8 Mbit/s cap, 30 under 15, and 90–99 against a
   58.4 Mbit/s target. One tile held its target: 5.7–8.2 Mbit/s under 8, and
-  56–59 against 58.4. Remotex sets bit 0, a frame rate of 60, where the strips
-  span 12.5 ms; that the stream holds its target there has not been measured.
+  56–59 against 58.4. With bit 0 set, as remotex sends it, the frame rate is
+  60, the strips span 12.5 ms, and four strips held their target under the same
+  flood: 7.8–8.2 Mbit/s under 8, and 51–55 against 58.4.
 - **Remotex.** It offers Apple's entries unchanged and reports as Apple's viewer
   does: `RCTL` every 50 ms once a picture packet has arrived, the delay
   estimated as above from when the receiver reads each picture packet, loss 0
@@ -1891,9 +1892,8 @@ is 10 s overdue.
 - **Other login types:** type 35's Kerberos tokens
   ([Other login types](#other-login-types)).
 - **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers
-  the target over longer than 30 s, whether any offer field lowers the
-  20 Mbit/s floor, and whether four strips at 60 fps hold their target
-  ([Rate control](#rate-control)).
+  the target over longer than 30 s, and whether any offer field lowers the
+  20 Mbit/s floor ([Rate control](#rate-control)).
 - **Four-tile frames**: what Apple's viewer acknowledges a tile picture with,
   and whether anything short of a keyframe mends a loss; a stream of them
   under loss, on a physical Mac and at 4K
