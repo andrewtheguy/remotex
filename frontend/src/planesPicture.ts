@@ -11,7 +11,9 @@
 // textures of the display's size, and drawn at its frame's last: a frame carries
 // the strips that changed, and the others are in the textures already. It is
 // drawn once every strip has come since its keyframe, or since the textures were
-// made, and not before: what was in a strip's rows then is no picture of it.
+// made, and not before: what was in a strip's rows then is no picture of it. A
+// display one to three rows past a multiple of 64 has strips that end short of its
+// last rows, which are black, as the gateway leaves them.
 import { openPictureCanvas } from "./glPicture.ts";
 import type { DecodedPlanes } from "./softwareDecoder.ts";
 
@@ -101,6 +103,33 @@ function conversion(matrix: DecodedPlanes["matrix"], fullRange: boolean) {
       ...[2 * (1 - kr) * c, (-2 * kr * (1 - kr) * c) / kg, 0],
     ],
   };
+}
+
+/**
+ * The rows of each plane's texture below `planes` that no strip holds, and the
+ * value that is black there: none but past the last strip, which can end short of
+ * the display's last rows.
+ */
+export function rowsBelow(
+  planes: Pick<
+    DecodedPlanes,
+    "height" | "subsampling" | "row" | "strip" | "fullRange"
+  > & { planes: { rows: number }[] },
+): { unit: number; row: number; rows: number; value: number }[] {
+  if (planes.strip !== undefined && planes.strip < 3) {
+    return [];
+  }
+  const halved = planes.subsampling === "4:2:0";
+  return planes.planes.flatMap((plane, unit) => {
+    const chroma = unit > 0 && halved;
+    const end = (chroma ? planes.row >> 1 : planes.row) + plane.rows;
+    const rows = (chroma ? (planes.height + 1) >> 1 : planes.height) - end;
+    if (rows <= 0) {
+      return [];
+    }
+    const value = unit > 0 ? 128 : planes.fullRange ? 0 : 16;
+    return [{ unit, row: end, rows, value }];
+  });
 }
 
 /** The textures' sizes for `planes`: the picture's luma, and its chroma. */
@@ -217,6 +246,22 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
           plane.offset,
         );
       });
+      for (const { unit, row, rows, value } of rowsBelow(planes)) {
+        const width = planes.planes[unit].width;
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          0,
+          row,
+          width,
+          rows,
+          gl.RED,
+          gl.UNSIGNED_BYTE,
+          new Uint8Array(width * rows).fill(value),
+        );
+      }
       placed = placedAfter(placed, planes);
     },
     draw(w, h) {
