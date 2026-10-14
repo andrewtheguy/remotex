@@ -1839,30 +1839,30 @@ window and each logged-in user have a capture agent of their own. When the
 session on console changes, the Mac moves the connection to the agent of the
 new one, which has only the physical display. The display configuration the
 viewer sent is not replayed there. Measured on the virtual Mac, whose physical
-display is 1280×800, with sessions asking for 1600×1000:
+display is 1280×800, with sessions asking for 1600×1000 or 1440×900:
 
 - **A login moves the session to the physical display, or closes it.** The
-  password was typed into a session at the login window, which logged in. In 8
-  of 11 runs the viewer was then sent `MiscStatus` 17 and, 2 s later, a layout
+  password was typed into a session at the login window, which logged in. In 10
+  of 14 runs the viewer was then sent `MiscStatus` 17 and, 2 s later, a layout
   of the physical display: its own id, its size, and the header flags `0x4`,
   bit 0 clear, where they had been `0x15`. The stream had stopped. No message 1
   came then or for the rest of the session, but an offer was answered and
-  streamed the physical display on the ports named at the start. In the other 3,
+  streamed the physical display on the ports named at the start. In the other 4,
   half a second after the login, the login window's agent closed the viewers it
-  served as it went, and the daemon exited. Those 3 were remotex sessions, in a
-  row. A fourth remotex session was switched, and so were seven sessions of a
-  probe, four of them sending remotex's opening messages. What decides it was
-  not found.
+  served as it went, and the daemon exited. Remotex sessions were closed 3 times
+  in 4, and a probe 1 time in 10. The probe was closed once and switched twice
+  when it sent remotex's opening messages and asked for remotex's stream, so
+  nothing a viewer sends was found to decide it.
 - **A new `SetDisplayConfiguration` brings a virtual display back.** It came
   11 s later, under a new id and with the flags `0x5`, and again with no message
   1; an offer brought its stream.
-- **A logout ends the session.** No run of 12 kept a virtual display or a
-  picture. In 8, the session's agent closed the viewers it served, and the
-  daemon closed the connection and exited within a second. In the other 4, the
-  Mac moved the connection to another agent of the session being ended, which
-  exited within 4 s. One of those logged the physical display first. In another,
-  the viewer was sent `MiscStatus` 17 and then nothing, and the next
-  `SetDisplayConfiguration` closed the connection.
+- **A logout ends the session.** No run of 15 kept a virtual display or a
+  picture. In 11, the session's agent closed the viewers it served, and the
+  daemon closed the connection within a second, exiting in 10 of them. In the
+  other 4, the Mac moved the connection to another agent of the session being
+  ended, which exited within 4 s. One of those logged the physical display
+  first. In another, the viewer was sent `MiscStatus` 17 and then nothing, and
+  the next `SetDisplayConfiguration` closed the connection.
 - **Unlocking a locked session and waking the Mac change no user session,** so,
   as read from the daemon, they move nothing. Neither was run.
 - **Apple's viewer does not ask again.** Read from its code, a change of the
