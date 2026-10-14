@@ -91,8 +91,8 @@
 # it out of every remotex build as the native decoder's keeps that out: download
 # the release this gateway pins from the private andrewtheguy/hevc-wasm-archives,
 #
-#   gh release download v0.0.8 --repo andrewtheguy/hevc-wasm-archives \
-#     --pattern hevc-wasm-v0.0.8.tar.gz
+#   gh release download v0.0.13 --repo andrewtheguy/hevc-wasm-archives \
+#     --pattern hevc-wasm-v0.0.13.tar.gz
 #
 # as it is, into share/remotex in the gateway's release tree, beside the
 # share/doc/remotex that holds this file: /usr/share/remotex for the .deb and
@@ -111,7 +111,7 @@
 # compositor's threads; the decoder's threads require that isolation too.
 #
 #[hevc_wasm]
-#archive = "/srv/remotex/hevc-wasm-v0.0.8.tar.gz"
+#archive = "/srv/remotex/hevc-wasm-v0.0.13.tar.gz"
 
 # On Windows, the folder an `ard-high-performance` target's HEVC decoder is
 # loaded from: FFmpeg's avcodec and avutil DLLs. With nothing set here the
@@ -570,8 +570,8 @@ password = "change-me"
 # here from decoded pictures. Every picture the
 # Mac sends goes, up to 30 a second, at the Mac's own quality. Its ZRLE rectangles
 # are never read or shown, so such a session builds no video encoder here.
-# The HEVC is
-# walked between 20 and 60 Mbit/s
+# The HEVC's target is
+# walked between 20 and 60 Mbit/s, which a screen with little movement comes far under,
 # by the Mac's own rate controller, from the delay this gateway reports as Apple's
 # viewer does, which ends at the gateway: the browser's link does not slow it. High
 # Performance has no Adaptive/Full choice, and the video keys below reach only the
