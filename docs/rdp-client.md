@@ -676,8 +676,10 @@ already where the mouse is, and nothing here can move a hardware pointer.
 
 ## Resize and density
 
-In a session started with resize, the Display Control Virtual Channel applies explicit
-desktop-size requests, and also matches the client's display density: a monitor
+The Display Control Virtual Channel is opened whenever the graphics pipeline is,
+at a kept size too. In a session started with resize it applies explicit
+desktop-size requests, and in every session it matches the client's display
+density as the window crosses screens: a monitor
 layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
 twice the pixels with the host's UI drawn at 200% rather than the same UI
 stretched. Every session, at a kept size too, opens at the client's density: the

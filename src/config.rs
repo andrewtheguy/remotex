@@ -519,13 +519,10 @@ pub enum Sizing {
     /// desktop client reports every window change; a tablet asks once for its
     /// screen. There is no client-side mode or manual resize command beside it.
     ///
-    /// On RDP this also turns on density matching, because there a density *is* a
-    /// resize: the Display Control channel this negotiates is the only way to tell
-    /// a live session to render at 200%, so a Retina client gets twice the pixels
-    /// and a UI drawn twice as large. At a kept size an RDP session states the
-    /// client's density once at connect, as a High Performance Mac opens at it.
-    /// An RDP resize is the graphics pipeline's, so a
-    /// target with `egfx = false` does not offer it.
+    /// Density is not this choice's: every session opens at the client's density
+    /// and follows it across screens, at a kept size too, wherever the wire can
+    /// restate it live. An RDP resize is the graphics pipeline's, so a target
+    /// with `egfx = false` does not offer it, and keeps the density it connected at.
     ///
     /// On a virtual display — `ard-high-performance`, or `ard` with
     /// [`TargetConfig::virtual_display`] — the setup descriptor always enables the

@@ -267,7 +267,7 @@ async fn session(
     if let Err(e) = active_loop(
         &session,
         events,
-        Flags { resize, pass_graphics: plan.rdp_graphics, plan, monitors: narrow(asked) },
+        Flags { resize, restates: config.egfx(), pass_graphics: plan.rdp_graphics, plan, monitors: narrow(asked) },
         applied,
         view,
         input_rx,
@@ -394,7 +394,11 @@ fn connect_config(
         placement: choices.placement,
         // Always stated, 1x too: a session left at 2x reconnects at 100%.
         scale_percent: opening.density.percent(),
-        resize: choices.resize(),
+        // Display Control whenever the pipeline is on, at a kept size too: it is
+        // how a density is restated on a live session, as the window crosses
+        // screens. Without the pipeline a layout is a Deactivation-Reactivation
+        // Sequence, and the channel is not taken.
+        resize: config.egfx(),
         // Passed to the browser whenever it is on: the gateway composes none.
         egfx: config.egfx(),
         // The whole desktop unless the session chose H.264 by region: the host
@@ -427,7 +431,13 @@ fn connect_config(
 /// [`crate::vnc`]'s own `Flags` is: values that always travel together and are
 /// only ever read from the same place.
 struct Flags {
+    /// Whether the window drives the desktop's size ([`Choices::resize`]).
     resize: bool,
+    /// Whether the client screen's density is restated on the live session, in
+    /// every session whatever its size: Display Control is open, which it is
+    /// whenever the pipeline is ([`connect_config`]). A session without the
+    /// pipeline keeps the density it connected at.
+    restates: bool,
     /// Whether the host's graphics pipeline is on, and so passed to the browser
     /// ([`RenderPlan::rdp_graphics`]): its frames are never in the framebuffer.
     pass_graphics: bool,
@@ -1418,7 +1428,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, pass_graphics, plan, monitors } = flags;
+    let Flags { resize, restates, pass_graphics, plan, monitors } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -1516,7 +1526,7 @@ async fn active_loop(
         if !view.all {
             tab_points = None;
         }
-        if resize
+        if restates
             && !view.all
             && let Some(wanted) = pending_layout.as_ref().map(|p| p.layout).filter(|l| l.second.is_some())
         {
@@ -1813,7 +1823,7 @@ async fn active_loop(
                                 tab = None;
                             }
                             // And the second display goes back to the first's size.
-                            if resize && was_all && !view.all {
+                            if restates && was_all && !view.all {
                                 let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
                                 if base.second.is_some() {
                                     install_layout(
@@ -1934,7 +1944,7 @@ async fn active_loop(
                     // points its window reported, re-expressed, or the monitor's
                     // own where it has reported none.
                     if let ClientMsg::HostDisplay(screen) = *made {
-                        if resize {
+                        if restates {
                             let base = pending_layout.as_ref().map_or_else(|| view.current(applied), |p| p.layout);
                             let density = Density::from_host(screen.scale);
                             let second = tab_points.map_or_else(
@@ -1957,15 +1967,15 @@ async fn active_loop(
                 }
                 // The screen this client's window is on — a density report
                 // mid-session (its size mattered at connect, where
-                // `connect_config` spent it). Ignored outright without `resize`,
-                // whose Display Control channel is the only way to restate a
-                // density on a live session.
+                // `connect_config` spent it), at a kept size too. Ignored outright
+                // without the pipeline, whose Display Control channel is the only
+                // way to restate a density on a live session.
                 //
                 // Recorded and scheduled rather than asked for here, so the retry
                 // branch is the single place a layout is requested from — one
                 // attempt and five look the same to this arm.
                 if let ClientMsg::HostDisplay(screen) = msg {
-                    if resize {
+                    if restates {
                         // Only the density changes; the size the desktop should be
                         // stays what it is. Re-express whatever size is already
                         // pending at the new density, or the live desktop when

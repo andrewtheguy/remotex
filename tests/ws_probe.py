@@ -219,6 +219,21 @@ async def main() -> int:
         help="client screen WIDTHxHEIGHT@SCALE[fit] carried on the connect (the opening size)",
     )
     parser.add_argument(
+        "--move-display",
+        type=host_display,
+        action="append",
+        default=[],
+        help="a screen WIDTHxHEIGHT@SCALE the window moves to mid-session, sent as "
+        "hostDisplay --move-after seconds after connected and as long after each "
+        "other (repeatable): a density change, in a session at a kept size too",
+    )
+    parser.add_argument(
+        "--move-after",
+        type=duration,
+        default=5.0,
+        help="seconds before each --move-display goes out",
+    )
+    parser.add_argument(
         "--wheel",
         type=coordinates,
         action="append",
@@ -520,6 +535,16 @@ async def main() -> int:
         reconnect_task = (
             asyncio.create_task(reconnect()) if args.reconnect_target is not None else None
         )
+
+        # The window dragged from screen to screen: each a density report, on its
+        # own clock like the reconnect.
+        async def move_display() -> None:
+            for screen in args.move_display:
+                await asyncio.sleep(args.move_after)
+                print(f"  -> hostDisplay {screen}")
+                await socket.send(json.dumps({"type": "hostDisplay", **screen}))
+
+        move_task = None
 
         # One chord, sent after the first resize so the engine's input path is
         # live. Codes go down in the given order and up in reverse, the way the
@@ -829,6 +854,8 @@ async def main() -> int:
                         )
                         if args.audio and audio_task is None:
                             audio_task = asyncio.create_task(listen_audio())
+                        if args.move_display and move_task is None:
+                            move_task = asyncio.create_task(move_display())
                         if args.clipboard is not None and not clipboard_sent:
                             clipboard_sent = True
                             # The fetch first, so what the remote already held is
@@ -846,6 +873,8 @@ async def main() -> int:
         finally:
             if reconnect_task is not None:
                 reconnect_task.cancel()
+            if move_task is not None:
+                move_task.cancel()
             if keys_task is not None and not keys_task.done():
                 keys_task.cancel()
             if chords_task is not None and not chords_task.done():

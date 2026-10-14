@@ -2451,9 +2451,12 @@ state (`TargetConfig::sized`), and `size` is refused on both at config load.
 
 A kept size opens at the client screen's density whatever names the points, on
 RDP and a High Performance Mac alike, which is how Apple's Screen Sharing opens a
-virtual display. An RDP session states it at connect; without resize there is no
-Display Control channel to restate it later, as a High Performance Mac at a kept
-size does not re-render either.
+virtual display. Mid-session the density follows the screen the window is on
+at a kept size as it does following the window, on every engine whose wire can
+restate it live: RDP with the graphics pipeline, whose Display Control channel
+is open in every session, and a Mac's virtual display. RDP without the pipeline
+is the one exception: a layout there is a Deactivation-Reactivation Sequence, so
+the channel is not taken and the density stays the one it connected at.
 A `wlshare` session at a kept size declares the client's density too, with the
 kept size in pixels at it, and declares it again if the screen's density
 changes; a physical output refuses the declaration and stays at its own scale.
@@ -2501,8 +2504,8 @@ display (`screenUnavailable`), and holds input back the same way. The measuremen
 [Resizing a High Performance display](apple-vnc-889.md#resizing-a-high-performance-display-as-measured).
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
-and its density. Mid-session only the density is acted on, in a session
-started with resize, and in every `wlshare` one: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
+and its density. Mid-session only the density is acted on, in every session whatever its
+size, except RDP without the graphics pipeline: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
 screen `connect` names), a High Performance virtual
 display re-renders the same points at it, and a `wlshare` target declares it to
 the server over wlshare's density extension, which sets its output's scale; the

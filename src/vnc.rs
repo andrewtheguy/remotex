@@ -3179,7 +3179,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 }
             }
             // A High Performance resize has something due — see [`HpResize`].
-            () = hp_resize_due(&desktop, &hp_wake), if virtual_display && resize => {
+            () = hp_resize_due(&desktop, &hp_wake), if virtual_display => {
                 if let Err(e) = hp_resize_step(&uplink, &desktop, media.as_ref(), &tab, &sink).await {
                     break Err(e);
                 }
@@ -3316,7 +3316,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             // display's density, as the session's own report
                             // is the first's.
                             (ClientMsg::HostDisplay(screen), Some(_)) => {
-                                if resize {
+                                if resize || virtual_display {
                                     let density = crate::protocol::render_density(screen.scale);
                                     desktop.lock().unwrap().second_density = Some(density);
                                     if let Err(e) =
@@ -3393,9 +3393,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 // Viewport reports drive dynamic resize, not an input event.
                 //
                 // `HostDisplay` is that request with no size of its own:
-                // mid-session it is a *density* report. High Performance can
-                // render its virtual display at the new density when resize is
-                // granted. Standard cannot reconfigure a physical display, but
+                // mid-session it is a *density* report. A virtual display is
+                // rendered at the new density in every session, at a kept size
+                // too. Standard cannot reconfigure a physical display, but
                 // does ask the Mac to scale the framebuffer before encoding it.
                 // The size it carries mattered only at session-open.
                 let ask = match input {
@@ -3417,7 +3417,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         }
                         None
                     }
-                    ClientMsg::HostDisplay(screen) if virtual_display && resize => {
+                    ClientMsg::HostDisplay(screen) if virtual_display => {
                         let density = crate::protocol::render_density(screen.scale);
                         let mut d = desktop.lock().unwrap();
                         let changed = (d.host_density - density).abs() > 0.005;
@@ -3449,7 +3449,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     _ => None,
                 };
                 let sent = if let Some(ask) = ask {
-                    if resize {
+                    // A window drives the size only in a session that follows
+                    // it; a density is restated in every one.
+                    if resize || matches!(ask, ResizeAsk::Density) {
                         request_resize(&uplink, &desktop, ask, virtual_display).await
                     } else {
                         Ok(())
@@ -3648,7 +3650,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     } else if hp_two {
                         // Two virtual displays are a stream each, and the choice
                         // between them is answered here.
-                        hp_select(&shared_here, id, &sink, resize).await
+                        hp_select(&shared_here, id, &sink).await
                     } else if apple {
                         // `COMBINED` is this gateway's own list entry, not a
                         // screen the Mac named, so it maps back to the
@@ -6619,7 +6621,7 @@ async fn hp_tab_shown(
 /// second in a tab of its own. The Mac sends a stream for each whatever is chosen,
 /// so it is asked for nothing but the keyframe a display coming into view starts
 /// at; the canvas is told its screen is not available until that picture.
-async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> anyhow::Result<()> {
+async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink) -> anyhow::Result<()> {
     let Shared { uplink, desktop, shadow, display, tab, hp_wake, .. } = shared;
     let media = shared.media.as_ref();
     let _switch = shared.switch.lock().await;
@@ -6688,7 +6690,10 @@ async fn hp_select(shared: &Shared, id: u32, sink: &VideoSink, resize: bool) -> 
     if let Some(media) = media {
         tell_withheld(desktop, media, sink, &shared.tab).await?;
     }
-    if resize && was.all && !now.all {
+    // The second display goes back to the first's size and density, which a tab
+    // may have changed: its window in a session that follows one, its screen in
+    // any.
+    if was.all && !now.all {
         request_resize(uplink, desktop, ResizeAsk::Density, true).await?;
         hp_wake.notify_one();
     }
@@ -12909,7 +12914,7 @@ mod tests {
 
         // The second display alone: the canvas is its size, with no picture
         // until its stream's first.
-        hp_select(&shared, 1, &sink, false).await.unwrap();
+        hp_select(&shared, 1, &sink).await.unwrap();
         assert_eq!(desktop.lock().unwrap().size, (1280, 800));
         sink.flush().await;
         assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 1280, h: 800, .. })));
@@ -12920,11 +12925,11 @@ mod tests {
             assert_eq!(d.hp_origin(d.view.active), (1600, 0), "a position on it is offset into the span");
         }
         // An id the list does not have changes nothing.
-        hp_select(&shared, 7, &sink, false).await.unwrap();
+        hp_select(&shared, 7, &sink).await.unwrap();
         assert!(forwarded(&sink, &mut rx).await.is_none());
 
         // All of them: the first on the canvas, the second named for a tab.
-        hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
+        hp_select(&shared, DisplayState::COMBINED, &sink).await.unwrap();
         assert_eq!(desktop.lock().unwrap().size, (1600, 1000));
         sink.flush().await;
         assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 1600, h: 1000, .. })));
@@ -13012,7 +13017,7 @@ mod tests {
         };
         let two = layout_payload(None, &[(9, (160, 100), (160, 100), 0x01), (10, (128, 80), (128, 80), 0x00)]);
         read_display_layout(&mut two.as_slice(), &shared, true, &sink).await.unwrap();
-        hp_select(&shared, 0, &sink, false).await.unwrap();
+        hp_select(&shared, 0, &sink).await.unwrap();
 
         // The Mac says so of the second display while the first is on the canvas.
         media.lock().unwrap().test_answered(&[(160, 100), (128, 80)]);
@@ -13020,9 +13025,9 @@ mod tests {
         tell_withheld(&desktop, &media, &sink, &shared.tab).await.unwrap();
         assert!(withheld_said(&sink, &mut rx).await.is_empty(), "not the first display's to hear");
 
-        hp_select(&shared, 1, &sink, false).await.unwrap();
+        hp_select(&shared, 1, &sink).await.unwrap();
         assert_eq!(withheld_said(&sink, &mut rx).await, [true], "said as it comes onto the canvas");
-        hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
+        hp_select(&shared, DisplayState::COMBINED, &sink).await.unwrap();
         assert_eq!(withheld_said(&sink, &mut rx).await, [false], "the first display is back on it");
 
         let plan = crate::config::RenderPlan {
@@ -13084,12 +13089,12 @@ mod tests {
             )
         };
         // No tab while one display is chosen: the list names none.
-        hp_select(&shared, 0, &sink, false).await.unwrap();
+        hp_select(&shared, 0, &sink).await.unwrap();
         let (early, _early_rx) = feed();
         hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(early), plan, true).await;
         assert!(shared.tab.lock().unwrap().is_none());
 
-        hp_select(&shared, DisplayState::COMBINED, &sink, false).await.unwrap();
+        hp_select(&shared, DisplayState::COMBINED, &sink).await.unwrap();
         let (shown, mut tab_rx) = feed();
         hp_tab_shown(&shared, HP_TAB_DISPLAY, Some(shown), plan, true).await;
         let (tab_sink, _) = tab_parts(&shared.tab).expect("the tab is fed");
