@@ -32,6 +32,13 @@ side.
 > when you upgrade. The page and the gateway are one release too: a tab left
 > open across an upgrade names both versions and asks to be reloaded.
 
+## Demo with Two Remote Virtual Displays
+
+https://github.com/user-attachments/assets/596640b5-9b35-45c3-a875-87934d1c0c0f
+
+
+
+
 ## Features
 
 - **One browser client.** It needs WebCodecs and nothing else: Chrome, Edge or
