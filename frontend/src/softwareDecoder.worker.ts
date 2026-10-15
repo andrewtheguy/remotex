@@ -201,9 +201,11 @@ function picture(
     rows = Math.min(h, strip.rows - row);
   }
   // Where the picture may differ from the stream's one before it, as the
-  // decoder says: for a picture whole, from a decoder that says.
+  // decoder says: for a picture whole at 4:4:4, from a decoder that says. The
+  // paint worker uploads the one rectangle of each plane, which another layout's
+  // chroma is not the size of; it uploads such a picture whole.
   let changed: PictureChange | undefined;
-  if (!strip && decoder.changed) {
+  if (!strip && subsampling === "4:4:4" && decoder.changed) {
     const [x, y, width, height] = new Int32Array(memory, decoder.changed(), 4);
     changed = {
       picture: `${id}:${p[14]}`,
