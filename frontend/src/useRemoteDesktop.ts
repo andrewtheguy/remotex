@@ -42,6 +42,7 @@ import {
 import type {
   AudioBlock,
   AudioStreamInfo,
+  HostPicture,
   VideoStreamInfo,
 } from "./mediaLabel.ts";
 import {
@@ -700,6 +701,9 @@ export function useRemoteDesktop(
   // was configured. Emptied with the decoder itself in `clearDesktop`, so it never
   // describes a desktop that has ended.
   const [videoStream, setVideoStream] = useState<VideoStreamInfo | null>(null);
+  // What an RDP host's pipeline has drawn with (`hostPicture`), for the card's
+  // Host's picture row: null on any other session, and emptied with the desktop.
+  const [hostPicture, setHostPicture] = useState<HostPicture | null>(null);
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
   // Why the desktop has no picture, from `oversize`: past what a video stream
@@ -1178,8 +1182,9 @@ export function useRemoteDesktop(
       // decoder with it. The next attachment starts its stream from a keyframe.
       painter?.clear();
       // The decoder went with it, so what the card says about it goes too. The
-      // next attachment re-announces its stream.
+      // next attachment re-announces its stream, and what its host drew with.
       setVideoStream(null);
+      setHostPicture(null);
       // Sound's own socket goes with this one. The gateway would keep the
       // subscription alive across a reattach — it belongs to the claim now — but this
       // browser cannot: rebuilding a decoder needs an AudioContext, and a context
@@ -2228,6 +2233,10 @@ export function useRemoteDesktop(
           // the pipeline's first run must find a compositor with nothing in it.
           painter?.startGraphics();
           setVideoStream({ decode: "", passthrough: true, composed: true });
+          setHostPicture({ exact: true, codecs: [] });
+          break;
+        case "hostPicture":
+          setHostPicture({ exact: msg.exact, codecs: msg.codecs });
           break;
         case "graphicsView":
           handleGraphicsView(msg);
@@ -3243,6 +3252,7 @@ export function useRemoteDesktop(
     // say and which nothing else on screen writes down.
     audioStream,
     videoStream,
+    hostPicture,
     canCamera,
     cameraEnabled,
     cameraError,

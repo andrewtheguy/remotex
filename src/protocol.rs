@@ -1122,6 +1122,13 @@ pub enum ServerMsg {
     /// discovered from the connection rather than an OS name someone has to keep
     /// correct in the config file.
     RemoteOs { macos: bool },
+    /// What an RDP host's graphics pipeline has drawn with so far, by codec, and
+    /// whether that is the host's picture exactly — which a Windows host's image
+    /// quality policy decides and nothing in the protocol says
+    /// ([`crate::rdp_client::Event::Drawn`]). Sent whenever the host draws with
+    /// something it had not, and again on every repaint of a session that keeps
+    /// its engine; never for a picture of bitmap updates.
+    HostPicture { exact: bool, codecs: Vec<&'static str> },
     /// The part of an RDP host's passed graphics pipeline this display shows, in
     /// the pixels of the picture the page composes from it: the column of the
     /// host's desktop the display is, `w` by `h` from `x`, `y`. Sent only in a
@@ -1347,6 +1354,7 @@ enum ControlMsg<'a> {
         render: &'a str,
     },
     RemoteOs { macos: bool },
+    HostPicture { exact: bool, codecs: &'a [&'static str] },
     TouchReady,
     Resizing { active: bool },
     ScreenUnavailable { active: bool },
@@ -1435,6 +1443,7 @@ impl ServerMsg {
                 | ServerMsg::ScreenUnavailable { .. }
                 | ServerMsg::PictureWithheld { .. }
                 | ServerMsg::RemoteOs { .. }
+                | ServerMsg::HostPicture { .. }
                 | ServerMsg::TouchReady
         )
     }
@@ -1519,6 +1528,9 @@ impl ServerMsg {
                 control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough, strips: *strips })
             }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
+            ServerMsg::HostPicture { exact, codecs } => {
+                control(&ControlMsg::HostPicture { exact: *exact, codecs })
+            }
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
             ServerMsg::ScreenUnavailable { active } => control(&ControlMsg::ScreenUnavailable { active: *active }),
@@ -2109,9 +2121,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn host_picture_names_its_codecs() {
+        let msg = ServerMsg::HostPicture { exact: false, codecs: vec!["Planar", "RemoteFX Progressive"] };
+        assert!(msg.is_display());
+        assert_eq!(
+            msg.text_frame().as_deref(),
+            Some(r#"{"type":"hostPicture","exact":false,"codecs":["Planar","RemoteFX Progressive"]}"#)
+        );
+    }
+
     // Nothing may put an unbounded string on the browser link. Refused rather
     // than truncated: the browser is told the size so it can say so, where the
     // first 512 KiB of a copy could not be told from all of it.
+
     #[test]
     fn oversized_clipboard_text_is_refused_with_its_size() {
         assert!(clipboard_fits(&"a".repeat(MAX_CLIPBOARD_BYTES)));

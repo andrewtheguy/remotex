@@ -30,6 +30,8 @@ import {
   type AudioStreamInfo,
   audioBlockCopy,
   audioLabel,
+  type HostPicture,
+  hostPictureLabel,
   renderLabel,
   type VideoStreamInfo,
   videoLabel,
@@ -584,6 +586,7 @@ function ScreenHelp({
   oversize,
   audio,
   videoStream,
+  hostPicture,
 }: {
   size: RemoteSize | null;
   hostScale: number;
@@ -592,6 +595,7 @@ function ScreenHelp({
   oversize: HoldCause | null;
   audio: AudioRow;
   videoStream: VideoStreamInfo | null;
+  hostPicture: HostPicture | null;
 }) {
   const video = videoLabel(videoStream, oversize);
   return (
@@ -650,6 +654,15 @@ function ScreenHelp({
               the gateway encoded, which only the gateway knows. */}
           <dd>{video}</dd>
         </div>
+        {hostPicture && (
+          <div className="help-item">
+            <dt>Host's picture</dt>
+            {/* Whether an RDP host draws its pipeline losslessly, which its own
+                image quality policy decides and nothing in the protocol states:
+                read off the codecs it has drawn with, by the gateway. */}
+            <dd>{hostPictureLabel(hostPicture)}</dd>
+          </div>
+        )}
       </dl>
     </>
   );
@@ -1005,6 +1018,7 @@ export default function FloatingMenu({
   audioError,
   audioStream,
   videoStream,
+  hostPicture,
   onAudioChange,
   canCamera,
   cameraEnabled,
@@ -1087,6 +1101,9 @@ export default function FloatingMenu({
   // arrives, which is a state the card words rather than hides.
   audioStream: AudioStreamInfo | null;
   videoStream: VideoStreamInfo | null;
+  // What an RDP host's pipeline has drawn with, and so whether it is lossless;
+  // null on every other session, which shows no such row.
+  hostPicture: HostPicture | null;
   onAudioChange: (enabled: boolean) => void;
   // The camera, under Audio's hide-don't-disable rule: `camera = true` is
   // RDP's and a wlshare target's (wlshare's camera extension) alone, so on every other
@@ -1421,6 +1438,7 @@ export default function FloatingMenu({
               stream: audioStream,
             }}
             videoStream={videoStream}
+            hostPicture={hostPicture}
           />
           <DisplaysHelp shown={shown} />
           <div className="help-actions">

@@ -117,7 +117,8 @@ use std::time::{Duration, Instant};
 use remotex::rdp_client::proto::gfx::H264;
 use remotex::rdp_client::proto::{rdpeai, rdpecam, rdpsnd};
 use remotex::rdp_client::{
-    AudioSink, Camera, CameraSink, Compositor, Connect, Event, Fed, Framebuffer, Input, MicrophoneSink, Session,
+    AudioSink, Camera, CameraSink, Compositor, Connect, Event, Fed, Fidelity, Framebuffer, Input, MicrophoneSink,
+    Session,
 };
 use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
 use remotex_rdp_graphics::avc::{Scanned, scan};
@@ -460,6 +461,8 @@ async fn record_microphone() {
 struct Tally {
     /// What the page did with the pipeline's commands.
     page: Page,
+    /// What the pipeline has drawn with so far, and so whether it is exact.
+    host_picture: Option<Fidelity>,
     paints: u64,
     /// Frame boundaries the host marked, which only the graphics pipeline does.
     frames: u64,
@@ -554,6 +557,7 @@ async fn pump(
                     );
                 }
             }
+            Event::Drawn(fidelity) => tally.host_picture = Some(fidelity),
             Event::Cursor(_) => tally.cursors += 1,
             Event::Resize { width, height, .. } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,

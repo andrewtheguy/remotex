@@ -1529,6 +1529,10 @@ async fn active_loop(
     // flush scheduling at the bottom of the loop. A property of the server, so it
     // survives resizes and never unlearns.
     let mut frame_marks = false;
+    // What the pipeline has drawn with so far, as last said to the browser: said
+    // again with every repaint, which a session that keeps its engine across a
+    // reattach is given instead of a pipeline that starts over.
+    let mut host_picture: Option<ServerMsg> = None;
 
     loop {
         if pass_graphics
@@ -1630,6 +1634,8 @@ async fn active_loop(
                     // never the leading-edge flush of a frame still being drawn.
                     Event::FramesMarked => {
                         frame_marks = true;
+                        // A pipeline that starts over has drawn with nothing yet.
+                        host_picture = None;
                         // This is where a pipeline begins, and the browser
                         // composes it from here.
                         if pass_graphics {
@@ -1652,6 +1658,14 @@ async fn active_loop(
                             Painted::new(move || input.frame_composed(frame))
                         });
                         sink.pass_graphics(commands, frame).await?;
+                    }
+                    Event::Drawn(fidelity) => {
+                        let msg = ServerMsg::HostPicture { exact: fidelity.exact(), codecs: fidelity.names() };
+                        sink.msg(msg.clone()).await?;
+                        if let Some(tab) = &mut tab {
+                            tab.msg(msg.clone()).await;
+                        }
+                        host_picture = Some(msg);
                     }
                     Event::Cursor(cursor) => pointer.set(cursor),
                     Event::ResizeReady { max_area } => {
@@ -1824,6 +1838,9 @@ async fn active_loop(
                     let (w, h) = view.size();
                     sink.msg(ServerMsg::Resize { w, h, scale: applied.of(view.active).scale() }).await?;
                     sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
+                    if let Some(msg) = &host_picture {
+                        sink.msg(msg.clone()).await?;
+                    }
                     // The list is pushed, never asked for, so a browser that attaches
                     // is told it here.
                     if let Some(msg) = view.displays(applied) {

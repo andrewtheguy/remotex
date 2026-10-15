@@ -313,6 +313,12 @@ export type ControlMsg =
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.
   | { type: "remoteOs"; macos: boolean }
+  // What an RDP host's graphics pipeline has drawn with so far, by codec, and
+  // whether all of it is the host's picture exactly: a Windows host draws
+  // exactly only when its image quality policy is set to Lossless, and nothing
+  // else in the protocol says so. Sent whenever the host draws with something it
+  // had not, and again on a repaint; a pipeline's `graphicsStart` starts it over.
+  | { type: "hostPicture"; exact: boolean; codecs: string[] }
   // The host opened its touch channel (MS-RDPEI), so `touch` messages reach it
   // as real contacts from now on. Sent by the RDP engine shortly after connect
   // and again on every reattach; never for a host without the channel, which

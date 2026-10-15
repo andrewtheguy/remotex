@@ -15,6 +15,7 @@ use crate::config::Placement;
 use super::connect::{self, Connected, Joined};
 use super::error::Error;
 use remotex_rdp_graphics::framebuffer::{Framebuffer, Rect, affordable, stage};
+use remotex_rdp_graphics::fidelity::Fidelity;
 use remotex_rdp_graphics::gfx::{self, Graphics};
 use super::camera::{Camera, CameraCommand, CameraFeed, CameraInput, CameraQueues, CameraSink};
 use super::input::{Clipboard, Command, Input};
@@ -197,6 +198,10 @@ pub enum Event {
     /// the first such paint, so a consumer pacing frames itself stops guessing
     /// before there is a frame to cut in half.
     FramesMarked,
+    /// The pipeline drew with something it had not drawn with before: what it has
+    /// drawn with so far, and so whether its picture is the host's exactly. A
+    /// pipeline that starts over ([`Event::FramesMarked`]) starts from nothing.
+    Drawn(Fidelity),
     /// The desktop was redefined — resized, or rebuilt at the same size — and the
     /// framebuffer has already been resized and cleared, so everything is about to
     /// be repainted.
@@ -1586,6 +1591,7 @@ impl<'a> Active<'a> {
                         self.send(Event::Frame).await;
                     }
                 }
+                gfx::Update::Drawn(fidelity) => self.send(Event::Drawn(fidelity)).await,
                 // What a pipeline composed here would report, and none is.
                 gfx::Update::Paint(_) | gfx::Update::Frame { .. } => {
                     bail!("the graphics pipeline, passed on, composed a frame here")

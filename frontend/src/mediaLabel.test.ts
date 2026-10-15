@@ -10,6 +10,7 @@ import { test } from "node:test";
 import {
   audioBlockCopy,
   audioLabel,
+  hostPictureLabel,
   renderLabel,
   videoLabel,
 } from "./mediaLabel.ts";
@@ -195,4 +196,22 @@ test("the Render row waits for the target, then names its dial", () => {
   const plan = "video q90 · libvpx · adaptive";
   assert.equal(renderLabel(""), "Waiting for the target");
   assert.equal(renderLabel(plan), plan);
+});
+
+test("an RDP host's picture says whether it is lossless, and with what", () => {
+  assert.equal(
+    hostPictureLabel({ exact: true, codecs: [] }),
+    "Nothing drawn yet",
+  );
+  assert.equal(
+    hostPictureLabel({ exact: true, codecs: ["Uncompressed", "Planar"] }),
+    "Lossless (Uncompressed, Planar)",
+  );
+  assert.equal(
+    hostPictureLabel({
+      exact: false,
+      codecs: ["ClearCodec with NSCodec", "RemoteFX Progressive"],
+    }),
+    "Lossy (ClearCodec with NSCodec, RemoteFX Progressive): the host's image quality policy is not Lossless",
+  );
 });
