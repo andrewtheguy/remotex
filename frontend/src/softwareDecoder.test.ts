@@ -75,7 +75,6 @@ const PLANES = {
   width: 2,
   height: 2,
   planes: [0, 4, 8].map((offset) => ({ offset, stride: 2, width: 2, rows: 2 })),
-  subsampling: "4:4:4",
   row: 0,
   keyframe: true,
   fullRange: true,

@@ -143,8 +143,10 @@ const PRIMARIES: Record<number, PredefinedColorSpace> = {
 const TRANSFERS = [1, UNSPECIFIED, 6, 13];
 const FULL_RANGE = 2;
 
-// 0 is 4:2:0, 1 is 4:2:2, 2 is 4:4:4.
-const SUBSAMPLING = ["4:2:0", "4:2:2", "4:4:4"] as const;
+// The chroma layout a picture states, of which the page takes 4:4:4 alone: the
+// gateway's VP9 is profile 1 and the Mac's HEVC Range Extensions 4:4:4, and each
+// module refuses a stream of another by name.
+const YUV444 = 2;
 
 // The strips a picture sent in strips comes in.
 const STRIPS = 4;
@@ -164,12 +166,11 @@ function picture(
   const memory = module.memory.buffer;
   const p = new Int32Array(memory, decoder.picture(), 16);
   const [w, h, layout, range, matrix, primaries, transfer] = p;
-  const subsampling = SUBSAMPLING[layout];
-  if (!subsampling) {
+  if (layout !== YUV444) {
     return {
       name: "NotSupportedError",
       error:
-        "the stream's pictures are not 8-bit Y'CbCr, which the page presents",
+        "the stream's pictures are not 8-bit Y'CbCr 4:4:4, which the page presents",
     };
   }
   const made = MATRIX[matrix];
@@ -201,11 +202,9 @@ function picture(
     rows = Math.min(h, strip.rows - row);
   }
   // Where the picture may differ from the stream's one before it, as the
-  // decoder says: for a picture whole at 4:4:4, from a decoder that says. The
-  // paint worker uploads the one rectangle of each plane, which another layout's
-  // chroma is not the size of; it uploads such a picture whole.
+  // decoder says: for a picture whole, from a decoder that says.
   let changed: PictureChange | undefined;
-  if (!strip && subsampling === "4:4:4" && decoder.changed) {
+  if (!strip && decoder.changed) {
     const [x, y, width, height] = new Int32Array(memory, decoder.changed(), 4);
     changed = {
       picture: `${id}:${p[14]}`,
@@ -216,8 +215,6 @@ function picture(
       height,
     };
   }
-  const chromaW = layout === 2 ? w : (w + 1) >> 1;
-  const chromaRows = layout === 0 ? (rows + 1) >> 1 : rows;
   return {
     serial: p[14],
     planes: {
@@ -227,10 +224,9 @@ function picture(
       planes: [0, 1, 2].map((i) => ({
         offset: p[7 + i],
         stride: p[10 + i],
-        width: i === 0 ? w : chromaW,
-        rows: i === 0 ? rows : chromaRows,
+        width: w,
+        rows,
       })),
-      subsampling,
       row,
       strip: strip?.index,
       keyframe: p[13] === 1,

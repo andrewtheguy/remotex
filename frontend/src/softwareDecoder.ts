@@ -108,8 +108,8 @@ export interface PicturePlane {
 }
 
 /**
- * A decoded picture as the decode worker describes it: 8-bit Y'CbCr planes, of
- * the whole picture or of one strip of it.
+ * A decoded picture as the decode worker describes it: 8-bit Y'CbCr 4:4:4
+ * planes, of the whole picture or of one strip of it.
  */
 export interface DecodedPlanes {
   /** The module's memory, which the planes are in until the picture is released. */
@@ -118,13 +118,11 @@ export interface DecodedPlanes {
   width: number;
   height: number;
   /**
-   * Luma, then the two chroma planes, as many of their rows as are of the
-   * picture: the chroma may be half the luma's size either way.
+   * Luma, then the two chroma planes, each the luma's size, as many of their
+   * rows as are of the picture.
    */
   planes: PicturePlane[];
-  /** How the chroma is subsampled, which sizes its planes of the picture. */
-  subsampling: "4:4:4" | "4:2:2" | "4:2:0";
-  /** The picture's row the luma's first is: 0, but for a strip below the first. */
+  /** The picture's row the planes' first is: 0, but for a strip below the first. */
   row: number;
   /**
    * The strip of the picture these are, from 0 at the top, of four: a picture

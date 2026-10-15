@@ -30,53 +30,34 @@ test("a picture whole is every strip", () => {
   assert.equal(placedAfter(0, { strip: undefined, keyframe: false }), 0b1111);
 });
 
-// Strip 3 of a display, its strips `pitch` rows apart, at the planes' layout.
-const lastStrip = (
-  height: number,
-  pitch: number,
-  subsampling: "4:4:4" | "4:2:0",
-  fullRange: boolean,
-) => {
+// Strip 3 of a display, its strips `pitch` rows apart.
+const lastStrip = (height: number, pitch: number, fullRange: boolean) => {
   const row = 3 * pitch;
   const rows = Math.min(pitch, height - row);
-  const chroma = subsampling === "4:2:0" ? (rows + 1) >> 1 : rows;
   return {
     height,
-    subsampling,
     row,
     strip: 3,
     fullRange,
-    planes: [{ rows }, { rows: chroma }, { rows: chroma }],
+    planes: [{ rows }, { rows }, { rows }],
   };
 };
 
 test("rows past the last strip are black", () => {
   // 834 rows in strips of 208 leave the last two, black in the stream's range.
-  assert.deepEqual(rowsBelow(lastStrip(834, 208, "4:4:4", false)), [
+  assert.deepEqual(rowsBelow(lastStrip(834, 208, false)), [
     { unit: 0, row: 832, rows: 2, value: 16 },
     { unit: 1, row: 832, rows: 2, value: 128 },
     { unit: 2, row: 832, rows: 2, value: 128 },
   ]);
-  assert.equal(rowsBelow(lastStrip(834, 208, "4:4:4", true))[0].value, 0);
-  // Halved chroma down the picture leaves one row of it.
-  assert.deepEqual(
-    rowsBelow(lastStrip(834, 208, "4:2:0", true)).map((r) => [r.row, r.rows]),
-    [
-      [832, 2],
-      [416, 1],
-      [416, 1],
-    ],
-  );
+  assert.equal(rowsBelow(lastStrip(834, 208, true))[0].value, 0);
   // A last strip that runs past the end leaves none.
-  assert.deepEqual(rowsBelow(lastStrip(1080, 272, "4:4:4", true)), []);
+  assert.deepEqual(rowsBelow(lastStrip(1080, 272, true)), []);
   // Nor do the strips before the last, or a picture whole.
-  assert.deepEqual(
-    rowsBelow({ ...lastStrip(834, 208, "4:4:4", true), strip: 2 }),
-    [],
-  );
+  assert.deepEqual(rowsBelow({ ...lastStrip(834, 208, true), strip: 2 }), []);
   assert.deepEqual(
     rowsBelow({
-      ...lastStrip(834, 208, "4:4:4", true),
+      ...lastStrip(834, 208, true),
       strip: undefined,
       row: 0,
       planes: [{ rows: 834 }, { rows: 834 }, { rows: 834 }],
