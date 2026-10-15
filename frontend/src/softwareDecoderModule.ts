@@ -49,9 +49,7 @@ export interface ModuleDecoder {
    * may differ from picture `since` are in the memory: the left, top, width
    * and height of a rectangle of its planes, the whole picture where it does
    * not descend from that one, and a width of 0 where nothing changed.
-   * hevc-wasm's takes any picture before, a strip's being its strip's last;
-   * vp9-wasm's takes none and says it of its picture before, which `since` is
-   * for the picture whole that VP9 comes as. hevc-wasm 0.0.16 has none.
+   * A strip's `since` is its strip's last picture. hevc-wasm 0.0.16 has none.
    */
   changed?(since: number): number;
   /**
