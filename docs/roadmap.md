@@ -267,13 +267,13 @@ judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
 
 ### Motion for a ZRLE picture
 
-The ZRLE of a plain VNC server or of a Mac in Standard mode reaches the gateway
-exact and leaves it as VP9. Motion, which an RDP target has
-([composed for Motion](architecture.md#rdps-graphics-pipeline-composed-for-motion)),
-would send it as PNG where it is still and VP9 where it moves. Its 64-pixel
-tiles are ZRLE's, on a grid anchored at (0,0), where ZRLE's start at each
-rectangle's own origin, so the damage would be mapped onto the grid. Weighed
-against a picture that already follows the link as one stream.
+A Mac's virtual display under `ard` can be started with Motion
+([A Mac's virtual display, sent for Motion](architecture.md#a-macs-virtual-display-sent-for-motion)).
+The ZRLE of a plain VNC server, and of a Mac in Standard mode on its physical
+displays, still reaches the gateway exact and leaves it as one VP9 stream.
+Motion would send it the same way: PNG where it is still and VP9 where it moves.
+Weighed against a picture that already follows the link as one stream, and, on
+the physical displays, against Combined Display and a picture the Mac scales.
 
 ## Not planned
 
@@ -296,6 +296,19 @@ server outside the three the project prioritizes, which is reached through the
 RFB baseline and nothing more
 ([Constraints](architecture.md#constraints)). A stream of its own passed
 through is what a `wlshare` target has.
+
+### A Motion tile other than 64 pixels
+
+Motion cuts the desktop into 64-pixel tiles from (0,0), in device pixels at
+every density (`TILE` in `src/regions.rs`). That is the size its pictures
+arrive in: a Windows host's bitmaps are 64×64 tiles on the same grid at 1x and
+2x ([Bitmap updates](rdp-client.md#bitmap-updates)), and a Mac's ZRLE tiles are
+64 device pixels at any density
+([ZRLE](apple-vnc-889.md#the-record-layer)). A tile that followed the density,
+128 pixels at 2x to stay 64 points, or a smaller one to find motion more finely,
+would split or merge the sources' own tiles, and would retune what is counted in
+tiles: the churn that marks a tile moving, the smallest region, and the
+cleanup's batch. Nothing measured asks for it.
 
 ### `THINCLIENT` in the graphics capability advertise
 

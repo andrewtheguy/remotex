@@ -79,7 +79,7 @@ camera and microphone, and how its picture reaches the browser.
 |---|---|---|---|---|---|
 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264, or composed here for Motion (alpha), PNG where still and VP9 where it moves; VP9 from the gateway on the bitmap path |
 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | the Mac's HEVC or its H.264, passed through |
-| macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
+| macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway; in a session on the virtual display started with Motion (alpha), PNG where still and VP9 where it moves |
 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
 | any other VNC server, not prioritized | `vnc` | one framebuffer at the size the server says, at 1x, never resized from the browser | none | no | VP9 from the gateway |
 
@@ -603,7 +603,9 @@ paths keep another representation the remote made: an
 and every session of an RDP target with the pipeline on passes the host's
 graphics pipeline for the browser to compose, save one started with Motion,
 whose picture is the old motion mode's: PNG where it is still and a VP9 stream
-for each region that moves. A VNC desktop past the stream's picture ceiling in a session started
+for each region that moves. An `ard` session on its virtual display can be
+started with Motion too
+([A Mac's virtual display, sent for Motion](#a-macs-virtual-display-sent-for-motion)). A VNC desktop past the stream's picture ceiling in a session started
 without resize has no picture until the remote sends a smaller one — see
 [past the ceiling](#past-the-ceiling).
 
@@ -1429,6 +1431,31 @@ A scroll or a drag arrives mostly as copies between surfaces, which Motion sends
 again as damage; sending them as copies is
 [on the roadmap](roadmap.md#motions-scrolls-and-drags-as-copies).
 
+#### A Mac's virtual display, sent for Motion
+
+An `ard` target with the unofficial `virtual_display = true` offers Motion
+(alpha) too, as a box of its own under Picture, since it has no Graphics group.
+The picture is the same as an RDP host's under Motion, PNG where it is still and
+a VP9 stream for each region that moves, by the same tiles, regions, cleanups
+and canvas, from the ZRLE the gateway decodes anyway. What is still is exact:
+ZRLE is lossless, where a Windows host is exact only under its Lossless policy.
+
+- **Damage is the ZRLE rectangles, mapped onto the grid.** The Mac's ZRLE tiles
+  are 64 device pixels as the gateway's are, but they start at each rectangle's
+  origin, and the rectangles fall on no grid
+  ([ZRLE](apple-vnc-889.md#the-record-layer)). Each rectangle reaches the motion
+  encoder as damage after what the page already has is taken out of it, and is
+  mapped onto the 64-pixel grid from (0,0) there, as a composed pipeline's
+  painted rectangles are.
+- **Either encoder codes the regions.** The VP9 encoder stays a choice on this
+  target, and the regions' streams are coded by the one chosen.
+- **A resize ends the streams,** and the Mac's repaint of the resized display
+  starts the picture over, as a pipeline's reset does. A reattach resumes it the
+  same way.
+- **The physical displays keep the one VP9 stream.** Standard's Combined Display
+  and a display the Mac scales are left to it; see
+  [the roadmap](roadmap.md#motion-for-a-zrle-picture).
+
 ### Decoded in the page
 
 The page has two software decoders of its own, in WebAssembly, for the two
@@ -1912,7 +1939,7 @@ and `GET /api/targets` carries it:
 | `vnc` | no | hidden | hidden | hidden | shown\* |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden | shown: wlshare's own |
 | `vnc`, `ard` | no | hidden | hidden | hidden | shown\* |
-| `vnc`, `ard` with `virtual_display` | yes | hidden | hidden | hidden | shown\* |
+| `vnc`, `ard` with `virtual_display` | yes | hidden | hidden | hidden; Motion (alpha) shown as Picture | shown\* |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden | hidden: the picture is never VP9 |
 
 \* In a build with the `native-vp9` feature, the default.

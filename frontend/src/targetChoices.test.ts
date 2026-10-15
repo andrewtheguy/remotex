@@ -450,6 +450,33 @@ test("Motion is high quality's, and composes the pipeline at the gateway", () =>
   assert.equal(unoffered.pipelineRow?.motion, null);
   assert.equal(unoffered.choices.motion, false);
   assert.match(targetOptions(two, undefined, UNABLE).blocked ?? "", /egfx/);
+  assert.equal(offered.motionRow, null, "ticked under high quality alone");
+});
+
+test("a Mac's virtual display offers Motion in a row of its own", () => {
+  const VIRTUAL = target({
+    subtype: "ard",
+    resize: true,
+    vp9: true,
+    motion: true,
+  });
+  const offered = targetOptions(VIRTUAL, undefined, ABLE);
+  assert.match(offered.motionRow?.label ?? "", /alpha/);
+  assert.equal(offered.pipelineRow, null);
+  assert.equal(offered.choices.motion, false, "not until somebody ticks it");
+  const ticked = targetOptions(VIRTUAL, { motion: true }, ABLE);
+  assert.equal(ticked.choices.motion, true);
+  assert.equal(ticked.choices.pipeline, "high-quality");
+  assert.ok(ticked.encoders, "its regions are coded by either encoder");
+  assert.equal(ticked.blocked, null);
+  // The physical displays are listed without it.
+  const physical = targetOptions(
+    target({ subtype: "ard", vp9: true }),
+    { motion: true },
+    ABLE,
+  );
+  assert.equal(physical.motionRow, null);
+  assert.equal(physical.choices.motion, false);
 });
 
 test("a browser that cannot decode the H.264 is offered high quality alone", () => {

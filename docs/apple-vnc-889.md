@@ -27,7 +27,7 @@ layer.
 |---|---|---|---|
 | `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC, or H.264, over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
-| `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
+| `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE, which a session started with Motion (alpha) sends on as PNG where it is still and VP9 where it moves | none; the Mac's own output is left alone |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Its picture
 and its sound are always passed, for the browser to decode: the picture as the

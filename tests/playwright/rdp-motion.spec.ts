@@ -348,9 +348,7 @@ test.describe("a target started with Motion", () => {
       .poll(() => seen.display.acknowledged.length, { timeout: 20_000 })
       .toBeGreaterThan(0);
 
-    expect(seen.connected?.render).toMatch(
-      /^the host's graphics pipeline composed here · motion as video q\d+ · libvpx/,
-    );
+    expect(seen.connected?.render).toMatch(/^motion as video q\d+ · libvpx/);
     const { faults, tiles } = walk(seen.display);
     expect(faults).toEqual([]);
     expect(tiles).toBeGreaterThan(0);
