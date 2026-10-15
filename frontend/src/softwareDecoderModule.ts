@@ -45,6 +45,14 @@ export interface ModuleDecoder {
    */
   picture(): number;
   /**
+   * Where the four numbers saying where the picture the last unit completed
+   * may differ from picture `since` are in the memory: the left, top, width
+   * and height of a rectangle of its planes, the whole picture where it does
+   * not descend from that one, and a width of 0 where nothing changed.
+   * A strip's `since` is its strip's last picture.
+   */
+  changed(since: number): number;
+  /**
    * The paint worker is done with picture `serial`, whose memory the decoder
    * may have back. The units after a picture decode into other memory while it
    * is held.

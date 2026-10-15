@@ -108,8 +108,8 @@ export interface PicturePlane {
 }
 
 /**
- * A decoded picture as the decode worker describes it: 8-bit Y'CbCr planes, of
- * the whole picture or of one strip of it.
+ * A decoded picture as the decode worker describes it: 8-bit Y'CbCr 4:4:4
+ * planes, of the whole picture or of one strip of it.
  */
 export interface DecodedPlanes {
   /** The module's memory, which the planes are in until the picture is released. */
@@ -118,13 +118,11 @@ export interface DecodedPlanes {
   width: number;
   height: number;
   /**
-   * Luma, then the two chroma planes, as many of their rows as are of the
-   * picture: the chroma may be half the luma's size either way.
+   * Luma, then the two chroma planes, each the luma's size, as many of their
+   * rows as are of the picture.
    */
   planes: PicturePlane[];
-  /** How the chroma is subsampled, which sizes its planes of the picture. */
-  subsampling: "4:4:4" | "4:2:2" | "4:2:0";
-  /** The picture's row the luma's first is: 0, but for a strip below the first. */
+  /** The picture's row the planes' first is: 0, but for a strip below the first. */
   row: number;
   /**
    * The strip of the picture these are, from 0 at the top, of four: a picture
@@ -133,11 +131,31 @@ export interface DecodedPlanes {
   strip?: number;
   /** Predicted from nothing before it: the strips placed before it are of no frame since. */
   keyframe: boolean;
+  /**
+   * Which of the stream's pictures this is, and where it may differ from the
+   * one before it in its rows, `since`, a strip's being its strip's last, as
+   * its decoder knows: a rectangle of its planes, empty where nothing does,
+   * and the whole picture where it does not come down from that one. The
+   * paint worker that has `since` in its textures uploads the rectangle alone
+   * (`uploadOf` in planesPicture.ts).
+   */
+  changed: PictureChange;
   fullRange: boolean;
   /** Which coefficients made the luma: BT.709's, or BT.601's. */
   matrix: "bt709" | "smpte170m";
   /** The primaries, as the canvas color space that has them. */
   colorSpace: PredefinedColorSpace;
+}
+
+/** Where a picture may differ from its stream's picture before it in its rows. */
+export interface PictureChange {
+  /** This picture, and the one before it, as a stream and a serial each. */
+  picture: string;
+  since: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 /** A decoded picture the paint worker holds: read until closed, and closed once. */

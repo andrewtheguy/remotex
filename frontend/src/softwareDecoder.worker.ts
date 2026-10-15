@@ -29,6 +29,7 @@ import {
   type DecoderCommand,
   type DecoderEvent,
   MODULE_CODEC,
+  type PictureChange,
   type PictureStrip,
   type SoftwareModule,
 } from "./softwareDecoder.ts";
@@ -142,32 +143,40 @@ const PRIMARIES: Record<number, PredefinedColorSpace> = {
 const TRANSFERS = [1, UNSPECIFIED, 6, 13];
 const FULL_RANGE = 2;
 
-// 0 is 4:2:0, 1 is 4:2:2, 2 is 4:4:4.
-const SUBSAMPLING = ["4:2:0", "4:2:2", "4:4:4"] as const;
+// The chroma layout a picture states, of which the page takes 4:4:4 alone: the
+// gateway's VP9 is profile 1 and the Mac's HEVC Range Extensions 4:4:4, and each
+// module refuses a stream of another by name.
+const YUV444 = 2;
 
 // The strips a picture sent in strips comes in.
 const STRIPS = 4;
+
+// What `last` keys a picture whole by, beside the strips' indices.
+const WHOLE = -1;
 
 /**
  * The picture `decode` just completed, as its planes and its serial: of the
  * whole picture, or for a unit that is `strip`, its rows of the display. An
  * error says what the page cannot present, or for a strip what does not fit.
+ * `last` is the stream's last picture's serial, by strip, which this one's
+ * becomes.
  */
 function picture(
   module: LoadedModule,
+  id: number,
   decoder: ModuleDecoder,
   strip: PictureStrip | undefined,
+  last: Map<number, number>,
 ): { planes: DecodedPlanes; serial: number } | { error: string; name: string } {
   // Read afresh: a memory that grew is a new buffer.
   const memory = module.memory.buffer;
   const p = new Int32Array(memory, decoder.picture(), 16);
   const [w, h, layout, range, matrix, primaries, transfer] = p;
-  const subsampling = SUBSAMPLING[layout];
-  if (!subsampling) {
+  if (layout !== YUV444) {
     return {
       name: "NotSupportedError",
       error:
-        "the stream's pictures are not 8-bit Y'CbCr, which the page presents",
+        "the stream's pictures are not 8-bit Y'CbCr 4:4:4, which the page presents",
     };
   }
   const made = MATRIX[matrix];
@@ -198,8 +207,21 @@ function picture(
     height = strip.rows;
     rows = Math.min(h, strip.rows - row);
   }
-  const chromaW = layout === 2 ? w : (w + 1) >> 1;
-  const chromaRows = layout === 0 ? (rows + 1) >> 1 : rows;
+  // Where the picture may differ from the stream's one before it in its rows,
+  // the picture whole's or the strip's, as the decoder says: the whole picture
+  // for the first, `since` 0 being none.
+  const key = strip?.index ?? WHOLE;
+  const since = last.get(key) ?? 0;
+  const rect = new Int32Array(memory, decoder.changed(since), 4);
+  const changed: PictureChange = {
+    picture: `${id}:${p[14]}`,
+    since: `${id}:${since}`,
+    x: rect[0],
+    y: rect[1],
+    width: rect[2],
+    height: rect[3],
+  };
+  last.set(key, p[14]);
   return {
     serial: p[14],
     planes: {
@@ -209,13 +231,13 @@ function picture(
       planes: [0, 1, 2].map((i) => ({
         offset: p[7 + i],
         stride: p[10 + i],
-        width: i === 0 ? w : chromaW,
-        rows: i === 0 ? rows : chromaRows,
+        width: w,
+        rows,
       })),
-      subsampling,
       row,
       strip: strip?.index,
       keyframe: p[13] === 1,
+      changed,
       fullRange: range === FULL_RANGE,
       matrix: made,
       colorSpace,
@@ -236,6 +258,9 @@ const ending = new Set<number>();
 
 // The serials of the pictures each stream's decoder holds for the paint worker.
 const held = new Map<number, Set<number>>();
+
+// Each stream's last picture's serial, by strip (`picture`).
+const lastPictures = new Map<number, Map<number, number>>();
 
 // A unit waiting for one of them to be released, by stream.
 const waiting = new Map<number, () => void>();
@@ -270,6 +295,7 @@ function drop(id: number) {
   const decoder = decoders.get(id);
   decoders.delete(id);
   held.delete(id);
+  lastPictures.delete(id);
   wake(id);
   decoder?.free();
 }
@@ -290,6 +316,7 @@ async function create(id: number, decoder: SoftwareModule): Promise<void> {
   }
   decoders.set(id, new module.glue.Decoder(THREADS));
   held.set(id, new Set());
+  lastPictures.set(id, new Map());
 }
 
 async function destroy(id: number): Promise<void> {
@@ -337,7 +364,13 @@ async function decode(
     scope.postMessage({ type: "decoded", id, picture: null });
     return;
   }
-  const decoded = picture(module, decoder, command.strip);
+  const decoded = picture(
+    module,
+    id,
+    decoder,
+    command.strip,
+    lastPictures.get(id) ?? new Map(),
+  );
   if ("error" in decoded) {
     fail(decoded.name, decoded.error);
     return;

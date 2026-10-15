@@ -581,7 +581,7 @@ composes once, so Motion is refused there. See
 | `frontend/wasm/flac/` | the page's FLAC decoder for a session's lossless sound, a WebAssembly module of its own |
 | `frontend/wasm/vp9/` | the pin of the page's software VP9 decoder, a release of vp9-wasm, and the script that unpacks it for the bundle |
 | `frontend/src/softwareDecoder.ts`, `softwareDecoder.worker.ts`, `softwareDecoderPool.worker.ts`, `softwareDecoderModule.ts` | the page's software decoders, HEVC and VP9 at 4:4:4: the `VideoDecoder` shape, a module's decode worker and its pool's threads, and where each module is loaded from |
-| `frontend/src/planesPicture.ts`, `glPicture.ts` | a software decoder's planes, uploaded from the module's memory and converted on the WebGL canvas over the desktop's |
+| `frontend/src/planesPicture.ts`, `glPicture.ts` | a software decoder's planes, uploaded from the module's memory, only where the picture, or a strip of it, changed, as its decoder says, when the textures hold the picture before, and converted on the WebGL canvas over the desktop's |
 | `frontend/src/softwareSupport.ts` | which of its software decoders the page can run and present the pictures of |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
