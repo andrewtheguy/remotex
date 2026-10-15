@@ -297,6 +297,19 @@ RFB baseline and nothing more
 ([Constraints](architecture.md#constraints)). A stream of its own passed
 through is what a `wlshare` target has.
 
+### A Motion tile other than 64 pixels
+
+Motion cuts the desktop into 64-pixel tiles from (0,0), in device pixels at
+every density (`TILE` in `src/regions.rs`). That is the size its pictures
+arrive in: a Windows host's bitmaps are 64×64 tiles on the same grid at 1x and
+2x ([Bitmap updates](rdp-client.md#bitmap-updates)), and a Mac's ZRLE tiles are
+64 device pixels at any density
+([ZRLE](apple-vnc-889.md#the-record-layer)). A tile that followed the density,
+128 pixels at 2x to stay 64 points, or a smaller one to find motion more finely,
+would split or merge the sources' own tiles, and would retune what is counted in
+tiles: the churn that marks a tile moving, the smallest region, and the
+cleanup's batch. Nothing measured asks for it.
+
 ### `THINCLIENT` in the graphics capability advertise
 
 `caps_advertise` in the graphics crate's `proto/gfx.rs` sends versions 8 and 10 with the small cache
