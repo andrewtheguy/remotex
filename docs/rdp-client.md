@@ -459,10 +459,22 @@ compositor decodes exactly, and the pipeline keeps its resize, which bitmap
 updates do not have. So a target that needs every pixel exact keeps `egfx` on
 and has its host set to Lossless; `egfx = false` is not the way to it.
 
+What such a host costs is its motion. A session started with Motion (alpha)
+has the gateway compose the pipeline and send what moves as VP9 and what is
+still as exact PNG, so the still desktop stays exact and a video in a window
+costs well under a megabyte a second
+([composed for Motion](architecture.md#rdps-graphics-pipeline-composed-for-motion)).
+Whether a host draws losslessly is read off the codecs it draws with, by
+`fidelity.rs` in the graphics crate, and shown in the Info card's *Host's
+picture* row for every session with the pipeline: it says the codecs, and is
+exact only for uncompressed, planar, alpha and ClearCodec without NSCodec.
+
 ### The pipeline, passed on
 
 `Connect::egfx` offers the pipeline and has the session hand its commands to its
-caller, which composes them: every session with the pipeline on. The channel is
+caller, which composes them: every session with the pipeline on. The page
+composes them, or under Motion the gateway does, on a thread of its own
+(`src/rdp_composer.rs`). The channel is
 still this client's: the capability exchange and the bulk compression are as
 above, since the history is the connection's, and so is writing each frame's
 acknowledgement, which the host stops drawing without. `Graphics::passing` reads

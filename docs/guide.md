@@ -59,7 +59,7 @@ config key.
 
 | Target | Window drives the size | Sound | Passthrough | Graphics | VP9 encoder |
 |---|---|---|---|---|---|
-| `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | high quality or adaptive H.264 | — |
+| `rdp` | yes | off, Opus or FLAC | the graphics pipeline, passed unless Motion is ticked | high quality, with Motion (alpha) on one display, or adaptive H.264 | — |
 | `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — | libvpx or native\* |
 | `vnc` | no | none | — | — | libvpx or native\* |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
@@ -103,7 +103,15 @@ amd64 machine under x86-64-v3.
   one. Under it, *H.264 full screen*, the default, draws the whole desktop in
   H.264, and *H.264 region* only what moves like video, with the rest as High quality draws it,
   which keeps text sharp but adapts less. Adaptive is greyed in a browser whose
-  `VideoDecoder` cannot decode the host's H.264.
+  `VideoDecoder` cannot decode the host's H.264. Under High quality, on a target
+  with one display, *Motion* (alpha) has the gateway compose the pipeline and
+  send what moves as VP9 and what is still as PNG. Nothing is then passed, so a
+  browser that cannot compose the pipeline can start it, and a reload resumes the
+  session. With the host's image quality policy set to Lossless, Motion is
+  eventually lossless: exact once what moved settles. See
+  [An exact picture](#an-exact-picture). `render_motion_debug = true` on the target
+  outlines what Motion sends: VP9 in magenta, PNG beside it in cyan, and the
+  cleanup after it in green.
 - **VP9 encoder.** Which encoder codes the VP9: *libvpx*, the default, or
   *Native* (alpha), the encoder in Rust that `screen-vp9` has written. On a
   `wlshare` target wlshare codes it, and needs a wlshare that has the encoder:
@@ -112,7 +120,7 @@ amd64 machine under x86-64-v3.
   Mac's picture is never VP9, so it has no such choice.
 
 One gateway holds one session. A reload or a dropped connection normally
-resumes it; an RDP session with the graphics pipeline on instead reconnects the engine,
+resumes it; an RDP session that passes the graphics pipeline instead reconnects the engine,
 because the browser's compositor state is gone. A different browser that finds
 the owner attached is asked whether to take over; one arriving during the
 owner's reattach grace may claim the slot directly. Either starts at the picker
@@ -141,8 +149,9 @@ touch.
   session passes to the browser to compose. That takes nearly all of the
   picture's work off the gateway. It needs WebGL 2 and a cross-origin isolated
   page, which a proxy that drops the gateway's two isolation headers undoes; a
-  browser without them cannot start the target. How the host draws the
-  pipeline, high quality or adaptive H.264 (alpha), is chosen at the picker.
+  browser without them cannot start the target but with Motion. How the host
+  draws the pipeline, high quality or adaptive H.264 (alpha), and whether the
+  gateway composes it for Motion (alpha), is chosen at the picker.
 - `egfx = false` makes the host draw with bitmap updates instead, which the
   gateway encodes as VP9: the target for a browser that cannot compose the
   pipeline. The desktop then keeps its size: without the pipeline Windows
@@ -183,6 +192,45 @@ touch.
   each. A client with one leaves the tab unopened, and has the first display
   here as it would alone, or picks a display. The tab is not supported on a
   phone or tablet, though nothing there stops you opening it.
+
+### An exact picture
+
+By default a Windows host draws much of its desktop lossily, as RemoteFX
+Progressive and ClearCodec's NSCodec, which blur text and colours slightly. Its
+own policy decides that, and no setting in remotex overrides it. To have it draw
+every pixel exactly:
+
+1. On the host, open the Local Group Policy Editor (`gpedit.msc`) and go to
+   Computer Configuration > Administrative Templates > Windows Components >
+   Remote Desktop Services > Remote Desktop Session Host > Remote Session
+   Environment. Enable *Configure image quality for RemoteFX Adaptive
+   Graphics* and set it to **Lossless**. A Windows edition without the editor
+   takes the same setting in the registry, from an elevated prompt:
+
+   ```text
+   reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v ImageQuality /t REG_DWORD /d 1 /f
+   ```
+
+   A domain's Group Policy, where one sets it, wins over either.
+2. Run `gpupdate /force`, then start a new session: one already running keeps
+   the quality it started with.
+3. At the picker, keep **Graphics** on *High quality*. The host then draws only
+   exact codecs, planar and uncompressed rectangles, and passes them to the
+   browser as they are.
+4. In the session, open the menu's **Info**: the *Host's picture* row reads
+   *Lossless (Planar)* or similar. *Lossy (…)* names what the host drew with
+   instead, and means the policy has not reached the session.
+
+Lossless is costly, because the host draws what moves exactly too: the opening
+desktop alone is about 7.6 MB, and a video in a window about 19 MB a second.
+That suits a LAN. On a slower link, tick **Motion** (alpha) under *High quality*
+on a target with one display, which makes the picture eventually lossless: the
+gateway sends what moves as VP9, lossy only while it moves, and what is still as
+exact PNG, and once a region settles it is sent again as exact PNG. So the
+screen is exact wherever nothing is moving, and the same video costs under half
+a megabyte a second. Adaptive H.264 changes nothing on such a host: it draws no H.264 under
+Lossless. See [Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)
+for what was measured.
 
 Another RDP server, an older Windows or xrdp say, may happen to work but is not
 tested against. See [The RDP client](rdp-client.md).
