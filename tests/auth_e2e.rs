@@ -8,7 +8,7 @@ mod common;
 
 use std::net::SocketAddr;
 
-use remotex::config::{AppConfig, Protocol, TargetConfig};
+use remotex::config::{AppConfig, MotionDebug, Protocol, TargetConfig};
 use remotex::server;
 use tokio::net::TcpListener;
 
@@ -39,7 +39,7 @@ async fn spawn_app() -> SocketAddr {
             microphone: false,
             video_quality: None,
             render_adaptive: None,
-            render_motion_debug: false,
+            render_motion_debug: MotionDebug::None,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,

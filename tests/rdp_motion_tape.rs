@@ -470,7 +470,7 @@ fn a_tape_is_replayed_for_motion() {
                     continue;
                 }
                 if stream.as_ref().is_none_or(|(_, _, size)| *size != (w, h)) {
-                    let mut motion = MotionStream::new(60, false, false);
+                    let mut motion = MotionStream::new(60, false, remotex::config::MotionDebug::None);
                     motion.want(w, h);
                     stream = Some((motion, Shadow::new("tape", w, h), (w, h)));
                     page.size = (w, h);

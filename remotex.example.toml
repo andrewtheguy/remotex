@@ -632,10 +632,17 @@ password = "change-me"
 #render_adaptive = true
 
 # QA aid for Motion, the alpha box under High quality on an "rdp" target with egfx
-# on and one virtual display: outline what a session started with it sends, in
-# the pixels themselves — a moving region's VP9 in magenta, a PNG cut from beside
-# one in cyan, and the exact PNG that replaces a region once it stops in green.
-# Unmarked is a still tile sent once, exactly. Off by default, and refused on a
-# target that does not offer Motion.
-#render_motion_debug = true
+# on and one virtual display, and on "ard" with virtual_display = true: draw what a
+# session started with it sends, in the pixels themselves.
+#   "none"    nothing (the default).
+#   "motion"  a moving region's VP9 outlined in magenta, a PNG cut from beside one
+#             in cyan, and the exact PNG that replaces a region once it stops in
+#             green. Unmarked is a still tile sent once, exactly.
+#   "tiles"   all of that, the 64-pixel tile grid on everything sent, and each
+#             tile a change sent as PNG tinted with a pip per 100 ms slot it changed
+#             in over the last 800 ms: yellow below the four that are motion,
+#             orange at four or more, for a tile in motion no stream took (one or
+#             two tiles changing apart from any other, such as a spinner).
+# Refused on a target that does not offer Motion.
+#render_motion_debug = "motion"
 

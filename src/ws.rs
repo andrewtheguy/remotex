@@ -2304,7 +2304,7 @@ mod tests {
             microphone: false,
             video_quality: None,
             render_adaptive: None,
-            render_motion_debug: false,
+            render_motion_debug: crate::config::MotionDebug::None,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,

@@ -118,6 +118,35 @@ pub fn outline(rgb: &mut [u8], (w, h): (usize, usize), mark: Mark) {
     }
 }
 
+/// The `render_motion_debug = "tiles"` grid: a line of `colour` one pixel wide
+/// along the top and left edges of every `cell`-sized tile of the desktop. Painted
+/// on the copy handed to an encoder, as a [`Mark`] is, and under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grid {
+    pub colour: [u8; 3],
+    pub cell: u16,
+}
+
+/// Paint `grid` on a `w`×`h` packed-RGB888 picture whose top-left pixel is the
+/// desktop's `origin`, in place, so the lines fall where the desktop's tiles meet
+/// whatever the picture's own corner.
+pub fn grid(rgb: &mut [u8], (w, h): (usize, usize), origin: (u16, u16), grid: Grid) {
+    let cell = usize::from(grid.cell);
+    let (left, top) = (usize::from(origin.0), usize::from(origin.1));
+    for y in 0..h {
+        let row = &mut rgb[y * w * 3..(y + 1) * w * 3];
+        if (top + y) % cell == 0 {
+            for pixel in row.as_chunks_mut::<3>().0 {
+                *pixel = grid.colour;
+            }
+            continue;
+        }
+        for x in ((cell - left % cell) % cell..w).step_by(cell) {
+            row[x * 3..x * 3 + 3].copy_from_slice(&grid.colour);
+        }
+    }
+}
+
 /// The whole framebuffer as packed RGB888, and the copy the stream reads: the
 /// desktop at its own size, odd sides included, which is the picture encoded.
 #[derive(Clone)]

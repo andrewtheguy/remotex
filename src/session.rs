@@ -2217,7 +2217,7 @@ mod tests {
             microphone: meta.microphone,
             video_quality: None,
             render_adaptive: None,
-            render_motion_debug: false,
+            render_motion_debug: crate::config::MotionDebug::None,
             audio_bitrate: None,
             virtual_display: false,
             audio_adaptive: None,

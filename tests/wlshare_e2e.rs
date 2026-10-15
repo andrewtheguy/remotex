@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, Subtype, TargetConfig};
+use remotex::config::{AppConfig, MotionDebug, Protocol, Subtype, TargetConfig};
 use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -122,7 +122,7 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         microphone: true,
         video_quality: None,
         render_adaptive: None,
-        render_motion_debug: false,
+        render_motion_debug: MotionDebug::None,
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,

@@ -616,10 +616,14 @@ A target's stream keys are per target, and every one has a default:
   gateway track the measured link — see
   [what the link will bear](#colour-and-what-the-link-will-bear) for the signal
   and the walk.
-- `render_motion_debug` (off by default) outlines, in the pixels themselves,
-  what a session started with Motion sends: a region's VP9 in magenta, a PNG cut
-  from beside one in cyan, and a cleanup in green. A QA aid, refused on a target
-  that does not offer Motion
+- `render_motion_debug` (`"none"` by default) draws, in the pixels themselves,
+  what a session started with Motion sends. `"motion"` outlines a region's VP9 in
+  magenta, a PNG cut from beside one in cyan, and a cleanup in green. `"tiles"`
+  adds the 64-pixel tile grid on everything sent, and tints each tile a report
+  changed that went as PNG, with a pip for each 100 ms slot of its churn: yellow
+  below the four that are motion, orange at four or more, for a tile in motion
+  that no stream took, such as one or two tiles changing apart from any other. A
+  QA aid, refused on a target that does not offer Motion
   ([composed for Motion](#rdps-graphics-pipeline-composed-for-motion)).
 
 There is no chroma key: the stream is always 4:4:4, profile 1. See
