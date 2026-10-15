@@ -29,11 +29,12 @@ use screen_vp9::walk::{LAG_CLEAR, QualityWalk};
 #[cfg(test)]
 use screen_vp9::walk::SETTLE_IDLE;
 
-use crate::config::RenderPlan;
+use crate::config::{PngTiles, RenderPlan};
 use crate::feedback::LinkFeedback;
-use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
+use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, TileUnit, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
 use crate::shadow::Rect;
+use crate::tiles::Tiles;
 use crate::video;
 
 /// Maximum queued items ahead of the one currently collected: rounds, which are
@@ -124,6 +125,10 @@ struct Video {
     /// `None` before the first one, so a freshly connected desktop paints without
     /// waiting out an interval.
     due_at: Option<tokio::time::Instant>,
+    /// TESTING ONLY: the picture as tiles, in place of [`Self::stream`], for a plan
+    /// that sends it so ([`RenderPlan::png_tiles`]). The stream is then never fed,
+    /// and the walk never moves: a tile is lossless and has no quality to walk.
+    tiles: Option<Tiles>,
 }
 
 /// What a source's desktop too large for a video stream ([`video::within_ceiling`])
@@ -158,6 +163,10 @@ enum Pending {
     ///
     /// With the share of [`QUEUE_BUDGET`] taken for it, at the last round's size.
     Round(JoinHandle<(Round, anyhow::Result<Produced>, u64)>, Held),
+    /// TESTING ONLY: tiles being coded as PNG on a blocking worker, and the
+    /// microseconds that cost, with the share of [`QUEUE_BUDGET`] taken for them.
+    /// Nothing chains one take of tiles to the next, so any number may be out.
+    Tiles(JoinHandle<(anyhow::Result<Vec<TileUnit>>, u64)>, Held),
     Msg(ServerMsg),
     /// A caller waiting for everything pushed before it to have reached `frame_tx`.
     Flush(oneshot::Sender<()>),
@@ -170,6 +179,9 @@ enum Pending {
 /// line the task logged on its own way out would be cancelled before it printed.
 struct Shared {
     oversize: Oversize,
+    /// Whether, and how, the picture goes as tiles ([`Video::tiles`]): for the
+    /// `TilesStart` that says which.
+    png_tiles: PngTiles,
     /// Whether the desktop's picture is held — see [`Oversize`]. Decided by each
     /// `Resize` ([`VideoSink::msg`]).
     oversized: AtomicBool,
@@ -252,9 +264,10 @@ struct Shared {
 
 impl Shared {
     fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>, oversize: Oversize) -> Self {
-        let RenderPlan { quality, adaptive, native_vp9, .. } = plan;
+        let RenderPlan { quality, adaptive, native_vp9, png_tiles, .. } = plan;
         Self {
             oversize,
+            png_tiles,
             oversized: AtomicBool::new(false),
             too_many_screens: AtomicBool::new(false),
             failure: Mutex::default(),
@@ -262,6 +275,7 @@ impl Shared {
                 stream: DesktopStream::new(quality, native_vp9),
                 congestion: QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, adaptive),
                 due_at: None,
+                tiles: png_tiles.on().then(Tiles::new),
             }),
             round_returned: Notify::new(),
             passing: AtomicBool::new(false),
@@ -344,7 +358,11 @@ impl VideoSink {
             debug!("{}: the source's rectangles carry the picture again, as video encoded here", self.engine);
             self.reset_render();
         }
-        self.shared.video.lock().await.stream.blit(rect, rgb)
+        let mut video = self.shared.video.lock().await;
+        match &mut video.tiles {
+            Some(tiles) => tiles.blit(rect, rgb),
+            None => video.stream.blit(rect, rgb),
+        }
     }
 
     /// Whether the desktop's picture is held ([`Oversize::Hold`]): past the video
@@ -395,6 +413,9 @@ impl VideoSink {
             return Ok(());
         }
         let mut video = self.shared.video.lock().await;
+        if video.tiles.is_some() {
+            return self.tiles(video).await;
+        }
         if video.stream.round_out() {
             // The previous round is still encoding, and it *is* this call's answer:
             // its return re-arms the engine (`Self::round_returned`), and taking
@@ -464,6 +485,41 @@ impl VideoSink {
         pushed
     }
 
+    /// TESTING ONLY: [`Self::frame`] for a picture sent as tiles. The cells that
+    /// changed are taken under the lock and coded as PNG on a blocking worker, at
+    /// most once per [`VIDEO_FRAME_INTERVAL`] as a round is, unless the client
+    /// holds nothing and is owed every cell: a repaint, a reattach or a resize,
+    /// which [`Self::reset_render`] arms. Such a take goes out behind a
+    /// `TilesStart`, which is where a client starts the picture over.
+    async fn tiles(&self, mut video: tokio::sync::MutexGuard<'_, Video>) -> anyhow::Result<()> {
+        let owed = self.shared.keyframe_owed.load(Ordering::Relaxed);
+        let now = tokio::time::Instant::now();
+        if !owed && video.due_at.is_some_and(|due| now < due) {
+            return Ok(());
+        }
+        let tiles = video.tiles.as_mut().expect("a sink sending tiles");
+        if self.shared.keyframe_owed.swap(false, Ordering::Relaxed) {
+            tiles.repaint();
+        }
+        let Some(taken) = tiles.take()? else {
+            return Ok(());
+        };
+        video.due_at = Some(now + VIDEO_FRAME_INTERVAL);
+        drop(video);
+        let start = taken.whole;
+        let handle = tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            (taken.encode(), micros(started))
+        });
+        let round_bytes = usize::try_from(self.shared.round_bytes.load(Ordering::Relaxed)).unwrap_or(usize::MAX);
+        let held = self.hold(round_bytes).await;
+        if start {
+            let debug = self.shared.png_tiles == PngTiles::Debug;
+            self.push(Pending::Msg(ServerMsg::TilesStart { debug })).await?;
+        }
+        self.push(Pending::Tiles(handle, held)).await
+    }
+
     /// Completes when a pipelined round has come back with pixels or a keyframe
     /// still waiting — the engines' third wake-up source, beside their own frame
     /// boundaries and [`Self::due_at`].
@@ -496,6 +552,13 @@ impl VideoSink {
             return None;
         }
         let video = self.shared.video.lock().await;
+        if let Some(tiles) = &video.tiles {
+            // A repaint owed is owed at once, as a forced keyframe is.
+            if self.shared.keyframe_owed.load(Ordering::Relaxed) && tiles.pictured() {
+                return Some(tokio::time::Instant::now());
+            }
+            return tiles.dirty().then(|| video.due_at.unwrap_or_else(tokio::time::Instant::now));
+        }
         if !video.stream.dirty() {
             return None;
         }
@@ -802,7 +865,12 @@ impl VideoSink {
                     self.reset_render();
                 }
             }
-            self.shared.video.lock().await.stream.want(w, h);
+            let mut video = self.shared.video.lock().await;
+            video.stream.want(w, h);
+            if let Some(tiles) = &mut video.tiles {
+                tiles.want(w, h);
+            }
+            drop(video);
             if self.shared.oversize == Oversize::Hold {
                 self.push(Pending::Msg(msg)).await?;
                 return self.push(Pending::Msg(ServerMsg::Oversize { cause })).await;
@@ -961,6 +1029,12 @@ async fn order_loop(
                 continue;
             }
             Pending::Round(handle, held) => (handle, held),
+            Pending::Tiles(handle, held) => {
+                if !forward_tiles(engine, &shared, &frame_tx, handle, held).await {
+                    break;
+                }
+                continue;
+            }
         };
         // `waiting` accrues only while the handle is found unfinished, so a round
         // already encoded when its turn comes adds encode time and no waiting — the
@@ -1053,6 +1127,54 @@ async fn order_loop(
             break;
         }
     }
+}
+
+/// TESTING ONLY: a take of tiles, once coded, to the browser: each tile a record of
+/// its own, with its share of the budget the take was queued with. `false` when
+/// the queue is to stop, because the coding failed or the browser has gone.
+async fn forward_tiles(
+    engine: &'static str,
+    shared: &Shared,
+    frame_tx: &mpsc::Sender<ServerMsg>,
+    handle: JoinHandle<(anyhow::Result<Vec<TileUnit>>, u64)>,
+    mut held: Held,
+) -> bool {
+    let started = Instant::now();
+    let joined = handle.await;
+    shared.waited_micros.fetch_add(micros(started), Ordering::Relaxed);
+    let (coded, encode_micros) = match joined {
+        Ok(finished) => finished,
+        Err(e) => {
+            give_up(engine, shared, anyhow::Error::new(e).context("tile encoder stopped"));
+            return false;
+        }
+    };
+    shared.encode_micros.fetch_add(encode_micros, Ordering::Relaxed);
+    let mut units = match coded {
+        Ok(units) => units,
+        Err(e) => {
+            give_up(engine, shared, e.context("tile encode failed"));
+            return false;
+        }
+    };
+    let bytes: usize = units.iter().map(|unit| unit.data.len()).sum();
+    shared.round_bytes.store(bytes as u64, Ordering::Relaxed);
+    shared.units.fetch_add(units.len() as u64, Ordering::Relaxed);
+    shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    held.settle(bytes);
+    // Each tile may leave in a batch of its own, so each takes its own share.
+    if let Some((last, rest)) = units.split_last_mut() {
+        for unit in rest {
+            unit.held = held.split(unit.data.len());
+        }
+        last.held = held;
+    }
+    debug!("{engine}: {} tiles: {bytes} bytes", units.len());
+    if frame_tx.send(ServerMsg::Tiles(units)).await.is_err() {
+        return false;
+    }
+    !(shared.uncover_owed.swap(false, Ordering::Relaxed)
+        && frame_tx.send(ServerMsg::ScreenUnavailable { active: false }).await.is_err())
 }
 
 /// Record why the queue stopped, for the engine's next push to report.
@@ -1178,7 +1300,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, png_tiles: crate::config::PngTiles::Off };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1229,6 +1351,51 @@ mod tests {
         assert!(matches!(out[2], ServerMsg::Resize { w: 32, h: 32, .. }));
         assert!(matches!(&out[3], ServerMsg::Graphics(run) if run.data == vec![2; 9] && run.frame.is_some()));
         assert!(rx.try_recv().is_err(), "and no access unit beside them");
+    }
+
+    /// TESTING ONLY tiles: the first picture is every tile behind a `TilesStart`
+    /// that says whether to draw the grid, a change is the tiles it touches and no
+    /// `TilesStart`, a reset is every tile again behind one, and no access unit
+    /// ever goes out beside them.
+    #[tokio::test]
+    async fn a_picture_sent_as_tiles_starts_whole_and_then_sends_what_changed() {
+        let plan = RenderPlan { png_tiles: PngTiles::Debug, ..VIDEO };
+        let (frame_tx, mut rx) = mpsc::channel(64);
+        let sink = VideoSink::new("test", frame_tx, plan, feedback(), Oversize::Refuse);
+        sink.msg(ServerMsg::Resize { w: 100, h: 64, scale: UNSCALED }).await.unwrap();
+        let whole = Rect::from_size(0, 0, 100, 64).unwrap();
+        sink.damage(whole, &vec![50; 100 * 64 * 3]).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut rx, 3).await;
+        assert!(matches!(out[0], ServerMsg::Resize { .. }));
+        assert!(matches!(out[1], ServerMsg::TilesStart { debug: true }), "{:?}", out[1]);
+        let ServerMsg::Tiles(tiles) = &out[2] else { panic!("expected tiles, got {:?}", out[2]) };
+        let places: Vec<_> = tiles.iter().map(|t| (t.x, t.y, t.w, t.h)).collect();
+        assert_eq!(places, vec![(0, 0, 64, 64), (64, 0, 36, 64)]);
+        assert!(tiles.iter().all(|t| t.data.starts_with(b"\x89PNG")));
+
+        // Past the interval, a change in the second tile is that tile alone.
+        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        let dot = Rect::from_size(70, 10, 2, 2).unwrap();
+        sink.damage(dot, &[200; 2 * 2 * 3]).await.unwrap();
+        assert!(sink.due_at().await.is_some(), "the change is owed a take");
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut rx, 1).await;
+        let ServerMsg::Tiles(tiles) = &out[0] else { panic!("expected tiles, got {:?}", out[0]) };
+        assert_eq!(tiles.iter().map(|t| (t.x, t.y)).collect::<Vec<_>>(), vec![(64, 0)]);
+        assert!(sink.due_at().await.is_none(), "nothing is left to send");
+
+        // A reattach's reset sends every tile again, from a fresh start, at once.
+        sink.reset_render();
+        assert!(sink.due_at().await.is_some(), "a repaint is owed");
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut rx, 2).await;
+        assert!(matches!(out[0], ServerMsg::TilesStart { debug: true }));
+        assert!(matches!(&out[1], ServerMsg::Tiles(tiles) if tiles.len() == 2));
+        assert!(rx.try_recv().is_err(), "and nothing beside them");
     }
 
     /// A passed run takes its size out of the queue's budget, so a browser that is
@@ -1898,7 +2065,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, png_tiles: crate::config::PngTiles::Off };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2025,7 +2192,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, png_tiles: crate::config::PngTiles::Off };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

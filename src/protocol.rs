@@ -423,6 +423,7 @@ pub enum ClientMsg {
 ///
 /// 0x03 VIDEO     u8 flags | u16 w | u16 h | u32 len | payload[len]
 /// 0x04 GRAPHICS  u32 len | commands[len]
+/// 0x05 TILE      u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 /// ```
 ///
 /// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
@@ -434,6 +435,9 @@ pub enum ClientMsg {
 /// A `GRAPHICS` record is a run of an RDP host's graphics pipeline commands, as the host sent
 /// them — see [`GraphicsUnit`]. A receiver rejects one with no payload.
 ///
+/// A `TILE` record (testing only) is a PNG of the `w`×`h` rectangle of the desktop at `(x, y)`
+/// — see [`TileUnit`]. A receiver rejects one with no payload or no size.
+///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
@@ -441,12 +445,16 @@ pub mod batch {
 
     pub const OP_VIDEO: u8 = 0x03;
     pub const OP_GRAPHICS: u8 = 0x04;
+    pub const OP_TILE: u8 = 0x05;
 
     /// Bytes a `VIDEO` record costs besides its payload.
     pub const VIDEO_HEADER_LEN: usize = 10;
 
     /// Bytes a `GRAPHICS` record costs besides its commands.
     pub const GRAPHICS_HEADER_LEN: usize = 5;
+
+    /// Bytes a `TILE` record costs besides its PNG.
+    pub const TILE_HEADER_LEN: usize = 13;
 
     /// A `VIDEO` record's flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
@@ -833,6 +841,51 @@ impl GraphicsUnit {
     }
 }
 
+/// TESTING ONLY: one tile of the desktop as a PNG, carried as a `TILE` record inside a
+/// [`batch`] frame, for a target that sends its picture as tiles
+/// ([`crate::config::PngTiles`]).
+///
+/// The contract every client implements:
+///
+/// - [`ServerMsg::TilesStart`] arrives first, behind the `Resize` that set the desktop's
+///   size and ahead of the first tile of each picture a client starts from: the first of a
+///   session, of a reattach and of a resize. Whatever a client held of a video stream or a
+///   pipeline before it is done with.
+/// - A tile is the `w`×`h` rectangle of the desktop at `(x, y)`, whole and lossless: a client
+///   draws it there and nothing else. Tiles lie on a grid of [`crate::tiles::TILE`] from the
+///   desktop's top left, clipped at its right and bottom edges, and a later tile replaces an
+///   earlier one.
+/// - The tiles after a `TilesStart` cover the whole desktop; after that, only the ones that
+///   changed come.
+#[derive(Debug, Clone)]
+pub struct TileUnit {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    /// The PNG, 8-bit RGB, `w`×`h`.
+    pub data: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
+}
+
+impl TileUnit {
+    /// What this tile will cost inside a batch, its PNG included.
+    pub fn record_len(&self) -> usize {
+        batch::TILE_HEADER_LEN + self.data.len()
+    }
+
+    /// Append this tile as a `TILE` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_TILE);
+        for field in [self.x, self.y, self.w, self.h] {
+            out.extend_from_slice(&field.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.data);
+    }
+}
+
 /// Largest cursor edge a client is asked to draw. Real pointers are 32x32 or
 /// 64x64; a shape past this is dropped rather than sent, because a CSS cursor
 /// that big is ignored by the browser and would leave no pointer at all.
@@ -906,8 +959,9 @@ impl CursorShape {
 /// `Fast` means `Filter::Adaptive` — all five PNG filters run and scored per
 /// row — and this runs on the session's hot path.
 ///
-/// The PNG a [`CursorShape`] carries.
-fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::Result<Vec<u8>> {
+/// The PNG a [`CursorShape`] carries, and each tile of a picture sent as tiles
+/// ([`TileUnit`]).
+pub(crate) fn encode_png(w: u16, h: u16, color: png::ColorType, pixels: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(pixels.len() / 4 + 256);
     let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
     encoder.set_color(color);
@@ -1014,6 +1068,14 @@ pub enum ServerMsg {
     /// the [`ServerMsg::Graphics`] records after this compose, and whatever a client
     /// held of a pipeline or a video stream before it is done with.
     GraphicsStart,
+    /// TESTING ONLY: tiles of the desktop as PNG, each a record of its own, in the
+    /// order they are to be drawn — see [`TileUnit`]. A binary record like
+    /// [`ServerMsg::Video`], ordered the same way.
+    Tiles(Vec<TileUnit>),
+    /// TESTING ONLY: the picture is the [`ServerMsg::Tiles`] after this, starting
+    /// with every tile of the desktop. `debug` asks the client to draw the tile grid
+    /// over it and mark each tile as it is painted.
+    TilesStart { debug: bool },
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1334,6 +1396,9 @@ enum ControlMsg<'a> {
     Error { message: &'a str },
     Picker,
     GraphicsStart,
+    TilesStart {
+        debug: bool,
+    },
     GraphicsView { x: u16, y: u16, w: u16, h: u16 },
     Connected {
         name: &'a str,
@@ -1425,6 +1490,8 @@ impl ServerMsg {
             ServerMsg::Video(_)
                 | ServerMsg::Graphics(_)
                 | ServerMsg::GraphicsStart
+                | ServerMsg::Tiles(_)
+                | ServerMsg::TilesStart { .. }
                 | ServerMsg::GraphicsView { .. }
                 | ServerMsg::VideoFormat { .. }
                 | ServerMsg::Resize { .. }
@@ -1447,10 +1514,15 @@ impl ServerMsg {
     /// caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Video(_) | ServerMsg::Graphics(_) | ServerMsg::Audio(_) | ServerMsg::AudioGap => {
+            ServerMsg::Video(_)
+            | ServerMsg::Graphics(_)
+            | ServerMsg::Tiles(_)
+            | ServerMsg::Audio(_)
+            | ServerMsg::AudioGap => {
                 return None;
             }
             ServerMsg::GraphicsStart => control(&ControlMsg::GraphicsStart),
+            ServerMsg::TilesStart { debug } => control(&ControlMsg::TilesStart { debug: *debug }),
             ServerMsg::GraphicsView { x, y, w, h } => {
                 control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
             }

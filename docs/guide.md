@@ -147,6 +147,12 @@ touch.
   gateway encodes as VP9: the target for a browser that cannot compose the
   pipeline. The desktop then keeps its size: without the pipeline Windows
   resizes by rebuilding the share, which this gateway does not take.
+- **Testing only:** beside `egfx = false`, `png_tiles = "on"` sends the picture
+  as a PNG of each 64×64 tile that changed, the tiles the host draws it in,
+  instead of VP9; `"debug"` also draws the tile grid over it and marks each tile
+  as it is painted. Lossless and large, for a LAN, and refused with
+  `virtual_displays = 2`. It is the first step toward a lossless picture whose
+  moving regions go as video ([roadmap](roadmap.md#a-lossless-picture-for-a-session-that-asks-for-one)).
 - **Alpha:** `virtual_displays = 2` asks the host for two displays, each the
   session's size. Where the second sits against the first is chosen under the
   target at the picker, **Second display**: right, left, top or bottom, to match

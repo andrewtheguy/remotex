@@ -19,6 +19,7 @@ import {
   decodeBatchFrame,
   type GraphicsMsg,
   stripRows,
+  type TileMsg,
   type VideoMsg,
 } from "./protocol.ts";
 import { type DecodedPicture, isSoftwarePlanes } from "./softwareDecoder.ts";
@@ -29,9 +30,9 @@ import {
   type VideoFormat,
 } from "./videoDecoder.ts";
 
-// The browser SPA's batch draw loop: each batch's records — access units and runs
-// of an RDP host's graphics pipeline — decoded or composed in wire order and
-// drawn onto the canvas. The decoder lives here rather than beside each caller:
+// The browser SPA's batch draw loop: each batch's records — access units, runs
+// of an RDP host's graphics pipeline, and (testing only) PNG tiles — decoded or
+// composed in wire order and drawn onto the canvas. The decoder lives here rather than beside each caller:
 // it belongs to exactly one attachment, and `clear` is the one place that ends it.
 
 // The destination's 2D context. A union rather than the element's alone because
@@ -40,6 +41,17 @@ import {
 export type PaintContext =
   | CanvasRenderingContext2D
   | OffscreenCanvasRenderingContext2D;
+
+/** A tile's picture: what `createImageBitmap` makes of its PNG. */
+export type TileImage = CanvasImageSource & { close(): void };
+
+/** Where a tile was drawn. */
+export interface TileRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
 export interface FramePainter {
   /**
@@ -66,6 +78,12 @@ export interface FramePainter {
    * compositor stood before is done with.
    */
   startGraphics(): void;
+  /**
+   * TESTING ONLY. Adopt a `tilesStart`: the TILE records after it are the
+   * picture, each drawn where it says on the desktop's canvas. Whatever decoder
+   * or compositor stood before is done with.
+   */
+  startTiles(): void;
   /**
    * Adopt a `graphicsView` on the page that composes the pipeline: the part of
    * its picture this display is, shown from now, by this pipeline and the next.
@@ -143,6 +161,13 @@ export function createFramePainter(options: {
   onGraphicsShown?: (shown: boolean) => void;
   /** How this page decodes (see `createDesktopVideo`). */
   decoding?: PageDecoding;
+  /**
+   * TESTING ONLY. What decodes a tile's PNG: the browser's `createImageBitmap`,
+   * taking the pixels as they are. Injectable for a test, which has none.
+   */
+  decodeTile?: (png: Uint8Array) => Promise<TileImage>;
+  /** TESTING ONLY. The tiles one batch drew, once it has drawn them. */
+  onTilesPainted?: (rects: TileRect[]) => void;
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and
   // is not queued behind draws — an eviction closes the socket from under whatever
@@ -439,11 +464,53 @@ export function createFramePainter(options: {
     }
   };
 
+  const decodeTile =
+    options.decodeTile ??
+    ((png: Uint8Array) =>
+      createImageBitmap(
+        new Blob([png as Uint8Array<ArrayBuffer>], { type: "image/png" }),
+        { colorSpaceConversion: "none", premultiplyAlpha: "none" },
+      ));
+
+  // A tile's picture, or null where its PNG did not decode: that tile of the
+  // desktop then shows what it showed before, until the repaint asked for here
+  // sends it again.
+  const tileImage = (record: TileMsg): Promise<TileImage | null> =>
+    decodeTile(record.data).catch((error: unknown) => {
+      options.onVideoNeedsKeyframe(
+        `a ${record.w}x${record.h} tile at ${record.x},${record.y} did not decode (${describe(error)})`,
+      );
+      return null;
+    });
+
+  // One tile, drawn where it goes on the desktop's canvas, and added to `drawn`
+  // when it was.
+  const drawTile = (
+    record: TileMsg,
+    image: TileImage | null,
+    born: number,
+    drawn: TileRect[],
+  ) => {
+    if (!image) {
+      return;
+    }
+    try {
+      const context = options.context();
+      if (generation === born && context) {
+        context.drawImage(image, record.x, record.y);
+        const { x, y, w, h } = record;
+        drawn.push({ x, y, w, h });
+      }
+    } finally {
+      image.close();
+    }
+  };
+
   // One unit's picture. Null when there is nothing to draw — a decoder that dropped
   // the unit has said so itself. A run of the pipeline has no picture of its own: it
-  // is composed in its turn.
+  // is composed in its turn, and a tile has its own (`tileImage`).
   const decode = (record: BatchRecord): Promise<DecodedPicture | null> => {
-    if (record.kind === "graphics") {
+    if (record.kind !== "video") {
       return Promise.resolve(null);
     }
     return desktopVideo().decode(
@@ -643,13 +710,25 @@ export function createFramePainter(options: {
       // the moment it is drawn instead of the whole batch's worth staying alive until
       // the slowest.
       const decodes = records.map(decode);
+      const tiles = records.map((record) =>
+        record.kind === "tile" ? tileImage(record) : null,
+      );
+      const drawn: TileRect[] = [];
       for (let i = 0; i < records.length; i += 1) {
         const record = records[i];
         if (record.kind === "graphics") {
           await compose(record, born);
           continue;
         }
+        if (record.kind === "tile") {
+          drawTile(record, await tiles[i], born, drawn);
+          continue;
+        }
         show(record, await decodes[i], born);
+      }
+      if (drawn.length > 0) {
+        painted();
+        options.onTilesPainted?.(drawn);
       }
     },
     clear() {
@@ -700,6 +779,11 @@ export function createFramePainter(options: {
           }
         });
       pipeline = starting;
+    },
+    startTiles() {
+      // The tiles take the picture from whatever stood before them, and are
+      // drawn on the desktop's own canvas.
+      releaseVideo();
     },
     setGraphicsView(part) {
       graphicsPart = part;

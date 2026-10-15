@@ -329,6 +329,15 @@ password = "change-me"
 # beside it have not been tried.
 #egfx = true
 
+# TESTING ONLY, and only with `egfx = false` and one virtual display: send the
+# bitmap path's picture as a PNG of each 64x64 tile that changed, the tiles the
+# host draws it in, instead of VP9 encoded here. "debug" also has the page draw
+# the tile grid over the picture and mark each tile as it is painted. Lossless
+# and as large as that makes it, for a LAN: the video keys reach none of it, and
+# nothing but the queue's own backpressure follows the browser's link. "off"
+# keeps the VP9.
+#png_tiles = "off"
+
 # ALPHA. Ask the host for this many virtual displays, each the session's size.
 # Where the second sits against the first is chosen at the picker, on an rdp
 # target: right, left, top or bottom. The session starts on the floating menu's

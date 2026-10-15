@@ -649,6 +649,16 @@ negotiates its own pixel formats and ignores that limit. A Windows workstation's
 listener allows 32 bits and takes either path. Such a server is reached with
 the pipeline on, or with its "Limit maximum color depth" setting raised to 32 bits.
 
+What the host sends on this path is lossless and comes in tiles. Measured on
+2026-10-14 against a Windows 11 host on Arm at 1920×1080, every rectangle was a
+64×64 tile at a 64-aligned origin, the bottom row cut to 64×56, up to 163 to one
+Bitmap Update, each planar coded: run-length coded with no alpha plane, or the
+raw planes where that came out no smaller. A full repaint of a desktop of flat
+windows came to 1.2–2.3 MB; on connecting, the host sent the whole desktop four
+to ten times within the first second, for reasons not looked into. A target's
+`png_tiles` (testing only) sends the browser a PNG of each tile of that grid
+that changed instead of VP9 (`src/tiles.rs`).
+
 Bitmap updates carry no frame boundary, so the engine flushes damage on a guess:
 the 16 ms coalescer (`DAMAGE_INTERVAL` in `src/rdp.rs`) reconstructs boundaries by
 timing — a quiet screen's damage leaves on the spot, and everything within one

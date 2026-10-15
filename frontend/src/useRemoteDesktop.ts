@@ -2148,6 +2148,19 @@ export function useRemoteDesktop(
     // pipeline, the part of its picture to show; in a tab showing a display of
     // its own, the part of the session page's picture this tab is painted from,
     // which is the only picture such a tab gets.
+    // TESTING ONLY, and queued the way a pipeline's start is: the tiles after it
+    // are the picture, drawn on the desktop's own canvas.
+    const handleTilesStart = (
+      msg: Extract<ControlMsg, { type: "tilesStart" }>,
+    ) => {
+      painter?.startTiles(msg.debug);
+      setVideoStream({
+        decode: "",
+        passthrough: false,
+        tiles: msg.debug ? "debug" : "on",
+      });
+    };
+
     const handleGraphicsView = (
       msg: Extract<ControlMsg, { type: "graphicsView" }>,
     ) => {
@@ -2228,6 +2241,9 @@ export function useRemoteDesktop(
           // the pipeline's first run must find a compositor with nothing in it.
           painter?.startGraphics();
           setVideoStream({ decode: "", passthrough: true, composed: true });
+          break;
+        case "tilesStart":
+          handleTilesStart(msg);
           break;
         case "graphicsView":
           handleGraphicsView(msg);

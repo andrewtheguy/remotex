@@ -38,6 +38,7 @@ import type { MosaicView } from "./mosaic.ts";
 import { createPlanesPicture } from "./planesPicture.ts";
 import { binaryFrameKind } from "./protocol.ts";
 import type { PageDecoding } from "./softwareSupport.ts";
+import { createTileDebug, type TileDebug } from "./tileDebug.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 /**
@@ -100,6 +101,11 @@ export type PainterCommand =
   | { type: "videoFormat"; format: VideoFormat }
   /** An RDP host's graphics pipeline starts, and this worker composes it. */
   | { type: "graphicsStart" }
+  /**
+   * TESTING ONLY. The picture is PNG tiles from here, with the grid drawn over
+   * it and each tile marked as it is painted when `debug` (tileDebug.ts).
+   */
+  | { type: "tilesStart"; debug: boolean }
   /** The part of the pipeline's picture this page's display is, to show. */
   | { type: "graphicsView"; part: PicturePart }
   /**
@@ -155,6 +161,14 @@ export function createPainterWorker(
   let framebuffer: OffscreenCanvas | null = null;
   let framebufferCtx: OffscreenCanvasRenderingContext2D | null = null;
   let view: MosaicView | null = null;
+  // TESTING ONLY: a picture sent as tiles with its debug overlay, which holds the
+  // clean picture the painter draws into and recomposes the canvas from it.
+  let debug: TileDebug | null = null;
+
+  const endDebug = () => {
+    debug?.close();
+    debug = null;
+  };
 
   const blank = (
     target: OffscreenCanvas,
@@ -248,7 +262,10 @@ export function createPainterWorker(
           // transferred canvas presents through the browser's commit instead.
           ctx = canvas.getContext("2d", { alpha: false });
           painter = makePainter({
-            context: () => (framebuffer ? framebufferCtx : ctx),
+            context: () =>
+              (debug?.context() as
+                | OffscreenCanvasRenderingContext2D
+                | undefined) ?? (framebuffer ? framebufferCtx : ctx),
             onVideoError: (reason) => post({ type: "videoError", reason }),
             onVideoNeedsKeyframe: (reason) =>
               post({ type: "videoNeedsKeyframe", reason }),
@@ -257,6 +274,7 @@ export function createPainterWorker(
             onGraphicsShown: (shown) =>
               post({ type: "graphicsShown", shown, epoch }),
             decoding: command.decoding,
+            onTilesPainted: (rects) => debug?.painted(rects),
           });
           break;
         case "frame": {
@@ -279,6 +297,7 @@ export function createPainterWorker(
             await painter?.draw(command.data);
             if (born === epoch) {
               compose();
+              debug?.present();
             }
             if (born !== epoch) {
               // A draw the clear did not wait for, landing after it. The painter's
@@ -318,6 +337,7 @@ export function createPainterWorker(
                 blank(canvas, ctx, command.w, command.h);
               }
               painter?.blank(command.w, command.h);
+              debug?.resize(command.w, command.h);
             }
             // Echoed even with no canvas: the page's layout state must not
             // wait forever on a bitmap that cannot exist.
@@ -334,10 +354,42 @@ export function createPainterWorker(
           queued(() => post({ type: "reached", seq: command.seq }));
           break;
         case "videoFormat":
-          queued(() => painter?.setVideoFormat(command.format));
+          queued(() => {
+            endDebug();
+            painter?.setVideoFormat(command.format);
+          });
           break;
         case "graphicsStart":
-          queued(() => painter?.startGraphics());
+          queued(() => {
+            endDebug();
+            painter?.startGraphics();
+          });
+          break;
+        case "tilesStart":
+          queued(() => {
+            endDebug();
+            painter?.startTiles();
+            if (command.debug && canvas && ctx) {
+              const shown = ctx;
+              debug = createTileDebug({
+                shown,
+                w: canvas.width,
+                h: canvas.height,
+                makeClean: (w, h) => {
+                  const clean = new OffscreenCanvas(w, h);
+                  const context = clean.getContext("2d", { alpha: false });
+                  if (!context) {
+                    throw new Error(
+                      "no 2D context for the tiles' clean picture",
+                    );
+                  }
+                  context.fillStyle = "#000";
+                  context.fillRect(0, 0, w, h);
+                  return { canvas: clean, context };
+                },
+              });
+            }
+          });
           break;
         case "graphicsView":
           queued(() => painter?.setGraphicsView(command.part));
@@ -351,6 +403,7 @@ export function createPainterWorker(
           // directly when it could reach it.
           epoch += 1;
           queue = Promise.resolve();
+          endDebug();
           painter?.clear();
           framebuffer = null;
           framebufferCtx = null;

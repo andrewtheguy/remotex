@@ -60,6 +60,34 @@ test("a graphics record is its commands, whole, among the records around it", ()
   assert.equal(decodeBatchFrame(empty), null);
 });
 
+test("a tile record is its rectangle and its PNG, whole", () => {
+  // Transcribed from `batch` in src/protocol.rs: op 0x05, x, y, w, h as u16s, a
+  // u32 length, the PNG.
+  const frame = new Uint8Array([
+    0x02, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x40, 0x00, 0x80,
+    0x00, 0x24, 0x00, 0x38, 0x00, 0x02, 0x00, 0x00, 0x00, 0x89, 0x50, 0x05,
+    0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x40, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x77,
+  ]).buffer;
+  const records = decodeBatchFrame(frame);
+  assert.deepEqual(
+    records?.map((record) =>
+      record.kind === "tile"
+        ? [record.x, record.y, record.w, record.h, [...record.data]]
+        : record.kind,
+    ),
+    [
+      [64, 128, 36, 56, [0x89, 0x50]],
+      [0, 0, 64, 64, [0x77]],
+    ],
+  );
+  assert.equal(decodeBatchFrame(frame.slice(0, frame.byteLength - 1)), null);
+  // A tile of no width is not a tile.
+  const flat = new Uint8Array(frame.slice(0));
+  flat[13] = 0;
+  assert.equal(decodeBatchFrame(flat.buffer), null);
+});
+
 test("a video record's flags say a keyframe, and which strip of its picture it is", () => {
   // Transcribed from `VideoUnit::write_record` in src/protocol.rs: op 0x03, flags,
   // the size and the length little-endian, the unit.

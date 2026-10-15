@@ -262,6 +262,13 @@ gateway ([Media paths](architecture.md#media-paths)). It would not reach a
 passed stream, which the gateway never decodes, so a Windows host would get it
 only with the pipeline off, and with that no resize.
 
+A first step is in, for testing only: an RDP target with `egfx = false` and
+`png_tiles` sends a PNG of each 64×64 tile that changed, on the grid the host
+draws its bitmap updates on, and `"debug"` has the page draw that grid and mark
+each tile as it is painted. It has no motion yet: what moves is tiles too. The
+next step is the detection of what moves, sent as video over the tiles until it
+settles.
+
 ## Not planned
 
 ### Decoding an RDP host's H.264 at the gateway

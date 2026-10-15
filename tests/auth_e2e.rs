@@ -34,6 +34,7 @@ async fn spawn_app() -> SocketAddr {
             domain: None,
             size: Some((1280, 800)),
             egfx: None,
+            png_tiles: remotex::config::PngTiles::Off,
             virtual_displays: 1,
             camera: false,
             microphone: false,

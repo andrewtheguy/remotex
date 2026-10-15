@@ -2204,6 +2204,7 @@ mod tests {
             domain: None,
             size: Some((1, 1)),
             egfx: meta.bitmap.then_some(false),
+            png_tiles: crate::config::PngTiles::Off,
             virtual_displays: 1,
             camera: meta.camera,
             microphone: meta.microphone,

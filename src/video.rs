@@ -134,9 +134,9 @@ impl Mirror {
         Ok(())
     }
 
-    /// `rect`'s pixels as packed RGB888, into a buffer the caller reuses — for the
-    /// tests asserting what landed where.
-    #[cfg(test)]
+    /// `rect`'s pixels as packed RGB888, into a buffer the caller reuses: a tile of
+    /// a picture sent as tiles ([`crate::tiles`]), and what the tests assert landed
+    /// where.
     pub fn crop_into(&self, rect: Rect, out: &mut Vec<u8>) -> anyhow::Result<()> {
         anyhow::ensure!(
             rect.right < self.size.0 && rect.bottom < self.size.1,

@@ -137,6 +137,9 @@ export interface VideoStreamInfo {
   // Not a stream at all: an RDP host's graphics pipeline, composed here
   // (`graphicsStart`). No decoder is configured and `decode` names nothing.
   composed?: boolean;
+  // TESTING ONLY. Not a stream either: PNG tiles from the gateway (`tilesStart`),
+  // with the debug overlay or not. `decode` names nothing.
+  tiles?: "on" | "debug";
   // Decoded by one of the page's WebAssembly decoders (softwareDecoder.ts) and
   // not by the browser's own: the VP9 where the browser's own does not take it,
   // and a Mac's HEVC where the gateway said so with the format.
@@ -169,6 +172,10 @@ export function videoLabel(
   }
   if (stream.composed) {
     return "Not in use: the host's graphics pipeline is composed by this browser";
+  }
+  if (stream.tiles) {
+    const overlay = stream.tiles === "debug" ? ", debug overlay" : "";
+    return `Not in use: PNG tiles from the gateway${overlay} (testing only)`;
   }
   const whose = stream.passthrough
     ? "passthrough from the remote"

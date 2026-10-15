@@ -72,7 +72,8 @@ futures-util = "0.3"
 bytes = "1"
 toml = "1"
 # Cursor shapes, which ride the JSON control channel as base64 PNG
-# (`encode_png` in src/protocol.rs).
+# (`encode_png` in src/protocol.rs), and an RDP target's `png_tiles` (testing
+# only), its bitmap path's tiles sent as PNG (src/tiles.rs).
 png = "0.18"
 # SQLite, for `[meter]`: the browser sockets' throughput per timeframe, which the page
 # reads back through `GET /api/throughput` (src/throughput.rs). `bundled` compiles
@@ -318,4 +319,19 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.yuv]
+opt-level = 3
+
+# The PNG encoder and the deflate and checksums under it, optimised in a debug
+# build as in release: an RDP target's `png_tiles` (testing only) codes every
+# tile it sends through them, at the rate a desktop paints.
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.fdeflate]
+opt-level = 3
+
+[profile.dev.package.crc32fast]
+opt-level = 3
+
+[profile.dev.package.simd-adler32]
 opt-level = 3

@@ -220,6 +220,10 @@ pub struct RenderPlan {
     /// libvpx ([`Vp9Encoder::Native`]), chosen at the picker: here, in a build
     /// that has it, or in wlshare, for the stream a `wlshare` target passes.
     pub native_vp9: bool,
+    /// TESTING ONLY: the picture goes as a PNG of each tile that changed, and not
+    /// as VP9 ([`TargetConfig::png_tiles`]). Only an RDP target on the bitmap path
+    /// sets it, and none of the fields above but its size reach it.
+    pub png_tiles: PngTiles,
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
@@ -478,6 +482,34 @@ pub enum Vp9Encoder {
 /// ([`Vp9Encoder::Native`]).
 const NATIVE_VP9: bool = cfg!(feature = "native-vp9");
 
+/// TESTING ONLY. How the picture of an RDP target on the bitmap path
+/// (`egfx = false`) reaches the browser: [`TargetConfig::png_tiles`].
+///
+/// A Windows host draws that path as 64×64 tiles on a grid from the desktop's
+/// top left, each lossless. Off, the gateway encodes them as VP9, as it does
+/// every picture it decodes. On, it sends each tile that changed as a PNG of
+/// that tile, coded at the fastest setting, for a LAN: the groundwork for a
+/// lossless picture whose moving regions go as video, which is in the roadmap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PngTiles {
+    /// VP9 encoded here, as every bitmap path is.
+    #[default]
+    Off,
+    /// A PNG of each tile that changed.
+    On,
+    /// As [`Self::On`], with the page drawing the tile grid over the picture and
+    /// marking each tile as it is painted.
+    Debug,
+}
+
+impl PngTiles {
+    /// Whether the picture goes as tiles.
+    pub fn on(self) -> bool {
+        self != Self::Off
+    }
+}
+
 /// Whether a session takes the remote's sound, and what that sound is sent to the
 /// browser as: [`Choices::audio`], on a target that offers it ([`Offers::audio`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -623,6 +655,11 @@ impl RenderPlan {
             let h264 = if self.rdp_h264 { " with H.264" } else { "" };
             return format!("{}{h264}, passed through", passthrough.stream());
         }
+        match self.png_tiles {
+            PngTiles::Off => {}
+            PngTiles::On => return "PNG tiles (testing only)".to_owned(),
+            PngTiles::Debug => return "PNG tiles, debug overlay (testing only)".to_owned(),
+        }
         // The walk as a suffix: the quality named before it is a ceiling the link
         // may fall below.
         let adaptive = if self.adaptive { " · adaptive" } else { "" };
@@ -753,6 +790,18 @@ pub struct TargetConfig {
     /// accepted and left inert ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
+    /// TESTING ONLY. `png_tiles = "on"` sends the bitmap path's picture as a PNG
+    /// of each 64×64 tile that changed, where it is otherwise VP9 encoded here;
+    /// `"debug"` does the same and has the page draw the tile grid over the
+    /// picture, marking each tile as it is painted; `"off"`, the default, keeps the
+    /// VP9. See [`PngTiles`].
+    ///
+    /// For a LAN: a tile is lossless and as large as that makes it, and nothing
+    /// follows the browser's link but the queue's own backpressure, so the
+    /// video keys reach none of it. Refused unless the target is `rdp` with
+    /// `egfx = false` and one virtual display.
+    #[serde(default)]
+    pub png_tiles: PngTiles,
     /// ALPHA. How many virtual displays the remote is asked to lay out for the
     /// session, side by side at the session's size: `virtual_displays = 2`.
     /// One, the default, is the single desktop every target has always opened;
@@ -984,7 +1033,8 @@ impl TargetConfig {
             apple_h264,
             rdp_graphics,
             rdp_h264,
-            native_vp9: choices.vp9 == Vp9Encoder::Native,
+            native_vp9: choices.vp9 == Vp9Encoder::Native && !self.png_tiles.on(),
+            png_tiles: self.png_tiles,
         }
     }
 
@@ -1012,8 +1062,9 @@ impl TargetConfig {
                 passthrough: if self.egfx() { &[Passthrough::RdpGraphics] } else { &[] },
                 placement: self.virtual_displays > 1,
                 pipeline: self.egfx(),
-                // The pipeline passes in every session: only the bitmap path is VP9.
-                vp9: !self.egfx() && NATIVE_VP9,
+                // The pipeline passes in every session: only the bitmap path is
+                // VP9, and not when it goes as tiles.
+                vp9: !self.egfx() && !self.png_tiles.on() && NATIVE_VP9,
             },
             // Read as any VNC server, which carries no sound and is shown at its
             // own size.
@@ -1794,6 +1845,17 @@ impl ConfigFile {
                  to switch. Remove the key.",
                 target.name,
                 target.protocol.name()
+            );
+            // Tiles are what a Windows host draws its bitmap path with, and the
+            // only picture they replace is that path's VP9. A second display is
+            // left out: its tab is a stream of its own, painted from a column whose
+            // edge need not fall on the tile grid.
+            anyhow::ensure!(
+                !target.png_tiles.on()
+                    || (target.protocol == Protocol::Rdp && !target.egfx() && target.virtual_displays == 1),
+                "target {:?} sets png_tiles, which only an rdp target with egfx = false and one \
+                 virtual display sends. Remove the key, or set egfx = false.",
+                target.name
             );
             // A count of virtual displays is a count the engine asks the remote
             // for, and two remotes create them: a Windows host and a Mac in High
@@ -3166,6 +3228,7 @@ mod tests {
                 rdp_graphics: false,
                 rdp_h264: false,
                 native_vp9: false,
+                png_tiles: crate::config::PngTiles::Off,
             }
         );
     }
@@ -3183,6 +3246,7 @@ mod tests {
                 rdp_graphics: false,
                 rdp_h264: false,
                 native_vp9: false,
+                png_tiles: crate::config::PngTiles::Off,
             }
         );
     }
@@ -4079,6 +4143,43 @@ vnc_password = \"x\"")).unwrap();
         );
     }
 
+    /// TESTING ONLY tiles: off unless written, taken on an rdp target's bitmap path
+    /// with one display, where the plan carries it, the card names it and the
+    /// picker offers no VP9 encoder; refused wherever there is no such path.
+    #[test]
+    fn png_tiles_belongs_to_the_bitmap_path_alone() {
+        let plain = ConfigFile::parse(&rdp_toml("egfx = false")).unwrap().targets.remove(0);
+        assert_eq!(plain.png_tiles, PngTiles::Off);
+        assert_eq!(plain.render_plan(Choices::default(), Decoders::ALL).png_tiles, PngTiles::Off);
+
+        for (value, want, card) in [
+            ("on", PngTiles::On, "PNG tiles (testing only)"),
+            ("debug", PngTiles::Debug, "PNG tiles, debug overlay (testing only)"),
+        ] {
+            let target = ConfigFile::parse(&rdp_toml(&format!("egfx = false\npng_tiles = \"{value}\"")))
+                .unwrap()
+                .targets
+                .remove(0);
+            let vp9 = Choices { vp9: Vp9Encoder::Native, ..Choices::default() };
+            let plan = target.render_plan(vp9, Decoders::ALL);
+            assert_eq!((plan.png_tiles, plan.native_vp9), (want, false), "no VP9 is encoded beside tiles");
+            assert_eq!(plan.describe(), card);
+            assert!(!target.offers().vp9, "the picker offers no VP9 encoder for tiles");
+        }
+
+        for (keys, why) in [
+            ("png_tiles = \"on\"", "the pipeline is on"),
+            ("egfx = true\npng_tiles = \"debug\"", "the pipeline is on"),
+            ("egfx = false\nvirtual_displays = 2\npng_tiles = \"on\"", "two displays"),
+        ] {
+            let err = ConfigFile::parse(&rdp_toml(keys)).expect_err(why);
+            assert!(format!("{err:#}").contains("png_tiles"), "{why}: {err:#}");
+        }
+        let err = ConfigFile::parse(&vnc_toml("png_tiles = \"on\"")).expect_err("a vnc target");
+        assert!(format!("{err:#}").contains("only an rdp target with egfx = false"), "{err:#}");
+        assert!(ConfigFile::parse(&rdp_toml("egfx = false\npng_tiles = \"sometimes\"")).is_err());
+    }
+
     /// EGFX is RDP's, and refused on VNC by name — either value, since a key
     /// that could not do anything is a config error, not a preference. On RDP the
     /// key is read, and `false` is the bitmap path.
@@ -4368,7 +4469,7 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, png_tiles: crate::config::PngTiles::Off });
         assert_eq!(plan.describe(), "video q80 · libvpx · adaptive");
     }
 
@@ -4380,7 +4481,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, png_tiles: crate::config::PngTiles::Off });
         assert_eq!(plan.describe(), "video q80 · libvpx");
     }
 

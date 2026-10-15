@@ -2299,6 +2299,7 @@ mod tests {
             domain: None,
             size: Some((1, 1)),
             egfx: None,
+            png_tiles: crate::config::PngTiles::Off,
             virtual_displays: 1,
             camera: false,
             microphone: false,

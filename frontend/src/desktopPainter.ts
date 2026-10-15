@@ -78,6 +78,8 @@ export interface DesktopPainter {
   setVideoFormat(format: VideoFormat): void;
   /** An RDP host's graphics pipeline starts, for the worker to compose. */
   startGraphics(): void;
+  /** TESTING ONLY. The picture is PNG tiles, with the debug overlay or not. */
+  startTiles(debug: boolean): void;
   /** The part of the pipeline's picture this page's display is (`graphicsView`). */
   setGraphicsView(part: PicturePart): void;
   /**
@@ -200,6 +202,9 @@ export function desktopPainterFor(
     },
     startGraphics() {
       post({ type: "graphicsStart" });
+    },
+    startTiles(debug) {
+      post({ type: "tilesStart", debug });
     },
     setGraphicsView(part) {
       post({ type: "graphicsView", part });

@@ -89,26 +89,35 @@ def batch_records(frame: bytes) -> int:
     """Print one screen batch's records and return its video units.
 
     Parsed here rather than trusted from anywhere: a VIDEO record is
-    ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``."""
+    ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``, and a TILE record
+    (testing only) ``0x05 | u16 x | u16 y | u16 w | u16 h | u32 len | png``."""
     count = int.from_bytes(frame[2:4], "little")
     sequence = int.from_bytes(frame[4:8], "little")
     at = 8
     video = 0
+    records = 0
     parts = []
     while at < len(frame):
         op = frame[at]
+        field = lambda offset: int.from_bytes(frame[at + offset : at + offset + 2], "little")  # noqa: E731
         if op == 0x03:
-            w = int.from_bytes(frame[at + 2 : at + 4], "little")
-            h = int.from_bytes(frame[at + 4 : at + 6], "little")
+            w, h = field(2), field(4)
             length = int.from_bytes(frame[at + 6 : at + 10], "little")
             key = " key" if frame[at + 1] & 1 else ""
             parts.append(f"video {w}x{h}{key} {length}B")
             video += 1
             at += 10 + length
+        elif op == 0x05:
+            x, y, w, h = field(1), field(3), field(5), field(7)
+            length = int.from_bytes(frame[at + 9 : at + 13], "little")
+            assert frame[at + 13 : at + 17] == b"\x89PNG", "a tile is a PNG"
+            parts.append(f"tile {w}x{h}@{x},{y} {length}B")
+            at += 13 + length
         else:
             raise AssertionError(f"unknown record op {op:#x}")
+        records += 1
     assert at == len(frame), "records must exactly fill the frame"
-    assert video == count, "the header's count must match the records"
+    assert records == count, "the header's count must match the records"
     shown = ", ".join(parts[:6]) + (f", ... ({len(parts)} records)" if len(parts) > 6 else "")
     print(f"  batch #{sequence}: {shown}")
     return video

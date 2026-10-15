@@ -196,3 +196,14 @@ test("the Render row waits for the target, then names its dial", () => {
   assert.equal(renderLabel(""), "Waiting for the target");
   assert.equal(renderLabel(plan), plan);
 });
+
+test("tiles say they are tiles, and whether the overlay is drawn", () => {
+  assert.equal(
+    videoLabel({ decode: "", passthrough: false, tiles: "on" }, null),
+    "Not in use: PNG tiles from the gateway (testing only)",
+  );
+  assert.equal(
+    videoLabel({ decode: "", passthrough: false, tiles: "debug" }, null),
+    "Not in use: PNG tiles from the gateway, debug overlay (testing only)",
+  );
+});

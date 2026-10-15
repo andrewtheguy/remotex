@@ -2,7 +2,7 @@
 //! messages flush the pending batch to preserve ordering against the records
 //! around them, and batches are bounded.
 
-use crate::protocol::{self, GraphicsUnit, ServerMsg, VideoUnit, WireFrame, batch};
+use crate::protocol::{self, GraphicsUnit, ServerMsg, TileUnit, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead.
@@ -84,6 +84,13 @@ impl Wire {
                             self.flush(&mut frames)?;
                         }
                     }
+                    // A record each, so a take of tiles is split across batches
+                    // where the caps fall like any run of units.
+                    ServerMsg::Tiles(tiles) => {
+                        for tile in tiles {
+                            self.push(Record::Tile(tile), &mut frames)?;
+                        }
+                    }
                     // Audio has no pixel-order dependency, so do not delay it
                     // behind the current batch.
                     ServerMsg::Audio(packets) => {
@@ -148,6 +155,11 @@ impl Wire {
                     painted.extend(unit.frame);
                     unit.held
                 }
+                Record::Tile(tile) => {
+                    self.totals.tile(tile.record_len());
+                    tile.write_record(&mut frame);
+                    tile.held
+                }
             });
         }
         self.pending_bytes = 0;
@@ -161,6 +173,7 @@ impl Wire {
 enum Record {
     Video(VideoUnit),
     Graphics(GraphicsUnit),
+    Tile(TileUnit),
 }
 
 impl Record {
@@ -168,6 +181,7 @@ impl Record {
         match self {
             Record::Video(unit) => unit.record_len(),
             Record::Graphics(unit) => unit.record_len(),
+            Record::Tile(tile) => tile.record_len(),
         }
     }
 }
@@ -186,6 +200,9 @@ pub struct Totals {
     /// Runs of a passed graphics pipeline and their record bytes.
     pub graphics: u64,
     pub graphics_bytes: u64,
+    /// Tiles of a picture sent as tiles (testing only) and their record bytes.
+    pub tiles: u64,
+    pub tile_bytes: u64,
     /// Audio packets and their binary-frame bytes. On a separate socket, so on any
     /// one `Wire` these and the video counters are mutually exclusive.
     pub audio_frames: u64,
@@ -221,6 +238,11 @@ impl Totals {
         self.graphics_bytes += len as u64;
     }
 
+    fn tile(&mut self, len: usize) {
+        self.tiles += 1;
+        self.tile_bytes += len as u64;
+    }
+
     fn text(&mut self, len: usize) {
         self.text_frames += 1;
         self.text_bytes += len as u64;
@@ -231,8 +253,8 @@ impl std::fmt::Display for Totals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} binary frames / {} bytes carrying {} video records / {} bytes \
-             and {} graphics records / {} bytes, \
+            "{} binary frames / {} bytes carrying {} video records / {} bytes, \
+             {} graphics records / {} bytes and {} tile records / {} bytes, \
              {} text frames / {} bytes, largest binary {} bytes, \
              {} audio frames / {} bytes carrying {} audio packets",
             self.binary_frames,
@@ -241,6 +263,8 @@ impl std::fmt::Display for Totals {
             self.video_bytes,
             self.graphics,
             self.graphics_bytes,
+            self.tiles,
+            self.tile_bytes,
             self.text_frames,
             self.text_bytes,
             self.largest_binary,
@@ -550,6 +574,54 @@ mod tests {
             })
             .collect();
         assert_eq!(shape, vec![(2, 1), (1, 1), (2, 0)], "records, and frames owed, in each batch");
+    }
+
+    /// A take of tiles is a record each, in its place behind the message that starts
+    /// the picture, split across batches where the byte cap falls, each tile whole.
+    #[test]
+    fn tiles_are_a_record_each_split_where_the_cap_falls() {
+        let tile = |seed: u8, len: usize| TileUnit {
+            x: u16::from(seed) * 64,
+            y: 64,
+            w: 64,
+            h: 32,
+            data: vec![seed; len],
+            held: Held::default(),
+        };
+        let mut wire = Wire::default();
+        let frames = wire
+            .encode(vec![
+                ServerMsg::TilesStart { debug: true },
+                ServerMsg::Tiles(vec![tile(1, 10), tile(2, MAX_BATCH_BYTES - 100), tile(3, 100)]),
+            ])
+            .unwrap();
+        let WireFrame::Text(text) = &frames[0] else {
+            panic!("the start goes out first, as text: {:?}", frames[0]);
+        };
+        assert_eq!(text, r#"{"type":"tilesStart","debug":true}"#);
+
+        // Parsed by hand: op, the rectangle, a length, then the PNG.
+        let mut seen = Vec::new();
+        for frame in binary(&frames) {
+            let count = usize::from(u16::from_le_bytes([frame[2], frame[3]]));
+            let mut at = batch::HEADER_LEN;
+            for _ in 0..count {
+                assert_eq!(frame[at], 0x05, "a TILE record");
+                let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
+                let len = u32::from_le_bytes([frame[at + 9], frame[at + 10], frame[at + 11], frame[at + 12]]) as usize;
+                let png = &frame[at + 13..at + 13 + len];
+                assert!(png.iter().all(|b| *b == png[0]), "the tile is whole");
+                seen.push((le(1), le(3), le(5), le(7), png[0], len));
+                at += 13 + len;
+            }
+            assert_eq!(at, frame.len(), "records must exactly fill the frame");
+        }
+        assert_eq!(
+            seen,
+            vec![(64, 64, 64, 32, 1, 10), (128, 64, 64, 32, 2, MAX_BATCH_BYTES - 100), (192, 64, 64, 32, 3, 100)]
+        );
+        assert_eq!(binary(&frames).len(), 2, "the third tile was past the cap");
+        assert_eq!(wire.totals.tiles, 3);
     }
 
     /// A unit's share of the queue budget rides the batch it went out in.

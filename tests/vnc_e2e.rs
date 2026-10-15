@@ -84,6 +84,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             // A plain target states no size: it is shown at the server's own.
             size: None,
             egfx: None,
+            png_tiles: remotex::config::PngTiles::Off,
             virtual_displays: 1,
             camera: false,
             microphone: false,

@@ -324,6 +324,14 @@ A session's picture reaches the browser one of two ways, both ordinary:
   asks to pass joins them with a rule of its own; do not refuse it on this
   rule's account.
 
+One exception is for testing only: an RDP target on the bitmap path with
+`png_tiles` set sends a PNG of each 64×64 tile that changed instead of VP9
+([`src/tiles.rs`](../src/tiles.rs)), the groundwork for a
+[lossless picture](roadmap.md#a-lossless-picture-for-a-session-that-asks-for-one).
+It is lossless and follows nothing of the browser's link but the queue's
+backpressure, so it is for a LAN, and it does not make PNG a second picture
+path for anything else.
+
 The gateway keeps to one encoder: whatever it transcodes goes to VP9, and a
 second encoder (H.264, AV1 or any other), a codec probe, or a codec key that
 selects one is not added as a side effect of other work. The rule is about the
@@ -1976,6 +1984,7 @@ u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
 VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
 GRAPHICS op 0x04: u32 len | commands[len]
+TILE     op 0x05: u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 ```
 
 One frame carries every record ready at once, so a backlog does not cost one
@@ -1991,6 +2000,15 @@ any other bit is rejected the same way, as is a number or a frame bit without
 is a run of that pipeline's commands, whole, which means something only after
 every run before it from the `graphicsStart` that began the pipeline. One of no
 length is rejected.
+
+A `TILE` record (testing only, `png_tiles`) is a PNG of the desktop's `w`×`h`
+rectangle at `(x, y)`, one cell of a 64-pixel grid from its top left, drawn
+there. A `tilesStart` control message precedes the first tile of every picture
+a page starts from — the session's, a reattach's, a resize's — which is every
+cell of the desktop; after it come only the cells that changed. Its `debug`
+has the page keep the tiles on a clean picture off screen and show it with the
+grid and a fading mark on each tile painted (`frontend/src/tileDebug.ts`). A
+tile with no size or no PNG is rejected.
 
 `sequence` starts at one and increases for the lifetime of one session-socket
 attachment. After the paint worker has finished the batch's ordered

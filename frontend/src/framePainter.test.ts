@@ -1454,3 +1454,117 @@ test("the attachment's end gives the software decoder's picture back", async () 
   assert.deepEqual(shown, [true, false]);
   assert.deepEqual([planes.made, planes.closed], [1, 1]);
 });
+
+// TESTING ONLY tiles, as `batch` in src/protocol.rs lays a TILE record out: op
+// 0x05, x, y, w and h as u16s, a u32 length, the PNG.
+function tileFrame(
+  tiles: { x: number; y: number; w: number; h: number; png: number[] }[],
+): ArrayBuffer {
+  const bytes: number[] = [];
+  const u16 = (n: number) => bytes.push(n & 0xff, (n >> 8) & 0xff);
+  const u32 = (n: number) =>
+    bytes.push(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff);
+  bytes.push(0x02, 0x00);
+  u16(tiles.length);
+  u32(1);
+  for (const tile of tiles) {
+    bytes.push(0x05);
+    u16(tile.x);
+    u16(tile.y);
+    u16(tile.w);
+    u16(tile.h);
+    u32(tile.png.length);
+    bytes.push(...tile.png);
+  }
+  return new Uint8Array(bytes).buffer;
+}
+
+/**
+ * A painter whose tiles "decode" to a picture named by their PNG's first byte,
+ * and whose PNG `[0]` does not decode at all.
+ */
+function tilePainter() {
+  const draws: { image: number; x: number; y: number }[] = [];
+  const closed: number[] = [];
+  const reported: { x: number; y: number; w: number; h: number }[][] = [];
+  const tileContext = {
+    drawImage(image: { id: number }, x: number, y: number) {
+      draws.push({ image: image.id, x, y });
+    },
+  } as unknown as CanvasRenderingContext2D;
+  const painter = createFramePainter({
+    context: () => tileContext,
+    onVideoError: (error) => {
+      videoErrors.push(error);
+    },
+    onVideoNeedsKeyframe: (reason) => {
+      videoKeyframeAsks.push(reason);
+    },
+    decodeTile: (png) =>
+      png[0] === 0
+        ? Promise.reject(new Error("not a PNG"))
+        : Promise.resolve({
+            id: png[0],
+            close() {
+              closed.push(png[0]);
+            },
+          } as unknown as ImageBitmap),
+    onTilesPainted: (rects) => {
+      reported.push(rects);
+    },
+  });
+  return { painter, draws, closed, reported };
+}
+
+test("tiles are drawn where they say, in wire order, and each picture let go", async () => {
+  const { painter, draws, closed, reported } = tilePainter();
+  painter.startTiles();
+  await painter.draw(
+    tileFrame([
+      { x: 0, y: 0, w: 64, h: 64, png: [1] },
+      { x: 64, y: 0, w: 36, h: 64, png: [2] },
+      { x: 0, y: 0, w: 64, h: 64, png: [3] },
+    ]),
+  );
+  assert.deepEqual(draws, [
+    { image: 1, x: 0, y: 0 },
+    { image: 2, x: 64, y: 0 },
+    { image: 3, x: 0, y: 0 },
+  ]);
+  assert.deepEqual(closed, [1, 2, 3]);
+  assert.deepEqual(reported, [
+    [
+      { x: 0, y: 0, w: 64, h: 64 },
+      { x: 64, y: 0, w: 36, h: 64 },
+      { x: 0, y: 0, w: 64, h: 64 },
+    ],
+  ]);
+  assert.deepEqual(videoKeyframeAsks, []);
+});
+
+test("a tile that does not decode asks for a repaint, and the rest are drawn", async () => {
+  const { painter, draws, reported } = tilePainter();
+  painter.startTiles();
+  await painter.draw(
+    tileFrame([
+      { x: 0, y: 0, w: 64, h: 64, png: [0] },
+      { x: 64, y: 0, w: 64, h: 64, png: [5] },
+    ]),
+  );
+  assert.deepEqual(draws, [{ image: 5, x: 64, y: 0 }]);
+  assert.deepEqual(reported, [[{ x: 64, y: 0, w: 64, h: 64 }]]);
+  assert.equal(videoKeyframeAsks.length, 1);
+  assert.match(videoKeyframeAsks[0], /64x64 tile at 0,0 did not decode/);
+});
+
+test("tiles decoded for an attachment that ended are let go, never drawn", async () => {
+  const { painter, draws, closed } = tilePainter();
+  painter.startTiles();
+  const drawing = painter.draw(
+    tileFrame([{ x: 0, y: 0, w: 64, h: 64, png: [7] }]),
+  );
+  painter.clear();
+  await drawing;
+  assert.deepEqual(draws, []);
+  assert.deepEqual(closed, [7]);
+});

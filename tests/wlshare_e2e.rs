@@ -117,6 +117,7 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         domain: None,
         size: None,
         egfx: None,
+        png_tiles: remotex::config::PngTiles::Off,
         virtual_displays: 1,
         camera: true,
         microphone: true,

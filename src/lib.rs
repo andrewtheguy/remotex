@@ -32,6 +32,7 @@ pub mod session;
 pub mod shadow;
 pub mod stream;
 pub mod throughput;
+pub mod tiles;
 pub mod video;
 pub mod vnc;
 pub mod vnc_apple;
