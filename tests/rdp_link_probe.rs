@@ -451,6 +451,7 @@ async fn a_real_host_draws_for_a_slow_client() {
         placement: remotex::config::Placement::Right,
         resize: false,
         egfx: true,
+        pass_bitmaps: false,
         h264,
         autodetect,
         multitransport,

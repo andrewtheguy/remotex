@@ -277,6 +277,7 @@ mod tests {
             apple_h264: false,
             rdp_graphics: false,
             rdp_h264: false,
+            rdp_bitmaps: false,
             native_vp9: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());

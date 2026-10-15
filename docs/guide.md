@@ -61,6 +61,7 @@ config key.
 |---|---|---|---|---|---|
 | `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | high quality or adaptive H.264 | — |
 | `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — | libvpx or native\* |
+| `rdp` with `egfx = false` and `bitmap_passthrough` (testing) | no | off, Opus or FLAC | the bitmap updates, always passed | — | — |
 | `vnc` | no | none | — | — | libvpx or native\* |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
 | `vnc`, `ard` | no | none | — | — | libvpx or native\* |
@@ -147,6 +148,13 @@ touch.
   gateway encodes as VP9: the target for a browser that cannot compose the
   pipeline. The desktop then keeps its size: without the pipeline Windows
   resizes by rebuilding the share, which this gateway does not take.
+- **Testing only:** `bitmap_passthrough = "enabled"` beside `egfx = false`
+  passes those bitmap updates to the browser instead, which composes them with
+  the pipeline's compositor and needs what it needs. The picture is lossless:
+  the planar codec the updates come in is, as this gateway negotiates it.
+  `"debug"` also draws the 64-pixel grid of tiles the host sends them in over
+  the picture, and tints each tile as it arrives. `"disabled"`, the default,
+  encodes them as VP9. It is refused with `virtual_displays = 2`.
 - **Alpha:** `virtual_displays = 2` asks the host for two displays, each the
   session's size. Where the second sits against the first is chosen under the
   target at the picker, **Second display**: right, left, top or bottom, to match

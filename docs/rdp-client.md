@@ -567,6 +567,17 @@ no resize at the picker. Every server that is not Windows takes this path whatev
 the key, as do the bitmap updates a Windows host sends before it confirms the
 pipeline.
 
+TESTING ONLY: `Connect::pass_bitmaps`, which a target's `bitmap_passthrough`
+asks for, hands the updates to the caller instead (`Event::Bitmaps`): the Bitmap
+Updates of each fast-path PDU, their bodies from `updateType` on, laid end to
+end. Each is read to its last rectangle as it passes, so one that does not
+parse, or names a depth other than 32, still ends the session here; nothing is
+decoded, and the framebuffer holds nothing of the desktop. The caller composes
+them with `BitmapCompositor` in the graphics crate. Measured against a Windows
+11 host at 1920×1080, every rectangle was a 64×64 tile on a 64-pixel grid, the
+bottom row cut to the desktop, and planar-coded: run-length coded where that
+paid, and raw planes (12,290 bytes a tile) where it did not.
+
 That is a deliberate narrowing, not an oversight, and not a limit of the protocol.
 MS-RDPEDISP 1.3 has a server without the pipeline answer a monitor layout with a
 Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3): a Deactivate All, then

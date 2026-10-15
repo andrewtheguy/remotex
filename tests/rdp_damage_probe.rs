@@ -86,6 +86,7 @@ fn connect() -> (Session, Page) {
         placement: remotex::config::Placement::Right,
         resize: offers.resize,
         egfx: target.egfx(),
+        pass_bitmaps: false,
         h264: H264::Refused,
         autodetect: false,
         multitransport: false,

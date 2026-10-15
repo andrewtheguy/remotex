@@ -1,3 +1,4 @@
+import { createTileHeat, type TileHeat } from "./bitmapDebug.ts";
 import {
   createRelaySink,
   createRelaySource,
@@ -7,6 +8,7 @@ import {
   type RelaySource,
 } from "./displayRelay.ts";
 import {
+  type BitmapDesktop,
   type EgfxCompositor,
   type EgfxFactory,
   loadEgfx,
@@ -66,6 +68,14 @@ export interface FramePainter {
    * compositor stood before is done with.
    */
   startGraphics(): void;
+  /**
+   * TESTING ONLY: adopt a `bitmapsStart`: an RDP host's bitmap updates are passed
+   * from here, onto a blank desktop of `width` by `height`, and the GRAPHICS
+   * records after it are those updates. With `debug` the tile grid and the tiles
+   * as they arrive are drawn over the picture (bitmapDebug.ts). Whatever decoder
+   * or compositor stood before is done with.
+   */
+  startBitmaps(width: number, height: number, debug: boolean): void;
   /**
    * Adopt a `graphicsView` on the page that composes the pipeline: the part of
    * its picture this display is, shown from now, by this pipeline and the next.
@@ -166,8 +176,16 @@ export function createFramePainter(options: {
     shown: boolean;
     broken: boolean;
     ready: Promise<void>;
+    /**
+     * TESTING ONLY: for a debug session of bitmap updates, when each tile last
+     * arrived, and the next draw of their fading while any is warm.
+     */
+    heat: TileHeat | null;
+    fading: ReturnType<typeof setTimeout> | null;
   }
   let pipeline: Pipeline | null = null;
+  // How often a debug session's fading tiles are drawn again (TESTING ONLY).
+  const FADE_STEP_MS = 40;
   const loadCompositor = options.loadCompositor ?? (() => loadEgfx());
   const makeGraphicsVideo = options.makeGraphicsVideo ?? createEgfxVideo;
   const makePicture =
@@ -198,6 +216,10 @@ export function createFramePainter(options: {
   // stays where it is, showing what was last drawn.
   const stop = (done: Pipeline) => {
     done.broken = true;
+    if (done.fading !== null) {
+      clearTimeout(done.fading);
+      done.fading = null;
+    }
     // Settles the unit a run is waiting on, which is what lets a run that this
     // ended in mid-decode come back and find it ended.
     done.video?.close();
@@ -425,6 +447,10 @@ export function createFramePainter(options: {
       }
       run = compositor.compose(record.data);
       picture.upload(run);
+      if (current.heat) {
+        current.heat.stamp(run.painted, performance.now());
+        drawTiles(current);
+      }
     } catch (error) {
       endPipeline(current, describe(error));
       return;
@@ -436,6 +462,76 @@ export function createFramePainter(options: {
     if (!current.shown && run.width > 0 && run.height > 0) {
       current.shown = true;
       options.onGraphicsShown?.(true);
+    }
+  };
+
+  // A pipeline begins, from nothing — or, TESTING ONLY, a desktop of bitmap
+  // updates of the size `bitmaps` names, with its tiles drawn over it in `debug`.
+  const begin = (bitmaps: BitmapDesktop | null, debug: boolean) => {
+    releaseVideo();
+    const starting: Pipeline = {
+      compositor: null,
+      picture: null,
+      video: null,
+      shown: false,
+      broken: false,
+      ready: Promise.resolve(),
+      heat:
+        bitmaps && debug ? createTileHeat(bitmaps.width, bitmaps.height) : null,
+      fading: null,
+    };
+    // The second display's end, reading the picture of whichever pipeline is
+    // current when an update goes out. A channel that cannot be opened leaves
+    // the tab unpainted, and this page's picture as it is.
+    if (!source) {
+      try {
+        source = createRelaySource(makeRelay(), () =>
+          pipeline?.compositor && !pipeline.broken
+            ? pipeline.compositor.picture()
+            : null,
+        );
+      } catch (error) {
+        console.warn("the second display's channel did not open:", error);
+      }
+    }
+    starting.ready = loadCompositor()
+      .then((make) => {
+        // Replaced or cleared while the module loaded: nothing to make one for.
+        if (!starting.broken) {
+          starting.compositor = make(bitmaps ?? undefined);
+          starting.picture = makePicture();
+          starting.picture.window(graphicsPart);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!starting.broken) {
+          finish(starting);
+          options.onVideoError(
+            `This browser could not load the graphics compositor (${describe(error)}).`,
+          );
+        }
+      });
+    pipeline = starting;
+  };
+
+  // TESTING ONLY: the tiles of a debug session of bitmap updates over its picture,
+  // as warm as they are now, and again while any is, for the fade.
+  const drawTiles = (current: Pipeline) => {
+    const { heat, picture } = current;
+    if (!heat || !picture || current.broken) {
+      return;
+    }
+    const { heat: values, warm } = heat.sample(performance.now());
+    picture.tiles(values, heat.columns, heat.rows);
+    if (warm && current.fading === null) {
+      current.fading = setTimeout(() => {
+        current.fading = null;
+        try {
+          drawTiles(current);
+        } catch (error) {
+          endPipeline(current, describe(error));
+        }
+      }, FADE_STEP_MS);
     }
   };
 
@@ -659,47 +755,10 @@ export function createFramePainter(options: {
       graphicsPart = null;
     },
     startGraphics() {
-      releaseVideo();
-      const starting: Pipeline = {
-        compositor: null,
-        picture: null,
-        video: null,
-        shown: false,
-        broken: false,
-        ready: Promise.resolve(),
-      };
-      // The second display's end, reading the picture of whichever pipeline is
-      // current when an update goes out. A channel that cannot be opened leaves
-      // the tab unpainted, and this page's picture as it is.
-      if (!source) {
-        try {
-          source = createRelaySource(makeRelay(), () =>
-            pipeline?.compositor && !pipeline.broken
-              ? pipeline.compositor.picture()
-              : null,
-          );
-        } catch (error) {
-          console.warn("the second display's channel did not open:", error);
-        }
-      }
-      starting.ready = loadCompositor()
-        .then((make) => {
-          // Replaced or cleared while the module loaded: nothing to make one for.
-          if (!starting.broken) {
-            starting.compositor = make();
-            starting.picture = makePicture();
-            starting.picture.window(graphicsPart);
-          }
-        })
-        .catch((error: unknown) => {
-          if (!starting.broken) {
-            finish(starting);
-            options.onVideoError(
-              `This browser could not load the graphics compositor (${describe(error)}).`,
-            );
-          }
-        });
-      pipeline = starting;
+      begin(null, false);
+    },
+    startBitmaps(width, height, debug) {
+      begin({ width, height }, debug);
     },
     setGraphicsView(part) {
       graphicsPart = part;

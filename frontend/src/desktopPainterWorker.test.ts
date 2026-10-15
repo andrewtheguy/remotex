@@ -54,6 +54,9 @@ function harness() {
     startGraphics() {
       calls.push("graphics");
     },
+    startBitmaps(w, h, debug) {
+      calls.push(`bitmaps ${w}x${h}${debug ? " debug" : ""}`);
+    },
     setGraphicsView(part) {
       calls.push(`view:${part.x},${part.y} ${part.w}x${part.h}`);
     },

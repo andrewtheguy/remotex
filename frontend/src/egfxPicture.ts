@@ -15,6 +15,11 @@
 // (`graphicsView`), one display's column. A tab showing the second display holds a
 // picture of its own, patched from the session page's rather than composed
 // (displayRelay.ts), and shows it whole.
+//
+// TESTING ONLY: a debug session of passed bitmap updates has the tile grid and
+// each tile's warmth drawn over the picture here (bitmapDebug.ts), by the shader,
+// from a texture of one texel a tile: the picture's own texture is left exact.
+import { TILE } from "./bitmapDebug.ts";
 import type { ComposedRun } from "./egfxCompositor.ts";
 import { openPictureCanvas } from "./glPicture.ts";
 
@@ -60,6 +65,12 @@ export interface GraphicsPicture {
    */
   blank(width: number, height: number): void;
   /**
+   * TESTING ONLY: draw the tile grid over the picture, each tile tinted by its
+   * warmth in `heat` (one byte a tile, `columns` across, row by row from the
+   * top), and draw it; or, for null, draw the picture alone again.
+   */
+  tiles(heat: Uint8Array | null, columns: number, rows: number): void;
+  /**
    * Give the GPU its memory back, and leave the canvas black: what it shows next
    * is another pipeline's.
    */
@@ -71,15 +82,33 @@ export interface GraphicsPicture {
 // canvas's rows go up. Texel coordinates at full precision: at half precision a
 // wide desktop's neighbouring columns share a value, and NEAREST then repeats or
 // drops one.
+//
+// With `debug`, the pixel of the picture `at` names is found in its tile: the
+// first row and column of every tile are drawn as the grid, and the whole tile
+// is tinted by its texel in `heat`. Without it neither is read.
 const FRAGMENT = `#version 300 es
 precision highp float;
 uniform sampler2D picture;
+uniform sampler2D heat;
 uniform vec4 view;
+uniform vec2 size;
+uniform bool debug;
 in vec2 uv;
 out vec4 color;
 void main() {
   vec2 at = view.xy + vec2(uv.x, 1.0 - uv.y) * view.zw;
-  color = vec4(texture(picture, at).rgb, 1.0);
+  vec3 rgb = texture(picture, at).rgb;
+  if (debug) {
+    vec2 pixel = floor(at * size);
+    vec2 tile = floor(pixel / ${TILE}.0);
+    float warm = texelFetch(heat, ivec2(tile), 0).r;
+    rgb = mix(rgb, vec3(1.0, 0.3, 0.1), warm * 0.45);
+    vec2 inside = pixel - tile * ${TILE}.0;
+    if (inside.x < 1.0 || inside.y < 1.0) {
+      rgb = mix(rgb, vec3(0.0, 0.8, 1.0), 0.6);
+    }
+  }
+  color = vec4(rgb, 1.0);
 }`;
 
 /** `part` within a picture of `w` by `h`, or null for none of it inside. */
@@ -98,7 +127,14 @@ export function createGraphicsPicture(
   const surface = openPictureCanvas(canvas, FRAGMENT);
   const { gl } = surface;
   const viewAt = gl.getUniformLocation(surface.program, "view");
+  const sizeAt = gl.getUniformLocation(surface.program, "size");
+  const debugAt = gl.getUniformLocation(surface.program, "debug");
+  // The heat on the second texture unit, the picture on the first.
+  gl.uniform1i(gl.getUniformLocation(surface.program, "heat"), 1);
   let texture: WebGLTexture | null = null;
+  // TESTING ONLY: the tiles' warmth, while the tiles are drawn, and its size.
+  let heat: WebGLTexture | null = null;
+  let heatSize = { columns: 0, rows: 0 };
   // The picture's size: the texture's.
   let width = 0;
   let height = 0;
@@ -162,6 +198,8 @@ export function createGraphicsPicture(
       inside.w / width,
       inside.h / height,
     );
+    gl.uniform2f(sizeAt, width, height);
+    gl.uniform1i(debugAt, heat ? 1 : 0);
     surface.draw();
   };
 
@@ -251,9 +289,54 @@ export function createGraphicsPicture(
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
     },
+    tiles(values, columns, rows) {
+      surface.usable();
+      if (!values) {
+        gl.deleteTexture(heat);
+        heat = null;
+        heatSize = { columns: 0, rows: 0 };
+        present();
+        return;
+      }
+      gl.activeTexture(gl.TEXTURE1);
+      if (!heat || heatSize.columns !== columns || heatSize.rows !== rows) {
+        gl.deleteTexture(heat);
+        heat = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, heat);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, columns, rows);
+        heatSize = { columns, rows };
+      } else {
+        gl.bindTexture(gl.TEXTURE_2D, heat);
+      }
+      // A byte a texel, packed: none of what the picture's uploads set.
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        columns,
+        rows,
+        gl.RED,
+        gl.UNSIGNED_BYTE,
+        values,
+      );
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      gl.activeTexture(gl.TEXTURE0);
+      if (width > 0 && height > 0) {
+        present();
+      }
+    },
     close() {
       gl.deleteTexture(texture);
       texture = null;
+      gl.deleteTexture(heat);
+      heat = null;
       surface.close();
     },
   };

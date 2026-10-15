@@ -22,6 +22,12 @@
 // and each picture's samples copied into the module's memory by `supply`, before
 // the run is composed and paints them.
 //
+// TESTING ONLY: a host's bitmap updates, passed where the target asks
+// (`bitmapsStart`), are composed by the same module, with the planar decoder the
+// gateway decodes them with: a compositor made for a desktop of a given size,
+// whose GRAPHICS records are Bitmap Updates laid end to end. Nothing in one is
+// drawn against another, so such a compositor can start at any of them.
+//
 // The framebuffer stays in the module's memory, and a canvas takes no image data
 // out of a shared one; a WebGL texture takes an upload from one. So `pixels` is a
 // view on the framebuffer where it is, good until the next `compose`, and the
@@ -149,8 +155,17 @@ export interface Picture {
   pixels: Uint8ClampedArray;
 }
 
-/** Makes a compositor with nothing in it, for a pipeline that is starting. */
-export type EgfxFactory = () => EgfxCompositor;
+/** The desktop a compositor of bitmap updates paints, in its pixels. */
+export interface BitmapDesktop {
+  width: number;
+  height: number;
+}
+
+/**
+ * Makes a compositor with nothing in it, for a pipeline that is starting, or,
+ * given a desktop, for bitmap updates (TESTING ONLY).
+ */
+export type EgfxFactory = (bitmaps?: BitmapDesktop) => EgfxCompositor;
 
 let loaded: Promise<EgfxFactory> | null = null;
 
@@ -301,8 +316,10 @@ export function loadEgfx(
       if (threads > 0) {
         await startThreads(memory, threads);
       }
-      return () => {
-        const egfx = new Egfx();
+      return (bitmaps?: BitmapDesktop) => {
+        const egfx = bitmaps
+          ? Egfx.forBitmaps(bitmaps.width, bitmaps.height)
+          : new Egfx();
         // The module's memory is given back by `close`, and not from under a copy
         // the browser is still writing into it.
         let closed = false;

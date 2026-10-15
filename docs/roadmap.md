@@ -262,6 +262,11 @@ gateway ([Media paths](architecture.md#media-paths)). It would not reach a
 passed stream, which the gateway never decodes, so a Windows host would get it
 only with the pipeline off, and with that no resize.
 
+A first step is in, for testing: `bitmap_passthrough` on an `rdp` target with
+`egfx = false` passes the host's bitmap updates to the page, which composes
+them exactly ([RDP's bitmap updates, passed through](architecture.md#rdps-bitmap-updates-passed-through)).
+Nothing of it codes what moves as video yet.
+
 ## Not planned
 
 ### Decoding an RDP host's H.264 at the gateway

@@ -10,7 +10,12 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import type { RelayMessage, RelayPort } from "./displayRelay.ts";
-import type { ComposedRun, EgfxCompositor, Scanned } from "./egfxCompositor.ts";
+import type {
+  BitmapDesktop,
+  ComposedRun,
+  EgfxCompositor,
+  Scanned,
+} from "./egfxCompositor.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { EgfxVideo } from "./egfxVideo.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
@@ -189,6 +194,7 @@ beforeEach(() => {
   blanked = [];
   windows = [];
   patched = [];
+  tiled = [];
   shown = [];
   cropped = [];
   decoded = [];
@@ -615,6 +621,8 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
   const made: {
     fed: number[][];
     closed: boolean;
+    /** The desktop a compositor of bitmap updates was made for. */
+    desktop: BitmapDesktop | null;
     /** Each picture supplied: its number in its run, and the unit's byte. */
     supplied: number[][];
   }[] = [];
@@ -622,10 +630,11 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
     if (options.fail) {
       return Promise.reject(new Error("no module"));
     }
-    return Promise.resolve((): EgfxCompositor => {
+    return Promise.resolve((bitmaps?: BitmapDesktop): EgfxCompositor => {
       const record = {
         fed: [] as number[][],
         closed: false,
+        desktop: bitmaps ?? null,
         supplied: [] as number[][],
       };
       made.push(record);
@@ -744,6 +753,8 @@ let blanked: number[][] = [];
 let windows: (PicturePart | null)[] = [];
 /** What a picture was patched with: its size, the rectangles, the bytes. */
 let patched: [number, number, number[], number][] = [];
+/** What a picture was told of its tiles: the heat, the grid, or null for none. */
+let tiled: ([number[], number, number] | null)[] = [];
 /** What the page was told about showing the picture, in order. */
 let shown: boolean[] = [];
 
@@ -811,6 +822,9 @@ function graphicsPainter(
         patch(w, h, rects, pixels) {
           patched.push([w, h, Array.from(rects), pixels.length]);
         },
+        tiles(heat, columns, rows) {
+          tiled.push(heat ? [Array.from(heat), columns, rows] : null);
+        },
         blank(w, h) {
           if (options.blankFails) {
             throw new Error("the GPU refused the picture");
@@ -847,6 +861,32 @@ test("a pipeline's runs are composed in order and their rectangles uploaded", as
   assert.deepEqual(shown, [true]);
   assert.equal(decoders, 0, "a pipeline built a video decoder");
   assert.deepEqual(videoKeyframeAsks, []);
+});
+
+test("passed bitmap updates are composed onto the desktop they start with, and a debug session draws its tiles", async () => {
+  const { made, load } = fakeCompositors();
+  const p = graphicsPainter(load);
+  p.startBitmaps(64, 48, false);
+  await p.draw(graphicsFrame([[7], [9]]));
+  assert.deepEqual(made[0].desktop, { width: 64, height: 48 });
+  assert.deepEqual(made[0].fed, [[7], [9]]);
+  assert.deepEqual(uploaded, [
+    [7, 2, 3, 4],
+    [9, 2, 3, 4],
+  ]);
+  assert.deepEqual(tiled, [], "no tiles are drawn without debug");
+  assert.deepEqual(shown, [true]);
+
+  // Started again for a browser that attaches: a compositor with nothing in it.
+  p.startBitmaps(64, 48, true);
+  await p.draw(graphicsFrame([[11]]));
+  assert.equal(made.length, 2);
+  assert.equal(made[0].closed, true);
+  // The run painted inside the one tile of a 64 by 48 desktop, as it arrived.
+  assert.deepEqual(tiled, [[[255], 1, 1]]);
+  // Given back, and its fading with it.
+  p.clear();
+  assert.equal(made[1].closed, true);
 });
 
 test("a pipeline that starts again is composed from nothing", async () => {

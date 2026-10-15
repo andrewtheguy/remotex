@@ -33,6 +33,19 @@
 //! `RUST_LOG=remotex=info` to read it, and set [`DUMP_ENV`] to a directory to get
 //! the picture as PNG at each stage, for the check only eyes can make.
 //!
+//! ## Bitmap updates passed on
+//!
+//! With the pipeline off, [`PASS_BITMAPS_ENV`] has the session hand its bitmap
+//! updates on instead of decoding them (`Connect::pass_bitmaps`, which a target's
+//! `bitmap_passthrough` asks for), and the probe takes the page's part with the
+//! page's [`BitmapCompositor`]. It asserts a lit desktop composed from what was
+//! passed, and that the session drew nothing of it.
+//!
+//! ```sh
+//! REMOTEX_UAT_TARGET=<rdp target> REMOTEX_UAT_EGFX=0 REMOTEX_UAT_PASS_BITMAPS=1 \
+//!   cargo test --test rdp_client_probe a_real_host_paints_a_live_desktop -- --ignored --nocapture
+//! ```
+//!
 //! ## The clipboard
 //!
 //! Both directions of MS-RDPECLIP are lazy — a copy announces which formats it can be
@@ -120,6 +133,7 @@ use remotex::rdp_client::{
     AudioSink, Camera, CameraSink, Compositor, Connect, Event, Fed, Framebuffer, Input, MicrophoneSink, Session,
 };
 use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
+use remotex_rdp_graphics::BitmapCompositor;
 use remotex_rdp_graphics::avc::{Scanned, scan};
 use tokio::sync::mpsc::Receiver;
 
@@ -129,6 +143,10 @@ const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 /// Whether to offer the graphics pipeline: anything but `0` or `false` does, and so
 /// does leaving it unset.
 const EGFX_ENV: &str = "REMOTEX_UAT_EGFX";
+
+/// Whether the bitmap path's updates are passed on rather than decoded: `1` does,
+/// and only with the pipeline off.
+const PASS_BITMAPS_ENV: &str = "REMOTEX_UAT_PASS_BITMAPS";
 
 /// Whether a sound is playing on the remote for this run — set it to `1` when one is.
 /// A Windows host sends its format list only once something plays, so the
@@ -202,6 +220,11 @@ const F4: u8 = 0x3E;
 /// Whether this run offers the graphics pipeline — see [`EGFX_ENV`].
 fn egfx() -> bool {
     !matches!(std::env::var(EGFX_ENV).as_deref(), Ok("0") | Ok("false"))
+}
+
+/// Whether this run passes its bitmap updates on — see [`PASS_BITMAPS_ENV`].
+fn pass_bitmaps() -> bool {
+    !egfx() && matches!(std::env::var(PASS_BITMAPS_ENV).as_deref(), Ok(v) if !matches!(v, "" | "0" | "false"))
 }
 
 /// Whether this run was told a sound is playing on the remote — see [`AUDIO_ENV`].
@@ -328,7 +351,13 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
     });
     let target = common::uat_target(&name);
-    println!("rdp_client_probe: {name} ({}:{}), egfx {}", target.host, target.port, egfx());
+    println!(
+        "rdp_client_probe: {name} ({}:{}), egfx {}, bitmaps passed {}",
+        target.host,
+        target.port,
+        egfx(),
+        pass_bitmaps()
+    );
     let ear = Arc::new(Ear::default());
     let eye = Arc::new(Eye::default());
     let voice = Arc::new(Voice::default());
@@ -346,6 +375,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         // A resize is the pipeline's graphics reset; the bitmap path has none.
         resize: egfx(),
         egfx: egfx(),
+        pass_bitmaps: pass_bitmaps(),
         h264: H264::Refused,
         autodetect: false,
         multitransport: false,
@@ -484,7 +514,7 @@ struct Tally {
 impl Tally {
     /// Whether the host drew anything, on either path.
     fn drawn(&self) -> bool {
-        self.paints > 0 || self.frames > 0
+        self.paints > 0 || self.frames > 0 || self.page.bitmap_runs > 0
     }
 }
 
@@ -500,6 +530,11 @@ struct Page {
     bytes: u64,
     /// Frames the passed runs ended.
     composed_frames: u64,
+    /// The bitmap updates passed on, composed as the page composes them: made at
+    /// the first, at the size the session connected at.
+    bitmaps: Option<BitmapCompositor>,
+    bitmap_runs: u64,
+    bitmap_rects: u64,
 }
 
 impl std::fmt::Debug for Page {
@@ -509,6 +544,8 @@ impl std::fmt::Debug for Page {
             .field("runs", &self.runs)
             .field("bytes", &self.bytes)
             .field("composed_frames", &self.composed_frames)
+            .field("bitmap_runs", &self.bitmap_runs)
+            .field("bitmap_rects", &self.bitmap_rects)
             .finish()
     }
 }
@@ -554,6 +591,18 @@ async fn pump(
                     );
                 }
             }
+            Event::Bitmaps(run) => {
+                assert!(pass_bitmaps(), "bitmap updates were passed on a session that decodes them");
+                let page = &mut tally.page;
+                let compositor = page.bitmaps.get_or_insert_with(|| {
+                    let (width, height) = session.framebuffer().with(|frame| (frame.width, frame.height));
+                    BitmapCompositor::new(width, height).expect("a desktop the session holds")
+                });
+                let composed = compositor.compose(&run).expect("the passed bitmap updates compose");
+                page.bitmap_runs += 1;
+                page.bitmap_rects += composed.painted.len() as u64;
+                page.bytes += run.len() as u64;
+            }
             Event::Cursor(_) => tally.cursors += 1,
             Event::Resize { width, height, .. } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,
@@ -598,7 +647,11 @@ const DUMP_ENV: &str = "REMOTEX_UAT_DUMP";
 /// The desktop as it stands: the page's picture under the pipeline, the session's
 /// framebuffer on the bitmap path.
 fn picture<'a>(session: &'a Session, tally: &'a Tally) -> &'a Framebuffer {
-    if egfx() { tally.page.compositor.framebuffer() } else { session.framebuffer() }
+    match (&tally.page.bitmaps, egfx()) {
+        (Some(bitmaps), _) => bitmaps.framebuffer(),
+        (None, true) => tally.page.compositor.framebuffer(),
+        (None, false) => session.framebuffer(),
+    }
 }
 
 /// Write the picture as `<dir>/<name>.png` when [`DUMP_ENV`] names a directory.
@@ -679,7 +732,8 @@ async fn case() {
     // A desktop worth of drawing, and Display Control, before anything is resized.
     // Under the pipeline the drawing shows as frames; on the bitmap path, as paint.
     let egfx = egfx();
-    let drawn = |t: &Tally| if egfx { t.frames > 0 } else { t.paints > 0 };
+    let passed = pass_bitmaps();
+    let drawn = |t: &Tally| if egfx { t.frames > 0 } else if passed { t.page.bitmap_runs > 0 } else { t.paints > 0 };
     let mut tally = Tally::default();
     pump(&session, &mut events, &mut tally, Instant::now() + Duration::from_secs(8), |t| {
         (t.resize_ready || !egfx) && t.clipboard_ready && drawn(t)
@@ -698,6 +752,13 @@ async fn case() {
     if egfx {
         assert_eq!(tally.page.started, 1, "the pipeline was said to begin once");
         assert_eq!(tally.page.composed_frames, tally.frames, "every frame the session marked was in what it passed");
+        assert_eq!(picture(&session, &tally).with(|frame| (frame.width, frame.height)), (width, height));
+        session.framebuffer().with(|frame| {
+            assert!(frame.pixels.iter().all(|b| *b == 0), "the session drew into its own framebuffer");
+        });
+    }
+    if passed {
+        assert_eq!(tally.paints, 0, "the session painted what it passed on");
         assert_eq!(picture(&session, &tally).with(|frame| (frame.width, frame.height)), (width, height));
         session.framebuffer().with(|frame| {
             assert!(frame.pixels.iter().all(|b| *b == 0), "the session drew into its own framebuffer");
@@ -1090,6 +1151,7 @@ async fn pass_h264() {
         placement: remotex::config::Placement::Right,
         resize: false,
         egfx: true,
+        pass_bitmaps: false,
         h264: H264::ByRegion,
         autodetect: false,
         multitransport: false,

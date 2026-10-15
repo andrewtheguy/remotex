@@ -9,6 +9,11 @@
 //! The framebuffer stays in this module's memory, which is shared with the threads
 //! below: the page uploads the rectangles a run painted out of it, into a texture.
 //!
+//! TESTING ONLY: a session that passes a host's bitmap updates instead
+//! (`bitmap_passthrough` on a target with `egfx = false`) is composed here too, by
+//! an [`Egfx`] made with [`Egfx::for_bitmaps`]: the same planar decoder the gateway
+//! decodes them with, into the same kind of framebuffer.
+//!
 //! H.264 is the one codec not decoded here: the page decodes a run's access units
 //! with the browser's own decoder before it composes the run, and hands each
 //! picture's samples into this memory ([`Egfx::units`], [`Egfx::reserve`],
@@ -25,7 +30,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 
 use rayon::{ThreadBuilder, ThreadPoolBuilder};
-use remotex_rdp_graphics::Compositor;
+use remotex_rdp_graphics::framebuffer::Framebuffer;
+use remotex_rdp_graphics::{BitmapCompositor, Composed, Compositor};
 use remotex_rdp_graphics::avc::{self, Picture, Plane, Samples, Scanned, Window};
 use wasm_bindgen::prelude::*;
 
@@ -75,12 +81,30 @@ pub fn start_pool(threads: usize) -> Result<(), JsError> {
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
+/// What an [`Egfx`] composes.
+enum Composer {
+    /// A host's graphics pipeline.
+    Pipeline(Compositor),
+    /// TESTING ONLY: a host's bitmap updates.
+    Bitmaps(BitmapCompositor),
+}
+
+impl Composer {
+    fn framebuffer(&self) -> &Framebuffer {
+        match self {
+            Self::Pipeline(compositor) => compositor.framebuffer(),
+            Self::Bitmaps(compositor) => compositor.framebuffer(),
+        }
+    }
+}
+
 /// One pipeline's compositor. Made where a pipeline starts (`graphicsStart`) and
 /// thrown away where the next one does: it is right only for a pipeline it has
-/// followed from its first command.
+/// followed from its first command. Or, made with [`Egfx::for_bitmaps`] where a
+/// desktop of bitmap updates starts (`bitmapsStart`), that desktop's.
 #[wasm_bindgen]
 pub struct Egfx {
-    compositor: Compositor,
+    compositor: Composer,
     /// What the last run painted: `x, y, width, height` for each rectangle.
     painted: Vec<u32>,
     resized: bool,
@@ -96,7 +120,16 @@ const UNIT_FIELDS: usize = 10;
 impl Egfx {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Egfx {
-        Egfx { compositor: Compositor::new(), painted: Vec::new(), resized: false, landing: Vec::new() }
+        Egfx::of(Composer::Pipeline(Compositor::new()))
+    }
+
+    /// TESTING ONLY: one for a desktop of `width` by `height` drawn with bitmap
+    /// updates, whose `GRAPHICS` records are those updates laid end to end. Blank
+    /// until they paint it. Throws for a size past what a desktop may take.
+    #[wasm_bindgen(js_name = forBitmaps)]
+    pub fn for_bitmaps(width: u32, height: u32) -> Result<Egfx, JsError> {
+        let compositor = BitmapCompositor::new(width, height).map_err(|e| JsError::new(&format!("{e:#}")))?;
+        Ok(Egfx::of(Composer::Bitmaps(compositor)))
     }
 
     /// Compose one `GRAPHICS` record's commands, and return how many frames they
@@ -107,7 +140,11 @@ impl Egfx {
     pub fn compose(&mut self, commands: &[u8]) -> Result<u32, JsError> {
         self.painted.clear();
         self.resized = false;
-        let composed = self.compositor.compose(commands).map_err(|e| JsError::new(&format!("{e:#}")))?;
+        let composed = match &mut self.compositor {
+            Composer::Pipeline(compositor) => compositor.compose(commands),
+            Composer::Bitmaps(compositor) => compositor.compose(commands),
+        };
+        let composed: Composed = composed.map_err(|e| JsError::new(&format!("{e:#}")))?;
         self.resized = composed.resized.is_some();
         for rect in composed.painted {
             self.painted.extend([rect.x, rect.y, rect.width, rect.height]);
@@ -130,6 +167,10 @@ impl Egfx {
     /// Throws for a command that does not decode, which [`Self::compose`] would
     /// throw for too.
     pub fn units(&self, commands: &[u8]) -> Result<Vec<u32>, JsError> {
+        // Bitmap updates carry no H.264.
+        if matches!(self.compositor, Composer::Bitmaps(_)) {
+            return Ok(Vec::new());
+        }
         let found = avc::scan(commands).map_err(|e| JsError::new(&e.to_string()))?;
         let mut out = Vec::with_capacity(found.len() * UNIT_FIELDS);
         for found in found {
@@ -183,7 +224,10 @@ impl Egfx {
             other => return Err(JsError::new(&format!("a picture laid out in {other} numbers"))),
         };
         let data = std::mem::take(&mut self.landing);
-        self.compositor.supply(unit, Picture { data, samples, left, top, width, height });
+        let Composer::Pipeline(compositor) = &mut self.compositor else {
+            return Err(JsError::new("a picture supplied to a desktop of bitmap updates"));
+        };
+        compositor.supply(unit, Picture { data, samples, left, top, width, height });
         Ok(())
     }
 
@@ -212,6 +256,12 @@ impl Egfx {
     /// [`Self::compose`], which may move it.
     pub fn pixels(&self) -> *const u8 {
         self.compositor.framebuffer().with(|frame| frame.pixels.as_ptr())
+    }
+}
+
+impl Egfx {
+    fn of(compositor: Composer) -> Egfx {
+        Egfx { compositor, painted: Vec::new(), resized: false, landing: Vec::new() }
     }
 }
 

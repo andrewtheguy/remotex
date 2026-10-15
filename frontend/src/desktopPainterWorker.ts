@@ -100,6 +100,11 @@ export type PainterCommand =
   | { type: "videoFormat"; format: VideoFormat }
   /** An RDP host's graphics pipeline starts, and this worker composes it. */
   | { type: "graphicsStart" }
+  /**
+   * TESTING ONLY: an RDP host's bitmap updates are passed from here, onto a
+   * blank desktop of `w` by `h`, and this worker composes them.
+   */
+  | { type: "bitmapsStart"; w: number; h: number; debug: boolean }
   /** The part of the pipeline's picture this page's display is, to show. */
   | { type: "graphicsView"; part: PicturePart }
   /**
@@ -338,6 +343,11 @@ export function createPainterWorker(
           break;
         case "graphicsStart":
           queued(() => painter?.startGraphics());
+          break;
+        case "bitmapsStart":
+          queued(() =>
+            painter?.startBitmaps(command.w, command.h, command.debug),
+          );
           break;
         case "graphicsView":
           queued(() => painter?.setGraphicsView(command.part));

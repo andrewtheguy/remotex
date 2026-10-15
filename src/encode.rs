@@ -692,6 +692,15 @@ impl VideoSink {
         self.push(Pending::Msg(ServerMsg::GraphicsStart)).await
     }
 
+    /// TESTING ONLY: an RDP host's bitmap updates are passed from here, for the
+    /// browser to compose onto a blank desktop of `w` by `h`, and are the picture
+    /// from now on ([`Self::pass_graphics`] carries them). Said ahead of the first,
+    /// and again for a browser that attaches, ahead of the repaint it is owed.
+    pub async fn bitmaps_start(&self, w: u16, h: u16, debug: bool) -> anyhow::Result<()> {
+        self.shared.passing.store(true, Ordering::Relaxed);
+        self.push(Pending::Msg(ServerMsg::BitmapsStart { w, h, debug })).await
+    }
+
     /// Queue a run of an RDP host's graphics pipeline as the next record, untouched:
     /// whole commands out of their bulk compression, for the browser to compose
     /// ([`crate::rdp_client::Event::Graphics`]).
@@ -708,6 +717,10 @@ impl VideoSink {
     /// page, so a page that composes more slowly than the host draws has to be what
     /// the host hears from. The budget is what is left for a browser that says
     /// nothing at all.
+    ///
+    /// A run of passed bitmap updates ([`Self::bitmaps_start`]) goes the same way
+    /// and ends no frame: the budget is all that paces their host, which stops
+    /// being read while the engine waits for room in it.
     pub async fn pass_graphics(&self, commands: Vec<u8>, frame: Option<Painted>) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
         let bytes = commands.len();
@@ -1178,7 +1191,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, rdp_bitmaps: false, native_vp9: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1898,7 +1911,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, rdp_bitmaps: false, native_vp9: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2025,7 +2038,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, rdp_bitmaps: false, native_vp9: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

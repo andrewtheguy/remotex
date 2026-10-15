@@ -196,6 +196,24 @@ test("only what the target's type offers has a row", () => {
   assert.equal(standard.blocked, null);
 });
 
+test("an RDP target that passes its bitmap updates says so, and needs the compositor", () => {
+  // As the gateway lists one with egfx = false and bitmap_passthrough on.
+  const bitmaps = target({
+    protocol: "rdp",
+    audio: true,
+    passthroughs: ["rdp-bitmaps"],
+  });
+  const able = targetOptions(bitmaps, undefined, ABLE);
+  assert.equal(able.pictures, null, "passed in every session, not chosen");
+  assert.match(able.passed?.note ?? "", /bitmap updates/);
+  assert.equal(able.choices.passthrough, null);
+  assert.equal(able.blocked, null);
+  assert.match(
+    targetOptions(bitmaps, undefined, UNABLE).blocked ?? "",
+    /cannot compose the host's bitmap updates/,
+  );
+});
+
 test("a Mac's picture is its HEVC passed or its H.264 passed", () => {
   const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
   assert.deepEqual(pictures(options), [

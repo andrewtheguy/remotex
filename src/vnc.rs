@@ -8459,7 +8459,7 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, rdp_bitmaps: false, native_vp9: false };
         assert_eq!(with_wlshare_vp9(&rest, walked), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
         // The alpha encoder is asked for by name, and only by a session started with it.
         assert_eq!(ENCODING_WLSHARE_VP9_NATIVE, i32::from_be_bytes(*b"WLSX"));
@@ -8467,7 +8467,7 @@ mod tests {
             with_wlshare_vp9(&rest, RenderPlan { native_vp9: true, ..walked }),
             [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_NATIVE, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
         );
-        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, rdp_bitmaps: false, native_vp9: false };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -9679,6 +9679,7 @@ mod tests {
             apple_h264: false,
             rdp_graphics: false,
             rdp_h264: false,
+            rdp_bitmaps: false,
             native_vp9: false,
         };
         Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
@@ -9715,6 +9716,7 @@ mod tests {
             apple_h264: false,
             rdp_graphics: false,
             rdp_h264: false,
+            rdp_bitmaps: false,
             native_vp9: false,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Refuse);
@@ -12343,7 +12345,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, rdp_bitmaps: false, native_vp9: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -12877,6 +12879,7 @@ mod tests {
             apple_h264: false,
             rdp_graphics: false,
             rdp_h264: false,
+            rdp_bitmaps: false,
             native_vp9: false,
         };
         let (frames, mut tab_rx) = mpsc::channel(8);
@@ -12917,6 +12920,7 @@ mod tests {
             apple_h264: false,
             rdp_graphics: false,
             rdp_h264: false,
+            rdp_bitmaps: false,
             native_vp9: false,
         };
         let feed = || {
@@ -13068,7 +13072,7 @@ mod tests {
     async fn all_displays_over_three_screens_is_held() {
         let (uplink, _sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, rdp_bitmaps: false, native_vp9: false };
         let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), Oversize::Hold);
         let shared = test_shared(uplink, shared_desktop((1280, 800), None, None), test_shadow((1280, 800)));
         let screens: [TestScreen; 3] = [

@@ -1014,6 +1014,16 @@ pub enum ServerMsg {
     /// the [`ServerMsg::Graphics`] records after this compose, and whatever a client
     /// held of a pipeline or a video stream before it is done with.
     GraphicsStart,
+    /// TESTING ONLY: an RDP host's bitmap updates are passed from here, for the
+    /// browser to compose onto a blank desktop of `w` by `h`: each
+    /// [`ServerMsg::Graphics`] record after this is the Bitmap Updates of one of the
+    /// host's PDUs, laid end to end, and none ends a frame. Whatever a client held
+    /// of a pipeline or a video stream before it is done with. `debug` asks the
+    /// page to draw the tile grid and each tile as it arrives over the picture.
+    ///
+    /// Unlike a pipeline, nothing in an update is drawn against an earlier one, so
+    /// this is said again to a browser that attaches, ahead of the host's repaint.
+    BitmapsStart { w: u16, h: u16, debug: bool },
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1334,6 +1344,7 @@ enum ControlMsg<'a> {
     Error { message: &'a str },
     Picker,
     GraphicsStart,
+    BitmapsStart { w: u16, h: u16, debug: bool },
     GraphicsView { x: u16, y: u16, w: u16, h: u16 },
     Connected {
         name: &'a str,
@@ -1425,6 +1436,7 @@ impl ServerMsg {
             ServerMsg::Video(_)
                 | ServerMsg::Graphics(_)
                 | ServerMsg::GraphicsStart
+                | ServerMsg::BitmapsStart { .. }
                 | ServerMsg::GraphicsView { .. }
                 | ServerMsg::VideoFormat { .. }
                 | ServerMsg::Resize { .. }
@@ -1451,6 +1463,9 @@ impl ServerMsg {
                 return None;
             }
             ServerMsg::GraphicsStart => control(&ControlMsg::GraphicsStart),
+            ServerMsg::BitmapsStart { w, h, debug } => {
+                control(&ControlMsg::BitmapsStart { w: *w, h: *h, debug: *debug })
+            }
             ServerMsg::GraphicsView { x, y, w, h } => {
                 control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
             }
@@ -1911,6 +1926,13 @@ mod tests {
         assert_eq!(
             view.text_frame().as_deref(),
             Some(r#"{"type":"graphicsView","x":1440,"y":0,"w":1440,"h":900}"#)
+        );
+        // A desktop of bitmap updates starting: a display's message too.
+        let bitmaps = ServerMsg::BitmapsStart { w: 1920, h: 1080, debug: true };
+        assert!(bitmaps.is_display());
+        assert_eq!(
+            bitmaps.text_frame().as_deref(),
+            Some(r#"{"type":"bitmapsStart","w":1920,"h":1080,"debug":true}"#)
         );
         // A Mac, which is where the subtype earns its place on the wire: three
         // targets say `"protocol":"vnc"` and only this field tells them apart.

@@ -23,7 +23,7 @@
 //! - [`framebuffer`] — the desktop as composed, and the rectangles of it that
 //!   changed.
 //! - [`compositor`] — the pipeline and a framebuffer together, fed commands that
-//!   were passed on.
+//!   were passed on, and a framebuffer fed bitmap updates that were.
 
 pub mod avc;
 pub mod compositor;
@@ -31,5 +31,5 @@ pub mod framebuffer;
 pub mod gfx;
 pub mod proto;
 
-pub use compositor::{Composed, Compositor};
+pub use compositor::{BitmapCompositor, Composed, Compositor};
 pub use framebuffer::{Frame, Framebuffer, Rect};

@@ -78,6 +78,11 @@ export interface DesktopPainter {
   setVideoFormat(format: VideoFormat): void;
   /** An RDP host's graphics pipeline starts, for the worker to compose. */
   startGraphics(): void;
+  /**
+   * TESTING ONLY: an RDP host's bitmap updates are passed from here, onto a
+   * blank desktop of `w` by `h`, for the worker to compose (`bitmapsStart`).
+   */
+  startBitmaps(w: number, h: number, debug: boolean): void;
   /** The part of the pipeline's picture this page's display is (`graphicsView`). */
   setGraphicsView(part: PicturePart): void;
   /**
@@ -200,6 +205,9 @@ export function desktopPainterFor(
     },
     startGraphics() {
       post({ type: "graphicsStart" });
+    },
+    startBitmaps(w, h, debug) {
+      post({ type: "bitmapsStart", w, h, debug });
     },
     setGraphicsView(part) {
       post({ type: "graphicsView", part });

@@ -87,6 +87,16 @@ pub struct Connect {
     /// host is told then. A host that answers the offer with bitmap updates has them
     /// decoded into the framebuffer as always.
     pub egfx: bool,
+    /// TESTING ONLY: whether the host's bitmap updates are handed to the caller as
+    /// they came ([`Event::Bitmaps`]) rather than decoded into the framebuffer, for
+    /// the caller to compose. Means nothing with [`Connect::egfx`], whose host
+    /// draws with the pipeline instead.
+    ///
+    /// Each is read to its last rectangle as it passes, so one that does not parse,
+    /// or is at a depth this client does not take, ends the session here as it
+    /// would have; nothing else of them is done: no [`Event::Paint`] follows one,
+    /// and the framebuffer holds nothing of the desktop.
+    pub pass_bitmaps: bool,
     /// Whether, and how, the host may draw with H.264 on the pipeline: the
     /// capability advertise says so ([`gfx_proto::caps_advertise`]), and the access
     /// units ride in the commands handed on, for whoever composes them to decode.
@@ -192,6 +202,14 @@ pub enum Event {
     /// [`Event::FramesMarked`] is where a pipeline begins, and it is sent again when
     /// a host closes the channel and opens another.
     Graphics { commands: Vec<u8>, frame: Option<u32> },
+    /// TESTING ONLY: the Bitmap Updates of one fast-path PDU, for a session
+    /// configured with [`Connect::pass_bitmaps`]: each update's body as the host
+    /// sent it, from its `updateType` on, laid end to end, in order
+    /// (`remotex_rdp_graphics::proto::bitmap::updates` reads them back). Each holds
+    /// the pixels that go where it says and nothing a later one draws against, so
+    /// a caller may start at any of them and has the whole desktop once the host
+    /// has repainted it ([`Input::refresh`]).
+    Bitmaps(Vec<u8>),
     /// The server confirmed the graphics pipeline, so every [`Event::Paint`] from
     /// here on arrives inside a frame that ends in an [`Event::Frame`]. Sent before
     /// the first such paint, so a consumer pacing frames itself stops guessing
@@ -962,6 +980,8 @@ struct Active<'a> {
     passed: PassedFrames,
     /// Whether the host is shown the caller's pace — [`Connect::paced`].
     caller_paced: bool,
+    /// Whether bitmap updates go to the caller as they came — [`Connect::pass_bitmaps`].
+    pass_bitmaps: bool,
     /// Network detection answered at the caller's pace while it is passed frames.
     paced: Paced,
     /// Whether [`Event::ResizeReady`] has gone out.
@@ -1212,6 +1232,7 @@ impl<'a> Active<'a> {
             graphics: config.egfx.then(Graphics::passing),
             passed: PassedFrames::default(),
             caller_paced: config.paced,
+            pass_bitmaps: config.pass_bitmaps && !config.egfx,
             paced: Paced::default(),
             resize_ready: false,
             pending_resize: None,
@@ -1377,17 +1398,26 @@ impl<'a> Active<'a> {
     }
 
     /// The fast path: everything the server draws.
+    ///
+    /// A session that passes its bitmap updates hands them on together, one
+    /// [`Event::Bitmaps`] for the PDU, after what else the PDU said.
     async fn on_updates(&mut self, frame: &[u8]) -> Result<()> {
         let mut painted = Vec::new();
+        let mut passed = Vec::new();
         for piece in fastpath::updates(frame)? {
             let piece = piece?;
             let cursor = {
                 // Disjoint pieces of the session, so that an update may borrow the
                 // reassembler it came out of while the decoders it feeds are used.
-                let Self { fragments, scratch, pixels, cursors, framebuffer, share, .. } = self;
+                let Self { fragments, scratch, pixels, cursors, framebuffer, share, pass_bitmaps, .. } = self;
                 let Some(update) = fragments.push(piece)? else {
                     continue;
                 };
+                if *pass_bitmaps && update.code == fastpath::BITMAP {
+                    bitmap::update(update.data)?;
+                    passed.extend_from_slice(update.data);
+                    continue;
+                }
                 draw(update, scratch, pixels, cursors, framebuffer, share, &mut painted)?
             };
             for rect in painted.drain(..) {
@@ -1396,6 +1426,9 @@ impl<'a> Active<'a> {
             if let Some(cursor) = cursor {
                 self.send(Event::Cursor(cursor)).await;
             }
+        }
+        if !passed.is_empty() {
+            self.send(Event::Bitmaps(passed)).await;
         }
         Ok(())
     }

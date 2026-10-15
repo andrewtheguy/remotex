@@ -40,7 +40,11 @@
 //   (softwareDecoder.ts).
 
 /** A stream a target can pass untouched, as `/api/targets` names it. */
-export type Passthrough = "rdp-graphics" | "apple-media" | "apple-h264";
+export type Passthrough =
+  | "rdp-graphics"
+  | "rdp-bitmaps"
+  | "apple-media"
+  | "apple-h264";
 
 /** One entry of GET /api/targets. */
 export interface TargetInfo {
@@ -232,7 +236,7 @@ export interface PassedNote {
 /** One way a High Performance Mac's picture can reach this browser. */
 export interface PictureOption {
   /** What `connect` names: the stream passed. */
-  value: Exclude<Passthrough, "rdp-graphics">;
+  value: Exclude<Passthrough, "rdp-graphics" | "rdp-bitmaps">;
   label: string;
   /** What choosing it does, or why it cannot be chosen here. */
   note: string;
@@ -281,6 +285,24 @@ const RDP_GRAPHICS: PassedNote & { blocked: string } = {
     "This browser cannot compose the host's graphics pipeline, which this target always passes: that needs WebGL 2 and a cross-origin isolated page. Use a browser that can, or a target with egfx disabled.",
 };
 
+// TESTING ONLY: an RDP host's bitmap updates, passed in every session of a
+// target with `bitmap_passthrough` on, and composed with the pipeline's
+// compositor and canvas.
+const RDP_BITMAPS: PassedNote & { blocked: string } = {
+  label: "Always passed through (testing)",
+  note: "bitmap_passthrough is on for this target, so every session passes the host's bitmap updates through, lossless, for this browser to compose.",
+  blocked:
+    "This browser cannot compose the host's bitmap updates, which this target always passes: that needs WebGL 2 and a cross-origin isolated page. Use a browser that can, or a target without bitmap_passthrough.",
+};
+
+/** What `target` passes in every session, if anything: an RDP host's drawing. */
+function passedAlways(target: TargetInfo): typeof RDP_GRAPHICS | null {
+  if (target.passthroughs.includes("rdp-graphics")) {
+    return RDP_GRAPHICS;
+  }
+  return target.passthroughs.includes("rdp-bitmaps") ? RDP_BITMAPS : null;
+}
+
 /**
  * The ways a High Performance Mac's picture can reach this browser, in the
  * order the picker shows them: its HEVC passed through, and its H.264.
@@ -313,7 +335,9 @@ function pictureOptions(
     },
   };
   return target.passthroughs.flatMap((passthrough) =>
-    passthrough === "rdp-graphics" ? [] : [options[passthrough]],
+    passthrough === "rdp-graphics" || passthrough === "rdp-bitmaps"
+      ? []
+      : [options[passthrough]],
   );
 }
 
@@ -529,16 +553,17 @@ export function targetOptions(
     sizes[0].value;
   const sound = soundRow(target, remembered?.audio, abilities.audio);
   const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
-  // An RDP host's pipeline is passed whatever is chosen, and a browser that
-  // cannot compose it cannot start the target.
-  const always = target.passthroughs.includes("rdp-graphics");
+  // An RDP host's pipeline, or its bitmap updates where the target asks, are
+  // passed whatever is chosen, and a browser that cannot compose them cannot
+  // start the target.
+  const always = passedAlways(target);
   const passed: PassedNote | null = always
-    ? { label: RDP_GRAPHICS.label, note: RDP_GRAPHICS.note }
+    ? { label: always.label, note: always.note }
     : null;
-  const blocked =
-    always && !abilities.rdpGraphics ? RDP_GRAPHICS.blocked : null;
+  const blocked = always && !abilities.rdpGraphics ? always.blocked : null;
   const pictures = target.passthroughs.some(
-    (passthrough) => passthrough !== "rdp-graphics",
+    (passthrough) =>
+      passthrough !== "rdp-graphics" && passthrough !== "rdp-bitmaps",
   )
     ? pictureOptions(target, abilities)
     : null;

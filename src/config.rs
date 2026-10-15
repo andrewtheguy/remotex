@@ -216,6 +216,11 @@ pub struct RenderPlan {
     /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
     /// [`Self::rdp_graphics`].
     pub rdp_h264: bool,
+    /// TESTING ONLY: an RDP host's bitmap updates pass as they came, for the
+    /// browser to compose: [`Passthrough::RdpBitmaps`], in every session of a
+    /// target with [`TargetConfig::bitmap_passthrough`] on. None of the fields above
+    /// reach it.
+    pub rdp_bitmaps: bool,
     /// ALPHA: the VP9 is coded by screen-vp9's encoder in Rust rather than
     /// libvpx ([`Vp9Encoder::Native`]), chosen at the picker: here, in a build
     /// that has it, or in wlshare, for the stream a `wlshare` target passes.
@@ -253,6 +258,16 @@ pub enum Passthrough {
     /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] beside it have not
     /// been tried.
     RdpGraphics,
+    /// TESTING ONLY: an RDP host's bitmap updates, as it sent them, for the page to
+    /// compose with the same decoder the gateway has. Passed in every session of an
+    /// `rdp` target with `egfx = false` and [`TargetConfig::bitmap_passthrough`] on,
+    /// to a browser that composes the pipeline, whose compositor and canvas they
+    /// share; any other is turned away ([`TargetConfig::beyond`]).
+    ///
+    /// Unlike the pipeline they hold nothing a later update draws against, so a
+    /// browser that comes back is resumed onto the running session and the host is
+    /// asked to repaint.
+    RdpBitmaps,
     /// A High Performance Mac's picture as its HEVC, Range Extensions 4:4:4.
     /// Offered by `ard-high-performance` beside its H.264. The Mac's sound is not
     /// part of the choice: its AAC-ELD is passed in every session.
@@ -271,6 +286,7 @@ impl Passthrough {
     pub fn name(self) -> &'static str {
         match self {
             Self::RdpGraphics => "rdp-graphics",
+            Self::RdpBitmaps => "rdp-bitmaps",
             Self::AppleMedia => "apple-media",
             Self::AppleH264 => "apple-h264",
         }
@@ -282,7 +298,7 @@ impl Passthrough {
     /// composes none.
     pub fn chosen(self) -> bool {
         match self {
-            Self::RdpGraphics => false,
+            Self::RdpGraphics | Self::RdpBitmaps => false,
             Self::AppleMedia | Self::AppleH264 => true,
         }
     }
@@ -291,6 +307,7 @@ impl Passthrough {
     pub fn stream(self) -> &'static str {
         match self {
             Self::RdpGraphics => "the host's graphics pipeline",
+            Self::RdpBitmaps => "the host's bitmap updates",
             Self::AppleMedia => "the Mac's HEVC",
             Self::AppleH264 => "the Mac's H.264",
         }
@@ -478,6 +495,32 @@ pub enum Vp9Encoder {
 /// ([`Vp9Encoder::Native`]).
 const NATIVE_VP9: bool = cfg!(feature = "native-vp9");
 
+/// TESTING ONLY: [`TargetConfig::bitmap_passthrough`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BitmapPassthrough {
+    /// The host's bitmap updates are decoded here and the desktop encoded as VP9.
+    #[default]
+    Disabled,
+    /// They are passed, and the page composes them.
+    Enabled,
+    /// They are passed, and the page draws the tile grid and the tiles as they
+    /// arrive over the picture it composes.
+    Debug,
+}
+
+impl BitmapPassthrough {
+    /// Whether the updates are passed.
+    pub fn passes(self) -> bool {
+        self != Self::Disabled
+    }
+
+    /// Whether the page draws the tiles over the picture.
+    pub fn debug(self) -> bool {
+        self == Self::Debug
+    }
+}
+
 /// Whether a session takes the remote's sound, and what that sound is sent to the
 /// browser as: [`Choices::audio`], on a target that offers it ([`Offers::audio`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -586,7 +629,8 @@ impl Decoders {
             Passthrough::AppleMedia => self.apple_media,
             // No browser is asked: one that does not decode it says so itself.
             Passthrough::AppleH264 => true,
-            Passthrough::RdpGraphics => self.rdp_graphics,
+            // The same compositor module and canvas the pipeline is composed on.
+            Passthrough::RdpGraphics | Passthrough::RdpBitmaps => self.rdp_graphics,
         }
     }
 }
@@ -606,6 +650,8 @@ impl RenderPlan {
             Some(Passthrough::AppleH264)
         } else if self.rdp_graphics {
             Some(Passthrough::RdpGraphics)
+        } else if self.rdp_bitmaps {
+            Some(Passthrough::RdpBitmaps)
         } else {
             None
         }
@@ -753,6 +799,19 @@ pub struct TargetConfig {
     /// accepted and left inert ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
+    /// TESTING ONLY. Whether a target with `egfx = false` passes the host's bitmap
+    /// updates to the browser as they came, for the page to compose
+    /// ([`Passthrough::RdpBitmaps`]), rather than decoding them here and encoding
+    /// the desktop as VP9: `"disabled"`, the default, `"enabled"`, or `"debug"`,
+    /// which passes them and has the page draw the 64-pixel tile grid the host
+    /// sends them in over the picture, and tint each tile as it arrives.
+    ///
+    /// The first step towards a lossless picture with moving regions coded as
+    /// video (see the roadmap): the planar codec a 32-bit session's updates come in
+    /// is lossless as this client negotiates it. Refused on any other target, and
+    /// with `virtual_displays = 2`.
+    #[serde(default)]
+    pub bitmap_passthrough: BitmapPassthrough,
     /// ALPHA. How many virtual displays the remote is asked to lay out for the
     /// session, side by side at the session's size: `virtual_displays = 2`.
     /// One, the default, is the single desktop every target has always opened;
@@ -977,6 +1036,7 @@ impl TargetConfig {
         let apple_h264 = passthrough == Some(Passthrough::AppleH264);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
         let rdp_h264 = rdp_graphics && choices.pipeline.h264() && decoders.rdp_h264;
+        let rdp_bitmaps = passthrough == Some(Passthrough::RdpBitmaps);
         RenderPlan {
             quality,
             adaptive,
@@ -984,6 +1044,7 @@ impl TargetConfig {
             apple_h264,
             rdp_graphics,
             rdp_h264,
+            rdp_bitmaps,
             native_vp9: choices.vp9 == Vp9Encoder::Native,
         }
     }
@@ -1006,14 +1067,22 @@ impl TargetConfig {
             // lays out: the browser composes the span the host draws and shows
             // one display of it, and paints the second display's tab from the same
             // picture (`ServerMsg::GraphicsView`).
+            // Bitmap updates are passed where the operator asked, for testing
+            // (`bitmap_passthrough`), and otherwise encoded here.
             (Protocol::Rdp, _) => Offers {
                 resize: self.egfx(),
                 audio: true,
-                passthrough: if self.egfx() { &[Passthrough::RdpGraphics] } else { &[] },
+                passthrough: if self.egfx() {
+                    &[Passthrough::RdpGraphics]
+                } else if self.bitmap_passthrough.passes() {
+                    &[Passthrough::RdpBitmaps]
+                } else {
+                    &[]
+                },
                 placement: self.virtual_displays > 1,
                 pipeline: self.egfx(),
                 // The pipeline passes in every session: only the bitmap path is VP9.
-                vp9: !self.egfx() && NATIVE_VP9,
+                vp9: !self.egfx() && !self.bitmap_passthrough.passes() && NATIVE_VP9,
             },
             // Read as any VNC server, which carries no sound and is shown at its
             // own size.
@@ -1794,6 +1863,22 @@ impl ConfigFile {
                  to switch. Remove the key.",
                 target.name,
                 target.protocol.name()
+            );
+            // Bitmap updates are what an RDP host without the pipeline draws with,
+            // and the page composes one desktop of them.
+            anyhow::ensure!(
+                !target.bitmap_passthrough.passes()
+                    || (target.protocol == Protocol::Rdp && target.egfx == Some(false)),
+                "target {:?} sets bitmap_passthrough, and only an rdp target with egfx = false \
+                 draws with bitmap updates. Remove the key, or set egfx = false.",
+                target.name
+            );
+            anyhow::ensure!(
+                !target.bitmap_passthrough.passes() || target.virtual_displays == 1,
+                "target {:?} sets bitmap_passthrough with virtual_displays = {}, and a passed \
+                 desktop of bitmap updates is shown on one display. Remove one of the keys.",
+                target.name,
+                target.virtual_displays
             );
             // A count of virtual displays is a count the engine asks the remote
             // for, and two remotes create them: a Windows host and a Mac in High
@@ -3165,6 +3250,7 @@ mod tests {
                 apple_h264: false,
                 rdp_graphics: false,
                 rdp_h264: false,
+                rdp_bitmaps: false,
                 native_vp9: false,
             }
         );
@@ -3182,6 +3268,7 @@ mod tests {
                 apple_h264: false,
                 rdp_graphics: false,
                 rdp_h264: false,
+                rdp_bitmaps: false,
                 native_vp9: false,
             }
         );
@@ -4206,6 +4293,65 @@ vnc_password = \"x\"")).unwrap();
         );
     }
 
+    /// TESTING ONLY: bitmap updates are passed where a target with the pipeline
+    /// off asks, in every session, to a page that composes the pipeline, and
+    /// nowhere else.
+    #[test]
+    fn bitmap_passthrough_belongs_to_the_bitmap_path() {
+        let rdp = |extra: &str| {
+            ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
+
+                [[targets]]
+                name = "win"
+                protocol = "rdp"
+                username = "u"
+                password = "p"
+                host = "10.0.0.5"
+                {extra}
+                "#,
+                site_passwd_line()
+            ))
+            .and_then(ConfigFile::resolve)
+        };
+        let target = |extra: &str| rdp(extra).unwrap().targets.remove(0);
+        assert_eq!(target("egfx = false").bitmap_passthrough, BitmapPassthrough::Disabled);
+        for (value, debug) in [("enabled", false), ("debug", true)] {
+            let passed = target(&format!("egfx = false\nbitmap_passthrough = \"{value}\""));
+            assert!(passed.bitmap_passthrough.passes(), "{value}");
+            assert_eq!(passed.bitmap_passthrough.debug(), debug, "{value}");
+            assert_eq!(passed.offers().passthrough, &[Passthrough::RdpBitmaps]);
+            assert!(!passed.offers().vp9, "nothing of it is encoded here");
+            let composes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false };
+            let plan = passed.render_plan(Choices::default(), composes);
+            assert!(plan.rdp_bitmaps && !plan.rdp_graphics, "{value}");
+            assert_eq!(plan.describe(), "the host's bitmap updates, passed through");
+            assert_eq!(passed.accepts(Choices::default()), Ok(()));
+            let cannot = Decoders { rdp_graphics: false, ..composes };
+            assert_eq!(passed.beyond(Choices::default(), cannot), Some(Passthrough::RdpBitmaps));
+        }
+        let disabled = target("egfx = false\nbitmap_passthrough = \"disabled\"");
+        assert!(!disabled.render_plan(Choices::default(), Decoders::ALL).rdp_bitmaps);
+
+        // Only where the host draws with bitmap updates, on one display.
+        for extra in [
+            "bitmap_passthrough = \"enabled\"",
+            "egfx = true\nbitmap_passthrough = \"enabled\"",
+            "egfx = false\nbitmap_passthrough = \"debug\"\nvirtual_displays = 2",
+            "egfx = false\nbitmap_passthrough = \"on\"",
+        ] {
+            let err = rdp(extra).unwrap_err();
+            assert!(format!("{err:#}").contains("bitmap_passthrough"), "{extra}: {err:#}");
+        }
+        let vnc = ConfigFile::parse(&format!(
+            "[server]\n{}\n[[targets]]\nname = \"vnc\"\nprotocol = \"vnc\"\nhost = \"10.0.0.5\"\nbitmap_passthrough = \"enabled\"",
+            site_passwd_line()
+        ));
+        assert!(vnc.is_err());
+    }
+
     /// Standard mode never touches the Mac's sound, so an `ard` target has none to
     /// offer and no use for the keys that tune it.
     #[test]
@@ -4368,7 +4514,7 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, rdp_bitmaps: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80 · libvpx · adaptive");
     }
 
@@ -4380,7 +4526,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, rdp_bitmaps: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80 · libvpx");
     }
 

@@ -185,6 +185,7 @@ site_passwd = ""
 #   target                           window   sound            passthrough   graphics
 #   rdp                              yes      shown            always        shown
 #   rdp with egfx = false            —        shown            —             —
+#   rdp with bitmap_passthrough      —        shown            always        —
 #   vnc                              —        —                —             —
 #   vnc, wlshare                     yes      shown            —             —
 #   vnc, ard                         —        —                —             —
@@ -328,6 +329,17 @@ password = "change-me"
 # mobile browser on iOS, with sound and the clipboard beside it; `camera` and `microphone`
 # beside it have not been tried.
 #egfx = true
+
+# TESTING ONLY. With `egfx = false`, pass the host's bitmap updates to the
+# browser as they came, for the page to compose with the pipeline's compositor,
+# instead of encoding them here as VP9: "enabled", or "debug", which also draws
+# the 64-pixel grid of tiles the host sends them in over the picture and tints
+# each tile as it arrives. The picture is lossless: the planar codec the updates
+# come in is, as this gateway negotiates it. The browser needs what the pipeline
+# needs, and a page that reloads is resumed and repainted by the host. Refused
+# with `virtual_displays = 2`. The first step towards a lossless picture with what
+# moves coded as video (docs/roadmap.md).
+#bitmap_passthrough = "disabled"
 
 # ALPHA. Ask the host for this many virtual displays, each the session's size.
 # Where the second sits against the first is chosen at the picker, on an rdp

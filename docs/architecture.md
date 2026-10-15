@@ -318,8 +318,10 @@ A session's picture reaches the browser one of two ways, both ordinary:
   the screen-vp9 repository and reaches here as a pin bump.
 - **Passed untouched**, as the remote made it, for the browser to decode or
   compose: today wlshare's VP9 on a `wlshare` target, a High Performance Mac's
-  HEVC or its H.264 in every session, whichever it was started with, and an RDP host's
-  graphics pipeline in every session of a target with it on, each with its rule
+  HEVC or its H.264 in every session, whichever it was started with, an RDP host's
+  graphics pipeline in every session of a target with it on, and, for testing,
+  an RDP host's bitmap updates in every session of a target with
+  `bitmap_passthrough` on, each with its rule
   below. Another stream the user
   asks to pass joins them with a rule of its own; do not refuse it on this
   rule's account.
@@ -520,7 +522,8 @@ the same picture, handed across the browser (`frontend/src/displayRelay.ts`).
 Do not compose a pipeline in two tabs, and do not deal its commands out by
 display. A host that draws with bitmap updates, on a target with
 `egfx = false` or one that answers the offer of the pipeline with them, is
-encoded here as VP9.
+encoded here as VP9, save on a target that passes them, for testing
+([RDP's bitmap updates, passed through](#rdps-bitmap-updates-passed-through)).
 
 How the host draws the pipeline is chosen at the picker: High quality, the
 pipeline's codecs without H.264, by default, or Adaptive
@@ -1320,6 +1323,48 @@ the pipeline.
   that picture is decoded and encoded as VP9 at the target's dial, as with
   `egfx = false`, and a `videoFormat` rather than a `graphicsStart` opens it.
 
+#### RDP's bitmap updates, passed through
+
+TESTING ONLY. An `rdp` target with `egfx = false` and `bitmap_passthrough` set
+to `"enabled"` or `"debug"` passes the host's bitmap updates to the browser in
+every session, instead of decoding them here and encoding the desktop as VP9. It
+is the first step towards [a lossless picture](roadmap.md#a-lossless-picture-for-a-session-that-asks-for-one):
+at 32 bits a rectangle is the planar codec's, and lossless as the RDP client
+negotiates it, since it claims neither of the codec's lossy options
+([Bitmap updates](rdp-client.md#bitmap-updates)). Nothing of what moves is coded
+as video yet.
+
+- **What passes.** The RDP client reads each fast-path PDU's Bitmap Updates to
+  their last rectangle and hands them on whole, their bodies laid end to end
+  (`Event::Bitmaps`); one that does not parse still ends the session here. The
+  engine queues each as a `GRAPHICS` record, behind a `bitmapsStart` naming the
+  desktop's size and whether to debug, which follows the `resize`. The records
+  end no frame and nothing acknowledges them to the host: the queue's budget is
+  what paces it, since the engine stops reading the RDP client while the budget is
+  spent, and the client its socket while the engine is behind.
+- **The page composes them with the pipeline's compositor.** The same module
+  (`frontend/wasm/egfx`) makes a compositor of the desktop's size for them,
+  `BitmapCompositor` in the graphics crate, whose planar decoder is the gateway's,
+  and the picture is shown on the pipeline's canvas. So the browser needs what
+  the pipeline needs, and the picker turns one away that cannot compose it
+  (`Passthrough::RdpBitmaps`, which a page's `rdp_graphics` answers).
+- **A page that comes back is resumed.** An update holds the pixels that go
+  where it says and nothing a later one draws against, so a reattach is resumed
+  onto the running engine: `bitmapsStart` is said again, the page starts on a
+  blank desktop, and the host is asked to repaint it.
+- **Debug draws the tiles.** A Windows host sends the updates as 64×64 tiles on a
+  64-pixel grid. With `"debug"` the page draws that grid over the picture, and
+  tints each tile as it arrives, fading over 600 ms (`frontend/src/bitmapDebug.ts`):
+  in the shader, from a texture of one texel a tile, so the composed picture
+  stays exact.
+- **One display.** The key is refused with `virtual_displays = 2`.
+
+`tests/rdp_client_probe.rs` composes what a session passes, against a real
+host, with the page's compositor (`REMOTEX_UAT_PASS_BITMAPS`), and
+`tests/playwright/rdp-bitmaps.spec.ts` reads the display socket of a headless
+browser composing them, across a reload. Checked against one Windows 11 host on
+arm64.
+
 ### Decoded in the page
 
 The page has two software decoders of its own, in WebAssembly, for the two
@@ -1989,7 +2034,10 @@ any other bit is rejected the same way, as is a number or a frame bit without
 `0x02`. A session's records are `VIDEO` unless its target passes an RDP host's
 [graphics pipeline](#rdps-graphics-pipeline-passed-through): a `GRAPHICS` record
 is a run of that pipeline's commands, whole, which means something only after
-every run before it from the `graphicsStart` that began the pipeline. One of no
+every run before it from the `graphicsStart` that began the pipeline. After a
+`bitmapsStart` (testing only), a `GRAPHICS` record is instead the Bitmap Updates
+of one of the host's PDUs, laid end to end
+([RDP's bitmap updates, passed through](#rdps-bitmap-updates-passed-through)). One of no
 length is rejected.
 
 `sequence` starts at one and increases for the lifetime of one session-socket

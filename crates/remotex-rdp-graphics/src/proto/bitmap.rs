@@ -97,19 +97,40 @@ pub struct Bitmap<'a> {
 
 /// The rectangles of one Bitmap Update, in the order they are to be painted.
 pub fn update(body: &[u8]) -> Result<Vec<Bitmap<'_>>, Malformed> {
-    const WHAT: &str = "an RDP Bitmap Update";
+    let mut rectangles = Vec::new();
+    read_update(&mut Reader::new(WHAT_UPDATE, body), &mut rectangles)?;
+    Ok(rectangles)
+}
 
-    let mut r = Reader::new(WHAT, body);
+/// The rectangles of Bitmap Updates laid end to end, as a session that passes
+/// them on carries them (`Event::Bitmaps` in the gateway's `rdp_client`), in the
+/// order they are to be painted.
+///
+/// Each update says how many rectangles it holds and each rectangle how long it
+/// is, so the next update starts where the last rectangle ends, and the run ends
+/// where its last update does: bytes left over are refused, not skipped.
+pub fn updates(run: &[u8]) -> Result<Vec<Bitmap<'_>>, Malformed> {
+    let mut r = Reader::new(WHAT_UPDATE, run);
+    let mut rectangles = Vec::new();
+    while !r.is_empty() {
+        read_update(&mut r, &mut rectangles)?;
+    }
+    Ok(rectangles)
+}
+
+const WHAT_UPDATE: &str = "an RDP Bitmap Update";
+
+fn read_update<'a>(r: &mut Reader<'a>, rectangles: &mut Vec<Bitmap<'a>>) -> Result<(), Malformed> {
     let kind = r.u16_le()?;
     if kind != UPDATE_BITMAP {
         return Err(r.refuse("its update type", kind));
     }
     let count = r.u16_le()?;
-    let mut rectangles = Vec::with_capacity(usize::from(count));
+    rectangles.reserve(usize::from(count));
     for _ in 0..count {
-        rectangles.push(rectangle(&mut r)?);
+        rectangles.push(rectangle(r)?);
     }
-    Ok(rectangles)
+    Ok(())
 }
 
 fn rectangle<'a>(r: &mut Reader<'a>) -> Result<Bitmap<'a>, Malformed> {
@@ -245,6 +266,18 @@ mod tests {
 
     fn plain(x: u16, y: u16, paint: (u16, u16), size: (u16, u16), data: &[u8]) -> Rectangle<'_> {
         Rectangle { x, y, paint, size, flags: 0, data }
+    }
+
+    #[test]
+    fn a_run_of_updates_is_read_one_after_another() {
+        let mut run = pdu(&[plain(0, 0, (1, 1), (1, 1), &[0; 4])]);
+        run.extend(pdu(&[plain(64, 0, (1, 1), (1, 1), &[0; 4]), plain(128, 64, (2, 1), (2, 1), &[0; 8])]));
+        let rectangles = updates(&run).expect("two Bitmap Updates");
+        let at: Vec<_> = rectangles.iter().map(|r| (r.x, r.y)).collect();
+        assert_eq!(at, [(0, 0), (64, 0), (128, 64)]);
+        assert!(updates(&[]).expect("no updates").is_empty());
+        // A run cut inside its last update is refused, not read short.
+        assert!(updates(&run[..run.len() - 1]).is_err());
     }
 
     #[test]

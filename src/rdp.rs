@@ -267,11 +267,27 @@ async fn session(
     {
         return; // browser already gone
     }
+    // A desktop of passed bitmap updates starts blank in the browser, at the size
+    // the host opened, which it keeps: the updates the host paints it with follow.
+    let bitmaps = plan.rdp_bitmaps.then(|| config.bitmap_passthrough.debug());
+    if let Some(debug) = bitmaps
+        && sink.bitmaps_start(w, h, debug).await.is_err()
+    {
+        return; // browser already gone
+    }
 
     if let Err(e) = active_loop(
         &session,
         events,
-        Flags { resize, kept, restates: config.egfx(), pass_graphics: plan.rdp_graphics, plan, monitors: narrow(asked) },
+        Flags {
+            resize,
+            kept,
+            restates: config.egfx(),
+            pass_graphics: plan.rdp_graphics,
+            bitmaps,
+            plan,
+            monitors: narrow(asked),
+        },
         applied,
         view,
         input_rx,
@@ -403,6 +419,8 @@ fn connect_config(
         resize: config.egfx(),
         // Passed to the browser whenever it is on: the gateway composes none.
         egfx: config.egfx(),
+        // Without it, the host's bitmap updates are passed where the target asks.
+        pass_bitmaps: plan.rdp_bitmaps,
         // The whole desktop unless the session chose H.264 by region: the host
         // rate-controls all of it to the page's link that way, where by region most
         // of the desktop is RemoteFX Progressive, which it does not.
@@ -449,6 +467,10 @@ struct Flags {
     /// Whether the host's graphics pipeline is on, and so passed to the browser
     /// ([`RenderPlan::rdp_graphics`]): its frames are never in the framebuffer.
     pass_graphics: bool,
+    /// TESTING ONLY: whether the host's bitmap updates are passed to the browser
+    /// ([`RenderPlan::rdp_bitmaps`]), and if so whether the page draws its tiles
+    /// over the picture. Nothing they paint is in the framebuffer either.
+    bitmaps: Option<bool>,
     /// The render dial, for the sink of a display shown in a tab ([`Tab`]).
     plan: RenderPlan,
     /// How many monitors every layout asks for: the target's `virtual_displays`.
@@ -1441,7 +1463,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, kept, restates, pass_graphics, plan, monitors } = flags;
+    let Flags { resize, kept, restates, pass_graphics, bitmaps, plan, monitors } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -1653,6 +1675,10 @@ async fn active_loop(
                         });
                         sink.pass_graphics(commands, frame).await?;
                     }
+                    // Bitmap updates, for the browser to paint as they are: the
+                    // records end no frame, and the queue's budget is what paces
+                    // the host.
+                    Event::Bitmaps(run) => sink.pass_graphics(run, None).await?,
                     Event::Cursor(cursor) => pointer.set(cursor),
                     Event::ResizeReady { max_area } => {
                         debug!("rdp: the remote offers dynamic resize, up to {max_area} pixels");
@@ -1834,6 +1860,13 @@ async fn active_loop(
                     sink.msg(pointer.attached()).await?;
                     if pass_graphics {
                         sink.msg(view.graphics_view()).await?;
+                    }
+                    // Passed bitmap updates start over on a blank desktop, which
+                    // the host's repaint below fills: none is drawn against
+                    // another.
+                    if let Some(debug) = bitmaps {
+                        let (w, h) = view.size();
+                        sink.bitmaps_start(w, h, debug).await?;
                     }
                     // A passed pipeline has no repaint this end can make: the
                     // framebuffer holds nothing of it. The host is asked instead,
@@ -2906,6 +2939,7 @@ mod tests {
             apple_h264: false,
             rdp_graphics: false,
             rdp_h264: false,
+            rdp_bitmaps: false,
             native_vp9: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());

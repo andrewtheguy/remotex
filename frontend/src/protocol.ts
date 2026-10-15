@@ -301,6 +301,14 @@ export type ControlMsg =
   // records after it are the picture: this page composes them. Whatever it held of
   // a pipeline or a video stream before is done with.
   | { type: "graphicsStart" }
+  // TESTING ONLY: an RDP host's bitmap updates are passed from here, for this page
+  // to compose onto a blank desktop of `w` by `h` (a target's
+  // `bitmap_passthrough`): the GRAPHICS records after it are each the Bitmap
+  // Updates of one of the host's PDUs, laid end to end, and none ends a frame.
+  // Nothing in one is drawn against another, so it comes again on a reattach,
+  // ahead of the host's repaint. With `debug` the page draws the tile grid and the
+  // tiles as they arrive over the picture (bitmapDebug.ts).
+  | { type: "bitmapsStart"; w: number; h: number; debug: boolean }
   // The part of a passed pipeline's picture this display is, in the picture's
   // pixels: the host draws its virtual displays as one span, and this names one
   // display's column of it, `w` by `h` from `x`, `y`. Only a session started with

@@ -2229,6 +2229,16 @@ export function useRemoteDesktop(
           painter?.startGraphics();
           setVideoStream({ decode: "", passthrough: true, composed: true });
           break;
+        case "bitmapsStart":
+          // As a pipeline's start, queued behind the frames already posted.
+          painter?.startBitmaps(msg.w, msg.h, msg.debug);
+          setVideoStream({
+            decode: "",
+            passthrough: true,
+            composed: true,
+            bitmaps: true,
+          });
+          break;
         case "graphicsView":
           handleGraphicsView(msg);
           break;
