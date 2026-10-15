@@ -9,6 +9,12 @@
 //! owes — with one difference: what is still goes as an exact PNG, where it went as
 //! the target's still codec.
 //!
+//! A picture that starts over — the session's first, a resize's, a repaint's — is
+//! seen first as video and settled after: one stream over the whole desktop carries
+//! it ([`crate::regions::Regions::first_sight`]), and the cleanups send it exactly
+//! once it has gone out, as they do for a region that stops. Every tile as PNG
+//! before the page sees anything was the largest thing the page was ever sent.
+//!
 //! The work is split as it was between the engine's damage, its frames and a timer
 //! of the sink's own ([`crate::encode`]):
 //!
@@ -201,6 +207,10 @@ pub struct Piece {
 pub struct Damage {
     /// A `TilesStart` first: the picture starts over here.
     pub start: bool,
+    /// The streams that have ended since the page was last told, said ahead of the
+    /// pieces: a first sight ends when its round comes back, and a piece is never
+    /// sent inside a stream the page still has live.
+    pub ended: Vec<u8>,
     /// The pieces to send as PNG, in order.
     pub pieces: Vec<Piece>,
 }
@@ -225,6 +235,9 @@ pub struct MotionStream {
     /// The page is owed a `TilesStart` ahead of anything else: the picture starts
     /// over.
     start_owed: bool,
+    /// The picture that starts over is owed its first sight, a stream over the whole
+    /// desktop, started by the first damage that follows.
+    first_owed: bool,
     round_out: bool,
     /// Whether `render_motion_debug` outlines what each decision sent.
     debug: bool,
@@ -237,6 +250,7 @@ impl MotionStream {
             churn: Churn::default(),
             unknown: HashSet::new(),
             start_owed: true,
+            first_owed: true,
             round_out: false,
             debug,
         }
@@ -252,10 +266,13 @@ impl MotionStream {
         self.forget();
     }
 
-    /// The page holds nothing: a repaint or a reattach. Every tile is sent again by
-    /// the repaint that follows, which settles every debt it covers; the churn is
+    /// The page holds nothing: a repaint or a reattach. Every stream and debt is
+    /// dropped, and the repaint that follows is sent again as the first sight of the
+    /// picture, a stream over the whole desktop that its cleanups settle; the churn is
     /// dropped, because a repaint is every tile drawn once, not motion.
     pub fn forget(&mut self) {
+        self.regions.forget();
+        self.first_owed = true;
         self.churn.clear();
         self.unknown = match self.regions.size().and_then(|(w, h)| Rect::from_size(0, 0, w, h)) {
             Some(whole) => tiles_of(whole).map(|(cell, _)| cell).collect(),
@@ -283,6 +300,9 @@ impl MotionStream {
     /// What is sent is paid for by [`Self::discharge`], once it is queued.
     pub fn damage(&mut self, rect: Rect, rgb: &[u8], now: Instant) -> anyhow::Result<Damage> {
         let start = std::mem::take(&mut self.start_owed);
+        if std::mem::take(&mut self.first_owed) {
+            self.regions.first_sight(now)?;
+        }
         let mut changed: HashSet<(u16, u16)> =
             self.regions.changed(rect, rgb)?.into_iter().map(|(cell, _)| cell).collect();
         let (w, h) = self.regions.size().expect("a mirror means a size");
@@ -344,7 +364,7 @@ impl MotionStream {
                 pieces.push(self.piece(run, Some(MARK_CRISP))?);
             }
         }
-        Ok(Damage { start, pieces })
+        Ok(Damage { start, ended: self.regions.drain_ended(), pieces })
     }
 
     /// The pieces [`Self::damage`] said to send have gone out exactly, so nothing is
@@ -434,10 +454,17 @@ impl MotionStream {
 
     /// Put back what [`Self::take_round`] took: its streams, which have just carried
     /// their tiles at `now`.
+    ///
+    /// The first sight ends here once it has carried the whole picture: every tile
+    /// has been drawn since the page started over, and nothing arrived for the stream
+    /// while it encoded.
     pub fn put_back(&mut self, round: MotionRound, now: Instant) {
         self.round_out = false;
         if let Some(streams) = round.streams {
             self.regions.put_back(streams, now);
+        }
+        if self.unknown.is_empty() {
+            self.regions.end_first_sight();
         }
     }
 
@@ -604,6 +631,9 @@ mod tests {
         if damage.start {
             page.take(ServerMsg::TilesStart);
         }
+        for stream in damage.ended {
+            page.take(ServerMsg::RegionEnd { stream });
+        }
         for piece in &damage.pieces {
             page.take(ServerMsg::Tile(encode_tile(piece).unwrap()));
         }
@@ -646,6 +676,7 @@ mod tests {
         now
     }
 
+    /// A stream with its first picture sent, as the first sight and nothing else yet.
     fn opened(at: Instant, debug: bool) -> (MotionStream, Page, Vec<u8>) {
         let mut stream = MotionStream::new(60, false, debug);
         stream.want(W, H);
@@ -654,6 +685,14 @@ mod tests {
         damage(&mut stream, &mut page, whole(), &picture, at);
         frame(&mut stream, &mut page, at);
         (stream, page, picture)
+    }
+
+    /// A stream whose first picture has settled: the page holds it exactly.
+    fn settled(at: Instant, debug: bool) -> (MotionStream, Page, Vec<u8>, Instant) {
+        let (mut stream, mut page, picture) = opened(at, debug);
+        let now = settle(&mut stream, &mut page, at);
+        page.tiles.clear();
+        (stream, page, picture, now)
     }
 
     /// Play `moving` changing every 40 ms for two seconds, a frame each time and a
@@ -683,13 +722,68 @@ mod tests {
         (seen, now)
     }
 
+    /// The first picture is seen as video: one stream over the whole desktop, and no
+    /// PNG at all until it has gone out.
+    #[test]
+    fn a_first_picture_is_seen_first_as_one_stream_over_the_desktop() {
+        let at = Instant::now();
+        let (stream, page, _) = opened(at, false);
+        assert!(page.started);
+        assert!(page.tiles.is_empty(), "a tile went out ahead of the first sight");
+        assert_eq!(page.regions.len(), 1);
+        assert_eq!(page.regions[0].1, whole(), "the first sight is the whole desktop");
+        assert!(!stream.covering(), "the first sight ends once it has carried the picture");
+    }
+
     #[test]
     fn a_still_desktop_reaches_the_page_exactly() {
         let at = Instant::now();
-        let (stream, page, picture) = opened(at, false);
-        assert!(page.started);
+        let (stream, page, picture, _) = settled(at, false);
+        assert!(page.regions.is_empty(), "the first sight ended");
         assert_eq!(page.rgb, picture, "every tile, exactly");
         assert!(stream.settled() && !stream.dirty(), "and nothing more is owed");
+    }
+
+    /// A first picture that arrives in parts is carried by the first sight until the
+    /// last part has gone out, and settles exactly after.
+    #[test]
+    fn a_first_picture_in_parts_is_carried_until_every_tile_has_arrived() {
+        let at = Instant::now();
+        let mut stream = MotionStream::new(60, false, false);
+        stream.want(W, H);
+        let picture = pattern(W, H, 7);
+        let mut page = Page::new();
+        let top = Rect { bottom: 127, ..whole() };
+        let rest = Rect { top: 128, ..whole() };
+        let stride = usize::from(W) * 3;
+        damage(&mut stream, &mut page, top, &picture[..128 * stride], at);
+        frame(&mut stream, &mut page, at);
+        assert!(stream.covering(), "the first sight ended with tiles not yet drawn");
+        let now = at + Duration::from_millis(40);
+        damage(&mut stream, &mut page, rest, &picture[128 * stride..], now);
+        frame(&mut stream, &mut page, now);
+        assert!(page.tiles.is_empty(), "a part of the first picture went out as PNG");
+        assert!(!stream.covering(), "the first sight outlived the picture it carries");
+        settle(&mut stream, &mut page, now);
+        assert_eq!(page.rgb, picture);
+    }
+
+    /// A first sight the remote never finishes painting ends anyway, and what it
+    /// carried settles exactly.
+    #[test]
+    fn a_first_sight_does_not_outlast_the_stream_idle() {
+        let at = Instant::now();
+        let mut stream = MotionStream::new(60, false, false);
+        stream.want(W, H);
+        let picture = pattern(W, H, 7);
+        let mut page = Page::new();
+        let top = Rect { bottom: 127, ..whole() };
+        damage(&mut stream, &mut page, top, &picture[..128 * usize::from(W) * 3], at);
+        frame(&mut stream, &mut page, at);
+        assert!(stream.covering());
+        settle(&mut stream, &mut page, at);
+        let stride = usize::from(W) * 3;
+        assert_eq!(page.rgb[..128 * stride], picture[..128 * stride]);
     }
 
     /// A band no stream touches is sent whole, as it is drawn: the still majority of
@@ -697,7 +791,8 @@ mod tests {
     #[test]
     fn a_band_no_stream_touches_is_sent_whole() {
         let at = Instant::now();
-        let (_, page, _) = opened(at, false);
+        let (mut stream, mut page, _, now) = settled(at, false);
+        damage(&mut stream, &mut page, whole(), &pattern(W, H, 8), now);
         let bands: Vec<Rect> = (0..H).step_by(64).map(|top| Rect { top, bottom: (top + 63).min(H - 1), ..whole() }).collect();
         assert_eq!(page.tiles, bands);
     }
@@ -705,7 +800,7 @@ mod tests {
     #[test]
     fn what_moves_goes_as_a_region_and_is_sent_exact_once_still() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture) = opened(at, false);
+        let (mut stream, mut page, mut picture, at) = settled(at, false);
         // Three by two tiles' worth changes every 40 ms for two seconds, from
         // (100, 70): four by three tiles.
         let moving = Rect::from_size(100, 70, 3 * TILE, 2 * TILE).unwrap();
@@ -722,7 +817,7 @@ mod tests {
     #[test]
     fn a_band_a_stream_splits_sends_only_its_changed_tiles_beside_it() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture) = opened(at, false);
+        let (mut stream, mut page, mut picture, at) = settled(at, false);
         let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
         let (seen, now) = play(&mut stream, &mut page, &mut picture, moving, at);
         assert!(seen);
@@ -744,7 +839,7 @@ mod tests {
     #[test]
     fn a_spinner_is_never_a_region() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture) = opened(at, false);
+        let (mut stream, mut page, mut picture, at) = settled(at, false);
         let spinner = Rect::from_size(200, 100, TILE, TILE).unwrap();
         let (seen, now) = play(&mut stream, &mut page, &mut picture, spinner, at);
         assert!(!seen && page.regions.is_empty(), "a spinner took a stream");
@@ -755,7 +850,7 @@ mod tests {
     #[test]
     fn a_change_that_does_not_keep_changing_is_never_a_region() {
         let at = Instant::now();
-        let (mut stream, mut page, _) = opened(at, false);
+        let (mut stream, mut page, _, at) = settled(at, false);
         let caret = Rect::from_size(300, 200, 2, 16).unwrap();
         let mut now = at;
         for blink in 0..20u8 {
@@ -771,7 +866,7 @@ mod tests {
     #[test]
     fn a_redraw_of_the_same_pixels_is_not_motion() {
         let at = Instant::now();
-        let (mut stream, mut page, picture) = opened(at, false);
+        let (mut stream, mut page, picture, at) = settled(at, false);
         let mut now = at;
         for _ in 0..30 {
             now += Duration::from_millis(40);
@@ -780,35 +875,46 @@ mod tests {
         assert!(stream.churn.moving(now).is_empty(), "an unchanged redraw counted as motion");
     }
 
-    /// A repaint for a page that holds nothing sends every tile again, though the
-    /// mirror already holds every pixel of it, after a `tilesStart`.
+    /// A repaint for a page that holds nothing sends the whole picture again, though
+    /// the mirror already holds every pixel of it, after a `tilesStart`: first seen
+    /// as video, and then exactly.
     #[test]
     fn a_repaint_after_a_forget_sends_the_whole_picture_again() {
         let at = Instant::now();
-        let (mut stream, _, picture) = opened(at, false);
+        let (mut stream, _, picture, now) = settled(at, false);
         stream.forget();
         let mut page = Page::new();
-        damage(&mut stream, &mut page, whole(), &picture, at);
+        damage(&mut stream, &mut page, whole(), &picture, now);
+        frame(&mut stream, &mut page, now);
         assert!(page.started);
+        assert_eq!(page.regions.iter().map(|(_, rect)| *rect).collect::<Vec<_>>(), vec![whole()]);
+        settle(&mut stream, &mut page, now);
         assert_eq!(page.rgb, picture);
     }
 
-    /// A reset drops every history the churn was counted from, and keeps the
-    /// streams, which start again at a keyframe.
+    /// A reset drops every history the churn was counted from and every stream: the
+    /// page that starts over is sent one first sight of the whole desktop, on an id
+    /// of its own, after the ends of the streams it replaces.
     #[test]
-    fn a_reset_drops_every_history_and_keeps_the_streams() {
+    fn a_reset_drops_every_history_and_every_stream() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture) = opened(at, false);
+        let (mut stream, mut page, mut picture, now) = settled(at, false);
         let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
-        let (seen, now) = play(&mut stream, &mut page, &mut picture, moving, at);
+        let (seen, now) = play(&mut stream, &mut page, &mut picture, moving, now);
         assert!(seen);
+        let streamed: Vec<u8> = page.regions.iter().map(|(id, _)| *id).collect();
         stream.forget();
         stream.force_keyframe();
         assert!(stream.churn.churn.is_empty() && stream.churn.origin.is_none());
         let mut fresh = Page::new();
-        damage(&mut stream, &mut fresh, whole(), &picture, now);
+        let repaint = stream.damage(whole(), &picture, now).unwrap();
+        assert!(repaint.start && repaint.pieces.is_empty(), "a repaint went out as PNG");
+        assert_eq!(repaint.ended, streamed, "the streams the reset dropped were ended");
+        fresh.take(ServerMsg::TilesStart);
         frame(&mut stream, &mut fresh, now);
-        assert_eq!(fresh.regions.len(), 1, "the stream went on, from a keyframe");
+        assert_eq!(fresh.regions.len(), 1);
+        assert_eq!(fresh.regions[0].1, whole(), "the picture started over as one first sight");
+        assert!(!streamed.contains(&fresh.regions[0].0), "the first sight took an id still being ended");
         settle(&mut stream, &mut fresh, now);
         assert_eq!(fresh.rgb, picture);
     }
@@ -818,7 +924,7 @@ mod tests {
     #[test]
     fn a_cleanup_is_held_for_a_page_behind_but_not_for_good() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture) = opened(at, false);
+        let (mut stream, mut page, mut picture, at) = settled(at, false);
         let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
         let (seen, mut now) = play(&mut stream, &mut page, &mut picture, moving, at);
         assert!(seen);
@@ -840,7 +946,7 @@ mod tests {
     #[test]
     fn a_debug_outline_is_on_what_is_sent_and_never_on_the_mirror() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture) = opened(at, true);
+        let (mut stream, mut page, mut picture, at) = settled(at, true);
         let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
         let (seen, now) = play(&mut stream, &mut page, &mut picture, moving, at);
         assert!(seen);

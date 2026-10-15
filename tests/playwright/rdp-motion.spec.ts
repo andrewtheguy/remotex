@@ -3,8 +3,9 @@
 // desktop is still and as a VP9 stream of its own for each region that moves.
 //
 // Everything asserted is decided by the system and not by a machine's timing: the
-// render the gateway resolved, `tilesStart` ahead of every record, the records' own
-// framing, each tile's PNG header against the size its record states, each
+// render the gateway resolved, `tilesStart` ahead of every record, the opening
+// picture seen first as one region over the whole desktop and settled by tiles
+// after it, the records' own framing, each tile's PNG header against the size its record states, each
 // region's `regionFormat` ahead of its units and its keyframe first, no tile inside
 // a live region, every pixel of the desktop drawn by some record, and the Info
 // card's rows. Nothing here looks at a pixel: a TILE and a REGION are headers this
@@ -237,6 +238,8 @@ interface Walk {
   /** Pixels of the desktop no record has drawn since the last `tilesStart`. */
   undrawn: number;
   tiles: number;
+  /** Whether the first record since the last `tilesStart` is a region over the whole desktop. */
+  openedAsVideo: boolean;
 }
 
 /// Walk a display socket's picture in wire order, as the page draws it, and say
@@ -251,6 +254,7 @@ function walk(display: Display): Walk {
   /** Each live stream's rectangle, from its first unit to its `regionEnd`. */
   const live = new Map<number, Rect>();
   let tiles = 0;
+  let opening: { kind: "tile" | "region"; rect: Rect } | undefined;
   const draw = (rect: Rect) => {
     if (!size || !drawn) {
       return;
@@ -273,6 +277,7 @@ function walk(display: Display): Walk {
         drawn = size ? new Uint8Array(size.w * size.h) : undefined;
         formatted.clear();
         live.clear();
+        opening = undefined;
         break;
       case "regionFormat":
         formatted.add(item.stream);
@@ -296,6 +301,7 @@ function walk(display: Display): Walk {
             faults.push(`a TILE inside live region ${stream}`);
           }
         }
+        opening ??= { kind: "tile", rect: item.rect };
         draw(item.rect);
         break;
       case "region":
@@ -314,12 +320,20 @@ function walk(display: Display): Walk {
         } else if (!live.has(item.stream)) {
           faults.push(`a REGION on stream ${item.stream} with no regionFormat`);
         }
+        opening ??= { kind: "region", rect: item.rect };
         draw(item.rect);
         break;
     }
   }
   const undrawn = drawn ? drawn.length - drawn.reduce((a, b) => a + b, 0) : -1;
-  return { faults, undrawn, tiles };
+  const openedAsVideo =
+    opening?.kind === "region" &&
+    size !== undefined &&
+    opening.rect.x === 0 &&
+    opening.rect.y === 0 &&
+    opening.rect.w === size.w &&
+    opening.rect.h === size.h;
+  return { faults, undrawn, tiles, openedAsVideo };
 }
 
 test.describe("a target started with Motion", () => {
@@ -340,18 +354,25 @@ test.describe("a target started with Motion", () => {
     await logInAndConnectTo(page, MOTION_TARGET ?? "", "", { motion: true });
 
     // The whole desktop is drawn by the opening's records, each one acknowledged
-    // once the paint worker has drawn its batch.
+    // once the paint worker has drawn its batch: seen first as one region over
+    // the whole desktop, and settled after it by exact tiles.
     await expect
       .poll(() => walk(seen.display).undrawn, { timeout: 30_000 })
       .toBe(0);
     await expect
       .poll(() => seen.display.acknowledged.length, { timeout: 20_000 })
       .toBeGreaterThan(0);
+    await expect
+      .poll(() => walk(seen.display).tiles, { timeout: 30_000 })
+      .toBeGreaterThan(0);
 
     expect(seen.connected?.render).toMatch(/^motion as video q\d+ · libvpx/);
-    const { faults, tiles } = walk(seen.display);
+    const { faults, openedAsVideo } = walk(seen.display);
     expect(faults).toEqual([]);
-    expect(tiles).toBeGreaterThan(0);
+    expect(
+      openedAsVideo,
+      "the opening is one region over the whole desktop",
+    ).toBe(true);
     expect(seen.display.bad, "frames this parser rejected").toEqual([]);
     expect(
       seen.display.foreign,
@@ -380,7 +401,9 @@ test.describe("a target started with Motion", () => {
     await returnToPicker(page);
   });
 
-  test("sends a page that comes back every tile again", async ({ page }) => {
+  test("sends a page that comes back the whole picture again", async ({
+    page,
+  }) => {
     const seen = watchSession(page);
     await logInAndConnectTo(page, MOTION_TARGET ?? "", "", { motion: true });
     await expect
@@ -388,7 +411,8 @@ test.describe("a target started with Motion", () => {
       .toBe(0);
 
     // The gateway holds the picture, so the page that comes back is sent it
-    // whole on its new display socket, behind a `tilesStart` of its own.
+    // whole on its new display socket, behind a `tilesStart` of its own, and as
+    // video first.
     const before = seen.display;
     await page.reload();
     await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
@@ -399,6 +423,7 @@ test.describe("a target started with Motion", () => {
       .poll(() => walk(seen.display).undrawn, { timeout: 30_000 })
       .toBe(0);
     expect(walk(seen.display).faults).toEqual([]);
+    expect(walk(seen.display).openedAsVideo).toBe(true);
     expect(seen.display.bad).toEqual([]);
     expect(seen.display.sent[0]).toBe(1);
     await expect(page.getByRole("alert")).toHaveCount(0);

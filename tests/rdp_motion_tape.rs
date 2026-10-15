@@ -496,6 +496,9 @@ fn a_tape_is_replayed_for_motion() {
                     });
                     if let Some((changed, pixels)) = shadow.changed(rect, &rgb) {
                         let damage = motion.damage(changed, &pixels, tokio::time::Instant::from_std(now)).unwrap();
+                        for stream in damage.ended {
+                            page.take(ServerMsg::RegionEnd { stream });
+                        }
                         let sent: Vec<ShadowRect> = damage.pieces.iter().map(|piece| piece.rect).collect();
                         for piece in &damage.pieces {
                             let started = Instant::now();

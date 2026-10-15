@@ -1378,6 +1378,14 @@ own picture, exact to it.
   than twice the moving tiles, and at most 4 regions stream at once. Geometry is
   retuned at most every 500 ms: a region that shrinks keeps its stream, one that
   grows is rebuilt at a keyframe, and one with no motion for a second ends.
+- **A picture that starts over is seen as video first.** The session's first
+  picture, a resize's and a repaint's go out as one VP9 stream over the whole
+  desktop, its keyframe the first thing the page draws, where every tile as PNG
+  was the largest thing the page was ever sent and all of it ahead of the first
+  pixel. The stream ends once a round has carried every tile with nothing more
+  arriving for it, a second after it started at the latest, or as soon as motion
+  inside it takes a region of its own; every tile it carried is then owed a PNG
+  like a stopped region's.
 - **What is still goes as PNG at once.** Each report of damage is compared
   exactly with what the page was sent, cut into 64-row bands, and encoded as
   PNG as soon as it arrives: a band no stream touches whole, and one a stream
@@ -1401,9 +1409,9 @@ own picture, exact to it.
   rectangle. It needs neither WebGL 2 nor cross-origin isolation, so a browser
   that cannot compose a pipeline can start the target with Motion ticked.
 - **A reattach resumes it.** The gateway holds the picture, so a reattach or a
-  `refresh` resumes the engine: the page is sent `tilesStart` and every tile
-  again, the streams go on from a keyframe, and the churn is forgotten. A resize
-  ends the streams, and the host redraws.
+  `refresh` resumes the engine: the page is sent `tilesStart`, the streams end,
+  the whole picture goes again as video first, and the churn is forgotten. A
+  resize does the same at the new size once the host redraws.
 - **The Info card says whether the host draws losslessly.** For every session
   with the pipeline, passed or composed, the gateway reads each draw's codec off
   the commands (`crates/remotex-rdp-graphics/src/fidelity.rs`), ClearCodec's
