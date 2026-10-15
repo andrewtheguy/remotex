@@ -25,7 +25,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, TargetConfig};
+use remotex::config::{AppConfig, MotionDebug, Protocol, TargetConfig};
 use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -89,7 +89,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             microphone: false,
             video_quality: None,
             render_adaptive: None,
-            render_motion_debug: false,
+            render_motion_debug: MotionDebug::None,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,

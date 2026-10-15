@@ -29,9 +29,13 @@
 //!   the streams whose motion has stopped and sends, as PNG, the tiles a stream left
 //!   lossy once they have been still for [`CLEANUP_IDLE`].
 //!
-//! Under `render_motion_debug` what each decision sent is outlined in the pixels
-//! themselves: a region's stream in magenta, a PNG cut from a band a stream splits in
-//! cyan, and a cleanup in green.
+//! Under `render_motion_debug = "motion"` what each decision sent is outlined in the
+//! pixels themselves: a region's stream in magenta, a PNG cut from a band a stream
+//! splits in cyan, and a cleanup in green. `"tiles"` draws the tile grid under them
+//! on everything sent, and tints each tile a report changed that went as PNG, with a
+//! pip for every slot of its churn: yellow below [`CHURN_MOVING`], orange at it — a
+//! tile in motion that no stream took, which is one or two tiles changing apart from
+//! any other.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -40,10 +44,11 @@ use tokio::time::Instant;
 
 use anyhow::Context as _;
 
+use crate::config::MotionDebug;
 use crate::protocol::{Held, ServerMsg, TileUnit};
 use crate::regions::{Regions, Round, tiles_of};
 use crate::shadow::Rect;
-use crate::video::{Mark, outline};
+use crate::video::{Grid, Mark, grid, outline};
 
 pub use crate::regions::TILE;
 
@@ -113,6 +118,22 @@ const MARK_CLEANUP: [u8; 3] = [0, 255, 0];
 /// Thickness of a `render_motion_debug` outline. Two pixels, because one does not
 /// reliably survive chroma subsampling at the quality a moving region is sent at.
 const MARK_PX: u16 = 2;
+/// The `render_motion_debug = "tiles"` grid: grey, which shows on a light desktop
+/// and a dark one alike.
+const GRID: Grid = Grid { colour: [128, 128, 128], cell: TILE };
+/// Colour of the `"tiles"` mark on a changed tile sent as PNG whose churn is below
+/// [`CHURN_MOVING`]: it changed too seldom to be motion.
+const MARK_CHURN: [u8; 3] = [255, 255, 0];
+/// Colour of the `"tiles"` mark on a changed tile sent as PNG whose churn is at
+/// [`CHURN_MOVING`] or past it: in motion, and no stream took it — alone, or one of
+/// too few to be worth one.
+const MARK_CHURN_MOVING: [u8; 3] = [255, 128, 0];
+/// How far a `"tiles"` mark's pips sit in from their tile's corner, past the grid
+/// and any outline; their side; and the distance from one to the next. Eight pips
+/// fit a tile's top edge.
+const PIP_INSET: u16 = 4;
+const PIP_PX: u16 = 4;
+const PIP_STEP: u16 = 6;
 
 /// One tile's recent history: bit 0 is the slot it was last seen changing,
 /// shifted left one place for every slot since. Its churn is the number of set
@@ -239,14 +260,16 @@ pub struct MotionStream {
     /// desktop, started by the first damage that follows.
     first_owed: bool,
     round_out: bool,
-    /// Whether `render_motion_debug` outlines what each decision sent.
-    debug: bool,
+    /// What `render_motion_debug` draws of what each decision sent.
+    debug: MotionDebug,
 }
 
 impl MotionStream {
-    pub fn new(quality: u8, native: bool, debug: bool) -> Self {
+    pub fn new(quality: u8, native: bool, debug: MotionDebug) -> Self {
+        let mark = (debug != MotionDebug::None).then_some(Mark { colour: MARK_MOTION, px: MARK_PX });
+        let grid = (debug == MotionDebug::Tiles).then_some(GRID);
         Self {
-            regions: Regions::new(quality, native, debug.then_some(Mark { colour: MARK_MOTION, px: MARK_PX })),
+            regions: Regions::new(quality, native, mark, grid),
             churn: Churn::default(),
             unknown: HashSet::new(),
             start_owed: true,
@@ -323,6 +346,10 @@ impl MotionStream {
 
         let stride = usize::from(rect.w()) * 3;
         let mut pieces = Vec::new();
+        // Each changed tile's churn, for the marks of `"tiles"`, and kept under it
+        // alone: this is the path every report of damage takes.
+        let tiles = self.debug == MotionDebug::Tiles;
+        let mut churned: HashMap<(u16, u16), u32> = HashMap::new();
         for top in (rect.top..=rect.bottom).step_by(usize::from(BAND_ROWS)) {
             let band = Rect { top, bottom: top.saturating_add(BAND_ROWS - 1).min(rect.bottom), ..rect };
             let from = usize::from(band.top - rect.top) * stride;
@@ -334,12 +361,17 @@ impl MotionStream {
             let cells: Vec<((u16, u16), Rect)> = tiles_of(band).collect();
             for (cell, _) in &cells {
                 if changed.contains(cell) {
-                    self.churn.observe(*cell, now);
+                    let churn = self.churn.observe(*cell, now);
+                    if tiles {
+                        churned.insert(*cell, churn);
+                    }
                 }
             }
             let split = self.regions.covering() && cells.iter().any(|(cell, _)| self.regions.covers(*cell));
             if !split {
-                pieces.push(Piece { rect: band, rgb: band_rgb.to_vec() });
+                let mut rgb = band_rgb.to_vec();
+                self.draw(band, &mut rgb, None, &churned);
+                pieces.push(Piece { rect: band, rgb });
                 continue;
             }
             // The still tiles go out as *runs*: along each row of tiles in the band,
@@ -361,7 +393,7 @@ impl MotionStream {
                 }
             }
             for run in runs {
-                pieces.push(self.piece(run, Some(MARK_CRISP))?);
+                pieces.push(self.piece(run, Some(MARK_CRISP), &churned)?);
             }
         }
         Ok(Damage { start, ended: self.regions.drain_ended(), pieces })
@@ -375,14 +407,31 @@ impl MotionStream {
         }
     }
 
-    /// `rect` cropped from the mirror, outlined in `mark` under `render_motion_debug`.
-    fn piece(&self, rect: Rect, mark: Option<[u8; 3]>) -> anyhow::Result<Piece> {
+    /// `rect` cropped from the mirror, drawn on as [`Self::draw`] says.
+    fn piece(&self, rect: Rect, mark: Option<[u8; 3]>, churned: &HashMap<(u16, u16), u32>) -> anyhow::Result<Piece> {
         let mut rgb = Vec::new();
         self.regions.crop(rect, &mut rgb)?;
-        if let Some(colour) = mark.filter(|_| self.debug) {
-            outline(&mut rgb, (usize::from(rect.w()), usize::from(rect.h())), Mark { colour, px: MARK_PX });
-        }
+        self.draw(rect, &mut rgb, mark, churned);
         Ok(Piece { rect, rgb })
+    }
+
+    /// Draw what `render_motion_debug` shows on `rgb`, the copy of `rect` about to
+    /// go as PNG: under `"tiles"`, on each tile in `churned` — the tiles a report
+    /// changed, with their churn — a tint and a pip for every slot of it, and the
+    /// grid over them; then, under either, `mark` round the whole.
+    fn draw(&self, rect: Rect, rgb: &mut [u8], mark: Option<[u8; 3]>, churned: &HashMap<(u16, u16), u32>) {
+        let size = (usize::from(rect.w()), usize::from(rect.h()));
+        if self.debug == MotionDebug::Tiles {
+            for (cell, part) in tiles_of(rect) {
+                if let Some(&churn) = churned.get(&cell) {
+                    churn_mark(rgb, rect, cell, part, churn);
+                }
+            }
+            grid(rgb, size, (rect.left, rect.top), GRID);
+        }
+        if let Some(colour) = mark.filter(|_| self.debug != MotionDebug::None) {
+            outline(rgb, size, Mark { colour, px: MARK_PX });
+        }
     }
 
     /// Whether a round is away being encoded.
@@ -485,7 +534,7 @@ impl MotionStream {
         let idle = if behind { CLEANUP_HELD } else { CLEANUP_IDLE };
         let mut pieces = Vec::new();
         for rect in self.regions.due(now, idle, max) {
-            match self.piece(rect, Some(MARK_CLEANUP)) {
+            match self.piece(rect, Some(MARK_CLEANUP), &HashMap::new()) {
                 Ok(piece) => pieces.push(piece),
                 Err(e) => log::warn!("motion: dropping a cleanup that would not crop: {e:#}"),
             }
@@ -525,6 +574,35 @@ impl MotionRound {
             records.extend(streams.encode()?);
         }
         Ok(records)
+    }
+}
+
+/// The `"tiles"` mark on `part`, the share of tile `cell` inside `rect`, painted on
+/// `rgb`, which holds `rect`: the part tinted a quarter of the way to the mark's
+/// colour, and `churn` pips along the tile's top edge, clipped to the part. Yellow
+/// below [`CHURN_MOVING`], orange at it.
+fn churn_mark(rgb: &mut [u8], rect: Rect, cell: (u16, u16), part: Rect, churn: u32) {
+    let colour = if churn >= CHURN_MOVING { MARK_CHURN_MOVING } else { MARK_CHURN };
+    let w = usize::from(rect.w());
+    let at = |x: u16, y: u16| (usize::from(y - rect.top) * w + usize::from(x - rect.left)) * 3;
+    for y in part.top..=part.bottom {
+        for x in part.left..=part.right {
+            let pixel = &mut rgb[at(x, y)..][..3];
+            for (channel, mark) in pixel.iter_mut().zip(colour) {
+                *channel = ((u16::from(*channel) * 3 + u16::from(mark)) / 4) as u8;
+            }
+        }
+    }
+    let (left, top) = (cell.0 * TILE + PIP_INSET, cell.1 * TILE + PIP_INSET);
+    for pip in 0..u16::try_from(churn).unwrap_or(u16::MAX) {
+        let pip_left = left + pip * PIP_STEP;
+        let square = Rect { left: pip_left, top, right: pip_left + PIP_PX - 1, bottom: top + PIP_PX - 1 };
+        let Some(square) = square.intersect(&part) else { continue };
+        for y in square.top..=square.bottom {
+            for x in square.left..=square.right {
+                rgb[at(x, y)..][..3].copy_from_slice(&colour);
+            }
+        }
     }
 }
 
@@ -677,7 +755,7 @@ mod tests {
     }
 
     /// A stream with its first picture sent, as the first sight and nothing else yet.
-    fn opened(at: Instant, debug: bool) -> (MotionStream, Page, Vec<u8>) {
+    fn opened(at: Instant, debug: MotionDebug) -> (MotionStream, Page, Vec<u8>) {
         let mut stream = MotionStream::new(60, false, debug);
         stream.want(W, H);
         let picture = pattern(W, H, 7);
@@ -688,7 +766,7 @@ mod tests {
     }
 
     /// A stream whose first picture has settled: the page holds it exactly.
-    fn settled(at: Instant, debug: bool) -> (MotionStream, Page, Vec<u8>, Instant) {
+    fn settled(at: Instant, debug: MotionDebug) -> (MotionStream, Page, Vec<u8>, Instant) {
         let (mut stream, mut page, picture) = opened(at, debug);
         let now = settle(&mut stream, &mut page, at);
         page.tiles.clear();
@@ -727,7 +805,7 @@ mod tests {
     #[test]
     fn a_first_picture_is_seen_first_as_one_stream_over_the_desktop() {
         let at = Instant::now();
-        let (stream, page, _) = opened(at, false);
+        let (stream, page, _) = opened(at, MotionDebug::None);
         assert!(page.started);
         assert!(page.tiles.is_empty(), "a tile went out ahead of the first sight");
         assert_eq!(page.regions.len(), 1);
@@ -738,7 +816,7 @@ mod tests {
     #[test]
     fn a_still_desktop_reaches_the_page_exactly() {
         let at = Instant::now();
-        let (stream, page, picture, _) = settled(at, false);
+        let (stream, page, picture, _) = settled(at, MotionDebug::None);
         assert!(page.regions.is_empty(), "the first sight ended");
         assert_eq!(page.rgb, picture, "every tile, exactly");
         assert!(stream.settled() && !stream.dirty(), "and nothing more is owed");
@@ -749,7 +827,7 @@ mod tests {
     #[test]
     fn a_first_picture_in_parts_is_carried_until_every_tile_has_arrived() {
         let at = Instant::now();
-        let mut stream = MotionStream::new(60, false, false);
+        let mut stream = MotionStream::new(60, false, MotionDebug::None);
         stream.want(W, H);
         let picture = pattern(W, H, 7);
         let mut page = Page::new();
@@ -773,7 +851,7 @@ mod tests {
     #[test]
     fn a_first_sight_does_not_outlast_the_stream_idle() {
         let at = Instant::now();
-        let mut stream = MotionStream::new(60, false, false);
+        let mut stream = MotionStream::new(60, false, MotionDebug::None);
         stream.want(W, H);
         let picture = pattern(W, H, 7);
         let mut page = Page::new();
@@ -791,7 +869,7 @@ mod tests {
     #[test]
     fn a_band_no_stream_touches_is_sent_whole() {
         let at = Instant::now();
-        let (mut stream, mut page, _, now) = settled(at, false);
+        let (mut stream, mut page, _, now) = settled(at, MotionDebug::None);
         damage(&mut stream, &mut page, whole(), &pattern(W, H, 8), now);
         let bands: Vec<Rect> = (0..H).step_by(64).map(|top| Rect { top, bottom: (top + 63).min(H - 1), ..whole() }).collect();
         assert_eq!(page.tiles, bands);
@@ -800,7 +878,7 @@ mod tests {
     #[test]
     fn what_moves_goes_as_a_region_and_is_sent_exact_once_still() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture, at) = settled(at, false);
+        let (mut stream, mut page, mut picture, at) = settled(at, MotionDebug::None);
         // Three by two tiles' worth changes every 40 ms for two seconds, from
         // (100, 70): four by three tiles.
         let moving = Rect::from_size(100, 70, 3 * TILE, 2 * TILE).unwrap();
@@ -817,7 +895,7 @@ mod tests {
     #[test]
     fn a_band_a_stream_splits_sends_only_its_changed_tiles_beside_it() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture, at) = settled(at, false);
+        let (mut stream, mut page, mut picture, at) = settled(at, MotionDebug::None);
         let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
         let (seen, now) = play(&mut stream, &mut page, &mut picture, moving, at);
         assert!(seen);
@@ -839,7 +917,7 @@ mod tests {
     #[test]
     fn a_spinner_is_never_a_region() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture, at) = settled(at, false);
+        let (mut stream, mut page, mut picture, at) = settled(at, MotionDebug::None);
         let spinner = Rect::from_size(200, 100, TILE, TILE).unwrap();
         let (seen, now) = play(&mut stream, &mut page, &mut picture, spinner, at);
         assert!(!seen && page.regions.is_empty(), "a spinner took a stream");
@@ -850,7 +928,7 @@ mod tests {
     #[test]
     fn a_change_that_does_not_keep_changing_is_never_a_region() {
         let at = Instant::now();
-        let (mut stream, mut page, _, at) = settled(at, false);
+        let (mut stream, mut page, _, at) = settled(at, MotionDebug::None);
         let caret = Rect::from_size(300, 200, 2, 16).unwrap();
         let mut now = at;
         for blink in 0..20u8 {
@@ -866,7 +944,7 @@ mod tests {
     #[test]
     fn a_redraw_of_the_same_pixels_is_not_motion() {
         let at = Instant::now();
-        let (mut stream, mut page, picture, at) = settled(at, false);
+        let (mut stream, mut page, picture, at) = settled(at, MotionDebug::None);
         let mut now = at;
         for _ in 0..30 {
             now += Duration::from_millis(40);
@@ -881,7 +959,7 @@ mod tests {
     #[test]
     fn a_repaint_after_a_forget_sends_the_whole_picture_again() {
         let at = Instant::now();
-        let (mut stream, _, picture, now) = settled(at, false);
+        let (mut stream, _, picture, now) = settled(at, MotionDebug::None);
         stream.forget();
         let mut page = Page::new();
         damage(&mut stream, &mut page, whole(), &picture, now);
@@ -898,7 +976,7 @@ mod tests {
     #[test]
     fn a_reset_drops_every_history_and_every_stream() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture, now) = settled(at, false);
+        let (mut stream, mut page, mut picture, now) = settled(at, MotionDebug::None);
         let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
         let (seen, now) = play(&mut stream, &mut page, &mut picture, moving, now);
         assert!(seen);
@@ -924,7 +1002,7 @@ mod tests {
     #[test]
     fn a_cleanup_is_held_for_a_page_behind_but_not_for_good() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture, at) = settled(at, false);
+        let (mut stream, mut page, mut picture, at) = settled(at, MotionDebug::None);
         let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
         let (seen, mut now) = play(&mut stream, &mut page, &mut picture, moving, at);
         assert!(seen);
@@ -946,7 +1024,7 @@ mod tests {
     #[test]
     fn a_debug_outline_is_on_what_is_sent_and_never_on_the_mirror() {
         let at = Instant::now();
-        let (mut stream, mut page, mut picture, at) = settled(at, true);
+        let (mut stream, mut page, mut picture, at) = settled(at, MotionDebug::Motion);
         let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
         let (seen, now) = play(&mut stream, &mut page, &mut picture, moving, at);
         assert!(seen);
@@ -960,6 +1038,59 @@ mod tests {
         let mut rgb = Vec::new();
         stream.regions.crop(moving, &mut rgb).unwrap();
         assert_eq!(rgb[..3], picture[..3], "the outline was painted on the mirror");
+    }
+
+    /// Under `"tiles"` a tile changed alone goes out on the grid, tinted, with a pip
+    /// for its churn — yellow while it is below motion, orange once a spinner keeps it
+    /// changing with no stream taking it — and none of it reaches the mirror.
+    #[test]
+    fn the_tiles_marks_show_the_grid_and_the_churn_below_motion() {
+        let at = Instant::now();
+        let (mut stream, mut page, mut picture, settled_at) = settled(at, MotionDebug::Tiles);
+        // Past the churn the first picture left.
+        let at = settled_at + CHURN_SLOT * u32::try_from(CHURN_WINDOW).unwrap();
+        let stride = usize::from(W) * 3;
+        let pixel = |rgb: &[u8], x: u16, y: u16| -> [u8; 3] {
+            rgb[usize::from(y) * stride + usize::from(x) * 3..][..3].try_into().unwrap()
+        };
+
+        let tile = Rect::from_size(2 * TILE, TILE, TILE, TILE).unwrap();
+        let rgb = pattern(TILE, TILE, 9);
+        damage(&mut stream, &mut page, tile, &rgb, at);
+        paint(&mut picture, tile, &rgb);
+        assert_eq!(page.tiles, vec![tile], "a tile changed alone goes as PNG");
+        assert_eq!(pixel(&page.rgb, tile.left, tile.top + 20), GRID.colour, "the grid is on its left edge");
+        assert_eq!(pixel(&page.rgb, tile.left + 20, tile.top), GRID.colour, "and on its top edge");
+        let (pip, past) = (tile.left + PIP_INSET, tile.left + PIP_INSET + PIP_STEP);
+        assert_eq!(pixel(&page.rgb, pip, tile.top + PIP_INSET), MARK_CHURN, "one pip for one slot of churn");
+        assert_ne!(pixel(&page.rgb, past, tile.top + PIP_INSET), MARK_CHURN, "and only one");
+        let (x, y) = (tile.left + 40, tile.top + 40);
+        let tinted: Vec<u8> =
+            pixel(&picture, x, y).iter().zip(MARK_CHURN).map(|(&c, m)| ((u16::from(c) * 3 + u16::from(m)) / 4) as u8).collect();
+        assert_eq!(pixel(&page.rgb, x, y)[..], tinted[..], "the tile is tinted");
+
+        let spinner = Rect::from_size(4 * TILE, 3 * TILE, TILE, TILE).unwrap();
+        let (seen, _) = play(&mut stream, &mut page, &mut picture, spinner, at);
+        assert!(!seen, "a spinner took a stream");
+        let moving = pixel(&page.rgb, spinner.left + PIP_INSET + (CHURN_MOVING as u16 - 1) * PIP_STEP, spinner.top + PIP_INSET);
+        assert_eq!(moving, MARK_CHURN_MOVING, "a spinner is marked in motion with no stream");
+
+        let mut mirror = Vec::new();
+        stream.regions.crop(whole(), &mut mirror).unwrap();
+        assert_eq!(mirror, picture, "a mark was painted on the mirror");
+    }
+
+    /// The grid falls where the desktop's tiles meet, whatever the corner of the
+    /// picture it is painted on.
+    #[test]
+    fn the_grid_follows_the_desktop_not_the_picture() {
+        let (w, h) = (100, 80);
+        let mut rgb = vec![0; w * h * 3];
+        grid(&mut rgb, (w, h), (TILE - 10, TILE - 30), GRID);
+        let lit = |x: usize, y: usize| rgb[(y * w + x) * 3..][..3] == GRID.colour;
+        assert!(lit(10, 5) && lit(10, 79), "the column at the desktop's x = TILE");
+        assert!(lit(0, 30) && lit(99, 30), "the row at the desktop's y = TILE");
+        assert!(!lit(0, 0) && !lit(11, 31) && !lit(9, 29));
     }
 
     /// A slot's worth of instants, for driving the churn by hand.

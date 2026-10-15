@@ -225,9 +225,10 @@ pub struct RenderPlan {
     /// rather than passed, or a Mac's ZRLE on its virtual display. Never set with
     /// [`Self::rdp_graphics`]. The fields above the passthroughs reach the VP9.
     pub motion: bool,
-    /// Outline what the motion path sent in the pixels themselves
-    /// ([`TargetConfig::render_motion_debug`]). Never set without [`Self::motion`].
-    pub motion_debug: bool,
+    /// What the motion path draws, in the pixels themselves, of what it sent
+    /// ([`TargetConfig::render_motion_debug`]). [`MotionDebug::None`] unless
+    /// [`Self::motion`].
+    pub motion_debug: MotionDebug,
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
@@ -499,6 +500,25 @@ pub enum Vp9Encoder {
 /// ([`Vp9Encoder::Native`]).
 const NATIVE_VP9: bool = cfg!(feature = "native-vp9");
 
+/// What a session started with Motion draws, in the pixels themselves, of what it
+/// sent: [`TargetConfig::render_motion_debug`]. A QA aid. Each level draws what the
+/// one before it does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MotionDebug {
+    /// Nothing: the picture as the remote drew it.
+    #[default]
+    None,
+    /// What each decision sent, outlined: a region's stream in magenta, a PNG cut
+    /// from beside one in cyan, and a cleanup in green.
+    Motion,
+    /// The tile grid as well, on everything sent, and each tile a report changed
+    /// that went as PNG tinted, with a pip for every slot of its churn: yellow below
+    /// the churn that is motion, orange at it, for a tile in motion that no stream
+    /// took — one or two tiles changing apart from any other, as a spinner does.
+    Tiles,
+}
+
 /// Whether a session takes the remote's sound, and what that sound is sent to the
 /// browser as: [`Choices::audio`], on a target that offers it ([`Offers::audio`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -667,7 +687,11 @@ impl RenderPlan {
         // quality, and nothing else a client sees says which a session was started with.
         let encoder = if self.native_vp9 { "native VP9" } else { "libvpx" };
         if self.motion {
-            let debug = if self.motion_debug { " · outlined" } else { "" };
+            let debug = match self.motion_debug {
+                MotionDebug::None => "",
+                MotionDebug::Motion => " · outlined",
+                MotionDebug::Tiles => " · outlined with tiles",
+            };
             return format!(
                 "motion as video q{} · {encoder}{adaptive} · still as PNG{debug}",
                 self.quality
@@ -910,17 +934,19 @@ pub struct TargetConfig {
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub render_adaptive: Option<bool>,
-    /// Outline everything a session started with Motion sends, in the pixels
-    /// themselves, so what the motion path decided is visible on the screen
-    /// instead of inferred from how blurry something looks: a region's stream in
+    /// Draw what a session started with Motion sends, in the pixels themselves, so
+    /// what the motion path decided is visible on the screen instead of inferred
+    /// from how blurry something looks. `"motion"` outlines a region's stream in
     /// magenta, a PNG cut from beside a stream in cyan, and a cleanup that sends a
-    /// stopped region's tiles exactly in green. A QA aid, off unless asked for, and
-    /// refused on a target that does not offer Motion ([`Offers::motion`]).
+    /// stopped region's tiles exactly in green; `"tiles"` adds the tile grid and
+    /// marks each tile that changed too seldom, or alone, to be video
+    /// ([`MotionDebug::Tiles`]). A QA aid, `"none"` unless asked for, and refused
+    /// on a target that does not offer Motion ([`Offers::motion`]).
     ///
-    /// The outlines go on the *copy* handed to an encoder, never on the mirror
-    /// ([`crate::video::Mark`]), so a cleanup erases the outline it replaces.
+    /// The marks go on the *copy* handed to an encoder, never on the mirror
+    /// ([`crate::video::Mark`]), so a cleanup erases the mark it replaces.
     #[serde(default)]
-    pub render_motion_debug: bool,
+    pub render_motion_debug: MotionDebug,
 }
 
 /// The stream quality a target streams at when [`TargetConfig::video_quality`] is
@@ -1054,7 +1080,7 @@ impl TargetConfig {
             rdp_h264,
             native_vp9: choices.vp9 == Vp9Encoder::Native,
             motion: choices.motion && self.offers().motion,
-            motion_debug: choices.motion && self.offers().motion && self.render_motion_debug,
+            motion_debug: if choices.motion && self.offers().motion { self.render_motion_debug } else { MotionDebug::None },
         }
     }
 
@@ -1979,8 +2005,8 @@ impl ConfigFile {
                 target.name
             );
             anyhow::ensure!(
-                !target.render_motion_debug || target.offers().motion,
-                "target {:?} sets render_motion_debug, which outlines what a session started \
+                target.render_motion_debug == MotionDebug::None || target.offers().motion,
+                "target {:?} sets render_motion_debug, which draws what a session started \
                  with Motion sends, and Motion is offered only on an RDP target with egfx on \
                  and one virtual display and on ard with virtual_display = true. Remove the key.",
                 target.name
@@ -3278,7 +3304,7 @@ mod tests {
                 rdp_h264: false,
                 native_vp9: false,
                 motion: false,
-                motion_debug: false,
+                motion_debug: MotionDebug::None,
             }
         );
     }
@@ -3297,7 +3323,7 @@ mod tests {
                 rdp_h264: false,
                 native_vp9: false,
                 motion: false,
-                motion_debug: false,
+                motion_debug: MotionDebug::None,
             }
         );
     }
@@ -3578,12 +3604,12 @@ mod tests {
         let native = Choices { vp9: Vp9Encoder::Native, ..motion };
         assert_eq!(virtual_display.accepts(native).is_ok(), NATIVE_VP9, "its regions take either encoder");
         assert!(!virtual_display.render_plan(Choices::default(), Decoders::ALL).motion);
-        let outlined = ard("virtual_display = true\nrender_motion_debug = true").unwrap().targets.remove(0);
-        assert!(outlined.render_plan(motion, Decoders::ALL).motion_debug);
+        let outlined = ard("virtual_display = true\nrender_motion_debug = \"motion\"").unwrap().targets.remove(0);
+        assert_eq!(outlined.render_plan(motion, Decoders::ALL).motion_debug, MotionDebug::Motion);
 
         let physical = ard("").unwrap().targets.remove(0);
         assert_eq!(physical.accepts(motion).unwrap_err().choice, "motion");
-        let err = ard("render_motion_debug = true").unwrap_err();
+        let err = ard("render_motion_debug = \"motion\"").unwrap_err();
         assert!(format!("{err:#}").contains("render_motion_debug"), "{err:#}");
     }
 
@@ -4434,18 +4460,31 @@ vnc_password = \"x\"")).unwrap();
         };
         let motion = Choices { motion: true, ..Choices::default() };
         let plain = parse("").unwrap().targets.remove(0);
-        assert!(!plain.render_plan(motion, Decoders::ALL).motion_debug, "off unless asked for");
+        assert_eq!(plain.render_plan(motion, Decoders::ALL).motion_debug, MotionDebug::None, "off unless asked for");
+        let none = parse("render_motion_debug = \"none\"").unwrap().targets.remove(0);
+        assert_eq!(none.render_plan(motion, Decoders::ALL), plain.render_plan(motion, Decoders::ALL));
 
-        let outlined = parse("render_motion_debug = true").unwrap().targets.remove(0);
+        let outlined = parse("render_motion_debug = \"motion\"").unwrap().targets.remove(0);
         let plan = outlined.render_plan(motion, Decoders::ALL);
-        assert!(plan.motion && plan.motion_debug);
+        assert!(plan.motion && plan.motion_debug == MotionDebug::Motion);
         assert!(plan.describe().ends_with("still as PNG · outlined"), "{}", plan.describe());
-        assert!(
-            !outlined.render_plan(Choices::default(), Decoders::ALL).motion_debug,
+        assert_eq!(
+            outlined.render_plan(Choices::default(), Decoders::ALL).motion_debug,
+            MotionDebug::None,
             "a session started without Motion has nothing to outline"
         );
 
-        for refused in ["render_motion_debug = true\negfx = false", "render_motion_debug = true\nvirtual_displays = 2"] {
+        let tiles = parse("render_motion_debug = \"tiles\"").unwrap().targets.remove(0);
+        let plan = tiles.render_plan(motion, Decoders::ALL);
+        assert_eq!(plan.motion_debug, MotionDebug::Tiles);
+        assert!(plan.describe().ends_with("still as PNG · outlined with tiles"), "{}", plan.describe());
+
+        for wrong in ["render_motion_debug = true", "render_motion_debug = \"grid\""] {
+            let err = parse(wrong).unwrap_err();
+            assert!(format!("{err:#}").contains("render_motion_debug"), "{err:#}");
+        }
+
+        for refused in ["render_motion_debug = \"tiles\"\negfx = false", "render_motion_debug = \"motion\"\nvirtual_displays = 2"] {
             let err = parse(refused).unwrap_err();
             assert!(format!("{err:#}").contains("render_motion_debug"), "{err:#}");
         }
@@ -4613,7 +4652,7 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: MotionDebug::None });
         assert_eq!(plan.describe(), "video q80 · libvpx · adaptive");
     }
 
@@ -4625,7 +4664,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: MotionDebug::None });
         assert_eq!(plan.describe(), "video q80 · libvpx");
     }
 

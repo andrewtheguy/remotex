@@ -51,7 +51,7 @@ use anyhow::Context as _;
 
 use crate::protocol::{Held, RegionUnit, ServerMsg};
 use crate::shadow::Rect;
-use crate::video::{AccessUnit, Mark, Mirror};
+use crate::video::{AccessUnit, Grid, Mark, Mirror};
 use crate::vp9::Stream;
 
 /// A tile's side, in the desktop's pixels: ZRLE's.
@@ -544,10 +544,12 @@ pub struct Regions {
     /// The `render_motion_debug` outline, painted on the crop handed to the encoder
     /// and never on the mirror.
     mark: Option<Mark>,
+    /// The `render_motion_debug = "tiles"` grid, painted under the outline.
+    grid: Option<Grid>,
 }
 
 impl Regions {
-    pub fn new(quality: u8, native: bool, mark: Option<Mark>) -> Self {
+    pub fn new(quality: u8, native: bool, mark: Option<Mark>, grid: Option<Grid>) -> Self {
         Self {
             quality,
             native,
@@ -563,6 +565,7 @@ impl Regions {
             debts: HashMap::new(),
             retuned_at: None,
             mark,
+            grid,
         }
     }
 
@@ -1104,6 +1107,7 @@ impl Regions {
             mirror: current,
             live: std::mem::take(&mut self.live),
             mark: self.mark,
+            grid: self.grid,
             skipped: 0,
             epoch: self.epoch,
             #[cfg(test)]
@@ -1201,6 +1205,7 @@ pub struct Round {
     mirror: Mirror,
     live: Vec<Live>,
     mark: Option<Mark>,
+    grid: Option<Grid>,
     skipped: u64,
     /// The [`Regions::epoch`] this round was taken under, so [`Regions::put_back`]
     /// can tell a round that outlived its desktop from one worth restoring.
@@ -1256,13 +1261,17 @@ fn rendezvous_arrive(rendezvous: &Option<std::sync::Arc<Rendezvous>>) {
     }
 }
 
-/// One stream's encode of its crop of the mirror: the crop is copied in, outlined
+/// One stream's encode of its crop of the mirror: the crop is copied in, drawn on
 /// under `render_motion_debug`, and coded.
-fn encode_live(live: &mut Live, mirror: &Mirror, mark: Option<Mark>) -> anyhow::Result<Option<AccessUnit>> {
+fn encode_live(live: &mut Live, mirror: &Mirror, mark: Option<Mark>, grid: Option<Grid>) -> anyhow::Result<Option<AccessUnit>> {
     let mut rgb = Vec::new();
     mirror.crop_into(live.rect, &mut rgb)?;
+    let size = (usize::from(live.rect.w()), usize::from(live.rect.h()));
+    if let Some(grid) = grid {
+        crate::video::grid(&mut rgb, size, (live.rect.left, live.rect.top), grid);
+    }
     if let Some(mark) = mark {
-        crate::video::outline(&mut rgb, (usize::from(live.rect.w()), usize::from(live.rect.h())), mark);
+        crate::video::outline(&mut rgb, size, mark);
     }
     let whole = Rect::from_size(0, 0, live.rect.w(), live.rect.h()).expect("a region is never empty");
     live.picture.blit(whole, &rgb)?;
@@ -1296,7 +1305,7 @@ impl Round {
     /// keyframe, so those pixels ride the next round — which is what stops a frame
     /// that produced nothing from becoming pixels the page never gets.
     pub fn encode(&mut self) -> anyhow::Result<Vec<ServerMsg>> {
-        let (mirror, mark) = (&self.mirror, self.mark);
+        let (mirror, mark, grid) = (&self.mirror, self.mark, self.grid);
         #[cfg(test)]
         let rendezvous = self.rendezvous.clone();
 
@@ -1324,7 +1333,7 @@ impl Round {
                     let handle = scope.spawn(move || {
                         #[cfg(test)]
                         rendezvous_arrive(&rendezvous);
-                        encode_live(live, mirror, mark)
+                        encode_live(live, mirror, mark, grid)
                     });
                     (at, handle)
                 })
@@ -1333,7 +1342,7 @@ impl Round {
             if let Some((at, live)) = first {
                 #[cfg(test)]
                 rendezvous_arrive(&rendezvous);
-                outcomes.push((at, encode_live(live, mirror, mark)));
+                outcomes.push((at, encode_live(live, mirror, mark, grid)));
             }
             for (at, handle) in spawned {
                 // A panicking encode is re-raised rather than absorbed: release
@@ -1667,7 +1676,7 @@ mod tests {
     /// for two blocks that size with a quiet tile between: neighbouring tiles
     /// coalesce into one.
     fn sized(w: u16, h: u16) -> Regions {
-        let mut regions = Regions::new(60, false, None);
+        let mut regions = Regions::new(60, false, None, None);
         regions.want(w, h);
         let bytes = usize::from(w) * usize::from(h) * 3;
         regions.blit(Rect { left: 0, top: 0, right: w - 1, bottom: h - 1 }, &vec![0; bytes]).expect("a full-desktop blit");

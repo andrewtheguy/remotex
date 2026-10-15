@@ -109,12 +109,15 @@ amd64 machine under x86-64-v3.
   browser that cannot compose the pipeline can start it, and a reload resumes the
   session. With the host's image quality policy set to Lossless, Motion is
   eventually lossless: exact once what moved settles. See
-  [An exact picture](#an-exact-picture). `render_motion_debug = true` on the target
+  [An exact picture](#an-exact-picture). `render_motion_debug = "motion"` on the target
   outlines what Motion sends: VP9 in magenta, PNG beside it in cyan, and the
-  cleanup after it in green. On an `ard` target with `virtual_display = true`,
+  cleanup after it in green. `"tiles"` adds the tile grid, and marks each tile
+  sent as PNG because it changed too seldom, or alone, to be video: yellow, with
+  a pip for each recent change, and orange once it changes often enough to be
+  motion but no stream takes it. On an `ard` target with `virtual_display = true`,
   *Motion* (alpha) is a box of its own, under Picture: the gateway sends what
   moves on the Mac's virtual display as VP9 and what is still as PNG, which is
-  exact, since the Mac's ZRLE always is. `render_motion_debug` outlines it
+  exact, since the Mac's ZRLE always is. `render_motion_debug` draws on it
   there too.
 - **VP9 encoder.** Which encoder codes the VP9: *libvpx*, the default, or
   *Native* (alpha), the encoder in Rust that `screen-vp9` has written. On a
