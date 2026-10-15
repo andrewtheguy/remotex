@@ -74,6 +74,7 @@ const changed = (
   width: number,
   height: number,
 ) => ({
+  planes: [{ rows: 256 }, { rows: 256 }, { rows: 256 }],
   changed: {
     picture: `7:${serial}`,
     since: `7:${serial - 1}`,
@@ -105,5 +106,21 @@ test("a picture after one the textures do not hold uploads whole", () => {
 });
 
 test("a picture that does not say where it changed uploads whole", () => {
-  assert.equal(uploadOf("7:4", { changed: undefined }), "whole");
+  assert.equal(
+    uploadOf("7:4", { changed: undefined, planes: [{ rows: 256 }] }),
+    "whole",
+  );
+});
+
+test("a last strip uploads only its rows of the display", () => {
+  // Strip 3 of 834 rows in strips of 208: two rows of it are the display's.
+  const strip = { ...changed(5, 0, 0, 352, 64), planes: [{ rows: 2 }] };
+  assert.deepEqual(uploadOf("7:4", strip), {
+    x: 0,
+    y: 0,
+    width: 352,
+    height: 2,
+  });
+  const below = { ...changed(5, 0, 32, 352, 32), planes: [{ rows: 2 }] };
+  assert.equal(uploadOf("7:4", below), null);
 });

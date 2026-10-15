@@ -151,16 +151,22 @@ const YUV444 = 2;
 // The strips a picture sent in strips comes in.
 const STRIPS = 4;
 
+// What `last` keys a picture whole by, beside the strips' indices.
+const WHOLE = -1;
+
 /**
  * The picture `decode` just completed, as its planes and its serial: of the
  * whole picture, or for a unit that is `strip`, its rows of the display. An
  * error says what the page cannot present, or for a strip what does not fit.
+ * `last` is the stream's last picture's serial, by strip, which this one's
+ * becomes.
  */
 function picture(
   module: LoadedModule,
   id: number,
   decoder: ModuleDecoder,
   strip: PictureStrip | undefined,
+  last: Map<number, number>,
 ): { planes: DecodedPlanes; serial: number } | { error: string; name: string } {
   // Read afresh: a memory that grew is a new buffer.
   const memory = module.memory.buffer;
@@ -201,20 +207,24 @@ function picture(
     height = strip.rows;
     rows = Math.min(h, strip.rows - row);
   }
-  // Where the picture may differ from the stream's one before it, as the
-  // decoder says: for a picture whole, from a decoder that says.
+  // Where the picture may differ from the stream's one before it in its rows,
+  // the picture whole's or the strip's, as a decoder that says says.
   let changed: PictureChange | undefined;
-  if (!strip && decoder.changed) {
-    const [x, y, width, height] = new Int32Array(memory, decoder.changed(), 4);
+  const key = strip?.index ?? WHOLE;
+  if (decoder.changed) {
+    const since = last.get(key) ?? 0;
+    const at = decoder.changed(since);
+    const [x, y, width, height] = new Int32Array(memory, at, 4);
     changed = {
       picture: `${id}:${p[14]}`,
-      since: `${id}:${p[14] - 1}`,
+      since: `${id}:${since}`,
       x,
       y,
       width,
       height,
     };
   }
+  last.set(key, p[14]);
   return {
     serial: p[14],
     planes: {
@@ -252,6 +262,9 @@ const ending = new Set<number>();
 // The serials of the pictures each stream's decoder holds for the paint worker.
 const held = new Map<number, Set<number>>();
 
+// Each stream's last picture's serial, by strip (`picture`).
+const lastPictures = new Map<number, Map<number, number>>();
+
 // A unit waiting for one of them to be released, by stream.
 const waiting = new Map<number, () => void>();
 
@@ -285,6 +298,7 @@ function drop(id: number) {
   const decoder = decoders.get(id);
   decoders.delete(id);
   held.delete(id);
+  lastPictures.delete(id);
   wake(id);
   decoder?.free();
 }
@@ -305,6 +319,7 @@ async function create(id: number, decoder: SoftwareModule): Promise<void> {
   }
   decoders.set(id, new module.glue.Decoder(THREADS));
   held.set(id, new Set());
+  lastPictures.set(id, new Map());
 }
 
 async function destroy(id: number): Promise<void> {
@@ -352,7 +367,13 @@ async function decode(
     scope.postMessage({ type: "decoded", id, picture: null });
     return;
   }
-  const decoded = picture(module, id, decoder, command.strip);
+  const decoded = picture(
+    module,
+    id,
+    decoder,
+    command.strip,
+    lastPictures.get(id) ?? new Map(),
+  );
   if ("error" in decoded) {
     fail(decoded.name, decoded.error);
     return;

@@ -46,12 +46,14 @@ export interface ModuleDecoder {
   picture(): number;
   /**
    * Where the four numbers saying where the picture the last unit completed
-   * may differ from the decoder's picture before it are in the memory: the
-   * left, top, width and height of a rectangle of its planes, the whole
-   * picture where it is not predicted from that one, and a width of 0 where
-   * nothing changed. vp9-wasm's alone: hevc-wasm's decoder has none.
+   * may differ from picture `since` are in the memory: the left, top, width
+   * and height of a rectangle of its planes, the whole picture where it does
+   * not descend from that one, and a width of 0 where nothing changed.
+   * hevc-wasm's takes any picture before, a strip's being its strip's last;
+   * vp9-wasm's takes none and says it of its picture before, which `since` is
+   * for the picture whole that VP9 comes as. hevc-wasm 0.0.16 has none.
    */
-  changed?(): number;
+  changed?(since: number): number;
   /**
    * The paint worker is done with picture `serial`, whose memory the decoder
    * may have back. The units after a picture decode into other memory while it

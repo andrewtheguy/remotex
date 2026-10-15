@@ -133,8 +133,8 @@ export interface DecodedPlanes {
   keyframe: boolean;
   /**
    * Which of the stream's pictures this is, and where it may differ from the
-   * one before it, `since`, as its decoder knows: a rectangle of its planes,
-   * empty where nothing does. None where the decoder does not say, and then
+   * one before it in its rows, `since`, a strip's being its strip's last, as
+   * its decoder knows: a rectangle of its planes, empty where nothing does. None where the decoder does not say, and then
    * every sample of it is new. The paint worker that has `since` in its
    * textures uploads the rectangle alone (`uploadOf` in planesPicture.ts).
    */
@@ -146,7 +146,7 @@ export interface DecodedPlanes {
   colorSpace: PredefinedColorSpace;
 }
 
-/** Where a picture may differ from its stream's picture before it. */
+/** Where a picture may differ from its stream's picture before it in its rows. */
 export interface PictureChange {
   /** This picture, and the one before it, as a stream and a serial each. */
   picture: string;

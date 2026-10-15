@@ -15,10 +15,10 @@
 // display one to three rows past a multiple of 64 has strips that end short of its
 // last rows, which are black, as the gateway leaves them.
 //
-// A picture whose decoder says where it may differ from the one before it
-// (`changed`) is uploaded only there when the textures hold that one, and not at
-// all where nothing changed: a quiet desktop's frame is a few of its blocks, and
-// the whole picture is 25 MB at 4K.
+// A picture whose decoder says where it may differ from the one before it in its
+// rows (`changed`), the picture whole's or the strip's, is uploaded only there
+// when the textures hold that one, and not at all where nothing changed: a quiet
+// desktop's frame is a few of its blocks, and the whole picture is 25 MB at 4K.
 import { openPictureCanvas } from "./glPicture.ts";
 import type { DecodedPlanes } from "./softwareDecoder.ts";
 
@@ -141,23 +141,25 @@ export interface PlanesRect {
 }
 
 /**
- * What of `planes` to upload into textures that hold the picture `held` (a
- * `PictureChange`'s `picture`, or null for none known): where it may differ
- * from the one before it, when the textures hold that one; nothing, where
- * nothing does; and otherwise the whole picture.
+ * What of `planes` to upload into textures whose rows of it hold the picture
+ * `held` (a `PictureChange`'s `picture`, or null for none known): where it may
+ * differ from the one before it, when the textures hold that one, and of a
+ * last strip only its rows of the display; nothing, where nothing does; and
+ * otherwise the whole picture.
  */
 export function uploadOf(
   held: string | null,
-  planes: Pick<DecodedPlanes, "changed">,
+  planes: Pick<DecodedPlanes, "changed"> & { planes: { rows: number }[] },
 ): PlanesRect | "whole" | null {
   const changed = planes.changed;
   if (!changed || held === null || changed.since !== held) {
     return "whole";
   }
-  if (changed.width <= 0 || changed.height <= 0) {
+  const { x, y, width } = changed;
+  const height = Math.min(changed.height, planes.planes[0].rows - y);
+  if (width <= 0 || height <= 0) {
     return null;
   }
-  const { x, y, width, height } = changed;
   return { x, y, width, height };
 }
 
@@ -180,9 +182,10 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
   let colors = "";
   // The strips in the textures (`placedAfter`).
   let placed = 0;
-  // The picture the textures hold, as its `changed.picture` (`uploadOf`): null
-  // where that is not known, or the textures were made since.
-  let held: string | null = null;
+  // The picture the textures hold, as its `changed.picture` (`uploadOf`), in
+  // each strip's rows, or the first's for a picture whole: null where that is
+  // not known, or the textures were made since.
+  const held: (string | null)[] = [null, null, null, null];
 
   // A texture for each plane, at the picture's size; a pixel reads its own
   // texel. WebGL reports a refused allocation as an error flag, not an
@@ -246,11 +249,10 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
     }
   };
 
-  // The same rectangle of each plane: a picture that says where it changed is
-  // whole (softwareDecoder.worker.ts). Its first sample is given as
-  // the offset, not by UNPACK_SKIP_PIXELS and UNPACK_SKIP_ROWS: WebKit took
-  // 0.5 ms for three 128×128 rectangles given by those, and 0.13 by the
-  // offset, where a whole 3840×2160 picture took 1.6.
+  // The same rectangle of each plane, in the picture's rows. Its first sample
+  // is given as the offset, not by UNPACK_SKIP_PIXELS and UNPACK_SKIP_ROWS:
+  // WebKit took 0.5 ms for three 128×128 rectangles given by those, and 0.13
+  // by the offset, where a whole 3840×2160 picture took 1.6.
   const uploadRect = (
     planes: DecodedPlanes,
     memory: Uint8Array,
@@ -274,6 +276,26 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
     });
   };
 
+  // What of `planes` the textures do not hold already (`uploadOf`), into its
+  // rows of them.
+  const upload = (planes: DecodedPlanes) => {
+    const memory = new Uint8Array(planes.memory);
+    const strip = planes.strip ?? 0;
+    const what = uploadOf(held[strip], planes);
+    // Unknown until the upload is done: one that throws leaves the textures
+    // holding no picture whole. A picture whole is in every strip's rows.
+    if (planes.strip === undefined) {
+      held.fill(null);
+    }
+    held[strip] = null;
+    if (what === "whole") {
+      uploadWhole(planes, memory);
+    } else if (what) {
+      uploadRect(planes, memory, what);
+    }
+    held[strip] = planes.changed?.picture ?? null;
+  };
+
   return {
     place(planes) {
       surface.usable();
@@ -282,7 +304,7 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
         // Not remembered until made: a refused allocation is tried again.
         extent = "";
         placed = 0;
-        held = null;
+        held.fill(null);
         allocate(planes.width, planes.height);
         extent = wanted;
       }
@@ -302,18 +324,8 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
         }
         colors = stated;
       }
-      const memory = new Uint8Array(planes.memory);
-      const upload = uploadOf(held, planes);
-      // Unknown until the upload is done: one that throws leaves the textures
-      // holding no picture whole.
-      held = null;
-      if (upload === "whole") {
-        uploadWhole(planes, memory);
-      } else if (upload) {
-        uploadRect(planes, memory, upload);
-      }
+      upload(planes);
       placed = placedAfter(placed, planes);
-      held = planes.changed?.picture ?? null;
     },
     draw(w, h) {
       surface.usable();
