@@ -152,7 +152,7 @@ export function uploadOf(
   planes: Pick<DecodedPlanes, "changed"> & { planes: { rows: number }[] },
 ): PlanesRect | "whole" | null {
   const changed = planes.changed;
-  if (!changed || held === null || changed.since !== held) {
+  if (held === null || changed.since !== held) {
     return "whole";
   }
   const { x, y, width } = changed;
@@ -293,7 +293,7 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
     } else if (what) {
       uploadRect(planes, memory, what);
     }
-    held[strip] = planes.changed?.picture ?? null;
+    held[strip] = planes.changed.picture;
   };
 
   return {

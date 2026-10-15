@@ -134,11 +134,12 @@ export interface DecodedPlanes {
   /**
    * Which of the stream's pictures this is, and where it may differ from the
    * one before it in its rows, `since`, a strip's being its strip's last, as
-   * its decoder knows: a rectangle of its planes, empty where nothing does. None where the decoder does not say, and then
-   * every sample of it is new. The paint worker that has `since` in its
-   * textures uploads the rectangle alone (`uploadOf` in planesPicture.ts).
+   * its decoder knows: a rectangle of its planes, empty where nothing does,
+   * and the whole picture where it does not come down from that one. The
+   * paint worker that has `since` in its textures uploads the rectangle alone
+   * (`uploadOf` in planesPicture.ts).
    */
-  changed?: PictureChange;
+  changed: PictureChange;
   fullRange: boolean;
   /** Which coefficients made the luma: BT.709's, or BT.601's. */
   matrix: "bt709" | "smpte170m";

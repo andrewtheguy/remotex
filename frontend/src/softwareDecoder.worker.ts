@@ -208,22 +208,19 @@ function picture(
     rows = Math.min(h, strip.rows - row);
   }
   // Where the picture may differ from the stream's one before it in its rows,
-  // the picture whole's or the strip's, as a decoder that says says.
-  let changed: PictureChange | undefined;
+  // the picture whole's or the strip's, as the decoder says: the whole picture
+  // for the first, `since` 0 being none.
   const key = strip?.index ?? WHOLE;
-  if (decoder.changed) {
-    const since = last.get(key) ?? 0;
-    const at = decoder.changed(since);
-    const [x, y, width, height] = new Int32Array(memory, at, 4);
-    changed = {
-      picture: `${id}:${p[14]}`,
-      since: `${id}:${since}`,
-      x,
-      y,
-      width,
-      height,
-    };
-  }
+  const since = last.get(key) ?? 0;
+  const rect = new Int32Array(memory, decoder.changed(since), 4);
+  const changed: PictureChange = {
+    picture: `${id}:${p[14]}`,
+    since: `${id}:${since}`,
+    x: rect[0],
+    y: rect[1],
+    width: rect[2],
+    height: rect[3],
+  };
   last.set(key, p[14]);
   return {
     serial: p[14],

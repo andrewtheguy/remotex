@@ -105,13 +105,6 @@ test("a picture after one the textures do not hold uploads whole", () => {
   assert.equal(uploadOf("6:4", changed(5, 64, 128, 192, 64)), "whole");
 });
 
-test("a picture that does not say where it changed uploads whole", () => {
-  assert.equal(
-    uploadOf("7:4", { changed: undefined, planes: [{ rows: 256 }] }),
-    "whole",
-  );
-});
-
 test("a last strip uploads only its rows of the display", () => {
   // Strip 3 of 834 rows in strips of 208: two rows of it are the display's.
   const strip = { ...changed(5, 0, 0, 352, 64), planes: [{ rows: 2 }] };

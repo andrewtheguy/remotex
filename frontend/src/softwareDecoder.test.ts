@@ -77,6 +77,7 @@ const PLANES = {
   planes: [0, 4, 8].map((offset) => ({ offset, stride: 2, width: 2, rows: 2 })),
   row: 0,
   keyframe: true,
+  changed: { picture: "1:1", since: "1:0", x: 0, y: 0, width: 2, height: 2 },
   fullRange: true,
   matrix: "bt709",
   colorSpace: "display-p3",
