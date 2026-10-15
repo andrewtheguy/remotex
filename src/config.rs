@@ -543,6 +543,22 @@ pub struct NotOffered {
     pub choice: &'static str,
 }
 
+/// A client screen a session following the window would open a Mac's virtual
+/// display at, under the least a Mac is asked for
+/// ([`TargetConfig::opens_on`]).
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "target {target:?} opens at this screen, and {}x{} points is under the {}x{} a Mac's virtual display is asked for at least",
+    .screen.0,
+    .screen.1,
+    crate::vnc_apple::MIN_DISPLAY_POINTS.0,
+    crate::vnc_apple::MIN_DISPLAY_POINTS.1
+)]
+pub struct ScreenUnderMinimum {
+    pub target: String,
+    pub screen: (u16, u16),
+}
+
 /// What the attached browser said it can take, from its session socket
 /// ([`crate::ws`]): the questions the page asks once at load and states on every
 /// session socket it opens. The first two say which passthrough this browser can
@@ -913,20 +929,33 @@ impl TargetConfig {
     /// viewport and pinch-zooms ([`HostDisplay::fit`]) has a screen but not one
     /// to open at: it is the one client not showing the desktop at 100%, and
     /// its screen is a tablet's, to be asked for in landscape once the session
-    /// is up. It opens at the default, as does a client that named no screen,
-    /// and one whose screen is under the least a Mac's virtual display is asked
-    /// for ([`crate::vnc_apple::MIN_DISPLAY_POINTS`]).
+    /// is up. It opens at the default, as does a client that named no screen.
+    /// A screen under the least a Mac's virtual display is asked for never gets
+    /// here: the session is refused before it starts ([`Self::opens_on`]).
     pub fn opening_size(&self, sizing: Sizing, display: Option<HostDisplay>) -> (u16, u16) {
         match sizing {
             Sizing::Target => self.kept_size(),
             Sizing::BuiltIn => DEFAULT_SIZE,
-            Sizing::Window => {
-                // A screen smaller than a Mac's virtual display is asked for is
-                // not one to open at either: refused like no screen, not raised.
-                let too_small =
-                    |d: &HostDisplay| self.has_virtual_display() && crate::vnc_apple::under_minimum((d.w, d.h));
-                display.filter(|d| !d.fit && !too_small(d)).map_or(DEFAULT_SIZE, |d| (d.w, d.h))
+            Sizing::Window => display.filter(|d| !d.fit).map_or(DEFAULT_SIZE, |d| (d.w, d.h)),
+        }
+    }
+
+    /// Whether a session started with `sizing` from a client with `display` can
+    /// open: not one that would open a Mac's virtual display at a screen under
+    /// the least a Mac is asked for ([`crate::vnc_apple::MIN_DISPLAY_POINTS`]).
+    /// Refused, never raised to the minimum nor swapped for [`DEFAULT_SIZE`]:
+    /// what the Mac is sent is a size a client asked for, or nothing.
+    pub fn opens_on(&self, sizing: Sizing, display: Option<HostDisplay>) -> Result<(), ScreenUnderMinimum> {
+        match display {
+            Some(d)
+                if sizing == Sizing::Window
+                    && !d.fit
+                    && self.has_virtual_display()
+                    && crate::vnc_apple::under_minimum((d.w, d.h)) =>
+            {
+                Err(ScreenUnderMinimum { target: self.name.clone(), screen: (d.w, d.h) })
             }
+            _ => Ok(()),
         }
     }
 
@@ -3752,10 +3781,21 @@ vnc_password = \"x\"")).unwrap();
         let mac = &ConfigFile::parse(&vnc_toml(&format!("{hp}size = \"800x600\""))).unwrap().targets[0];
         assert_eq!(mac.kept_size(), (800, 600));
         let wlshare = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"")).unwrap().targets[0];
-        let small = HostDisplay { w: 640, h: 480, scale: 100, fit: false };
-        assert_eq!(mac.opening_size(Sizing::Window, Some(small)), DEFAULT_SIZE, "refused, not raised");
-        assert_eq!(wlshare.opening_size(Sizing::Window, Some(small)), (640, 480));
+        for small in [(640, 480), (800, 599), (799, 600)] {
+            let small = HostDisplay { w: small.0, h: small.1, scale: 100, fit: false };
+            assert_eq!(
+                mac.opens_on(Sizing::Window, Some(small)),
+                Err(ScreenUnderMinimum { target: mac.name.clone(), screen: (small.w, small.h) }),
+                "refused, not raised nor swapped for the default"
+            );
+            // Only a session that opens at the screen is refused for it.
+            assert_eq!(mac.opens_on(Sizing::Target, Some(small)), Ok(()));
+            assert_eq!(mac.opens_on(Sizing::Window, Some(HostDisplay { fit: true, ..small })), Ok(()));
+            assert_eq!(wlshare.opens_on(Sizing::Window, Some(small)), Ok(()));
+            assert_eq!(wlshare.opening_size(Sizing::Window, Some(small)), (small.w, small.h));
+        }
         let least = HostDisplay { w: 800, h: 600, scale: 200, fit: false };
+        assert_eq!(mac.opens_on(Sizing::Window, Some(least)), Ok(()));
         assert_eq!(mac.opening_size(Sizing::Window, Some(least)), (800, 600));
     }
 
