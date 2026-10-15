@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { placedAfter, rowsBelow } from "./planesPicture.ts";
+import { placedAfter, rowsBelow, uploadOf } from "./planesPicture.ts";
 
 const strip = (index: number, keyframe = false) => ({ strip: index, keyframe });
 
@@ -83,4 +83,46 @@ test("rows past the last strip are black", () => {
     }),
     [],
   );
+});
+
+// A picture of stream 7 that says where it changed since the one before it.
+const changed = (
+  serial: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) => ({
+  changed: {
+    picture: `7:${serial}`,
+    since: `7:${serial - 1}`,
+    x,
+    y,
+    width,
+    height,
+  },
+});
+
+test("a picture after the one the textures hold uploads where it changed", () => {
+  assert.deepEqual(uploadOf("7:4", changed(5, 64, 128, 192, 64)), {
+    x: 64,
+    y: 128,
+    width: 192,
+    height: 64,
+  });
+});
+
+test("a picture where nothing changed uploads nothing", () => {
+  assert.equal(uploadOf("7:4", changed(5, 0, 0, 0, 0)), null);
+});
+
+test("a picture after one the textures do not hold uploads whole", () => {
+  // One between was dropped, the textures are new, or the picture is another stream's.
+  assert.equal(uploadOf("7:3", changed(5, 64, 128, 192, 64)), "whole");
+  assert.equal(uploadOf(null, changed(5, 64, 128, 192, 64)), "whole");
+  assert.equal(uploadOf("6:4", changed(5, 64, 128, 192, 64)), "whole");
+});
+
+test("a picture that does not say where it changed uploads whole", () => {
+  assert.equal(uploadOf("7:4", { changed: undefined }), "whole");
 });

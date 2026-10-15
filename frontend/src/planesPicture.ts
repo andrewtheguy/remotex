@@ -14,6 +14,11 @@
 // made, and not before: what was in a strip's rows then is no picture of it. A
 // display one to three rows past a multiple of 64 has strips that end short of its
 // last rows, which are black, as the gateway leaves them.
+//
+// A picture whose decoder says where it may differ from the one before it
+// (`changed`) is uploaded only there when the textures hold that one, and not at
+// all where nothing changed: a quiet desktop's frame is a few of its blocks, and
+// the whole picture is 25 MB at 4K.
 import { openPictureCanvas } from "./glPicture.ts";
 import type { DecodedPlanes } from "./softwareDecoder.ts";
 
@@ -132,6 +137,35 @@ export function rowsBelow(
   });
 }
 
+/** A rectangle of a picture's planes, in samples. */
+export interface PlanesRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * What of `planes` to upload into textures that hold the picture `held` (a
+ * `PictureChange`'s `picture`, or null for none known): where it may differ
+ * from the one before it, when the textures hold that one; nothing, where
+ * nothing does; and otherwise the whole picture.
+ */
+export function uploadOf(
+  held: string | null,
+  planes: Pick<DecodedPlanes, "changed">,
+): PlanesRect | "whole" | null {
+  const changed = planes.changed;
+  if (!changed || held === null || changed.since !== held) {
+    return "whole";
+  }
+  if (changed.width <= 0 || changed.height <= 0) {
+    return null;
+  }
+  const { x, y, width, height } = changed;
+  return { x, y, width, height };
+}
+
 /** The textures' sizes for `planes`: the picture's luma, and its chroma. */
 function textureSizes(planes: DecodedPlanes): [number, number][] {
   const { width: w, height: h, subsampling } = planes;
@@ -161,6 +195,9 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
   let colors = "";
   // The strips in the textures (`placedAfter`).
   let placed = 0;
+  // The picture the textures hold, as its `changed.picture` (`uploadOf`): null
+  // where that is not known, or the textures were made since.
+  let held: string | null = null;
 
   // A texture for each plane, at its size. WebGL reports a refused allocation as
   // an error flag, not an exception, and a draw from a texture it did not make is
@@ -196,6 +233,77 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
     );
   };
 
+  // Every plane of `planes` into its rows of the textures, and the rows past a
+  // last strip black.
+  const uploadWhole = (planes: DecodedPlanes, memory: Uint8Array) => {
+    planes.planes.forEach((plane, unit) => {
+      // A chroma plane halved down the picture starts at half the row.
+      const row =
+        unit > 0 && planes.subsampling === "4:2:0"
+          ? planes.row >> 1
+          : planes.row;
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.pixelStorei(gl.UNPACK_ROW_LENGTH, plane.stride);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        row,
+        plane.width,
+        plane.rows,
+        gl.RED,
+        gl.UNSIGNED_BYTE,
+        memory,
+        plane.offset,
+      );
+    });
+    for (const { unit, row, rows, value } of rowsBelow(planes)) {
+      const width = planes.planes[unit].width;
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        row,
+        width,
+        rows,
+        gl.RED,
+        gl.UNSIGNED_BYTE,
+        new Uint8Array(width * rows).fill(value),
+      );
+    }
+  };
+
+  // The same rectangle of each plane: a picture that says where it changed is
+  // 4:4:4 and whole (softwareDecoder.worker.ts).
+  const uploadRect = (
+    planes: DecodedPlanes,
+    memory: Uint8Array,
+    rect: PlanesRect,
+  ) => {
+    planes.planes.forEach((plane, unit) => {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.pixelStorei(gl.UNPACK_ROW_LENGTH, plane.stride);
+      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, rect.x);
+      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, rect.y);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        rect.x,
+        planes.row + rect.y,
+        rect.width,
+        rect.height,
+        gl.RED,
+        gl.UNSIGNED_BYTE,
+        memory,
+        plane.offset,
+      );
+    });
+    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+    gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+  };
+
   return {
     place(planes) {
       surface.usable();
@@ -205,6 +313,7 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
         // Not remembered until made: a refused allocation is tried again.
         layout = "";
         placed = 0;
+        held = null;
         allocate(planes, sizes);
         layout = wanted;
       }
@@ -225,44 +334,17 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
         colors = stated;
       }
       const memory = new Uint8Array(planes.memory);
-      planes.planes.forEach((plane, unit) => {
-        // A chroma plane halved down the picture starts at half the row.
-        const row =
-          unit > 0 && planes.subsampling === "4:2:0"
-            ? planes.row >> 1
-            : planes.row;
-        gl.activeTexture(gl.TEXTURE0 + unit);
-        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, plane.stride);
-        gl.texSubImage2D(
-          gl.TEXTURE_2D,
-          0,
-          0,
-          row,
-          plane.width,
-          plane.rows,
-          gl.RED,
-          gl.UNSIGNED_BYTE,
-          memory,
-          plane.offset,
-        );
-      });
-      for (const { unit, row, rows, value } of rowsBelow(planes)) {
-        const width = planes.planes[unit].width;
-        gl.activeTexture(gl.TEXTURE0 + unit);
-        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
-        gl.texSubImage2D(
-          gl.TEXTURE_2D,
-          0,
-          0,
-          row,
-          width,
-          rows,
-          gl.RED,
-          gl.UNSIGNED_BYTE,
-          new Uint8Array(width * rows).fill(value),
-        );
+      const upload = uploadOf(held, planes);
+      // Unknown until the upload is done: one that throws leaves the textures
+      // holding no picture whole.
+      held = null;
+      if (upload === "whole") {
+        uploadWhole(planes, memory);
+      } else if (upload) {
+        uploadRect(planes, memory, upload);
       }
       placed = placedAfter(placed, planes);
+      held = planes.changed?.picture ?? null;
     },
     draw(w, h) {
       surface.usable();
