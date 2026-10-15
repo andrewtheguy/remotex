@@ -346,7 +346,9 @@ impl MotionStream {
 
         let stride = usize::from(rect.w()) * 3;
         let mut pieces = Vec::new();
-        // Each changed tile's churn, for the marks of `"tiles"`.
+        // Each changed tile's churn, for the marks of `"tiles"`, and kept under it
+        // alone: this is the path every report of damage takes.
+        let tiles = self.debug == MotionDebug::Tiles;
         let mut churned: HashMap<(u16, u16), u32> = HashMap::new();
         for top in (rect.top..=rect.bottom).step_by(usize::from(BAND_ROWS)) {
             let band = Rect { top, bottom: top.saturating_add(BAND_ROWS - 1).min(rect.bottom), ..rect };
@@ -359,7 +361,10 @@ impl MotionStream {
             let cells: Vec<((u16, u16), Rect)> = tiles_of(band).collect();
             for (cell, _) in &cells {
                 if changed.contains(cell) {
-                    churned.insert(*cell, self.churn.observe(*cell, now));
+                    let churn = self.churn.observe(*cell, now);
+                    if tiles {
+                        churned.insert(*cell, churn);
+                    }
                 }
             }
             let split = self.regions.covering() && cells.iter().any(|(cell, _)| self.regions.covers(*cell));
