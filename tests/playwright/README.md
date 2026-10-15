@@ -56,6 +56,17 @@ painted on from the session page's picture all the same, and that the picker
 moving the session's page to the other display moves the view without starting
 the pipeline over.
 
+`png-tiles.spec.ts` (testing only) is an RDP target on the bitmap path with
+`png_tiles` set, read from the display socket: that `tilesStart` comes behind
+the `resize` and ahead of the first `TILE` record, that every record is a tile
+and every tile exactly one cell of the 64-pixel grid of the desktop announced,
+a PNG whose own header gives its size, that the first picture after a
+`tilesStart` covers every cell, that the page acknowledges each batch once its
+paint worker has drawn it, and that a page that reloads is sent every cell
+again behind a start of its own. It checks that the session card names the
+tiles, and the debug overlay where the start asks for it, without looking at
+the overlay itself.
+
 `display-drag.spec.ts` reads the input each display socket sends while a held
 drag crosses the edge between two virtual displays. It checks that the edge
 towards the display beside it is open and every outer edge still clamps the
@@ -250,6 +261,14 @@ video playing:
 ```sh
 REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET='win-h264' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
+```
+
+The tiles spec needs a live RDP host in a target with `egfx = false` and
+`png_tiles`, named by `REMOTEX_PLAYWRIGHT_TILES_TARGET`:
+
+```sh
+REMOTEX_PLAYWRIGHT_TILES_TARGET='win-tiles' \
+bun run test:tiles
 ```
 
 The two-display spec needs the same kind of host, in a target with
