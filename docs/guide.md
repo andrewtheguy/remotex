@@ -230,9 +230,11 @@ desktop alone is about 7.6 MB, and a video in a window about 19 MB a second.
 That suits a LAN. On a slower link, tick **Motion** (alpha) under *High quality*
 on a target with one display, which makes the picture eventually lossless: the
 gateway sends what moves as VP9, lossy only while it moves, and what is still as
-exact PNG, and once a region settles it is sent again as exact PNG. So the
-screen is exact wherever nothing is moving, and the same video costs under half
-a megabyte a second. Adaptive H.264 changes nothing on such a host: it draws no H.264 under
+exact PNG, and once a region settles it is sent again as exact PNG. The opening
+picture, and the one after a resize or a reconnect, arrives the same way: as
+video first, then exact a few seconds later. So the screen settles exact
+wherever nothing is moving, and the same video costs under half a megabyte a
+second. Adaptive H.264 changes nothing on such a host: it draws no H.264 under
 Lossless. See [Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)
 for what was measured.
 

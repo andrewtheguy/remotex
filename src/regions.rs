@@ -27,6 +27,8 @@
 //! A stream is built over exactly its region's tile bounding box. Nothing outside
 //! what [`coalesce`] chose is streamed when a stream starts: the still pixels beside
 //! a moving region keep whatever exact tile last painted them, and are owed nothing.
+//! The one stream that is not a region is the first sight of a picture that starts
+//! over ([`Regions::first_sight`]): the whole desktop, carried once and owed in full.
 //!
 //! While a stream is live, geometry moves at most once per `RETUNE`, so a stream is
 //! not restarted for every twitch: a region that shrinks keeps its stream (the idle
@@ -44,6 +46,8 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Duration;
 
 use tokio::time::Instant;
+
+use anyhow::Context as _;
 
 use crate::protocol::{Held, RegionUnit, ServerMsg};
 use crate::shadow::Rect;
@@ -175,6 +179,11 @@ struct Live {
     /// When something inside this region was last seen moving. What [`STREAM_IDLE`]
     /// is measured from.
     moving_at: Instant,
+    /// Whether this is the first sight of a picture that starts over
+    /// ([`Regions::first_sight`]) rather than a region that moves: it lasts until it
+    /// has carried that picture, never past [`STREAM_IDLE`], and is never kept for
+    /// motion inside it.
+    first: bool,
 }
 
 /// A rectangle of the tile grid, in tile coordinates. What [`coalesce`] works in,
@@ -579,8 +588,8 @@ impl Regions {
 
     /// Drop every stream and every debt, keeping the mirror.
     ///
-    /// For a repaint or a reattach: every pixel is about to be re-sent as PNG, which
-    /// discharges anything that was owed, and a page with nothing on screen cannot
+    /// For a repaint or a reattach: every pixel is about to be sent again, which
+    /// settles anything that was owed, and a page with nothing on screen cannot
     /// decode from the middle of a stream.
     pub fn forget(&mut self) {
         // A round away on a worker carries streams and a mirror this is dropping;
@@ -776,7 +785,7 @@ impl Regions {
         let busy: HashSet<(u16, u16)> =
             moving.iter().copied().filter(|cell| worthy.iter().any(|c| c.bbox.contains(*cell))).collect();
         for live in &mut self.live {
-            if live.cells.iter().any(|cell| busy.contains(cell)) {
+            if !live.first && live.cells.iter().any(|cell| busy.contains(cell)) {
                 live.moving_at = now;
             }
         }
@@ -800,6 +809,9 @@ impl Regions {
         // and so — by that rule — one no kept stream touches.
         let (mut next, mut old): (Vec<Live>, Vec<Live>) =
             std::mem::take(&mut self.live).into_iter().partition(|live| {
+                if live.first {
+                    return false;
+                }
                 let mut touched = wanted.iter().filter(|rect| live.rect.intersect(rect).is_some());
                 touched.clone().next().is_some() && touched.all(|rect| live.rect.contains(rect))
             });
@@ -899,6 +911,55 @@ impl Regions {
         }
     }
 
+    /// Stream the whole desktop: the first sight of a picture the page holds nothing
+    /// of, after a [`Self::forget`].
+    ///
+    /// A picture that starts over is every tile at once, and as PNG that is the
+    /// largest thing the page is ever sent, all of it before it sees anything. As one
+    /// VP9 keyframe it is a fraction of that, and it is what the page sees first; the
+    /// exact picture follows as cleanups, from a tick of their own, as it does for a
+    /// region that stops. So the picture is eventually lossless from the first frame,
+    /// not lossless first.
+    ///
+    /// The stream lasts until a round has carried it with nothing more arriving for it
+    /// ([`Self::end_first_sight`]), and never past [`STREAM_IDLE`]: a caret that
+    /// blinks on, or a remote that never paints part of its desktop, must not keep the
+    /// whole of it lossy. Motion found while it lasts ends it, as it does any stream a
+    /// region straddles, and builds its own.
+    ///
+    /// Its id avoids the ends not yet said as well as the live ids, so the end of a
+    /// stream [`Self::forget`] dropped still reaches the page.
+    pub fn first_sight(&mut self, now: Instant) -> anyhow::Result<()> {
+        let Some(rect) = self.size.and_then(|(w, h)| Rect::from_size(0, 0, w, h)) else {
+            return Ok(());
+        };
+        debug_assert!(self.live.is_empty(), "a first sight over live streams");
+        let taken: Vec<u8> = self.live.iter().map(|live| live.id).chain(self.ended.iter().copied()).collect();
+        let mut live = self.build(rect, now, &taken).context("the first sight of a picture that starts over")?;
+        live.first = true;
+        self.covered = live.cells.iter().copied().collect();
+        self.live.push(live);
+        Ok(())
+    }
+
+    /// End the first sight once a round has carried it and nothing more has arrived
+    /// for it. Its tiles are owed from that round, and come due like any stopped
+    /// region's.
+    pub fn end_first_sight(&mut self) {
+        let before = self.live.len();
+        let ended = &mut self.ended;
+        self.live.retain(|live| {
+            let keep = !live.first || live.dirty;
+            if !keep {
+                record_end(ended, live.id);
+            }
+            keep
+        });
+        if self.live.len() != before {
+            self.covered = self.live.iter().flat_map(|live| live.cells.iter().copied()).collect();
+        }
+    }
+
     /// Build a stream over `rect`, with an id none of `taken` is using.
     ///
     /// The ids in use are passed in rather than read off `self.live`, because the
@@ -940,6 +1001,7 @@ impl Regions {
             carried: false,
             announced: None,
             moving_at: now,
+            first: false,
         })
     }
 
@@ -1616,6 +1678,49 @@ mod tests {
     fn only_rect(regions: &Regions) -> Rect {
         assert_eq!(regions.live.len(), 1, "expected exactly one stream");
         regions.live[0].rect
+    }
+
+    /// The first sight covers the whole desktop, and motion inside it is not a
+    /// reason to keep it: a region that qualifies ends it and streams on its own, so
+    /// a video playing at the start does not keep the whole desktop lossy.
+    #[test]
+    fn motion_during_the_first_sight_ends_it_for_a_region_of_its_own() {
+        let mut regions = regions();
+        let t0 = Instant::now();
+        regions.first_sight(t0).expect("a first sight");
+        assert_eq!(only_rect(&regions), Rect::from_size(0, 0, 320, 128).unwrap());
+        let first = regions.live[0].id;
+        regions.retune(&[], t0).expect("nothing moving");
+        assert_eq!(only_rect(&regions).h(), 128, "the first sight ended with nothing moving");
+
+        regions.retune(&top_row(), t0 + RETUNE).expect("a stream for the moving tiles");
+        assert_eq!(only_rect(&regions).h(), 64, "the first sight was kept for the motion inside it");
+        assert!(!regions.live[0].first);
+        // Its id may be handed straight back to the region, which the page tells
+        // from a continuation by the rectangle; otherwise it is ended.
+        assert!(regions.live[0].id == first || regions.drain_ended().contains(&first));
+    }
+
+    /// The first sight ends once a round has carried it with nothing waiting, not
+    /// while something is, and never later than a stream idle after it started.
+    #[test]
+    fn the_first_sight_ends_once_carried_and_never_past_the_stream_idle() {
+        let mut regions = regions();
+        let t0 = Instant::now();
+        regions.first_sight(t0).expect("a first sight");
+        regions.end_first_sight();
+        assert!(regions.covering(), "a first sight ended before it was carried");
+        let mut round = regions.take_round().expect("a first sight is dirty");
+        round.encode().expect("an encode");
+        regions.put_back(round, t0);
+        regions.end_first_sight();
+        assert!(!regions.covering(), "a first sight outlived the round that carried it");
+        assert!(regions.owes(), "and its tiles are owed exactly");
+
+        let mut regions = self::regions();
+        regions.first_sight(t0).expect("a first sight");
+        regions.expire(t0 + STREAM_IDLE);
+        assert!(!regions.covering(), "a first sight outlived the stream idle");
     }
 
     #[test]

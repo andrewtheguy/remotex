@@ -399,6 +399,9 @@ impl VideoSink {
         if damage.start {
             self.push(Pending::Msg(ServerMsg::TilesStart)).await?;
         }
+        for stream in damage.ended {
+            self.push(Pending::Msg(ServerMsg::RegionEnd { stream })).await?;
+        }
         let sent: Vec<Rect> = damage.pieces.iter().map(|piece| piece.rect).collect();
         for piece in damage.pieces {
             self.encode_tile(piece).await?;
@@ -2342,14 +2345,33 @@ mod tests {
         motion_debug: false,
     };
 
-    /// A sink for a picture sent for motion, on `link`, told the desktop is 640×128.
-    async fn motion_sink(link: Arc<LinkFeedback>) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
+    /// A sink for a picture sent for motion, on `link`, told the desktop is 640×128
+    /// and sent nothing of it yet.
+    async fn fresh_motion_sink(link: Arc<LinkFeedback>) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, mut frame_rx) = mpsc::channel(256);
         let sink = VideoSink::new("test", frame_tx, MOTION, link, Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 640, h: 128, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
         assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
         (sink, frame_rx)
+    }
+
+    /// [`fresh_motion_sink`] with its first picture sent and settled, so the page
+    /// holds it exactly. Requires a paused clock.
+    async fn motion_sink(link: Arc<LinkFeedback>) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
+        let (sink, mut frame_rx) = fresh_motion_sink(link).await;
+        sink.damage(rect(0, 0, 640, 128), &vec![1; 640 * 128 * 3]).await.unwrap();
+        sink.frame().await.unwrap();
+        for _ in 0..40 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+            sink.flush().await;
+            while frame_rx.try_recv().is_ok() {}
+            if sink.shared.video.lock().await.stream.motion().is_some_and(|motion| motion.settled()) {
+                return (sink, frame_rx);
+            }
+        }
+        panic!("the first picture never settled");
     }
 
     /// Damage `area` with new pixels slot by slot, with the frame boundaries an
@@ -2376,6 +2398,53 @@ mod tests {
         link.owed_since(Some(sent));
     }
 
+    /// The first picture is seen as video, one stream over the whole desktop, and
+    /// only then sent exactly: no PNG goes out ahead of the stream's unit.
+    #[tokio::test(start_paused = true)]
+    async fn a_first_picture_is_video_before_it_is_png() {
+        let (sink, mut frame_rx) = fresh_motion_sink(feedback()).await;
+        sink.damage(rect(0, 0, 640, 128), &vec![9; 640 * 128 * 3]).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        assert!(matches!(frame_rx.try_recv(), Ok(ServerMsg::TilesStart)), "the picture starts first");
+        let mut unit = None;
+        while let Ok(msg) = frame_rx.try_recv() {
+            match msg {
+                ServerMsg::RegionFormat { .. } => {}
+                ServerMsg::Region(region) => unit = Some(region),
+                other => panic!("expected the first sight, got {other:?}"),
+            }
+        }
+        let unit = unit.expect("the first sight's unit");
+        assert!(unit.keyframe);
+        assert_eq!((unit.x, unit.y, unit.w, unit.h), (0, 0, 640, 128), "the first sight is the whole desktop");
+
+        let mut ended = false;
+        let mut tiles = 0;
+        for _ in 0..40 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+            sink.flush().await;
+            while let Ok(msg) = frame_rx.try_recv() {
+                match msg {
+                    ServerMsg::RegionEnd { stream } => {
+                        assert_eq!(stream, unit.stream);
+                        ended = true;
+                    }
+                    ServerMsg::Tile(_) => {
+                        assert!(ended, "a cleanup went out inside the first sight");
+                        tiles += 1;
+                    }
+                    other => panic!("expected the cleanups, got {other:?}"),
+                }
+            }
+            if sink.shared.video.lock().await.stream.motion().is_some_and(|motion| motion.settled()) {
+                break;
+            }
+        }
+        assert!(tiles > 0, "the first sight was never settled exactly");
+    }
+
     /// A still change is sent at once, as a PNG, ahead of any frame: it does not wait
     /// for a round.
     #[tokio::test(start_paused = true)]
@@ -2384,7 +2453,6 @@ mod tests {
         let area = rect(0, 0, 640, 128);
         sink.damage(area, &vec![9; 640 * 128 * 3]).await.unwrap();
         sink.flush().await;
-        assert!(matches!(frame_rx.try_recv(), Ok(ServerMsg::TilesStart)), "the picture starts first");
         let mut tiles = 0;
         while let Ok(msg) = frame_rx.try_recv() {
             let ServerMsg::Tile(tile) = msg else { panic!("expected a tile, got {msg:?}") };
