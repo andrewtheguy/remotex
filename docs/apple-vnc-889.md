@@ -340,6 +340,15 @@ each raw, run-length encoded, palettised or both, with three-byte CPIXELs in the
 pixel format `SetPixelFormat` asks for. The Mac encodes it whenever it is the first
 of zlib, ZRLE and its own codecs listed.
 
+The Mac's tiles are 64×64 device pixels at any density, and every one is raw
+(subencoding 0): the deflate stream is all the compression it applies. Tiles
+start at each rectangle's own origin, and the rectangles fall on no grid; at 2x
+their edges are even. Measured on the virtual Mac under macOS 26, in Standard
+mode on a 1x and a 2x physical display, the 2x one also scaled by the Mac to a
+1x client, and on a virtual display at 1x and 2x: 894 rectangles and 24,532
+tiles, every rectangle inflating to exactly its 64-pixel tiles and no other
+edge.
+
 **zlib** (`0x06`), not listed, is the same stream holding raw
 `w × h × 4` pixels. On a static desktop it measured roughly 50:1, in either mode.
 
