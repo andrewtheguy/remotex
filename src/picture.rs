@@ -1,10 +1,12 @@
 //! What [`crate::encode`]'s sink encodes: the desktop's one VP9 stream, or a picture
 //! sent for motion — PNG where it is still, VP9 for each region that moves.
 //!
-//! Both take damage into a mirror and are encoded a round at a time on a blocking
-//! worker, so the sink drives either the same way; this is that one way.
+//! Both encode their video a round at a time on a blocking worker, so the sink
+//! drives the rounds of either the same way; this is that one way. Damage and the
+//! cleanups of a picture sent for motion are the sink's to send
+//! ([`Picture::motion`]).
 
-use std::time::Instant;
+use tokio::time::Instant;
 
 use crate::config::RenderPlan;
 use crate::motion::{MotionRound, MotionStream};
@@ -33,10 +35,20 @@ impl Picture {
         }
     }
 
+    /// Copy a changed rectangle into the desktop's mirror. A picture sent for
+    /// motion takes its damage through [`Self::motion`] instead.
     pub fn blit(&mut self, rect: Rect, rgb: &[u8]) -> anyhow::Result<()> {
         match self {
             Self::Desktop(stream) => stream.blit(rect, rgb),
-            Self::Motion(stream) => stream.blit(rect, rgb, Instant::now()),
+            Self::Motion(_) => anyhow::bail!("a picture sent for motion takes its damage as pieces to send"),
+        }
+    }
+
+    /// The picture sent for motion, where this is one.
+    pub fn motion(&mut self) -> Option<&mut MotionStream> {
+        match self {
+            Self::Desktop(_) => None,
+            Self::Motion(stream) => Some(stream),
         }
     }
 
@@ -51,28 +63,14 @@ impl Picture {
     pub fn dirty(&self) -> bool {
         match self {
             Self::Desktop(stream) => stream.dirty(),
-            Self::Motion(stream) => stream.dirty(Instant::now()),
+            Self::Motion(stream) => stream.dirty(),
         }
     }
 
-    /// When a round is next owed if nothing changes: now for a dirty picture, and
-    /// for one sent for motion, also when a region it holds ends or a tile one drew
-    /// is owed its PNG. `None` while nothing is owed.
-    pub fn owed_at(&self) -> Option<Instant> {
-        match self {
-            Self::Desktop(stream) => stream.dirty().then(Instant::now),
-            Self::Motion(stream) => stream.next_due(Instant::now()),
-        }
-    }
-
-    /// Take a round for the worker. `behind` is an adaptive plan's page lagging,
-    /// which a picture sent for motion holds its cleanups back for.
-    pub fn take_round(&mut self, behind: bool) -> anyhow::Result<Option<PictureRound>> {
+    pub fn take_round(&mut self) -> anyhow::Result<Option<PictureRound>> {
         Ok(match self {
             Self::Desktop(stream) => stream.take_round()?.map(|round| PictureRound::Desktop(Box::new(round))),
-            Self::Motion(stream) => {
-                stream.take_round(Instant::now(), behind)?.map(|round| PictureRound::Motion(Box::new(round)))
-            }
+            Self::Motion(stream) => stream.take_round(Instant::now())?.map(|round| PictureRound::Motion(Box::new(round))),
         })
     }
 

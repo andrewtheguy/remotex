@@ -41,7 +41,9 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use crate::protocol::{Held, RegionUnit, ServerMsg};
 use crate::shadow::Rect;
@@ -631,14 +633,9 @@ impl Regions {
         !self.covered.is_empty()
     }
 
-    /// Whether a stream covers any tile of grid row `row`.
-    pub fn row_covered(&self, row: u16) -> bool {
-        self.covered.iter().any(|(_, r)| *r == row)
-    }
-
-    /// Whether any pixels have arrived for the desktop [`Self::want`] adopted.
-    pub fn pictured(&self) -> bool {
-        self.mirror.is_some()
+    /// Whether any tile is owed an exact re-send.
+    pub fn owes(&self) -> bool {
+        !self.debts.is_empty()
     }
 
     /// The mirror, built if it is not there yet.
@@ -888,9 +885,6 @@ impl Regions {
     /// region whose stream never ended would never come due — the page would keep a
     /// lossy rendition of a paused screen forever.
     pub fn expire(&mut self, now: Instant) {
-        if self.round_out {
-            return;
-        }
         let before = self.live.len();
         let ended = &mut self.ended;
         self.live.retain(|live| {
@@ -903,12 +897,6 @@ impl Regions {
         if self.live.len() != before {
             self.covered = self.live.iter().flat_map(|live| live.cells.iter().copied()).collect();
         }
-    }
-
-    /// When the first live stream will have gone quiet long enough to end, if
-    /// nothing moves in it before then.
-    pub fn expires_at(&self) -> Option<Instant> {
-        self.live.iter().map(|live| live.moving_at + STREAM_IDLE).min()
     }
 
     /// Build a stream over `rect`, with an id none of `taken` is using.
@@ -972,11 +960,6 @@ impl Regions {
                 self.debts.remove(&key);
             }
         }
-    }
-
-    /// When the first tile no stream covers will have been owed for `idle`.
-    pub fn due_at(&self, idle: Duration) -> Option<Instant> {
-        self.debts.iter().filter(|(cell, _)| !self.covered.contains(*cell)).map(|(_, at)| *at + idle).min()
     }
 
     /// Take up to `max` tiles that have been owed for `idle`, oldest first, as

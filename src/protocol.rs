@@ -626,9 +626,9 @@ impl Held {
         Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
     }
 
-    /// Take `bytes` of `budget` if it has them now, and nothing otherwise — a share
-    /// a test can build without an executor.
-    #[cfg(test)]
+    /// Take `bytes` of `budget` if it has them now, and nothing otherwise: for the
+    /// task that cannot wait for room, because what it would wait on is queued
+    /// behind it — a picture sent for motion's cleanups ([`crate::encode`]).
     pub(crate) fn take_now(budget: &std::sync::Arc<tokio::sync::Semaphore>, bytes: usize, limit: u32) -> Self {
         let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(limit);
         match budget.try_acquire_many(bytes) {
@@ -636,6 +636,11 @@ impl Held {
             Err(_) => return Self::default(),
         }
         Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
+    }
+
+    /// How much of the budget this holds.
+    pub fn bytes(&self) -> usize {
+        self.share.as_ref().map_or(0, |share| share.bytes as usize)
     }
 
     /// Move up to `bytes` of this share into a share of its own, for one payload of

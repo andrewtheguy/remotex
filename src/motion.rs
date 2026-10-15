@@ -4,30 +4,33 @@
 //! The picture of a session started with Motion ([`crate::config::Choices::motion`]):
 //! an RDP host's graphics pipeline, composed here. It is the gateway's motion mode
 //! of old (`render_motion`, removed with the tile transport in 6c948ad3) brought
-//! back with its rules — which tiles are moving, which become regions
-//! ([`crate::regions`]), when a region ends and what it then owes — and one
-//! difference: what is still goes as an exact PNG, where it went as the target's
-//! still codec.
+//! back as it was — which tiles are moving, which become regions
+//! ([`crate::regions`]), what is sent at once, when a region ends and what it then
+//! owes — with one difference: what is still goes as an exact PNG, where it went as
+//! the target's still codec.
 //!
-//! - **Churn.** A tile changed in [`CHURN_MOVING`] of its last [`CHURN_WINDOW`]
-//!   slots of [`CHURN_SLOT`] is moving, counted only where its pixels really
-//!   changed ([`Regions::changed`]).
-//! - **What is sent at once.** A tile that changed and that no stream covers is sent
-//!   as a PNG in the next round, as a run of its row's changed tiles, cut to what
-//!   changed in them. A tile a stream covers is never also sent as a PNG.
-//! - **Cleanups.** A tile a stream carried is owed a PNG once the stream has ended
-//!   and the tile has been still for [`CLEANUP_IDLE`], [`MAX_CLEANUPS_PER_TICK`] of
-//!   them every [`CLEANUP_TICK`], held up to [`CLEANUP_HELD`] while an adaptive
-//!   plan's page is behind.
+//! The work is split as it was between the engine's damage, its frames and a timer
+//! of the sink's own ([`crate::encode`]):
 //!
-//! It is the shape of [`crate::stream::DesktopStream`], for [`crate::encode`]'s
-//! sink: damage is blitted into a mirror, a round is taken to a blocking worker with
-//! what it needs and encoded there, and comes back. Under `render_motion_debug`
-//! what each decision sent is outlined in the pixels themselves: a region's stream
-//! in magenta, a PNG cut from beside a stream in cyan, and a cleanup in green.
+//! - **Damage** ([`MotionStream::damage`]) goes into the mirror, counts towards the
+//!   churn of the tiles whose pixels it changes, and comes back as the pieces to
+//!   send at once as PNG: a band of the report no stream touches whole, and from a
+//!   band a stream splits, the runs of changed tiles beside it. A tile a stream
+//!   covers is never also sent as a PNG.
+//! - **A frame** ([`MotionStream::take_round`]) lays the regions out again from the
+//!   churn and encodes the streams with pixels waiting.
+//! - **The cleanup tick** ([`MotionStream::cleanups`], every [`CLEANUP_TICK`]) ends
+//!   the streams whose motion has stopped and sends, as PNG, the tiles a stream left
+//!   lossy once they have been still for [`CLEANUP_IDLE`].
+//!
+//! Under `render_motion_debug` what each decision sent is outlined in the pixels
+//! themselves: a region's stream in magenta, a PNG cut from a band a stream splits in
+//! cyan, and a cleanup in green.
 
-use std::collections::{BTreeMap, HashMap};
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use anyhow::Context as _;
 
@@ -40,11 +43,11 @@ pub use crate::regions::TILE;
 
 /// How long one slot of churn is.
 ///
-/// A unit of time rather than of the remote's frames, because frames are not a
-/// rate: a busy desktop reports damage far more often than anything presents it,
-/// and the same movement reported in ten rectangles is not ten times the movement.
-/// A slot means the same thing whoever reports, and "in motion" stays one statement
-/// about the remote.
+/// Time rather than frames, because neither engine has a frame worth counting: a
+/// busy desktop reports damage far more often than anything presents it, and the
+/// same movement reported in ten rectangles is not ten times the movement. A slot
+/// means the same thing whoever reports, and "in motion" stays one statement about
+/// the remote.
 const CHURN_SLOT: Duration = Duration::from_millis(100);
 
 /// Slots of change history each tile keeps — the width of the `u8` shift register
@@ -65,24 +68,30 @@ const CHURN_MOVING: u32 = 4;
 /// Long enough that a brief pause in motion is not chased with a redundant
 /// re-send, short enough that a settled region sharpens while the eye is still on
 /// it.
-const CLEANUP_IDLE: Duration = Duration::from_millis(500);
+pub const CLEANUP_IDLE: Duration = Duration::from_millis(500);
 
 /// How long a cleanup may be held back for a page that is behind, on an adaptive
-/// plan. Five seconds is the walk from a stream's usual dial down to its floor: a
-/// link still behind after that is not one the streams can make room on, and a
-/// tile left at a stream's quality for good is the worse of the two failures.
-const CLEANUP_HELD: Duration = Duration::from_secs(5);
+/// plan — see [`crate::encode`]'s cleanup tick. Five seconds is the walk from a
+/// stream's usual dial down to its floor: a link still behind after that is not one
+/// the streams can make room on, and a tile left at a stream's quality for good is
+/// the worse of the two failures.
+pub const CLEANUP_HELD: Duration = Duration::from_secs(5);
 
-/// How often settled tiles are looked for. Its own clock rather than something the
-/// next change does, because a screen that stops changing produces no next change
-/// — which is exactly the case a cleanup is for.
-const CLEANUP_TICK: Duration = Duration::from_millis(250);
+/// How often the sink's cleanup tick wakes to look for settled tiles. It has to be
+/// its own timer rather than something the next frame does, because a screen that
+/// stops changing produces no next frame — which is exactly the case a cleanup is
+/// for.
+pub const CLEANUP_TICK: Duration = Duration::from_millis(250);
 
 /// Cleanups per tick, so a whole stopped video settles over a few ticks rather
 /// than in one burst competing with live motion for the socket. Forty 64-pixel
 /// tiles is a 640×256 patch per tick: a stopped 720p player sharpens in about two
 /// seconds, and a full 1080p desktop in a little over three.
-const MAX_CLEANUPS_PER_TICK: usize = 40;
+pub const MAX_CLEANUPS_PER_TICK: usize = 40;
+
+/// The rows a report of damage is cut into before it is sent, as every payload was:
+/// a band is sent whole when no stream touches it.
+const BAND_ROWS: u16 = 64;
 
 /// Colour of a `render_motion_debug` outline round a region's stream.
 ///
@@ -90,8 +99,8 @@ const MAX_CLEANUPS_PER_TICK: usize = 40;
 /// low dial, and none of them is a colour a desktop produces in a straight line by
 /// accident.
 const MARK_MOTION: [u8; 3] = [255, 0, 255];
-/// Colour of a `render_motion_debug` outline on a PNG cut from a row a stream
-/// shares — the still side of the split.
+/// Colour of a `render_motion_debug` outline on a piece sent as PNG from inside a
+/// band a stream splits — the still side of the split.
 const MARK_CRISP: [u8; 3] = [0, 255, 255];
 /// Colour of a `render_motion_debug` outline on a cleanup.
 const MARK_CLEANUP: [u8; 3] = [0, 255, 0];
@@ -174,26 +183,49 @@ impl Churn {
         moving
     }
 
-    /// Drop everything. A resize changes what every key means, and a repaint has
-    /// already re-sent every pixel the churn was counted from.
+    /// Drop everything. A resize changes what every key means, and a repaint
+    /// re-sends every pixel the churn was counted from.
     fn clear(&mut self) {
         self.origin = None;
         self.churn.clear();
     }
 }
 
+/// A rectangle to send as a PNG, and its pixels as packed RGB888.
+pub struct Piece {
+    pub rect: Rect,
+    pub rgb: Vec<u8>,
+}
+
+/// What a report of damage owes the page at once.
+pub struct Damage {
+    /// A `TilesStart` first: the picture starts over here.
+    pub start: bool,
+    /// The pieces to send as PNG, in order.
+    pub pieces: Vec<Piece>,
+}
+
+/// What a cleanup tick owes the page: the streams it ended, said first, and the
+/// tiles they left lossy, as PNG.
+pub struct Cleanups {
+    pub ended: Vec<u8>,
+    pub pieces: Vec<Piece>,
+}
+
 /// The picture, its churn, its regions, and what it owes the page.
 pub struct MotionStream {
     regions: Regions,
     churn: Churn,
-    /// Tiles changed since the last round, by (row, column) so they come out a row
-    /// at a time: each with the box of what changed in it.
-    pending: BTreeMap<(u16, u16), Rect>,
-    /// The page is owed the picture from nothing: a `TilesStart`, and every tile.
-    restart: bool,
+    /// Tiles whose pixels the page cannot be counted on to hold — every tile, after
+    /// a resize or a repaint — and so changed by whatever is next drawn over them,
+    /// whatever the mirror holds. The mirror is the newest source, not what the page
+    /// was sent, so without this a repaint of the pixels the mirror already has
+    /// would send nothing.
+    unknown: HashSet<(u16, u16)>,
+    /// The page is owed a `TilesStart` ahead of anything else: the picture starts
+    /// over.
+    start_owed: bool,
     round_out: bool,
-    /// When settled tiles are next looked for — see [`CLEANUP_TICK`].
-    cleanup_at: Option<Instant>,
     /// Whether `render_motion_debug` outlines what each decision sent.
     debug: bool,
 }
@@ -203,47 +235,134 @@ impl MotionStream {
         Self {
             regions: Regions::new(quality, native, debug.then_some(Mark { colour: MARK_MOTION, px: MARK_PX })),
             churn: Churn::default(),
-            pending: BTreeMap::new(),
-            restart: true,
+            unknown: HashSet::new(),
+            start_owed: true,
             round_out: false,
-            cleanup_at: None,
             debug,
         }
     }
 
-    /// Adopt the desktop the page is about to be told about. A different size
-    /// starts the picture over.
+    /// Adopt the desktop the page is about to be told about. A different size drops
+    /// every stream and every debt ([`Regions::want`]), and starts the picture over.
     pub fn want(&mut self, w: u16, h: u16) {
         if self.regions.size() == Some((w, h)) {
             return;
         }
         self.regions.want(w, h);
-        self.pending.clear();
-        self.churn.clear();
-        self.restart = true;
+        self.forget();
     }
 
-    /// Copy a changed rectangle's pixels into the mirror, and count it against the
-    /// tiles whose pixels it changes.
+    /// The page holds nothing: a repaint or a reattach. Every tile is sent again by
+    /// the repaint that follows, which settles every debt it covers; the churn is
+    /// dropped, because a repaint is every tile drawn once, not motion.
+    pub fn forget(&mut self) {
+        self.churn.clear();
+        self.unknown = match self.regions.size().and_then(|(w, h)| Rect::from_size(0, 0, w, h)) {
+            Some(whole) => tiles_of(whole).map(|(cell, _)| cell).collect(),
+            None => HashSet::new(),
+        };
+        self.start_owed = true;
+    }
+
+    /// Copy a changed rectangle into the mirror, count it against the tiles whose
+    /// pixels it changes, and say what to send of it at once.
     ///
-    /// Churn is recorded for the tiles that *changed*, whether or not a stream is
-    /// already carrying them, because that is what keeps the stream alive.
-    pub fn blit(&mut self, rect: Rect, rgb: &[u8], now: Instant) -> anyhow::Result<()> {
-        let changed = self.regions.changed(rect, rgb)?;
-        self.regions.blit(rect, rgb)?;
-        for ((col, row), part) in changed {
-            self.churn.observe((col, row), now);
-            self.pending
-                .entry((row, col))
-                .and_modify(|seen| {
-                    seen.left = seen.left.min(part.left);
-                    seen.top = seen.top.min(part.top);
-                    seen.right = seen.right.max(part.right);
-                    seen.bottom = seen.bottom.max(part.bottom);
-                })
-                .or_insert(part);
+    /// Bands, and tiles only where it matters, with the one rule that decides
+    /// everything: a tile a live stream covers is **not sent at all**. Its pixels
+    /// reach the page through that stream, and sending them as a PNG as well would
+    /// discharge a debt the stream has not paid. A band no stream touches is sent
+    /// whole — a desktop with nothing moving is sent as it is drawn — and only a band
+    /// a stream splits is cut at the grid, into the runs of its changed tiles beside
+    /// the stream: a video in a window costs its own tiles and costs the text beside
+    /// it nothing.
+    ///
+    /// Churn is recorded for the tiles that *changed*, not for every tile the
+    /// rectangle covers, and whether or not a stream is already carrying them,
+    /// because that is what keeps the stream alive.
+    ///
+    /// What is sent is paid for by [`Self::discharge`], once it is queued.
+    pub fn damage(&mut self, rect: Rect, rgb: &[u8], now: Instant) -> anyhow::Result<Damage> {
+        let start = std::mem::take(&mut self.start_owed);
+        let mut changed: HashSet<(u16, u16)> =
+            self.regions.changed(rect, rgb)?.into_iter().map(|(cell, _)| cell).collect();
+        let (w, h) = self.regions.size().expect("a mirror means a size");
+        for (cell, part) in tiles_of(rect) {
+            if self.unknown.contains(&cell) {
+                changed.insert(cell);
+                let whole = Rect {
+                    left: cell.0 * TILE,
+                    top: cell.1 * TILE,
+                    right: (cell.0 * TILE + TILE - 1).min(w - 1),
+                    bottom: (cell.1 * TILE + TILE - 1).min(h - 1),
+                };
+                if part == whole {
+                    self.unknown.remove(&cell);
+                }
+            }
         }
-        Ok(())
+
+        let stride = usize::from(rect.w()) * 3;
+        let mut pieces = Vec::new();
+        for top in (rect.top..=rect.bottom).step_by(usize::from(BAND_ROWS)) {
+            let band = Rect { top, bottom: top.saturating_add(BAND_ROWS - 1).min(rect.bottom), ..rect };
+            let from = usize::from(band.top - rect.top) * stride;
+            let to = (usize::from(band.bottom - rect.top) + 1) * stride;
+            let band_rgb = &rgb[from..to];
+            // Everything goes into the mirror, moving or not: it is what a cleanup
+            // crops and what a stream starting later reads.
+            self.regions.blit(band, band_rgb)?;
+            let cells: Vec<((u16, u16), Rect)> = tiles_of(band).collect();
+            for (cell, _) in &cells {
+                if changed.contains(cell) {
+                    self.churn.observe(*cell, now);
+                }
+            }
+            let split = self.regions.covering() && cells.iter().any(|(cell, _)| self.regions.covers(*cell));
+            if !split {
+                pieces.push(Piece { rect: band, rgb: band_rgb.to_vec() });
+                continue;
+            }
+            // The still tiles go out as *runs*: along each row of tiles in the band,
+            // every stretch of tiles that changed and are not under a stream is one
+            // PNG. Changed, because a split band is the one place a report's box is
+            // known tile by tile and the box is loose here by construction: a stream
+            // in the middle of a window and a scrollbar at its edge put every still
+            // tile between them in one box.
+            let mut runs: Vec<Rect> = Vec::new();
+            for (cell, part) in cells {
+                if self.regions.covers(cell) || !changed.contains(&cell) {
+                    continue;
+                }
+                match runs.last_mut() {
+                    Some(run) if run.top == part.top && run.right.checked_add(1) == Some(part.left) => {
+                        run.right = part.right;
+                    }
+                    _ => runs.push(part),
+                }
+            }
+            for run in runs {
+                pieces.push(self.piece(run, Some(MARK_CRISP))?);
+            }
+        }
+        Ok(Damage { start, pieces })
+    }
+
+    /// The pieces [`Self::damage`] said to send have gone out exactly, so nothing is
+    /// owed for any tile they cover in full.
+    pub fn discharge(&mut self, sent: impl IntoIterator<Item = Rect>) {
+        for rect in sent {
+            self.regions.discharge(rect);
+        }
+    }
+
+    /// `rect` cropped from the mirror, outlined in `mark` under `render_motion_debug`.
+    fn piece(&self, rect: Rect, mark: Option<[u8; 3]>) -> anyhow::Result<Piece> {
+        let mut rgb = Vec::new();
+        self.regions.crop(rect, &mut rgb)?;
+        if let Some(colour) = mark.filter(|_| self.debug) {
+            outline(&mut rgb, (usize::from(rect.w()), usize::from(rect.h())), Mark { colour, px: MARK_PX });
+        }
+        Ok(Piece { rect, rgb })
     }
 
     /// Whether a round is away being encoded.
@@ -251,40 +370,27 @@ impl MotionStream {
         self.round_out
     }
 
-    /// Whether settled tiles are to be looked for at `now`.
-    fn cleanup_due(&self, now: Instant) -> bool {
-        self.cleanup_at.is_none_or(|at| now >= at) && self.regions.due_at(CLEANUP_IDLE).is_some_and(|at| now >= at)
+    /// Whether any stream holds pixels no access unit has carried yet.
+    pub fn dirty(&self) -> bool {
+        !self.round_out && self.regions.dirty()
     }
 
-    /// Whether there is something to send at `now`.
-    pub fn dirty(&self, now: Instant) -> bool {
-        if self.round_out || !self.regions.pictured() {
-            return false;
-        }
-        self.restart
-            || !self.pending.is_empty()
-            || self.regions.dirty()
-            || self.regions.expires_at().is_some_and(|at| now >= at)
-            || self.cleanup_due(now)
+    /// Whether nothing is streaming and nothing is owed: the page holds the picture
+    /// exactly.
+    pub fn settled(&self) -> bool {
+        !self.round_out && !self.regions.covering() && !self.regions.owes()
     }
 
-    /// When there is next something to send if nothing changes: a region's end, or
-    /// a tile one carried owed its PNG.
-    pub fn next_due(&self, now: Instant) -> Option<Instant> {
-        if self.round_out || !self.regions.pictured() {
-            return None;
-        }
-        if self.dirty(now) {
-            return Some(now);
-        }
-        let cleanup = self.regions.due_at(CLEANUP_IDLE).map(|at| self.cleanup_at.map_or(at, |tick| tick.max(at)));
-        [self.regions.expires_at(), cleanup].into_iter().flatten().min()
+    /// Whether a stream is carrying any tile, for the sink's tests.
+    #[cfg(test)]
+    pub(crate) fn covering(&self) -> bool {
+        self.regions.covering()
     }
 
-    /// Start the picture over for a page that has nothing: a reattach, or a
-    /// repaint.
+    /// Arm a keyframe on every live stream, and announce each again: the page is
+    /// one that has to be able to start over.
     pub fn force_keyframe(&mut self) {
-        self.restart = true;
+        self.regions.force_keyframes();
     }
 
     /// Move every stream's dial, for the congestion walk.
@@ -296,96 +402,34 @@ impl MotionStream {
         self.regions.quality()
     }
 
-    /// Take what is owed at `now`, for an encode on a blocking worker: the regions
-    /// laid out again, the ends that says, the PNGs, and the streams with pixels
-    /// waiting. `None` when there is nothing, or a round is already away.
+    /// One remote frame has ended: lay the regions out again from the churn, and
+    /// take the streams with pixels waiting, for an encode on a blocking worker —
+    /// with the ends that says, ahead of them. `None` when there is nothing, or a
+    /// round is already away.
     ///
-    /// `behind` is an adaptive plan's page lagging, which holds the cleanups back
-    /// for up to [`CLEANUP_HELD`]: they are the heaviest thing sent for pixels that
-    /// are already right, and the link they would go into is one the streams are
-    /// being coarsened to fit.
-    pub fn take_round(&mut self, now: Instant, behind: bool) -> anyhow::Result<Option<MotionRound>> {
-        if !self.dirty(now) {
+    /// Geometry moves here, on the engine's own task, before anything is encoded:
+    /// that is what makes the set of streamed tiles [`Self::damage`] reads a stable
+    /// thing rather than a race.
+    pub fn take_round(&mut self, now: Instant) -> anyhow::Result<Option<MotionRound>> {
+        if self.round_out {
             return Ok(None);
         }
         let mut msgs = Vec::new();
-        if self.restart {
-            self.restart = false;
-            // Every stream ends, and is said to, ahead of the picture starting over.
-            self.regions.forget();
-            msgs.extend(self.regions.drain_ended().into_iter().map(|stream| ServerMsg::RegionEnd { stream }));
+        if std::mem::take(&mut self.start_owed) {
             msgs.push(ServerMsg::TilesStart);
-            self.churn.clear();
-            self.cleanup_at = None;
-            let (w, h) = self.regions.size().expect("a pictured stream has a size");
-            let whole = Rect::from_size(0, 0, w, h).expect("a desktop is never empty");
-            self.pending = tiles_of(whole).map(|((col, row), part)| ((row, col), part)).collect();
         }
-        // Geometry moves here, before anything is sent: that is what makes the set
-        // of streamed tiles the PNGs below are cut against a stable thing.
         let moving = self.churn.moving(now);
         self.regions.retune(&moving, now)?;
-        // A screen that has stopped changing has no motion to retune for, so this is
-        // what notices its streams have gone quiet.
-        self.regions.expire(now);
-        // Ahead of this round's records and behind every one before it: the units
-        // that used these ids are already queued in front, and the region that takes
-        // one next is in this round.
+        // Ahead of this round and behind every one before it: the units that used
+        // these ids are already queued in front of these, and the region that takes
+        // one next is in the round about to be pushed behind them.
         msgs.extend(self.regions.drain_ended().into_iter().map(|stream| ServerMsg::RegionEnd { stream }));
-
-        let mut bands = Vec::new();
-        // The changed tiles no stream covers go out as *runs*: along each row, every
-        // stretch of neighbouring tiles that changed is one PNG, cut to the box of
-        // what changed in it. The tile is the unit of identity, not of transport.
-        let mut runs: Vec<(u16, u16, Rect)> = Vec::new();
-        for (&(row, col), part) in &self.pending {
-            if self.regions.covers((col, row)) {
-                continue;
-            }
-            match runs.last_mut() {
-                Some((run_row, run_col, run)) if *run_row == row && run_col.checked_add(1) == Some(col) => {
-                    *run_col = col;
-                    run.left = run.left.min(part.left);
-                    run.top = run.top.min(part.top);
-                    run.right = run.right.max(part.right);
-                    run.bottom = run.bottom.max(part.bottom);
-                }
-                _ => runs.push((row, col, *part)),
-            }
-        }
-        self.pending.clear();
-        for (row, _, run) in runs {
-            // Only a PNG cut from beside a stream is marked: the still majority of a
-            // desktop sent unmarked is the quiet path.
-            let mark = self.regions.row_covered(row).then_some(MARK_CRISP);
-            bands.push(self.band(run, mark)?);
-            self.regions.discharge(run);
-        }
-
-        if self.cleanup_due(now) {
-            self.cleanup_at = Some(now + CLEANUP_TICK);
-            let idle = if behind { CLEANUP_HELD } else { CLEANUP_IDLE };
-            for rect in self.regions.due(now, idle, MAX_CLEANUPS_PER_TICK) {
-                bands.push(self.band(rect, Some(MARK_CLEANUP))?);
-            }
-        }
-
         let streams = self.regions.take_round();
-        if msgs.is_empty() && bands.is_empty() && streams.is_none() {
+        if msgs.is_empty() && streams.is_none() {
             return Ok(None);
         }
         self.round_out = true;
-        Ok(Some(MotionRound { msgs, bands, streams, quality: self.regions.quality() }))
-    }
-
-    /// `rect` cropped from the mirror, outlined in `mark` under `render_motion_debug`.
-    fn band(&self, rect: Rect, mark: Option<[u8; 3]>) -> anyhow::Result<(Rect, Vec<u8>)> {
-        let mut rgb = Vec::new();
-        self.regions.crop(rect, &mut rgb)?;
-        if let Some(colour) = mark.filter(|_| self.debug) {
-            outline(&mut rgb, (usize::from(rect.w()), usize::from(rect.h())), Mark { colour, px: MARK_PX });
-        }
-        Ok((rect, rgb))
+        Ok(Some(MotionRound { msgs, streams, quality: self.regions.quality() }))
     }
 
     /// Put back what [`Self::take_round`] took: its streams, which have just carried
@@ -396,12 +440,36 @@ impl MotionStream {
             self.regions.put_back(streams, now);
         }
     }
+
+    /// The cleanup tick: end every stream whose region has stopped moving, and take
+    /// up to `max` tiles a stream left lossy that have been still for
+    /// [`CLEANUP_IDLE`] — or [`CLEANUP_HELD`] while `behind` — cropped from the
+    /// mirror, which is the newest truth by construction.
+    ///
+    /// A screen that has stopped changing produces no frame, so this is the only
+    /// thing that will ever notice its streams have gone quiet — and a stream that
+    /// never ends is a region that never comes due.
+    ///
+    /// A tile that will not crop is dropped with its debt, which is the safe
+    /// direction: it keeps the stream's rendition until it changes again.
+    pub fn cleanups(&mut self, now: Instant, behind: bool, max: usize) -> Cleanups {
+        self.regions.expire(now);
+        let ended = self.regions.drain_ended();
+        let idle = if behind { CLEANUP_HELD } else { CLEANUP_IDLE };
+        let mut pieces = Vec::new();
+        for rect in self.regions.due(now, idle, max) {
+            match self.piece(rect, Some(MARK_CLEANUP)) {
+                Ok(piece) => pieces.push(piece),
+                Err(e) => log::warn!("motion: dropping a cleanup that would not crop: {e:#}"),
+            }
+        }
+        Cleanups { ended, pieces }
+    }
 }
 
-/// One round: what it says first, the PNGs it sends, and the streams it encodes.
+/// One round: the ends and the start it says first, and the streams it encodes.
 pub struct MotionRound {
     msgs: Vec<ServerMsg>,
-    bands: Vec<(Rect, Vec<u8>)>,
     streams: Option<Round>,
     quality: u8,
 }
@@ -422,67 +490,30 @@ impl MotionRound {
         self.streams.as_ref().map_or(0, Round::skipped)
     }
 
-    /// Encode the round, in the order its records go out: what it says first, the
-    /// PNGs, and each stream's configuration ahead of its unit. Blocking: call it on
-    /// a worker. The PNGs and the streams are encoded side by side, the PNGs over as
-    /// many threads as the gateway gives an encoder.
+    /// Encode the round, in the order its records go out: what it says first, then
+    /// each stream's configuration ahead of its unit. Blocking: call it on a worker.
     pub fn encode(&mut self) -> anyhow::Result<Vec<ServerMsg>> {
-        let bands = std::mem::take(&mut self.bands);
-        let workers = crate::video::threads().max(1);
-        let streams = self.streams.as_mut();
-        let (tiles, units) = std::thread::scope(|scope| {
-            let units = streams.map(|streams| scope.spawn(move || streams.encode()));
-            let chunk = bands.len().div_ceil(workers).max(1);
-            let pngs: Vec<_> = bands
-                .chunks(chunk)
-                .map(|chunk| {
-                    scope.spawn(move || {
-                        chunk
-                            .iter()
-                            .map(|(rect, rgb)| {
-                                Ok(TileUnit {
-                                    x: rect.left,
-                                    y: rect.top,
-                                    w: rect.w(),
-                                    h: rect.h(),
-                                    png: encode_png(rect.w(), rect.h(), rgb)?,
-                                    held: Held::default(),
-                                })
-                            })
-                            .collect::<anyhow::Result<Vec<TileUnit>>>()
-                    })
-                })
-                .collect();
-            let tiles: anyhow::Result<Vec<TileUnit>> = pngs
-                .into_iter()
-                .map(|handle| handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
-                .collect::<anyhow::Result<Vec<Vec<TileUnit>>>>()
-                .map(|chunks| chunks.into_iter().flatten().collect());
-            let units = units.map(|handle| handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)));
-            (tiles, units)
-        });
         let mut records = std::mem::take(&mut self.msgs);
-        records.extend(tiles?.into_iter().map(ServerMsg::Tile));
-        if let Some(units) = units {
-            records.extend(units?);
+        if let Some(streams) = &mut self.streams {
+            records.extend(streams.encode()?);
         }
         Ok(records)
     }
 }
 
-/// Packed RGB888 as an 8-bit RGB PNG. `Fast`: a still tile is sent once, so its
-/// bytes count for more than its encode, and the five filters scored per row are
-/// what keep a desktop's text and flats small.
-fn encode_png(w: u16, h: u16, rgb: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(rgb.len() / 4 + 64);
-    let mut encoder = png::Encoder::new(&mut out, u32::from(w), u32::from(h));
+/// `piece` as a `TILE` record: packed RGB888 as an 8-bit RGB PNG, at `Fastest`, as
+/// every PNG tile was.
+pub fn encode_tile(piece: &Piece) -> anyhow::Result<TileUnit> {
+    let (w, h) = (piece.rect.w(), piece.rect.h());
+    let mut png = Vec::with_capacity(piece.rgb.len() / 4 + 256);
+    let mut encoder = png::Encoder::new(&mut png, u32::from(w), u32::from(h));
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
+    encoder.set_compression(png::Compression::Fastest);
     let mut writer = encoder.write_header().context("a tile's PNG header")?;
-    writer.write_image_data(rgb).context("a tile's PNG")?;
+    writer.write_image_data(&piece.rgb).context("a tile's PNG")?;
     writer.finish().context("a tile's PNG")?;
-    Ok(out)
+    Ok(TileUnit { x: piece.rect.left, y: piece.rect.top, w, h, png, held: Held::default() })
 }
 
 #[cfg(test)]
@@ -507,60 +538,6 @@ mod tests {
         Rect::from_size(0, 0, W, H).unwrap()
     }
 
-    /// The page's picture: tiles drawn where they say, read back with an independent
-    /// PNG decoder, and the rectangles regions drew, which are not exact.
-    struct Page {
-        rgb: Vec<u8>,
-        regions: Vec<(u8, Rect)>,
-        started: bool,
-    }
-
-    impl Page {
-        fn new() -> Self {
-            Self { rgb: vec![0; usize::from(W) * usize::from(H) * 3], regions: Vec::new(), started: false }
-        }
-
-        fn take(&mut self, records: Vec<ServerMsg>) {
-            for record in records {
-                match record {
-                    ServerMsg::TilesStart => {
-                        assert!(self.regions.is_empty(), "a region outlived the picture it was in");
-                        self.started = true;
-                    }
-                    ServerMsg::Tile(tile) => {
-                        assert!(self.started, "a tile before tilesStart");
-                        let rect = Rect::from_size(tile.x, tile.y, tile.w, tile.h).unwrap();
-                        for (id, region) in &self.regions {
-                            assert!(rect.intersect(region).is_none(), "a tile inside live region {id}");
-                        }
-                        let mut reader = png::Decoder::new(std::io::Cursor::new(tile.png)).read_info().unwrap();
-                        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
-                        let info = reader.next_frame(&mut buf).unwrap();
-                        assert_eq!((info.width, info.height), (u32::from(tile.w), u32::from(tile.h)));
-                        assert_eq!(info.color_type, png::ColorType::Rgb);
-                        paint(&mut self.rgb, rect, &buf);
-                    }
-                    ServerMsg::RegionFormat { .. } => {}
-                    ServerMsg::Region(unit) => {
-                        let rect = Rect::from_size(unit.x, unit.y, unit.w, unit.h).unwrap();
-                        if !self.regions.contains(&(unit.stream, rect)) {
-                            assert!(unit.keyframe, "a region starts at a keyframe");
-                            self.regions.retain(|(id, _)| *id != unit.stream);
-                            for (id, other) in &self.regions {
-                                assert!(rect.intersect(other).is_none(), "regions {id} and {} overlap", unit.stream);
-                            }
-                            self.regions.push((unit.stream, rect));
-                        }
-                    }
-                    ServerMsg::RegionEnd { stream } => {
-                        self.regions.retain(|(id, _)| *id != stream);
-                    }
-                    other => panic!("unexpected {other:?}"),
-                }
-            }
-        }
-    }
-
     /// Copy `rgb`, packed for `rect`, into a picture as wide as the page.
     fn paint(picture: &mut [u8], rect: Rect, rgb: &[u8]) {
         let stride = usize::from(W) * 3;
@@ -571,21 +548,99 @@ mod tests {
         }
     }
 
-    /// Take and encode a round at `now`, if one is owed, onto `page`.
-    fn round(stream: &mut MotionStream, page: &mut Page, now: Instant) -> bool {
-        let Some(mut round) = stream.take_round(now, false).unwrap() else { return false };
-        let records = round.encode().unwrap();
-        stream.put_back(round, now);
-        page.take(records);
-        true
+    /// The page's picture: tiles drawn where they say, read back with an independent
+    /// PNG decoder, and the rectangles regions drew, which are not exact.
+    struct Page {
+        rgb: Vec<u8>,
+        regions: Vec<(u8, Rect)>,
+        started: bool,
+        tiles: Vec<Rect>,
     }
 
-    /// Rounds until nothing is owed, the clock run forward to each due time.
+    impl Page {
+        fn new() -> Self {
+            Self { rgb: vec![0; usize::from(W) * usize::from(H) * 3], regions: Vec::new(), started: false, tiles: Vec::new() }
+        }
+
+        fn take(&mut self, record: ServerMsg) {
+            match record {
+                ServerMsg::TilesStart => self.started = true,
+                ServerMsg::Tile(tile) => {
+                    assert!(self.started, "a tile before tilesStart");
+                    let rect = Rect::from_size(tile.x, tile.y, tile.w, tile.h).unwrap();
+                    for (id, region) in &self.regions {
+                        assert!(rect.intersect(region).is_none(), "a tile inside live region {id}");
+                    }
+                    let mut reader = png::Decoder::new(std::io::Cursor::new(tile.png)).read_info().unwrap();
+                    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+                    let info = reader.next_frame(&mut buf).unwrap();
+                    assert_eq!((info.width, info.height), (u32::from(tile.w), u32::from(tile.h)));
+                    assert_eq!(info.color_type, png::ColorType::Rgb);
+                    paint(&mut self.rgb, rect, &buf);
+                    self.tiles.push(rect);
+                }
+                ServerMsg::RegionFormat { .. } => {}
+                ServerMsg::Region(unit) => {
+                    let rect = Rect::from_size(unit.x, unit.y, unit.w, unit.h).unwrap();
+                    if !self.regions.contains(&(unit.stream, rect)) {
+                        assert!(unit.keyframe, "a region starts at a keyframe");
+                        self.regions.retain(|(id, _)| *id != unit.stream);
+                        for (id, other) in &self.regions {
+                            assert!(rect.intersect(other).is_none(), "regions {id} and {} overlap", unit.stream);
+                        }
+                        self.regions.push((unit.stream, rect));
+                    }
+                }
+                ServerMsg::RegionEnd { stream } => self.regions.retain(|(id, _)| *id != stream),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    /// What the sink does with a report of damage: send its pieces in order, then
+    /// discharge them.
+    fn damage(stream: &mut MotionStream, page: &mut Page, rect: Rect, rgb: &[u8], now: Instant) {
+        let damage = stream.damage(rect, rgb, now).unwrap();
+        if damage.start {
+            page.take(ServerMsg::TilesStart);
+        }
+        for piece in &damage.pieces {
+            page.take(ServerMsg::Tile(encode_tile(piece).unwrap()));
+        }
+        stream.discharge(damage.pieces.iter().map(|piece| piece.rect));
+    }
+
+    /// What the sink does at a frame: encode the round, if one is owed.
+    fn frame(stream: &mut MotionStream, page: &mut Page, now: Instant) {
+        let Some(mut round) = stream.take_round(now).unwrap() else { return };
+        for record in round.encode().unwrap() {
+            page.take(record);
+        }
+        stream.put_back(round, now);
+    }
+
+    /// What the sink's cleanup tick does.
+    fn tick(stream: &mut MotionStream, page: &mut Page, now: Instant, behind: bool) -> usize {
+        let cleanups = stream.cleanups(now, behind, MAX_CLEANUPS_PER_TICK);
+        for stream in cleanups.ended {
+            page.take(ServerMsg::RegionEnd { stream });
+        }
+        let sent = cleanups.pieces.len();
+        for piece in &cleanups.pieces {
+            page.take(ServerMsg::Tile(encode_tile(piece).unwrap()));
+        }
+        sent
+    }
+
+    /// Cleanup ticks, and frames while a stream holds pixels, until nothing is owed.
     fn settle(stream: &mut MotionStream, page: &mut Page, mut now: Instant) -> Instant {
         let limit = now + Duration::from_secs(20);
-        while let Some(due) = stream.next_due(now) {
-            now = due.max(now);
-            assert!(round(stream, page, now), "a due time with nothing to send");
+        while !stream.settled() {
+            now += CLEANUP_TICK;
+            if stream.dirty() {
+                frame(stream, page, now);
+            }
+            tick(stream, page, now, false);
             assert!(now < limit, "it settles");
         }
         now
@@ -595,28 +650,34 @@ mod tests {
         let mut stream = MotionStream::new(60, false, debug);
         stream.want(W, H);
         let picture = pattern(W, H, 7);
-        stream.blit(whole(), &picture, at).unwrap();
         let mut page = Page::new();
-        while round(&mut stream, &mut page, at) {}
+        damage(&mut stream, &mut page, whole(), &picture, at);
+        frame(&mut stream, &mut page, at);
         (stream, page, picture)
     }
 
-    /// Play `moving` changing every 40 ms for two seconds, and say whether a region
-    /// carried it.
+    /// Play `moving` changing every 40 ms for two seconds, a frame each time and a
+    /// cleanup tick every 250 ms, and say whether a region carried it.
     fn play(
         stream: &mut MotionStream,
         page: &mut Page,
         picture: &mut [u8],
         moving: Rect,
-        mut now: Instant,
+        at: Instant,
     ) -> (bool, Instant) {
         let mut seen = false;
-        for frame in 0..50u8 {
+        let mut now = at;
+        let mut ticked = at;
+        for frame_at in 0..50u8 {
             now += Duration::from_millis(40);
-            let rgb = pattern(moving.w(), moving.h(), frame);
-            stream.blit(moving, &rgb, now).unwrap();
+            let rgb = pattern(moving.w(), moving.h(), frame_at);
+            damage(stream, page, moving, &rgb, now);
             paint(picture, moving, &rgb);
-            round(stream, page, now);
+            frame(stream, page, now);
+            if now >= ticked + CLEANUP_TICK {
+                ticked = now;
+                tick(stream, page, now, false);
+            }
             seen |= page.regions.iter().any(|(_, region)| region.contains(&moving));
         }
         (seen, now)
@@ -628,8 +689,17 @@ mod tests {
         let (stream, page, picture) = opened(at, false);
         assert!(page.started);
         assert_eq!(page.rgb, picture, "every tile, exactly");
-        assert!(!stream.dirty(at + Duration::from_secs(5)), "and nothing more is owed");
-        assert_eq!(stream.next_due(at + Duration::from_secs(5)), None);
+        assert!(stream.settled() && !stream.dirty(), "and nothing more is owed");
+    }
+
+    /// A band no stream touches is sent whole, as it is drawn: the still majority of
+    /// a desktop costs what it would with nothing moving at all.
+    #[test]
+    fn a_band_no_stream_touches_is_sent_whole() {
+        let at = Instant::now();
+        let (_, page, _) = opened(at, false);
+        let bands: Vec<Rect> = (0..H).step_by(64).map(|top| Rect { top, bottom: (top + 63).min(H - 1), ..whole() }).collect();
+        assert_eq!(page.tiles, bands);
     }
 
     #[test]
@@ -645,6 +715,28 @@ mod tests {
         settle(&mut stream, &mut page, now);
         assert!(page.regions.is_empty(), "the region ended");
         assert_eq!(page.rgb, picture, "and the page holds the picture exactly");
+    }
+
+    /// A band a stream splits is cut at the grid, and only the tiles beside the
+    /// stream that changed go as PNG.
+    #[test]
+    fn a_band_a_stream_splits_sends_only_its_changed_tiles_beside_it() {
+        let at = Instant::now();
+        let (mut stream, mut page, mut picture) = opened(at, false);
+        let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
+        let (seen, now) = play(&mut stream, &mut page, &mut picture, moving, at);
+        assert!(seen);
+        // One report across the top row: the stream's tiles and a caret two tiles
+        // past it.
+        page.tiles.clear();
+        let report = Rect::from_size(0, 0, 8 * TILE, TILE).unwrap();
+        let mut rgb = Vec::new();
+        stream.regions.crop(report, &mut rgb).unwrap();
+        let stride = usize::from(report.w()) * 3;
+        rgb[10 * stride + (7 * usize::from(TILE) + 3) * 3] ^= 0xff;
+        paint(&mut picture, report, &rgb);
+        damage(&mut stream, &mut page, report, &rgb, now);
+        assert_eq!(page.tiles, vec![Rect::from_size(7 * TILE, 0, TILE, TILE).unwrap()], "only the changed tile beside it");
     }
 
     /// A spinner — a tile, however it straddles the lines — is not a video, however
@@ -668,73 +760,57 @@ mod tests {
         let mut now = at;
         for blink in 0..20u8 {
             now += Duration::from_millis(500);
-            stream.blit(caret, &pattern(2, 16, blink + 1), now).unwrap();
-            round(&mut stream, &mut page, now);
+            damage(&mut stream, &mut page, caret, &pattern(2, 16, blink + 1), now);
+            frame(&mut stream, &mut page, now);
             assert!(page.regions.is_empty(), "a blinking caret is a PNG each time");
         }
     }
 
-    /// A caret's PNG is the caret, not the tile it is in: what is sent at once is cut
-    /// to what changed.
+    /// A rectangle drawn again with the pixels it already had does not count
+    /// towards motion.
     #[test]
-    fn a_change_is_sent_cut_to_what_changed() {
-        let at = Instant::now();
-        let (mut stream, _, _) = opened(at, false);
-        let caret = Rect::from_size(300, 200, 2, 16).unwrap();
-        stream.blit(caret, &pattern(2, 16, 1), at).unwrap();
-        let mut round = stream.take_round(at, false).unwrap().expect("the caret is owed");
-        let records = round.encode().unwrap();
-        let tiles: Vec<(u16, u16, u16, u16)> = records
-            .iter()
-            .filter_map(|r| match r {
-                ServerMsg::Tile(t) => Some((t.x, t.y, t.w, t.h)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(tiles, vec![(300, 200, 2, 16)]);
-    }
-
-    /// A rectangle drawn again with the pixels it already had changes nothing: it
-    /// sends nothing, and it does not count towards motion.
-    #[test]
-    fn a_redraw_of_the_same_pixels_is_not_a_change() {
+    fn a_redraw_of_the_same_pixels_is_not_motion() {
         let at = Instant::now();
         let (mut stream, mut page, picture) = opened(at, false);
         let mut now = at;
         for _ in 0..30 {
             now += Duration::from_millis(40);
-            stream.blit(whole(), &picture, now).unwrap();
-            assert!(!round(&mut stream, &mut page, now), "an unchanged redraw was sent");
+            damage(&mut stream, &mut page, whole(), &picture, now);
         }
         assert!(stream.churn.moving(now).is_empty(), "an unchanged redraw counted as motion");
     }
 
+    /// A repaint for a page that holds nothing sends every tile again, though the
+    /// mirror already holds every pixel of it, after a `tilesStart`.
     #[test]
-    fn a_restart_sends_the_whole_picture_again() {
+    fn a_repaint_after_a_forget_sends_the_whole_picture_again() {
         let at = Instant::now();
         let (mut stream, _, picture) = opened(at, false);
-        stream.force_keyframe();
+        stream.forget();
         let mut page = Page::new();
-        while round(&mut stream, &mut page, at) {}
+        damage(&mut stream, &mut page, whole(), &picture, at);
+        assert!(page.started);
         assert_eq!(page.rgb, picture);
     }
 
-    /// A restart while a region is live ends it ahead of the `tilesStart`, so the
-    /// page hands its decoder back, and drops every history the churn was counted
-    /// from.
+    /// A reset drops every history the churn was counted from, and keeps the
+    /// streams, which start again at a keyframe.
     #[test]
-    fn a_restart_ends_the_regions_and_forgets_the_churn() {
+    fn a_reset_drops_every_history_and_keeps_the_streams() {
         let at = Instant::now();
         let (mut stream, mut page, mut picture) = opened(at, false);
         let moving = Rect::from_size(0, 0, 5 * TILE, TILE).unwrap();
         let (seen, now) = play(&mut stream, &mut page, &mut picture, moving, at);
         assert!(seen);
+        stream.forget();
         stream.force_keyframe();
-        // The test page asserts no region outlives the `tilesStart`.
-        assert!(round(&mut stream, &mut page, now));
         assert!(stream.churn.churn.is_empty() && stream.churn.origin.is_none());
-        settle(&mut stream, &mut page, now);
-        assert_eq!(page.rgb, picture);
+        let mut fresh = Page::new();
+        damage(&mut stream, &mut fresh, whole(), &picture, now);
+        frame(&mut stream, &mut fresh, now);
+        assert_eq!(fresh.regions.len(), 1, "the stream went on, from a keyframe");
+        settle(&mut stream, &mut fresh, now);
+        assert_eq!(fresh.rgb, picture);
     }
 
     /// A page that is behind on an adaptive plan holds the cleanups back, but not
@@ -747,20 +823,15 @@ mod tests {
         let (seen, mut now) = play(&mut stream, &mut page, &mut picture, moving, at);
         assert!(seen);
         let stopped = now;
-        let mut cleaned = None;
-        while let Some(due) = stream.next_due(now) {
-            now = due.max(now);
-            let Some(mut round) = stream.take_round(now, true).unwrap() else { continue };
-            let records = round.encode().unwrap();
-            stream.put_back(round, now);
-            if records.iter().any(|r| matches!(r, ServerMsg::Tile(_))) {
-                cleaned.get_or_insert(now);
+        let cleaned = loop {
+            now += CLEANUP_TICK;
+            if tick(&mut stream, &mut page, now, true) > 0 {
+                break now;
             }
-            page.take(records);
             assert!(now < stopped + Duration::from_secs(20), "it settles");
-        }
-        let cleaned = cleaned.expect("the cleanups went out in the end");
+        };
         assert!(cleaned >= stopped + CLEANUP_HELD, "a cleanup went out to a page {:?} behind", cleaned - stopped);
+        settle(&mut stream, &mut page, now);
         assert_eq!(page.rgb, picture);
     }
 
