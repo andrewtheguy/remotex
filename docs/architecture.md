@@ -2408,10 +2408,10 @@ request, and a window smaller than the display scrolls. The gateway never
 adjusts a size on its way to the Mac: what it sends is a size a client asked
 for, or nothing. Behind the page it refuses what is under the minimum where it
 arrives (`vnc_apple::MIN_DISPLAY_POINTS`): a window report for a Mac's virtual
-display is logged and dropped and the display keeps its size, a client screen
-that small is not an opening size and the session opens at the default as for
-a client that named none, and a configured `size` that small fails
-`check-config`. Behind that, a Mac that sends no picture of a display says so
+display is logged and dropped and the display keeps its size, a `connect` that
+would open the display at a client screen that small is refused with an error
+and starts nothing (`TargetConfig::opens_on`), never opened at the default in
+its place, and a configured `size` that small fails `check-config`. Behind that, a Mac that sends no picture of a display says so
 in its stream, which the gateway reads and tells the page
 (`pictureWithheld`, [Apple VNC](apple-vnc-889.md#in-strips)).
 

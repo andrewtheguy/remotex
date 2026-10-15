@@ -14,7 +14,8 @@ use crate::audio::AudioBridge;
 use crate::camera::{CameraBridge, CameraFormat, CameraSignal};
 use crate::mic::{MicBridge, MicSignal};
 use crate::config::{
-    AudioPlan, Choices, Decoders, NotOffered, Passthrough, Protocol, RenderPlan, Subtype, TargetConfig,
+    AudioPlan, Choices, Decoders, NotOffered, Passthrough, Protocol, RenderPlan, ScreenUnderMinimum, Subtype,
+    TargetConfig,
 };
 use crate::feedback::LinkFeedback;
 use crate::protocol::{ClientMsg, HostDisplay, MouseButton, ServerMsg, TouchPhase};
@@ -121,6 +122,10 @@ pub enum ConnectError {
     /// A choice was made that the target's type does not offer.
     #[error(transparent)]
     NotOffered(#[from] NotOffered),
+    /// The client's screen, which the session would open at, is under the
+    /// least a Mac's virtual display is asked for.
+    #[error(transparent)]
+    ScreenUnderMinimum(#[from] ScreenUnderMinimum),
     /// The passthrough chosen is one this browser said it cannot take.
     #[error("this browser cannot take {}, passed through", .0.stream())]
     Beyond(Passthrough),
@@ -1612,8 +1617,10 @@ impl SessionManager {
     /// it for the life of the session. A choice the target's type does not offer
     /// is refused, and so is a passthrough this browser said it cannot take,
     /// whether chosen or one the target passes in every session: the picker
-    /// starts neither, so either is a client that did not ask it. Both tell the browser with a [`ServerMsg::Error`] and leave the
-    /// slot as it was.
+    /// starts neither, so either is a client that did not ask it. So is a
+    /// session that would open a Mac's virtual display at a client screen under
+    /// the least a Mac is asked for ([`TargetConfig::opens_on`]). Each tells the
+    /// browser with a [`ServerMsg::Error`] and leaves the slot as it was.
     ///
     /// `display` is the client's screen from [`ClientMsg::Connect`], handed to
     /// the engine at spawn so a High Performance session can open its virtual
@@ -1644,9 +1651,10 @@ impl SessionManager {
                     return Err(ConnectError::UnknownTarget(target_name.to_owned()));
                 }
             };
-            let refused = match target.accepts(choices) {
-                Err(not_offered) => Some(ConnectError::NotOffered(not_offered)),
-                Ok(()) => target.beyond(choices, decoders).map(ConnectError::Beyond),
+            let refused = match (target.accepts(choices), target.opens_on(choices.size, display)) {
+                (Err(not_offered), _) => Some(ConnectError::NotOffered(not_offered)),
+                (Ok(()), Err(small)) => Some(ConnectError::ScreenUnderMinimum(small)),
+                (Ok(()), Ok(())) => target.beyond(choices, decoders).map(ConnectError::Beyond),
             };
             if let Some(refused) = refused {
                 Self::notify(st.client.as_ref(), ServerMsg::Error { message: refused.to_string() });
@@ -2726,8 +2734,23 @@ mod tests {
         ));
         assert!(matches!(recv(&mut att.events).await, AttachEvent::Msg(ServerMsg::Error { .. })));
 
-        // The Mac's H.264, which no browser is asked about, starts the target.
+        // A window-sized session from a screen under the least a Mac's virtual
+        // display is asked for: refused, not opened at the default.
         let h264 = Choices { passthrough: Some(Passthrough::AppleH264), ..RESIZE };
+        let small = HostDisplay { w: 640, h: 480, scale: 100, fit: false };
+        assert!(matches!(
+            mgr.connect(att.id, "mac", Some(small), h264).await,
+            Err(ConnectError::ScreenUnderMinimum(_))
+        ));
+        match recv(&mut att.events).await {
+            AttachEvent::Msg(ServerMsg::Error { message }) => {
+                assert!(message.contains("640x480") && message.contains("800x600"), "{message}");
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+        assert!(hook_rx.try_recv().is_err(), "nothing was started");
+
+        // The Mac's H.264, which no browser is asked about, starts the target.
         mgr.connect(att.id, "mac", None, h264).await.unwrap();
         assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { apple_media: false, apple_h264: true, .. })));
     }

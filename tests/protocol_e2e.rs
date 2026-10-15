@@ -424,8 +424,12 @@ const MAC_DESKTOP: u16 = 32;
 const MAC_COMMANDS: [u8; 16] = [0xbf, 0xf6, 0xe7, 0x2f, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 /// The fake client's screen, named in its `connect`. With no pinned config
 /// size, this is what the virtual display opens at — the unified opening rule.
-const MAC_SCREEN_WIDTH: u16 = 64;
-const MAC_SCREEN_HEIGHT: u16 = 48;
+/// At least the 800x600 points a Mac's virtual display is asked for: a screen
+/// under it is refused at connect.
+const MAC_SCREEN_WIDTH: u16 = 1024;
+const MAC_SCREEN_HEIGHT: u16 = 768;
+/// The window a resize reports: the least a Mac's virtual display is asked for.
+const MAC_WINDOW: (u16, u16) = (800, 600);
 const MAC_CLIPBOARD_SESSION: u32 = 0x1234_5678;
 const MAC_REMOTE_CLIPBOARD: &str = "copied on virtual Mac ✓";
 const MAC_BROWSER_CLIPBOARD: &str = "sent from browser ☕";
@@ -2179,15 +2183,15 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
 
     // A resize is High Performance's: the narrowed arming, the new configuration,
     // the held poll, and the Mac's answering layout.
-    ws.send(Message::text(r#"{"type":"viewport","w":24,"h":18}"#)).await.unwrap();
+    ws.send(Message::text(format!(r#"{{"type":"viewport","w":{},"h":{}}}"#, MAC_WINDOW.0, MAC_WINDOW.1))).await.unwrap();
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoFramebuffer((1, 1)));
-    assert_eq!(next_mac_request(&mut requests).await, MacRequest::Configuration((24, 18), 1));
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::Configuration(MAC_WINDOW, 1));
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::HeldFramebuffer);
     let resize = expect_resize_msg(&mut ws).await;
-    assert_eq!(resize["w"], 24, "{resize}");
-    assert_eq!(resize["h"], 18, "{resize}");
+    assert_eq!(resize["w"], MAC_WINDOW.0, "{resize}");
+    assert_eq!(resize["h"], MAC_WINDOW.1, "{resize}");
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
-    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoFramebuffer((24, 18)));
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoFramebuffer(MAC_WINDOW));
     expect_frame(&mut ws).await;
 
     ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
@@ -2198,7 +2202,7 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
         .expect("the fake Mac task failed");
     assert_eq!(
         configurations,
-        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), ((24, 18), 1)],
+        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), (MAC_WINDOW, 1)],
         "unexpected display configurations"
     );
 }
@@ -2410,7 +2414,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     // Dynamic resize is another full configuration on the same record stream. The
     // fake Mac independently checks that the dynamic flag and the rest of the native
     // descriptor shape remain present, then answers with an authoritative layout.
-    ws.send(Message::text(r#"{"type":"viewport","w":24,"h":18}"#))
+    ws.send(Message::text(format!(r#"{{"type":"viewport","w":{},"h":{}}}"#, MAC_WINDOW.0, MAC_WINDOW.1)))
         .await
         .unwrap();
     assert_eq!(
@@ -2420,7 +2424,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Configuration((24, 18), 1)
+        MacRequest::Configuration(MAC_WINDOW, 1)
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
@@ -2428,8 +2432,8 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         "polling did not hold to one pixel while the display change was out"
     );
     let resize = expect_resize_msg(&mut ws).await;
-    assert_eq!(resize["w"], 24, "{resize}");
-    assert_eq!(resize["h"], 18, "{resize}");
+    assert_eq!(resize["w"], MAC_WINDOW.0, "{resize}");
+    assert_eq!(resize["h"], MAC_WINDOW.1, "{resize}");
     assert_eq!(resize["scale"], 1.0, "{resize}");
     assert_eq!(
         next_mac_request(&mut requests).await,
@@ -2438,7 +2442,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::AutoFramebuffer((24, 18))
+        MacRequest::AutoFramebuffer(MAC_WINDOW)
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
@@ -2453,7 +2457,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         .expect("the fake Mac task failed");
     assert_eq!(
         configurations,
-        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), ((24, 18), 1)],
+        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), (MAC_WINDOW, 1)],
         "unexpected display configurations"
     );
 }
