@@ -276,7 +276,10 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
   };
 
   // The same rectangle of each plane: a picture that says where it changed is
-  // 4:4:4 and whole (softwareDecoder.worker.ts).
+  // 4:4:4 and whole (softwareDecoder.worker.ts). Its first sample is given as
+  // the offset, not by UNPACK_SKIP_PIXELS and UNPACK_SKIP_ROWS: WebKit took
+  // 0.5 ms for three 128×128 rectangles given by those, and 0.13 by the
+  // offset, where a whole 3840×2160 picture took 1.6.
   const uploadRect = (
     planes: DecodedPlanes,
     memory: Uint8Array,
@@ -285,8 +288,6 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
     planes.planes.forEach((plane, unit) => {
       gl.activeTexture(gl.TEXTURE0 + unit);
       gl.pixelStorei(gl.UNPACK_ROW_LENGTH, plane.stride);
-      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, rect.x);
-      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, rect.y);
       gl.texSubImage2D(
         gl.TEXTURE_2D,
         0,
@@ -297,11 +298,9 @@ export function createPlanesPicture(canvas: OffscreenCanvas): PlanesPicture {
         gl.RED,
         gl.UNSIGNED_BYTE,
         memory,
-        plane.offset,
+        plane.offset + rect.y * plane.stride + rect.x,
       );
     });
-    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
-    gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
   };
 
   return {
