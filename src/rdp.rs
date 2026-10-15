@@ -1625,13 +1625,18 @@ async fn active_loop(
             // paint would be, and a run that ends a frame flushes it as a marked
             // frame does; the frame is acknowledged to the host once composed, as
             // the page acknowledges one it composes. A run that does not compose
-            // ends the session: the way back is a session that starts.
+            // ends the session: the way back is a session that starts. One
+            // queued before a resize or a restart paints a picture that is gone,
+            // and is only acknowledged. The composer waits at a frame's end until
+            // `ran` is dropped, so the frame is read as it was composed.
             ran = ran => {
                 let ran = ran?;
-                for rect in ran.composed.painted {
-                    stage_damage(&mut pending_damage, damaged(rect));
+                if !ran.stale {
+                    for rect in ran.composed.painted {
+                        stage_damage(&mut pending_damage, damaged(rect));
+                    }
                 }
-                if ran.composed.frames > 0 {
+                if ran.composed.frames > 0 && !ran.stale {
                     flush_damage(framebuffer, &mut pending_damage, view, &mut shadow, sink, &mut tab).await?;
                     damage_flushed = Instant::now();
                     damage_due = None;
@@ -1673,8 +1678,15 @@ async fn active_loop(
                         frame_marks = true;
                         // A pipeline that starts over has drawn with nothing yet.
                         host_picture = None;
-                        if let Some(composer) = &composer {
+                        if let Some(composer) = &mut composer {
                             composer.begin()?;
+                            // A passed pipeline's page is told so by its
+                            // `graphicsStart`; a composed one's is told here.
+                            let msg = ServerMsg::HostPicture { exact: true, codecs: Vec::new() };
+                            sink.msg(msg.clone()).await?;
+                            if let Some(tab) = &mut tab {
+                                tab.msg(msg).await;
+                            }
                         }
                         if let Some(composed) = composed.as_deref() {
                             framebuffer = composed;
@@ -1770,8 +1782,12 @@ async fn active_loop(
                             desktop.0, desktop.1, view.columns
                         );
                         // Damage staged before the resize names rectangles of a
-                        // framebuffer that no longer exists.
+                        // framebuffer that no longer exists, and so does what the
+                        // composer was handed before it.
                         pending_damage.clear();
+                        if let Some(composer) = &mut composer {
+                            composer.fence();
+                        }
                         damage_due = None;
                         let (w, h) = view.size();
                         shadow.resize(w, h);
