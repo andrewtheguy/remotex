@@ -433,6 +433,9 @@ impl Graphics {
                         "rdp: the host confirmed graphics pipeline version {version:#010x}, flags {flags:#x}; \
                          its commands are passed on"
                     );
+                    // A pipeline that starts over has drawn with nothing yet, so
+                    // the codecs it draws with again are reported again.
+                    self.fidelity = Fidelity::default();
                     cut(&mut updates, &mut from, command.start, None);
                     updates.push(Update::Confirmed);
                 }

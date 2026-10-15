@@ -309,11 +309,12 @@ password = "change-me"
 # for a host whose pipeline the page's decoders cannot paint. RDP only, and
 # refused on VNC whatever the value.
 #
-# With the pipeline on, every session passes it to the browser, which composes
-# it; the gateway composes none, and a browser that cannot is not sent VP9 in
-# its place. What the host draws with is sent as it is, with no quality walk
-# behind it, so the video keys further down reach only the bitmap updates of a
-# host that answers the offer with them. How the host draws it, high quality or
+# With the pipeline on, every session but one started with Motion (below)
+# passes it to the browser, which composes it; the gateway composes none, and a
+# browser that cannot is not sent VP9 in its place. What the host draws with is
+# sent as it is, with no quality walk behind it, so the video keys further down
+# reach only Motion and the bitmap updates of a host that answers the offer
+# with them. How the host draws it, high quality or
 # adaptive H.264, is chosen at the picker (Graphics, above). It takes the encoding
 # and the decoding off the gateway — a few percent of a core are left, whatever
 # the desktop is doing — and puts the decoding on the browser, where a desktop in
@@ -322,6 +323,18 @@ password = "change-me"
 # session again rather than resumed, since the host draws against what its client
 # already holds. The page needs WebGL 2 and to be cross-origin isolated, which
 # every gateway makes it and a proxy that drops the two headers undoes.
+#
+# Motion, ALPHA, is a box under High quality on a target with one virtual
+# display. A session started with it is the one the pipeline is not passed in:
+# the gateway composes it, acknowledges each frame once composed rather than
+# once the page has painted it, and sends what moves as VP9, under the video
+# keys below, and what is still as exact PNG. Its page decodes VP9 and draws
+# PNG, so it needs neither WebGL 2 nor cross-origin isolation, and a browser
+# that cannot compose the pipeline can still start it. A page that reloads or
+# reconnects is repainted from the gateway's picture instead of logged on
+# again. What settles is exact only when the host draws losslessly, which its
+# image quality policy decides; the Info card's "Host's picture" row says
+# whether it does.
 # The compositor is the gateway's own and is tested as it is there,
 # and what is passed is checked against a real host, in a headless browser and by
 # hand. That is a physical Windows 11 computer, from a desktop browser and from a
@@ -582,7 +595,8 @@ password = "change-me"
 # encodes a desktop, and wlshare applies the same plan to the VP9 it makes and the
 # gateway passes through. A passed Mac media stream or RDP graphics pipeline keeps
 # the remote's own quality, so the keys are refused on an ard-high-performance
-# target, and on RDP apply only to the bitmap path. Every key below is per target, so it belongs
+# target, and on RDP apply only to the bitmap path and to Motion's streams of
+# what moves, which libvpx encodes. Every key below is per target, so it belongs
 # *inside* a [[targets]] table and not in a section of their own — uncommented here
 # they would attach to whichever [[targets]] block precedes them, which is the
 # "example" one at the top of this file. There is no global render setting, and
