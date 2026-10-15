@@ -48,6 +48,7 @@ use crate::rdp_client::{
     Placed, Session,
 };
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
+use crate::rdp_composer::Composer;
 use crate::shadow::{Rect, Shadow};
 
 // A layout — a size, a density, or both — the remote has been asked for and has
@@ -1443,7 +1444,13 @@ async fn active_loop(
 ) -> anyhow::Result<()> {
     let Flags { resize, kept, restates, pass_graphics, plan, monitors } = flags;
     let input = session.input();
-    let framebuffer = session.framebuffer();
+    // A session started with Motion composes the pipeline here, on a thread of
+    // its own, and from the pipeline's start its picture is the one that thread
+    // composes: the session's own framebuffer holds only bitmap updates, which a
+    // host sends before it confirms the pipeline and no more after.
+    let mut composer = if plan.motion { Some(Composer::start()?) } else { None };
+    let composed = composer.as_ref().map(Composer::framebuffer);
+    let mut framebuffer = session.framebuffer();
 
     // The pixels the browser has already been sent, of the display it is looking
     // at. Lives beside the framebuffer it shadows, and is forgotten on a repaint,
@@ -1529,6 +1536,10 @@ async fn active_loop(
     // flush scheduling at the bottom of the loop. A property of the server, so it
     // survives resizes and never unlearns.
     let mut frame_marks = false;
+    // What the pipeline has drawn with so far, as last said to the browser: said
+    // again with every repaint, which a session that keeps its engine across a
+    // reattach is given instead of a pipeline that starts over.
+    let mut host_picture: Option<ServerMsg> = None;
 
     loop {
         if pass_graphics
@@ -1599,9 +1610,41 @@ async fn active_loop(
             }
         };
 
+        // A run of the pipeline composed here, under Motion.
+        let ran = async {
+            match composer.as_mut() {
+                Some(composer) => composer.ran().await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
             // Nothing to do here: the turn is what says the distance, above.
             _ = distance_tick.tick(), if pass_graphics => {}
+            // What a run composed here painted is staged as a bitmap update's
+            // paint would be, and a run that ends a frame flushes it as a marked
+            // frame does; the frame is acknowledged to the host once composed, as
+            // the page acknowledges one it composes. A run that does not compose
+            // ends the session: the way back is a session that starts. One
+            // queued before a resize or a restart paints a picture that is gone,
+            // and is only acknowledged. The composer waits at a frame's end until
+            // `ran` is dropped, so the frame is read as it was composed.
+            ran = ran => {
+                let ran = ran?;
+                if !ran.stale {
+                    for rect in ran.composed.painted {
+                        stage_damage(&mut pending_damage, damaged(rect));
+                    }
+                }
+                if ran.composed.frames > 0 && !ran.stale {
+                    flush_damage(framebuffer, &mut pending_damage, view, &mut shadow, sink, &mut tab).await?;
+                    damage_flushed = Instant::now();
+                    damage_due = None;
+                }
+                if let Some(frame) = ran.frame {
+                    input.frame_composed(frame);
+                }
+            }
             event = events.recv() => {
                 let Some(event) = event else {
                     // The client's thread always sends `Ended` before it lets go of
@@ -1619,6 +1662,9 @@ async fn active_loop(
                     // the damage interval was built to guess at: everything staged
                     // since the last one of these is one coherent picture, so it goes
                     // out now — not in up-to-16ms, and never cut in half.
+                    // Under Motion a frame ends when the composer has composed
+                    // it, which it says itself.
+                    Event::Frame if composer.is_some() => frame_marks = true,
                     Event::Frame => {
                         frame_marks = true;
                         flush_damage(framebuffer, &mut pending_damage, view, &mut shadow, sink, &mut tab)
@@ -1630,6 +1676,21 @@ async fn active_loop(
                     // never the leading-edge flush of a frame still being drawn.
                     Event::FramesMarked => {
                         frame_marks = true;
+                        // A pipeline that starts over has drawn with nothing yet.
+                        host_picture = None;
+                        if let Some(composer) = &mut composer {
+                            composer.begin()?;
+                            // A passed pipeline's page is told so by its
+                            // `graphicsStart`; a composed one's is told here.
+                            let msg = ServerMsg::HostPicture { exact: true, codecs: Vec::new() };
+                            sink.msg(msg.clone()).await?;
+                            if let Some(tab) = &mut tab {
+                                tab.msg(msg).await;
+                            }
+                        }
+                        if let Some(composed) = composed.as_deref() {
+                            framebuffer = composed;
+                        }
                         // This is where a pipeline begins, and the browser
                         // composes it from here.
                         if pass_graphics {
@@ -1646,12 +1707,25 @@ async fn active_loop(
                     // frame a run ends is acknowledged to the host when the
                     // browser has painted it, which is what the host paces its
                     // drawing by.
+                    Event::Graphics { commands, frame } if composer.is_some() => {
+                        if let Some(composer) = &composer {
+                            composer.run(commands, frame)?;
+                        }
+                    }
                     Event::Graphics { commands, frame } => {
                         let frame = frame.map(|frame| {
                             let input = input.clone();
                             Painted::new(move || input.frame_composed(frame))
                         });
                         sink.pass_graphics(commands, frame).await?;
+                    }
+                    Event::Drawn(fidelity) => {
+                        let msg = ServerMsg::HostPicture { exact: fidelity.exact(), codecs: fidelity.names() };
+                        sink.msg(msg.clone()).await?;
+                        if let Some(tab) = &mut tab {
+                            tab.msg(msg.clone()).await;
+                        }
+                        host_picture = Some(msg);
                     }
                     Event::Cursor(cursor) => pointer.set(cursor),
                     Event::ResizeReady { max_area } => {
@@ -1708,8 +1782,12 @@ async fn active_loop(
                             desktop.0, desktop.1, view.columns
                         );
                         // Damage staged before the resize names rectangles of a
-                        // framebuffer that no longer exists.
+                        // framebuffer that no longer exists, and so does what the
+                        // composer was handed before it.
                         pending_damage.clear();
+                        if let Some(composer) = &mut composer {
+                            composer.fence();
+                        }
                         damage_due = None;
                         let (w, h) = view.size();
                         shadow.resize(w, h);
@@ -1824,6 +1902,9 @@ async fn active_loop(
                     let (w, h) = view.size();
                     sink.msg(ServerMsg::Resize { w, h, scale: applied.of(view.active).scale() }).await?;
                     sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
+                    if let Some(msg) = &host_picture {
+                        sink.msg(msg.clone()).await?;
+                    }
                     // The list is pushed, never asked for, so a browser that attaches
                     // is told it here.
                     if let Some(msg) = view.displays(applied) {
@@ -2907,6 +2988,8 @@ mod tests {
             rdp_graphics: false,
             rdp_h264: false,
             native_vp9: false,
+            motion: false,
+            motion_debug: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse);

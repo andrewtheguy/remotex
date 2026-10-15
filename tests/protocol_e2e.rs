@@ -1224,6 +1224,7 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         microphone: false,
         video_quality: None,
         render_adaptive: None,
+        render_motion_debug: false,
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,

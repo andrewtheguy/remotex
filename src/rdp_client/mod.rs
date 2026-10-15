@@ -103,5 +103,6 @@ pub use microphone::{MicrophoneFeed, MicrophoneSink};
 pub use error::Error;
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};
 pub use pointer::{Cursor, CursorImage};
+pub use remotex_rdp_graphics::fidelity::Fidelity;
 pub use remotex_rdp_graphics::{Composed, Compositor, Frame, Framebuffer, Rect};
 pub use session::{AudioSink, Connect, Event, Placed, Session};

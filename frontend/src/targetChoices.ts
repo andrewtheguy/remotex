@@ -16,7 +16,7 @@
 // - One it offers that cannot be had here is greyed, with the reason: Opus in
 //   a browser with no audio decoder, or a passthrough this browser cannot take.
 // - An RDP host's graphics pipeline is passed in every session, which is said and
-//   not offered: the gateway composes none.
+//   not offered, unless Motion is ticked: see the next rule.
 // - A High Performance Mac's picture is one of two, both passed through: its
 //   HEVC, or its H.264, in that order: see `pictureOptions`. The first this
 //   browser can take is taken until another is chosen. The H.264 is never
@@ -29,7 +29,10 @@
 // - How the host draws an RDP pipeline, high quality or adaptive H.264 (alpha), is a
 //   choice on a target with the pipeline on, and under adaptive the whole desktop
 //   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
-//   offered high quality alone.
+//   offered high quality alone. Under high quality, on a target with one display,
+//   Motion (alpha) has the gateway compose the pipeline instead and send what
+//   moves as VP9 and what is still as PNG: then nothing is passed, and a browser
+//   that cannot compose a pipeline can start the target.
 // - Which encoder codes the VP9, libvpx or the native one in Rust (alpha), is a
 //   choice on a target that offers it: see `encoderOptions`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
@@ -81,6 +84,11 @@ export interface TargetInfo {
   pipeline: boolean;
   /** Whether which encoder codes the VP9 is a choice. */
   vp9: boolean;
+  /**
+   * Whether the gateway may compose the host's pipeline for motion, beside
+   * high quality: VP9 where it moves, PNG where it is still.
+   */
+  motion: boolean;
 }
 
 /** A desktop size in points. */
@@ -135,6 +143,11 @@ export interface Choices {
   placement: Placement;
   pipeline: Pipeline;
   vp9: Vp9Encoder;
+  /**
+   * Whether the gateway composes the host's pipeline, sending what moves as
+   * VP9 and what is still as PNG, rather than passing it to this browser.
+   */
+  motion: boolean;
 }
 
 /** What this browser can do with a target. */
@@ -206,6 +219,8 @@ export interface PipelineOption<V> {
 export interface PipelineRow {
   modes: PipelineOption<"high-quality" | "adaptive">[];
   h264: PipelineOption<Exclude<Pipeline, "high-quality">>[];
+  /** Motion, under high quality, on a target that offers it: null otherwise. */
+  motion: { label: string; note: string } | null;
 }
 
 /** One encoder the VP9 can be coded with. */
@@ -273,12 +288,14 @@ export interface TargetOptions {
 }
 
 // An RDP host's graphics pipeline: passed in every session of a target that has
-// it on, so said and not offered.
-const RDP_GRAPHICS: PassedNote & { blocked: string } = {
+// it on but one the gateway composes for motion, so said and not offered.
+const RDP_GRAPHICS: PassedNote & { blocked: string; motion: string } = {
   label: "Always passed through",
-  note: "egfx is on for this target, so every session passes the host's graphics pipeline through, for this browser to compose.",
+  note: "egfx is on for this target, so every session passes the host's graphics pipeline through, for this browser to compose, unless Motion is ticked.",
   blocked:
     "This browser cannot compose the host's graphics pipeline, which this target always passes: that needs WebGL 2 and a cross-origin isolated page. Use a browser that can, or a target with egfx disabled.",
+  motion:
+    "This browser cannot compose the host's graphics pipeline: that needs WebGL 2 and a cross-origin isolated page. Tick Motion to have the gateway compose it, or use a browser that can.",
 };
 
 /**
@@ -463,11 +480,11 @@ const PLACEMENTS: PlacementOption[] = [
  */
 function pipelineRow(
   target: TargetInfo,
-  remembered: Pipeline | undefined,
+  remembered: Partial<Choices> | undefined,
   decodes: boolean,
-): { row: PipelineRow | null; pipeline: Pipeline } {
+): { row: PipelineRow | null; pipeline: Pipeline; motion: boolean } {
   if (!target.pipeline) {
-    return { row: null, pipeline: "high-quality" };
+    return { row: null, pipeline: "high-quality", motion: false };
   }
   const h264: PipelineRow["h264"] = [
     {
@@ -483,11 +500,12 @@ function pipelineRow(
       disabled: false,
     },
   ];
+  const was = remembered?.pipeline;
   const pipeline =
-    remembered !== undefined &&
-    (remembered === "high-quality" ||
-      (decodes && h264.some((option) => option.value === remembered)))
-      ? remembered
+    was !== undefined &&
+    (was === "high-quality" ||
+      (decodes && h264.some((option) => option.value === was)))
+      ? was
       : "high-quality";
   return {
     row: {
@@ -508,8 +526,42 @@ function pipelineRow(
         },
       ],
       h264,
+      motion: target.motion
+        ? {
+            label: "Motion (alpha)",
+            note: "The gateway composes the pipeline and sends what moves as VP9 and what is still as PNG. What is still is exact when the host's image quality policy is set to Lossless.",
+          }
+        : null,
     },
     pipeline,
+    // High quality's alone, and only where it was ticked.
+    motion:
+      target.motion &&
+      pipeline === "high-quality" &&
+      remembered?.motion === true,
+  };
+}
+
+/**
+ * An RDP host's pipeline as the picker says it: passed unless the gateway
+ * composes it for `motion`, and then said rather than offered, and a target a
+ * browser that cannot compose one (`composes`) cannot start without Motion.
+ */
+function rdpGraphics(
+  target: TargetInfo,
+  motion: boolean,
+  composes: boolean,
+): { passed: PassedNote | null; blocked: string | null } {
+  if (!target.passthroughs.includes("rdp-graphics") || motion) {
+    return { passed: null, blocked: null };
+  }
+  const passed = { label: RDP_GRAPHICS.label, note: RDP_GRAPHICS.note };
+  if (composes) {
+    return { passed, blocked: null };
+  }
+  return {
+    passed,
+    blocked: target.motion ? RDP_GRAPHICS.motion : RDP_GRAPHICS.blocked,
   };
 }
 
@@ -528,15 +580,12 @@ export function targetOptions(
     sizes.find((option) => option.value === remembered?.size)?.value ??
     sizes[0].value;
   const sound = soundRow(target, remembered?.audio, abilities.audio);
-  const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
-  // An RDP host's pipeline is passed whatever is chosen, and a browser that
-  // cannot compose it cannot start the target.
-  const always = target.passthroughs.includes("rdp-graphics");
-  const passed: PassedNote | null = always
-    ? { label: RDP_GRAPHICS.label, note: RDP_GRAPHICS.note }
-    : null;
-  const blocked =
-    always && !abilities.rdpGraphics ? RDP_GRAPHICS.blocked : null;
+  const drawn = pipelineRow(target, remembered, abilities.rdpH264);
+  const { passed, blocked } = rdpGraphics(
+    target,
+    drawn.motion,
+    abilities.rdpGraphics,
+  );
   const pictures = target.passthroughs.some(
     (passthrough) => passthrough !== "rdp-graphics",
   )
@@ -561,6 +610,7 @@ export function targetOptions(
     vp9:
       encoders?.find((option) => option.value === remembered?.vp9)?.value ??
       "libvpx",
+    motion: drawn.motion,
   };
   return {
     sizes,

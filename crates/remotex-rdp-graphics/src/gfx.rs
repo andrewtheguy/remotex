@@ -33,6 +33,7 @@ use anyhow::{Context as _, Result};
 use log::{debug, info, warn};
 
 use crate::avc::{self, Avc, Picture};
+use crate::fidelity::Fidelity;
 use crate::framebuffer::{Framebuffer, Rect, affordable, stage};
 use crate::proto::bitmap::MAX_DESKTOP_BYTES;
 use crate::proto::gfx::{self, Message, Point16, Rect16};
@@ -71,6 +72,10 @@ pub enum Update {
     /// `frame` is the frame it ends: the one the host is owed an acknowledgement
     /// for once whoever composes the run has.
     Passed { commands: Vec<u8>, frame: Option<u32> },
+    /// A passed pipeline drew with something it had not drawn with before: what it
+    /// has drawn with so far, all of it ([`Fidelity`]). Ahead of the run that
+    /// carries that draw.
+    Drawn(Fidelity),
 }
 
 /// One surface: its pixels in `RGBX32`, where it shows on the output, and what has
@@ -279,6 +284,8 @@ pub struct Graphics {
     supplied: BTreeMap<u32, Picture>,
     /// How many access units the run being composed has reached.
     unit: u32,
+    /// What a passed pipeline has drawn with.
+    fidelity: Fidelity,
 }
 
 impl Default for Graphics {
@@ -306,6 +313,7 @@ impl Graphics {
             pass: false,
             supplied: BTreeMap::new(),
             unit: 0,
+            fidelity: Fidelity::default(),
         }
     }
 
@@ -384,7 +392,7 @@ impl Graphics {
     /// something of its own to do: before the confirmation and before a reset, so
     /// what the session says about either reaches its caller ahead of the commands
     /// that follow it, and after each frame's end, so that a run names the one
-    /// frame it ends.
+    /// frame it ends. Each draw's codec is read on the way, for [`Update::Drawn`].
     fn hand_on(&mut self, commands: &[u8]) -> Result<Vec<Update>> {
         let mut updates = Vec::new();
         let mut from = 0;
@@ -397,16 +405,37 @@ impl Graphics {
         for command in gfx::commands(commands) {
             let command = command?;
             self.tally.command(command.id);
-            if !matches!(command.id, gfx::CMD_CAPS_CONFIRM | gfx::CMD_RESET_GRAPHICS | gfx::CMD_END_FRAME) {
+            if !matches!(
+                command.id,
+                gfx::CMD_CAPS_CONFIRM
+                    | gfx::CMD_RESET_GRAPHICS
+                    | gfx::CMD_END_FRAME
+                    | gfx::CMD_WIRE_TO_SURFACE_1
+                    | gfx::CMD_WIRE_TO_SURFACE_2
+            ) {
                 continue;
             }
             let read = gfx::messages(&commands[command.start..command.end]).next();
             match read.transpose()? {
+                Some(Message::WireToSurface1 { codec, data, .. } | Message::WireToSurface2 { codec, data, .. }) => {
+                    if self.fidelity.saw(codec, data) {
+                        let names = self.fidelity.names();
+                        info!(
+                            "rdp: the host has drawn with {} so far, {}",
+                            names.join(", "),
+                            if self.fidelity.exact() { "exact" } else { "not exact" }
+                        );
+                        updates.push(Update::Drawn(self.fidelity.clone()));
+                    }
+                }
                 Some(Message::CapsConfirm { version, flags }) => {
                     info!(
                         "rdp: the host confirmed graphics pipeline version {version:#010x}, flags {flags:#x}; \
                          its commands are passed on"
                     );
+                    // A pipeline that starts over has drawn with nothing yet, so
+                    // the codecs it draws with again are reported again.
+                    self.fidelity = Fidelity::default();
                     cut(&mut updates, &mut from, command.start, None);
                     updates.push(Update::Confirmed);
                 }
@@ -1344,10 +1373,14 @@ mod tests {
         let pdus: Vec<Vec<u8>> = opening.iter().chain(&first).chain(&second).cloned().collect();
 
         let updates = receive(&mut graphics, &framebuffer, &pdus);
+        // Said once the uncompressed draw is read, ahead of the run that carries it.
+        let mut drawn = Fidelity::default();
+        drawn.saw(CODEC_UNCOMPRESSED, &[]);
         assert_eq!(updates, vec![
             Update::Confirmed,
             Update::Passed { commands: opening[0].clone(), frame: None },
             Update::Reset { width: 4, height: 4, monitors: vec![gfx::Placed { x: 0, y: 0, w: 4, h: 4 }] },
+            Update::Drawn(drawn),
             Update::Passed { commands: [&opening[1..], &first[..]].concat().concat(), frame: Some(1) },
             Update::Passed { commands: second.concat(), frame: None },
         ]);

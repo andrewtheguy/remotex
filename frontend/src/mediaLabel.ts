@@ -128,6 +128,28 @@ export function renderLabel(plan: string): string {
   return plan || "Waiting for the target";
 }
 
+/** The wire fields of `hostPicture`: what an RDP host's pipeline has drawn with. */
+export interface HostPicture {
+  exact: boolean;
+  codecs: string[];
+}
+
+/**
+ * The Host's picture row of an RDP session with the graphics pipeline: whether
+ * what the host has drawn so far is its picture exactly, and with which codecs.
+ * Null on any other session, which has no row; an empty list is a pipeline that
+ * has drawn nothing yet.
+ */
+export function hostPictureLabel(picture: HostPicture): string {
+  if (picture.codecs.length === 0) {
+    return "Nothing drawn yet";
+  }
+  const codecs = picture.codecs.join(", ");
+  return picture.exact
+    ? `Lossless (${codecs})`
+    : `Lossy (${codecs}): the host's image quality policy is not Lossless`;
+}
+
 /** The wire fields of `videoFormat`, or a pipeline this browser composes. */
 export interface VideoStreamInfo {
   decode: string;
@@ -143,6 +165,24 @@ export interface VideoStreamInfo {
   software?: boolean;
   // How many strips each picture of the stream comes in, where more than one.
   strips?: number;
+  // ALPHA: a picture sent for motion (`tilesStart`): PNG tiles where the desktop
+  // is still and a stream of its own for each region that moves. `decode` is the
+  // first region's `regionFormat`, and empty until one has moved.
+  motion?: boolean;
+}
+
+// What a configuration string is, as a person names it: VP9 for every `vp09.`.
+function codecName(decode: string): string {
+  return decode.startsWith("vp09.") ? "VP9" : decode;
+}
+
+// The Video row of a picture sent for motion: what it is drawn with where it
+// moves and where it is still, and which decoder decodes the moving part.
+function motionLabel(stream: VideoStreamInfo, decoder: string): string {
+  if (!stream.decode) {
+    return "PNG tiles so far, nothing has moved · encoded by the gateway";
+  }
+  return `${codecName(stream.decode)} where it moves (${stream.decode}), PNG where it is still · encoded by the gateway · ${decoder}`;
 }
 
 /**
@@ -170,12 +210,15 @@ export function videoLabel(
   if (stream.composed) {
     return "Not in use: the host's graphics pipeline is composed by this browser";
   }
+  const decoder = stream.software
+    ? "decoded by this page's WebAssembly decoder"
+    : "decoded by the browser's native decoder";
+  if (stream.motion) {
+    return motionLabel(stream, decoder);
+  }
   const whose = stream.passthrough
     ? "passthrough from the remote"
     : "encoded by the gateway";
   const strips = (stream.strips ?? 1) > 1 ? ` in ${stream.strips} strips` : "";
-  const decoder = stream.software
-    ? "decoded by this page's WebAssembly decoder"
-    : "decoded by the browser's native decoder";
   return `${stream.decode} · ${whose}${strips} · ${decoder}`;
 }

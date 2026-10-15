@@ -400,7 +400,7 @@ impl Round {
         if live.keyframe_owed {
             live.stream.force_keyframe();
         }
-        let mut produced = Produced { format: None, unit: None };
+        let mut produced = Produced { format: None, unit: None, records: Vec::new() };
         let encoded = match live.settle {
             Some(quality) => live.stream.settle(&self.mirror, quality),
             None => live.stream.encode(&self.mirror, self.changed.as_deref()),
@@ -449,12 +449,16 @@ impl Round {
     }
 }
 
-/// What one round produced: the configuration owed ahead of the unit, and the unit.
+/// What one round produced: the configuration owed ahead of the unit, and the unit;
+/// or, for a picture sent for motion ([`crate::motion`]), its records in order.
 pub struct Produced {
     /// The `ServerMsg::VideoFormat` owed because the stream is new, was re-armed, or
     /// its configuration string changed.
     pub format: Option<String>,
     pub unit: Option<VideoUnit>,
+    /// A picture sent for motion's round: what it says, its tiles, and each moving
+    /// region's configuration and unit, in the order they go out.
+    pub records: Vec<crate::protocol::ServerMsg>,
 }
 
 /// An access unit the remote encoded itself, as the browser is told about it.

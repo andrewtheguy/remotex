@@ -122,6 +122,7 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         microphone: true,
         video_quality: None,
         render_adaptive: None,
+        render_motion_debug: false,
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,

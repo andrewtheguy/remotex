@@ -16,7 +16,7 @@
 //! pixels.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,8 +31,10 @@ use screen_vp9::walk::SETTLE_IDLE;
 
 use crate::config::RenderPlan;
 use crate::feedback::LinkFeedback;
-use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
-use crate::stream::{DesktopStream, Produced, Round};
+use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, TileUnit, VideoUnit};
+use crate::motion::{CLEANUP_TICK, MAX_CLEANUPS_PER_TICK, Piece, TILE, encode_tile};
+use crate::picture::{Picture, PictureRound};
+use crate::stream::Produced;
 use crate::shadow::Rect;
 use crate::video;
 
@@ -104,9 +106,18 @@ const SETTLE_TICK: Duration = Duration::from_millis(250);
 const VIDEO_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 
 
+/// The paint window's lag past which an adaptive plan's page is behind: the walk's
+/// own threshold for giving quality up, which a picture sent for motion also holds
+/// its cleanups back at ([`flush_cleanups`]).
+const LAG_BEHIND: Duration = Duration::from_millis(60);
+
+/// What a tile is assumed to compress to before any has: an eighth of its pixels,
+/// in the 1024ths [`Shared::encoded_per_raw`] is kept in.
+const ENCODED_PER_RAW: u32 = 128;
+
 /// The stream, and what the link will bear.
 struct Video {
-    stream: DesktopStream,
+    stream: Picture,
     /// screen-vp9's walk of the dial, with the plan's quality as its ceiling and
     /// [`VIDEO_FRAME_INTERVAL`] as the frame it slows from. Its verdicts are the
     /// push's blocking ([`VideoSink::adjust`]) and, on an adaptive plan, the paint
@@ -157,7 +168,13 @@ enum Pending {
     /// blits meanwhile, and the order task puts the round back when it lands.
     ///
     /// With the share of [`QUEUE_BUDGET`] taken for it, at the last round's size.
-    Round(JoinHandle<(Round, anyhow::Result<Produced>, u64)>, Held),
+    Round(JoinHandle<(PictureRound, anyhow::Result<Produced>, u64)>, Held),
+    /// A PNG of a picture sent for motion in flight, yielding the tile and the
+    /// microseconds it cost.
+    ///
+    /// With the share of [`QUEUE_BUDGET`] its pixels were estimated at, and their
+    /// length, which is what settles the estimate and improves the next.
+    Tile(JoinHandle<anyhow::Result<(TileUnit, u64)>>, Held, usize),
     Msg(ServerMsg),
     /// A caller waiting for everything pushed before it to have reached `frame_tx`.
     Flush(oneshot::Sender<()>),
@@ -211,6 +228,11 @@ struct Shared {
     /// sites are already awaiting other things, and none of them should have to wait
     /// out an encode to say "the client needs to start again".
     keyframe_owed: AtomicBool,
+    /// Set by [`VideoSink::reset_render`] and consumed by the next damage or frame:
+    /// the page holds nothing, and a picture sent for motion forgets what it was
+    /// sent ([`crate::motion::MotionStream::forget`]). Atomic for the reason
+    /// [`Self::keyframe_owed`] is.
+    forget_owed: AtomicBool,
     /// The link as the attached browser's paint window measures it — see
     /// [`crate::feedback`]. [`VideoSink::adjust`] hands its lag to an adaptive
     /// congestion walk beside the push-blocked signal, and the settle tick asks it
@@ -218,6 +240,18 @@ struct Shared {
     feedback: Arc<LinkFeedback>,
     units: AtomicU64,
     encoded_bytes: AtomicU64,
+    /// PNGs of a picture sent for motion, and of those, the cleanups that sent a
+    /// stopped region's tiles exactly, with their bytes.
+    tiles: AtomicU64,
+    cleanups: AtomicU64,
+    cleanup_bytes: AtomicU64,
+    /// What recent tiles compressed to, in 1024ths of their pixels: the estimate a
+    /// tile's share is taken at before its encode says what it really is.
+    encoded_per_raw: AtomicU32,
+    /// The same for cleanups, which are their own population: whatever a stream was
+    /// carrying, encoded as a still. Starts at the pixels themselves, so the first
+    /// tickful is the one that cannot outrun its share.
+    cleanup_per_raw: AtomicU32,
     /// Runs of a graphics pipeline passed ([`VideoSink::pass_graphics`]), and their
     /// bytes.
     graphics: AtomicU64,
@@ -252,14 +286,14 @@ struct Shared {
 
 impl Shared {
     fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>, oversize: Oversize) -> Self {
-        let RenderPlan { quality, adaptive, native_vp9, .. } = plan;
+        let RenderPlan { quality, adaptive, .. } = plan;
         Self {
             oversize,
             oversized: AtomicBool::new(false),
             too_many_screens: AtomicBool::new(false),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
-                stream: DesktopStream::new(quality, native_vp9),
+                stream: Picture::new(plan),
                 congestion: QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, adaptive),
                 due_at: None,
             }),
@@ -269,9 +303,15 @@ impl Shared {
             pass_announced: Mutex::default(),
             uncover_owed: AtomicBool::new(false),
             keyframe_owed: AtomicBool::new(false),
+            forget_owed: AtomicBool::new(false),
             feedback,
             units: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
+            tiles: AtomicU64::new(0),
+            cleanups: AtomicU64::new(0),
+            cleanup_bytes: AtomicU64::new(0),
+            encoded_per_raw: AtomicU32::new(ENCODED_PER_RAW),
+            cleanup_per_raw: AtomicU32::new(1024),
             graphics: AtomicU64::new(0),
             graphics_bytes: AtomicU64::new(0),
             keyframes: AtomicU64::new(0),
@@ -344,7 +384,48 @@ impl VideoSink {
             debug!("{}: the source's rectangles carry the picture again, as video encoded here", self.engine);
             self.reset_render();
         }
-        self.shared.video.lock().await.stream.blit(rect, rgb)
+        let mut video = self.shared.video.lock().await;
+        let Some(motion) = video.stream.motion() else {
+            return video.stream.blit(rect, rgb);
+        };
+        if self.shared.forget_owed.swap(false, Ordering::Relaxed) {
+            motion.forget();
+        }
+        let damage = motion.damage(rect, rgb, tokio::time::Instant::now())?;
+        // Dropped before the pushes: the order task takes it for its cleanups, and a
+        // push that waits for a queue slot while holding it would be waiting on the
+        // task that empties the queue.
+        drop(video);
+        if damage.start {
+            self.push(Pending::Msg(ServerMsg::TilesStart)).await?;
+        }
+        let sent: Vec<Rect> = damage.pieces.iter().map(|piece| piece.rect).collect();
+        for piece in damage.pieces {
+            self.encode_tile(piece).await?;
+        }
+        // What went out exactly, discharged in one critical section once it is
+        // queued.
+        if let Some(motion) = self.shared.video.lock().await.stream.motion() {
+            motion.discharge(sent);
+        }
+        Ok(())
+    }
+
+    /// Start a PNG of a picture sent for motion and queue its place in the order.
+    ///
+    /// The encode starts immediately; only its *place in the order* is queued. Its
+    /// share of the budget is taken before the encode is started rather than after:
+    /// what waits here is the engine, with nothing of this tile's yet in any queue.
+    async fn encode_tile(&self, piece: Piece) -> anyhow::Result<()> {
+        let raw = piece.rgb.len();
+        let per_raw = self.shared.encoded_per_raw.load(Ordering::Relaxed) as usize;
+        let held = self.hold((raw.saturating_mul(per_raw) / 1024).max(1)).await;
+        let handle = tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let tile = encode_tile(&piece)?;
+            Ok((tile, micros(started)))
+        });
+        self.push(Pending::Tile(handle, held, raw)).await
     }
 
     /// Whether the desktop's picture is held ([`Oversize::Hold`]): past the video
@@ -421,6 +502,11 @@ impl VideoSink {
             // that yields no bitstream cannot lose the ask, and a client is never
             // left waiting for a keyframe nothing will send again.
             video.stream.force_keyframe();
+        }
+        if self.shared.forget_owed.swap(false, Ordering::Relaxed)
+            && let Some(motion) = video.stream.motion()
+        {
+            motion.forget();
         }
         let Some(mut round) = video.stream.take_round()? else {
             return Ok(());
@@ -551,9 +637,13 @@ impl VideoSink {
     /// For a resize, where the picture size has changed, and for a repaint, where
     /// leaving the stream mid-chain would ask a client to decode from a frame it
     /// never saw. Its call sites are exactly the moments a client's decoder has to be
-    /// able to start over, which is why the keyframe is armed here.
+    /// able to start over, which is why the keyframe is armed here. A picture sent
+    /// for motion also forgets its churn and what the page was sent: every pixel is
+    /// about to be sent again, and carrying churn across would put tiles in motion
+    /// that are only being redrawn once.
     pub fn reset_render(&self) {
         self.shared.keyframe_owed.store(true, Ordering::Relaxed);
+        self.shared.forget_owed.store(true, Ordering::Relaxed);
         self.restart_pass();
     }
 
@@ -935,6 +1025,11 @@ async fn order_loop(
     // whose settle is still owed, and firing the backlog at once would only stack
     // re-encodes behind whatever made it late.
     settle.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // A picture sent for motion's cleanups, on a timer of their own for the same
+    // reason: a screen that stops changing produces no frame.
+    let motion = shared.video.lock().await.stream.motion().is_some();
+    let mut cleanup = tokio::time::interval(CLEANUP_TICK);
+    cleanup.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         let item = tokio::select! {
@@ -945,6 +1040,12 @@ async fn order_loop(
             _ = settle.tick() => {
                 settle_stream(engine, &shared).await;
                 continue;
+            }
+            _ = cleanup.tick(), if motion => {
+                if flush_cleanups(engine, &shared, &frame_tx).await {
+                    continue;
+                }
+                break;
             }
         };
         let (handle, mut held) = match item {
@@ -961,6 +1062,45 @@ async fn order_loop(
                 continue;
             }
             Pending::Round(handle, held) => (handle, held),
+            Pending::Tile(handle, mut held, raw) => {
+                let started = Instant::now();
+                let joined = handle.await;
+                shared.waited_micros.fetch_add(micros(started), Ordering::Relaxed);
+                let mut tile = match joined {
+                    Ok(Ok((tile, encode_micros))) => {
+                        shared.encode_micros.fetch_add(encode_micros, Ordering::Relaxed);
+                        tile
+                    }
+                    // Ends the session: the shadow already counts those pixels as
+                    // delivered.
+                    Ok(Err(e)) => {
+                        give_up(engine, &shared, e.context("tile encode failed"));
+                        break;
+                    }
+                    // Only reachable by cancellation — `panic = "abort"` in release
+                    // means a panicking worker never gets this far.
+                    Err(e) => {
+                        give_up(engine, &shared, anyhow::Error::new(e).context("tile encoder stopped"));
+                        break;
+                    }
+                };
+                let bytes = tile.png.len();
+                shared.tiles.fetch_add(1, Ordering::Relaxed);
+                shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+                debug!("{engine}: tile {}x{} at ({},{}): {raw} -> {bytes} bytes", tile.w, tile.h, tile.x, tile.y);
+                held.settle(bytes);
+                tile.held = held;
+                // A quarter of the way to each new ratio: one odd tile does not move
+                // the estimate far, and a change of content does within a repaint.
+                let per_raw = u32::try_from(bytes.saturating_mul(1024) / raw.max(1)).unwrap_or(u32::MAX);
+                let _ = shared.encoded_per_raw.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                    Some((old.saturating_mul(3).saturating_add(per_raw)) / 4)
+                });
+                if frame_tx.send(ServerMsg::Tile(tile)).await.is_err() {
+                    break; // browser gone; the engine learns it from its own next push
+                }
+                continue;
+            }
         };
         // `waiting` accrues only while the handle is found unfinished, so a round
         // already encoded when its turn comes adds encode time and no waiting — the
@@ -1023,6 +1163,12 @@ async fn order_loop(
                 break;
             }
         }
+        if !produced.records.is_empty() {
+            if forward(&shared, &frame_tx, produced.records, held).await.is_err() {
+                break; // browser gone; the engine learns it from its own next push
+            }
+            continue;
+        }
         let Some(mut unit) = produced.unit else {
             continue;
         };
@@ -1053,6 +1199,146 @@ async fn order_loop(
             break;
         }
     }
+}
+
+/// Send a picture sent for motion's settled tiles, exactly, and the ends of the
+/// streams whose motion stopped: the cleanup tick, on the order task. `false` means
+/// the browser is gone.
+///
+/// The mirror already holds the exact current source for every pixel, so a cleanup
+/// is a crop of it and is the newest truth by construction. A tile a live stream
+/// still covers is never due, so nothing here can overtake a stream that is still
+/// running.
+///
+/// A cleanup that fails to encode is dropped rather than ending the session, which
+/// is the one place this path differs from a tile sent at once: a tile that never
+/// arrives leaves the shadow claiming the page has pixels it never got, while a
+/// cleanup that never arrives leaves the page with pixels that are correct and
+/// merely coarser.
+async fn flush_cleanups(engine: &'static str, shared: &Arc<Shared>, frame_tx: &mpsc::Sender<ServerMsg>) -> bool {
+    // This tickful's share of the queue budget, carved up among its tiles below.
+    let mut room: Held;
+    // One reading of the clock, and so one reading of the lag, for the whole tickful:
+    // these all go out together and are one moment's answer, not several.
+    let now = tokio::time::Instant::now();
+    let cleanups = {
+        // One critical section for the whole tickful: `cleanups` and its crops have
+        // to agree about the mirror, and holding the lock across the encodes below
+        // would make every `damage` wait on them.
+        let mut video = shared.video.lock().await;
+        // A cleanup is always PNG — the link moves a stream's quality and never a
+        // still's — so what an adaptive plan gives up while its page is behind is
+        // *when* one is paid, not what it is paid with. A tickful of stills is the
+        // heaviest thing this path sends for pixels that are already right, and the
+        // link it would go into is one the streams are being coarsened to fit. The
+        // debts stand meanwhile, held up to `CLEANUP_HELD` and no longer.
+        let behind = video.congestion.lag_aware() && shared.feedback.lag(now) >= LAG_BEHIND;
+        // Not whatever the queue budget says, though. The lag is a reason to prefer
+        // the streams; the budget is the bound on what is queued towards the browser
+        // at all. So the room is taken first and only as many tiles as it covers are
+        // taken after it — a debt is removed by being taken, and nothing is taken
+        // that is not sent. Taken without waiting, because this is the order task and
+        // what it would wait on is queued behind it.
+        let per_raw = shared.cleanup_per_raw.load(Ordering::Relaxed) as usize;
+        let per_cell = (usize::from(TILE) * usize::from(TILE) * 3).saturating_mul(per_raw) / 1024;
+        let affordable = (shared.budget.available_permits() / per_cell.max(1)).min(MAX_CLEANUPS_PER_TICK);
+        room = Held::take_now(&shared.budget, affordable * per_cell, QUEUE_BUDGET);
+        let cells = if room.bytes() == 0 { 0 } else { affordable };
+        let Some(motion) = video.stream.motion() else {
+            return true;
+        };
+        motion.cleanups(now, behind, cells)
+    };
+
+    // Before the cleanups rather than after: this is already the ordered task, so
+    // whatever the ended streams sent is behind us, and an end said as early as it is
+    // known is a decode session handed back before the next region asks for one.
+    for stream in cleanups.ended {
+        if frame_tx.send(ServerMsg::RegionEnd { stream }).await.is_err() {
+            return false;
+        }
+    }
+
+    let started: Vec<(Rect, usize, JoinHandle<anyhow::Result<TileUnit>>)> = cleanups
+        .pieces
+        .into_iter()
+        .map(|piece| (piece.rect, piece.rgb.len(), tokio::task::spawn_blocking(move || encode_tile(&piece))))
+        .collect();
+    for (rect, raw, handle) in started {
+        let mut tile = match handle.await {
+            Ok(Ok(tile)) => tile,
+            Ok(Err(e)) => {
+                warn!(
+                    "{engine}: dropping a cleanup for {}x{} at ({},{}) that would not encode; \
+                     it stays at the stream's quality until it changes again: {e:#}",
+                    rect.w(),
+                    rect.h(),
+                    rect.left,
+                    rect.top
+                );
+                continue;
+            }
+            Err(e) => {
+                give_up(engine, shared, anyhow::Error::new(e).context("tile encoder stopped"));
+                return false;
+            }
+        };
+        let bytes = tile.png.len();
+        shared.tiles.fetch_add(1, Ordering::Relaxed);
+        shared.cleanups.fetch_add(1, Ordering::Relaxed);
+        shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        shared.cleanup_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        let per_raw = u32::try_from(bytes.saturating_mul(1024) / raw.max(1)).unwrap_or(u32::MAX);
+        let _ = shared.cleanup_per_raw.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+            Some((old.saturating_mul(3).saturating_add(per_raw)) / 4)
+        });
+        tile.held = room.split(bytes);
+        tile.held.settle(bytes);
+        if frame_tx.send(ServerMsg::Tile(tile)).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Send a picture sent for motion's records, in order, counting what they cost.
+/// The round's share of the queue budget, settled at their bytes, rides its last
+/// tile or unit.
+async fn forward(
+    shared: &Shared,
+    frame_tx: &mpsc::Sender<ServerMsg>,
+    mut records: Vec<ServerMsg>,
+    mut held: Held,
+) -> Result<(), mpsc::error::SendError<ServerMsg>> {
+    let mut bytes = 0;
+    for record in &records {
+        match record {
+            ServerMsg::Tile(tile) => bytes += tile.png.len(),
+            ServerMsg::Region(unit) => {
+                bytes += unit.data.len();
+                shared.units.fetch_add(1, Ordering::Relaxed);
+                if unit.keyframe {
+                    shared.keyframes.fetch_add(1, Ordering::Relaxed);
+                    shared.keyframe_bytes.fetch_add(unit.data.len() as u64, Ordering::Relaxed);
+                }
+            }
+            _ => {}
+        }
+    }
+    shared.round_bytes.store(bytes as u64, Ordering::Relaxed);
+    shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    held.settle(bytes);
+    if let Some(last) = records.iter_mut().rev().find_map(|record| match record {
+        ServerMsg::Tile(tile) => Some(&mut tile.held),
+        ServerMsg::Region(unit) => Some(&mut unit.held),
+        _ => None,
+    }) {
+        *last = held;
+    }
+    for record in records {
+        frame_tx.send(record).await?;
+    }
+    Ok(())
 }
 
 /// Record why the queue stopped, for the engine's next push to report.
@@ -1089,6 +1375,9 @@ fn micros(since: Instant) -> u64 {
 struct Totals {
     units: u64,
     encoded_bytes: u64,
+    tiles: u64,
+    cleanups: u64,
+    cleanup_bytes: u64,
     graphics: u64,
     graphics_bytes: u64,
     keyframes: u64,
@@ -1108,6 +1397,9 @@ impl Totals {
         Self {
             units: shared.units.load(Ordering::Relaxed),
             encoded_bytes: shared.encoded_bytes.load(Ordering::Relaxed),
+            tiles: shared.tiles.load(Ordering::Relaxed),
+            cleanups: shared.cleanups.load(Ordering::Relaxed),
+            cleanup_bytes: shared.cleanup_bytes.load(Ordering::Relaxed),
             graphics: shared.graphics.load(Ordering::Relaxed),
             graphics_bytes: shared.graphics_bytes.load(Ordering::Relaxed),
             keyframes: shared.keyframes.load(Ordering::Relaxed),
@@ -1126,12 +1418,15 @@ impl fmt::Display for Totals {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} access unit(s) / {} bytes, \
+            "{} access unit(s) and {} tile(s) ({} cleanup(s) / {} bytes) / {} bytes, \
              {} graphics run(s) / {} bytes passed, \
              {} keyframe(s) / {} bytes, {} skipped, \
              {} round(s) coarsened (lowest quality {}), \
              {}µs encoding in {}µs of waiting, engine stalled {}µs",
             self.units,
+            self.tiles,
+            self.cleanups,
+            self.cleanup_bytes,
             self.encoded_bytes,
             self.graphics,
             self.graphics_bytes,
@@ -1150,6 +1445,7 @@ impl fmt::Display for Totals {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::motion::CLEANUP_HELD;
     use crate::protocol::{UNSCALED, VideoUnit};
 
     /// A fresh, never-written link measurement: what every sink here runs on, so
@@ -1178,7 +1474,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1898,7 +2194,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2025,10 +2321,167 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");
         assert_eq!(video.congestion.quality(), 60, "the walk starts on the dial");
+    }
+
+    // ---- a picture sent for motion ---------------------------------------------
+
+    const MOTION: RenderPlan = RenderPlan {
+        quality: 60,
+        adaptive: true,
+        apple_media: false,
+        apple_h264: false,
+        rdp_graphics: false,
+        rdp_h264: false,
+        native_vp9: false,
+        motion: true,
+        motion_debug: false,
+    };
+
+    /// A sink for a picture sent for motion, on `link`, told the desktop is 640×128.
+    async fn motion_sink(link: Arc<LinkFeedback>) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let sink = VideoSink::new("test", frame_tx, MOTION, link, Oversize::Refuse);
+        sink.msg(ServerMsg::Resize { w: 640, h: 128, scale: UNSCALED }).await.unwrap();
+        sink.flush().await;
+        assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
+        (sink, frame_rx)
+    }
+
+    /// Damage `area` with new pixels slot by slot, with the frame boundaries an
+    /// engine would produce, until a stream is carrying it. Requires a paused clock.
+    async fn until_streamed(sink: &VideoSink, frame_rx: &mut mpsc::Receiver<ServerMsg>, area: Rect) {
+        for slot in 0..40u8 {
+            sink.damage(area, &vec![slot; usize::from(area.w()) * usize::from(area.h()) * 3]).await.unwrap();
+            sink.frame().await.unwrap();
+            sink.flush().await;
+            while frame_rx.try_recv().is_ok() {}
+            tokio::time::advance(Duration::from_millis(100)).await;
+            if sink.shared.video.lock().await.stream.motion().is_some_and(|motion| motion.covering()) {
+                return;
+            }
+        }
+        panic!("a region that changed every slot never got a stream");
+    }
+
+    /// A client far enough behind that every lag threshold here has been crossed.
+    /// `sent` is an instant already in the past, so the lag is there at once rather
+    /// than something the test has to wait to accrue.
+    fn behind(link: &LinkFeedback, sent: tokio::time::Instant) {
+        link.baseline(0);
+        link.owed_since(Some(sent));
+    }
+
+    /// A still change is sent at once, as a PNG, ahead of any frame: it does not wait
+    /// for a round.
+    #[tokio::test(start_paused = true)]
+    async fn a_still_change_is_sent_at_once_as_png() {
+        let (sink, mut frame_rx) = motion_sink(feedback()).await;
+        let area = rect(0, 0, 640, 128);
+        sink.damage(area, &vec![9; 640 * 128 * 3]).await.unwrap();
+        sink.flush().await;
+        assert!(matches!(frame_rx.try_recv(), Ok(ServerMsg::TilesStart)), "the picture starts first");
+        let mut tiles = 0;
+        while let Ok(msg) = frame_rx.try_recv() {
+            let ServerMsg::Tile(tile) = msg else { panic!("expected a tile, got {msg:?}") };
+            assert_eq!(tile.held.bytes(), tile.png.len(), "a tile went out unaccounted");
+            tiles += 1;
+        }
+        assert_eq!(tiles, 2, "two bands, sent whole");
+    }
+
+    /// A cleanup is the heaviest thing the motion path sends for pixels that are
+    /// already right, so an adaptive plan holds it back while the client is behind —
+    /// and pays it anyway once it has been held [`CLEANUP_HELD`], because the streams
+    /// beside it may never stop and a tile left at a stream's quality for good is
+    /// the worse failure.
+    #[tokio::test(start_paused = true)]
+    async fn an_adaptive_cleanup_is_held_for_a_client_behind_but_not_for_good() {
+        let link = feedback();
+        let sent = tokio::time::Instant::now();
+        let (sink, mut frame_rx) = motion_sink(Arc::clone(&link)).await;
+        until_streamed(&sink, &mut frame_rx, rect(0, 0, 320, 64)).await;
+
+        // The region stops, and the client is behind from that moment on.
+        behind(&link, sent);
+        let stopped = tokio::time::Instant::now();
+        let mut restored = None;
+        while restored.is_none() {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+            sink.flush().await;
+            while let Ok(msg) = frame_rx.try_recv() {
+                if matches!(msg, ServerMsg::Tile(_)) {
+                    restored = Some(tokio::time::Instant::now());
+                }
+            }
+            assert!(stopped.elapsed() < CLEANUP_HELD * 3, "a tile a stream left behind was never restored");
+        }
+        let waited = restored.unwrap().saturating_duration_since(stopped);
+        assert!(waited >= CLEANUP_HELD, "a cleanup went out to a client {waited:?} behind");
+    }
+
+    /// The same region on the same plan with a client that is keeping up: nothing is
+    /// held, and the cleanup comes as soon as the tile has been quiet.
+    #[tokio::test(start_paused = true)]
+    async fn an_adaptive_cleanup_is_prompt_for_a_client_keeping_up() {
+        let (sink, mut frame_rx) = motion_sink(feedback()).await;
+        until_streamed(&sink, &mut frame_rx, rect(0, 0, 320, 64)).await;
+
+        for _ in 0..12 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+        }
+        sink.flush().await;
+        let mut tiles = 0;
+        while let Ok(msg) = frame_rx.try_recv() {
+            tiles += usize::from(matches!(msg, ServerMsg::Tile(_)));
+        }
+        assert!(tiles > 0, "a client keeping up was made to wait for its cleanup");
+    }
+
+    /// A cleanup is queued towards the browser like any other payload, so it is paid
+    /// for out of the same budget — and because the order task cannot wait for room,
+    /// a tick that finds none sends nothing and leaves the debt standing for the
+    /// tick that does.
+    #[tokio::test(start_paused = true)]
+    async fn a_cleanup_waits_for_room_in_the_queue_budget() {
+        let (sink, mut frame_rx) = motion_sink(feedback()).await;
+        until_streamed(&sink, &mut frame_rx, rect(0, 0, 320, 64)).await;
+
+        // Everything the link has not let go of, as a slow one holds it.
+        let budget = Arc::clone(&sink.shared.budget);
+        let queued = Held::take_now(&budget, budget.available_permits(), QUEUE_BUDGET);
+        assert_eq!(budget.available_permits(), 0);
+        for _ in 0..12 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+        }
+        sink.flush().await;
+        while let Ok(msg) = frame_rx.try_recv() {
+            assert!(!matches!(msg, ServerMsg::Tile(_)), "a cleanup was queued past the budget");
+        }
+
+        drop(queued);
+        let mut held = 0;
+        for _ in 0..12 {
+            tokio::time::advance(CLEANUP_TICK).await;
+            tokio::task::yield_now().await;
+        }
+        sink.flush().await;
+        let mut tiles = Vec::new();
+        while let Ok(msg) = frame_rx.try_recv() {
+            if let ServerMsg::Tile(tile) = msg {
+                held += tile.held.bytes();
+                assert_eq!(tile.held.bytes(), tile.png.len(), "a cleanup went out unaccounted");
+                tiles.push(tile);
+            }
+        }
+        assert!(!tiles.is_empty(), "the debt did not survive the ticks that could not pay it");
+        assert_eq!(budget.available_permits(), QUEUE_BUDGET as usize - held);
     }
 }

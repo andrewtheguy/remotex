@@ -423,6 +423,8 @@ pub enum ClientMsg {
 ///
 /// 0x03 VIDEO     u8 flags | u16 w | u16 h | u32 len | payload[len]
 /// 0x04 GRAPHICS  u32 len | commands[len]
+/// 0x05 TILE      u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
+/// 0x06 REGION    u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
 /// ```
 ///
 /// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
@@ -434,6 +436,11 @@ pub enum ClientMsg {
 /// A `GRAPHICS` record is a run of an RDP host's graphics pipeline commands, as the host sent
 /// them — see [`GraphicsUnit`]. A receiver rejects one with no payload.
 ///
+/// `TILE` and `REGION` records are a picture sent for motion ([`ServerMsg::TilesStart`]): a
+/// PNG of a rectangle of the desktop, exact, and an access unit of one moving region's VP9
+/// stream — see [`TileUnit`] and [`RegionUnit`]. A `REGION` record's flags are `0x01` for a
+/// keyframe and nothing else.
+///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
@@ -441,12 +448,23 @@ pub mod batch {
 
     pub const OP_VIDEO: u8 = 0x03;
     pub const OP_GRAPHICS: u8 = 0x04;
+    pub const OP_TILE: u8 = 0x05;
+    pub const OP_REGION: u8 = 0x06;
 
     /// Bytes a `VIDEO` record costs besides its payload.
     pub const VIDEO_HEADER_LEN: usize = 10;
 
     /// Bytes a `GRAPHICS` record costs besides its commands.
     pub const GRAPHICS_HEADER_LEN: usize = 5;
+
+    /// Bytes a `TILE` record costs besides its PNG.
+    pub const TILE_HEADER_LEN: usize = 13;
+
+    /// Bytes a `REGION` record costs besides its payload.
+    pub const REGION_HEADER_LEN: usize = 15;
+
+    /// A `REGION` record's flag: its stream's decoder can start here.
+    pub const REGION_KEYFRAME: u8 = 0x01;
 
     /// A `VIDEO` record's flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
@@ -608,9 +626,9 @@ impl Held {
         Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
     }
 
-    /// Take `bytes` of `budget` if it has them now, and nothing otherwise — a share
-    /// a test can build without an executor.
-    #[cfg(test)]
+    /// Take `bytes` of `budget` if it has them now, and nothing otherwise: for the
+    /// task that cannot wait for room, because what it would wait on is queued
+    /// behind it — a picture sent for motion's cleanups ([`crate::encode`]).
     pub(crate) fn take_now(budget: &std::sync::Arc<tokio::sync::Semaphore>, bytes: usize, limit: u32) -> Self {
         let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(limit);
         match budget.try_acquire_many(bytes) {
@@ -618,6 +636,11 @@ impl Held {
             Err(_) => return Self::default(),
         }
         Self { share: Some(Share { budget: std::sync::Arc::clone(budget), bytes, limit }) }
+    }
+
+    /// How much of the budget this holds.
+    pub fn bytes(&self) -> usize {
+        self.share.as_ref().map_or(0, |share| share.bytes as usize)
     }
 
     /// Move up to `bytes` of this share into a share of its own, for one payload of
@@ -833,6 +856,89 @@ impl GraphicsUnit {
     }
 }
 
+/// A rectangle of the desktop as a PNG, carried as a `TILE` record inside a [`batch`]
+/// frame, in a picture sent for motion ([`ServerMsg::TilesStart`]).
+///
+/// The contract every client implements:
+///
+/// - The PNG is 8-bit RGB, `w`×`h`, and is the desktop's pixels exactly: drawn at
+///   `(x, y)` with no colour conversion, it is the picture there until something
+///   later in the stream draws over it.
+/// - Records are drawn in order, with the `REGION` records among them: a `TILE`
+///   over a region's rectangle comes only after its [`ServerMsg::RegionEnd`].
+#[derive(Debug, Clone)]
+pub struct TileUnit {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub png: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
+}
+
+impl TileUnit {
+    /// What this tile will cost inside a batch, its PNG included.
+    pub fn record_len(&self) -> usize {
+        batch::TILE_HEADER_LEN + self.png.len()
+    }
+
+    /// Append this tile as a `TILE` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_TILE);
+        for value in [self.x, self.y, self.w, self.h] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.png.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.png);
+    }
+}
+
+/// An access unit of one moving region's VP9 stream, carried as a `REGION` record
+/// inside a [`batch`] frame, in a picture sent for motion ([`ServerMsg::TilesStart`]).
+///
+/// The contract every client implements:
+///
+/// - [`ServerMsg::RegionFormat`] for `stream` arrives first, and names the decoder's
+///   configuration. A stream's rectangle is fixed for its life: one whose `w`×`h`
+///   differs from the last on its id is a new stream on a reused id, which starts
+///   at a keyframe behind its own `RegionFormat`.
+/// - The decoded picture's top-left `w`×`h` is drawn at `(x, y)`, cropped to that
+///   rectangle; a VP9 picture of an odd side is one pixel larger.
+/// - Every unit of a stream is a link in its chain, in order, until its
+///   [`ServerMsg::RegionEnd`].
+#[derive(Debug, Clone)]
+pub struct RegionUnit {
+    pub stream: u8,
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub keyframe: bool,
+    pub data: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
+}
+
+impl RegionUnit {
+    /// What this unit will cost inside a batch, payload included.
+    pub fn record_len(&self) -> usize {
+        batch::REGION_HEADER_LEN + self.data.len()
+    }
+
+    /// Append this unit as a `REGION` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_REGION);
+        out.push(self.stream);
+        out.push(if self.keyframe { batch::REGION_KEYFRAME } else { 0 });
+        for value in [self.x, self.y, self.w, self.h] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.data);
+    }
+}
+
 /// Largest cursor edge a client is asked to draw. Real pointers are 32x32 or
 /// 64x64; a shape past this is dropped rather than sent, because a CSS cursor
 /// that big is ignored by the browser and would leave no pointer at all.
@@ -1010,6 +1116,27 @@ pub enum ServerMsg {
     /// A run of an RDP host's graphics pipeline, passed for the browser to compose.
     /// A binary record like [`ServerMsg::Video`], ordered the same way.
     Graphics(GraphicsUnit),
+    /// A rectangle of the desktop as a PNG, in a picture sent for motion. A binary
+    /// record like [`ServerMsg::Video`], ordered the same way.
+    Tile(TileUnit),
+    /// An access unit of one moving region's VP9, in a picture sent for motion. A
+    /// binary record like [`ServerMsg::Video`], ordered the same way.
+    Region(RegionUnit),
+    /// The picture from here on is sent for motion: `TILE` records where the desktop
+    /// is still, exact, and a VP9 stream of its own for each region that moves, as
+    /// `REGION` records ([`TileUnit`], [`RegionUnit`]). Whatever a client held of a
+    /// pipeline, a video stream or a region's stream before it is done with, and the
+    /// picture is blank until tiles draw it. Sent ahead of the first record, and again
+    /// wherever the picture starts over: a reattach, and a resize.
+    TilesStart,
+    /// Build the decoder for moving region `stream`, with this configuration: ahead
+    /// of the stream's first `REGION` record, and of the first of a new stream on a
+    /// reused id.
+    RegionFormat { stream: u8, decode: String },
+    /// Moving region `stream` has stopped: no `REGION` record follows on its id
+    /// until a `RegionFormat` starts another. What it last drew stays until `TILE`
+    /// records draw over it, which are sent after this.
+    RegionEnd { stream: u8 },
     /// An RDP host's graphics pipeline starts here, from nothing: the picture is what
     /// the [`ServerMsg::Graphics`] records after this compose, and whatever a client
     /// held of a pipeline or a video stream before it is done with.
@@ -1122,6 +1249,13 @@ pub enum ServerMsg {
     /// discovered from the connection rather than an OS name someone has to keep
     /// correct in the config file.
     RemoteOs { macos: bool },
+    /// What an RDP host's graphics pipeline has drawn with so far, by codec, and
+    /// whether that is the host's picture exactly — which a Windows host's image
+    /// quality policy decides and nothing in the protocol says
+    /// ([`crate::rdp_client::Event::Drawn`]). Sent whenever the host draws with
+    /// something it had not, and again on every repaint of a session that keeps
+    /// its engine; never for a picture of bitmap updates.
+    HostPicture { exact: bool, codecs: Vec<&'static str> },
     /// The part of an RDP host's passed graphics pipeline this display shows, in
     /// the pixels of the picture the page composes from it: the column of the
     /// host's desktop the display is, `w` by `h` from `x`, `y`. Sent only in a
@@ -1347,6 +1481,7 @@ enum ControlMsg<'a> {
         render: &'a str,
     },
     RemoteOs { macos: bool },
+    HostPicture { exact: bool, codecs: &'a [&'static str] },
     TouchReady,
     Resizing { active: bool },
     ScreenUnavailable { active: bool },
@@ -1386,6 +1521,14 @@ enum ControlMsg<'a> {
         decode: &'a str,
         passthrough: bool,
         strips: u8,
+    },
+    TilesStart,
+    RegionFormat {
+        stream: u8,
+        decode: &'a str,
+    },
+    RegionEnd {
+        stream: u8,
     },
     CameraStart {
         width: u32,
@@ -1427,6 +1570,11 @@ impl ServerMsg {
                 | ServerMsg::GraphicsStart
                 | ServerMsg::GraphicsView { .. }
                 | ServerMsg::VideoFormat { .. }
+                | ServerMsg::Tile(_)
+                | ServerMsg::Region(_)
+                | ServerMsg::TilesStart
+                | ServerMsg::RegionFormat { .. }
+                | ServerMsg::RegionEnd { .. }
                 | ServerMsg::Resize { .. }
                 | ServerMsg::Cursor(_)
                 | ServerMsg::Mosaic { .. }
@@ -1435,6 +1583,7 @@ impl ServerMsg {
                 | ServerMsg::ScreenUnavailable { .. }
                 | ServerMsg::PictureWithheld { .. }
                 | ServerMsg::RemoteOs { .. }
+                | ServerMsg::HostPicture { .. }
                 | ServerMsg::TouchReady
         )
     }
@@ -1447,9 +1596,19 @@ impl ServerMsg {
     /// caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Video(_) | ServerMsg::Graphics(_) | ServerMsg::Audio(_) | ServerMsg::AudioGap => {
+            ServerMsg::Video(_)
+            | ServerMsg::Graphics(_)
+            | ServerMsg::Tile(_)
+            | ServerMsg::Region(_)
+            | ServerMsg::Audio(_)
+            | ServerMsg::AudioGap => {
                 return None;
             }
+            ServerMsg::TilesStart => control(&ControlMsg::TilesStart),
+            ServerMsg::RegionFormat { stream, decode } => {
+                control(&ControlMsg::RegionFormat { stream: *stream, decode })
+            }
+            ServerMsg::RegionEnd { stream } => control(&ControlMsg::RegionEnd { stream: *stream }),
             ServerMsg::GraphicsStart => control(&ControlMsg::GraphicsStart),
             ServerMsg::GraphicsView { x, y, w, h } => {
                 control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
@@ -1519,6 +1678,9 @@ impl ServerMsg {
                 control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough, strips: *strips })
             }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
+            ServerMsg::HostPicture { exact, codecs } => {
+                control(&ControlMsg::HostPicture { exact: *exact, codecs })
+            }
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
             ServerMsg::ScreenUnavailable { active } => control(&ControlMsg::ScreenUnavailable { active: *active }),
@@ -1697,6 +1859,7 @@ mod tests {
                     placement: crate::config::Placement::Right,
                     pipeline: crate::config::Pipeline::HighQuality,
                     vp9: crate::config::Vp9Encoder::Libvpx,
+                    motion: false,
                     whole: false,
                 }
             ),
@@ -2109,9 +2272,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn host_picture_names_its_codecs() {
+        let msg = ServerMsg::HostPicture { exact: false, codecs: vec!["Planar", "RemoteFX Progressive"] };
+        assert!(msg.is_display());
+        assert_eq!(
+            msg.text_frame().as_deref(),
+            Some(r#"{"type":"hostPicture","exact":false,"codecs":["Planar","RemoteFX Progressive"]}"#)
+        );
+    }
+
     // Nothing may put an unbounded string on the browser link. Refused rather
     // than truncated: the browser is told the size so it can say so, where the
     // first 512 KiB of a copy could not be told from all of it.
+
     #[test]
     fn oversized_clipboard_text_is_refused_with_its_size() {
         assert!(clipboard_fits(&"a".repeat(MAX_CLIPBOARD_BYTES)));

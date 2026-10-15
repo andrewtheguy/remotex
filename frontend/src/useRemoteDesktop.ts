@@ -42,6 +42,7 @@ import {
 import type {
   AudioBlock,
   AudioStreamInfo,
+  HostPicture,
   VideoStreamInfo,
 } from "./mediaLabel.ts";
 import {
@@ -700,6 +701,9 @@ export function useRemoteDesktop(
   // was configured. Emptied with the decoder itself in `clearDesktop`, so it never
   // describes a desktop that has ended.
   const [videoStream, setVideoStream] = useState<VideoStreamInfo | null>(null);
+  // What an RDP host's pipeline has drawn with (`hostPicture`), for the card's
+  // Host's picture row: null on any other session, and emptied with the desktop.
+  const [hostPicture, setHostPicture] = useState<HostPicture | null>(null);
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
   // Why the desktop has no picture, from `oversize`: past what a video stream
@@ -1178,8 +1182,9 @@ export function useRemoteDesktop(
       // decoder with it. The next attachment starts its stream from a keyframe.
       painter?.clear();
       // The decoder went with it, so what the card says about it goes too. The
-      // next attachment re-announces its stream.
+      // next attachment re-announces its stream, and what its host drew with.
       setVideoStream(null);
+      setHostPicture(null);
       // Sound's own socket goes with this one. The gateway would keep the
       // subscription alive across a reattach — it belongs to the claim now — but this
       // browser cannot: rebuilding a decoder needs an AudioContext, and a context
@@ -2160,6 +2165,49 @@ export function useRemoteDesktop(
       setVideoStream({ decode: "", passthrough: true, composed: true });
     };
 
+    // A picture sent for motion. Queued in the worker like a format, behind the
+    // frames already posted: a region's decoder is built, kept and retired in its
+    // place among the records, and the tiles of a picture started over land on a
+    // canvas with nothing of the last one's streams left in it.
+    const handleMotion = (
+      msg: Extract<
+        ControlMsg,
+        { type: "tilesStart" | "regionFormat" | "regionEnd" }
+      >,
+    ) => {
+      if (msg.type === "regionEnd") {
+        painter?.endRegion(msg.stream);
+        return;
+      }
+      if (msg.type === "tilesStart") {
+        painter?.startTiles();
+        // A picture started over on a resize or a reattach decodes its regions
+        // as the last one did, so what the card says of them stands.
+        setVideoStream((prev) =>
+          prev?.motion
+            ? prev
+            : { decode: "", passthrough: false, motion: true },
+        );
+        return;
+      }
+      painter?.setRegionFormat(msg.stream, { decode: msg.decode });
+      // The card names the first region's configuration, and which decoder this
+      // page builds for it: every region is the same VP9 at another size.
+      setVideoStream((prev) =>
+        prev?.motion && !prev.decode
+          ? {
+              ...prev,
+              decode: msg.decode,
+              software:
+                pageModuleFor(msg.decode, {
+                  nativeVp9: nativeVp9(),
+                  nativeHevc: decodesAppleMedia(),
+                }) !== undefined,
+            }
+          : prev,
+      );
+    };
+
     const handleControlMsg = (msg: ControlMsg) => {
       // Any control message proves the socket attached to the slot, so reset
       // the reconnect backoff (an onopen-time reset would let a slot that
@@ -2228,6 +2276,15 @@ export function useRemoteDesktop(
           // the pipeline's first run must find a compositor with nothing in it.
           painter?.startGraphics();
           setVideoStream({ decode: "", passthrough: true, composed: true });
+          setHostPicture({ exact: true, codecs: [] });
+          break;
+        case "tilesStart":
+        case "regionFormat":
+        case "regionEnd":
+          handleMotion(msg);
+          break;
+        case "hostPicture":
+          setHostPicture({ exact: msg.exact, codecs: msg.codecs });
           break;
         case "graphicsView":
           handleGraphicsView(msg);
@@ -3243,6 +3300,7 @@ export function useRemoteDesktop(
     // say and which nothing else on screen writes down.
     audioStream,
     videoStream,
+    hostPicture,
     canCamera,
     cameraEnabled,
     cameraError,

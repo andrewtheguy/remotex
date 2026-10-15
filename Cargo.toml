@@ -23,7 +23,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/flac"]
 
 [package]
 name = "remotex"
-version = "0.0.406"
+version = "0.0.407"
 license = "MIT"
 edition = "2024"
 
@@ -318,4 +318,25 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.yuv]
+opt-level = 3
+
+# PNG, which a session with Motion sends every still tile as: the encoder and the
+# deflate and checksum crates under it, optimised in a debug build as in release,
+# so a debug gateway sends a desktop's tiles at the speed a released one does.
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.fdeflate]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.flate2]
+opt-level = 3
+
+[profile.dev.package.crc32fast]
+opt-level = 3
+
+[profile.dev.package.simd-adler32]
 opt-level = 3

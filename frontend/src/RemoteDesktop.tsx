@@ -301,6 +301,7 @@ export default function RemoteDesktop({
     videoError,
     audioStream,
     videoStream,
+    hostPicture,
     canCamera,
     cameraEnabled,
     cameraError,
@@ -449,6 +450,7 @@ export default function RemoteDesktop({
             audioError={audioError}
             audioStream={audioStream}
             videoStream={videoStream}
+            hostPicture={hostPicture}
             onAudioChange={setAudio}
             canCamera={canCamera}
             cameraEnabled={cameraEnabled}
