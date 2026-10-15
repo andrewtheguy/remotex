@@ -2,7 +2,7 @@
 //! messages flush the pending batch to preserve ordering against the records
 //! around them, and batches are bounded.
 
-use crate::protocol::{self, GraphicsUnit, ServerMsg, VideoUnit, WireFrame, batch};
+use crate::protocol::{self, GraphicsUnit, RegionUnit, ServerMsg, TileUnit, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead.
@@ -74,6 +74,8 @@ impl Wire {
                 // one message, not the whole attachment.
                 None => match msg {
                     ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames)?,
+                    ServerMsg::Tile(unit) => self.push(Record::Tile(unit), &mut frames)?,
+                    ServerMsg::Region(unit) => self.push(Record::Region(unit), &mut frames)?,
                     // A frame's last run is its batch's last record: the browser
                     // shows a batch once it has drawn all of it, and acknowledges
                     // it then, which is this frame's acknowledgement to the host.
@@ -148,6 +150,16 @@ impl Wire {
                     painted.extend(unit.frame);
                     unit.held
                 }
+                Record::Tile(unit) => {
+                    self.totals.tile(unit.record_len());
+                    unit.write_record(&mut frame);
+                    unit.held
+                }
+                Record::Region(unit) => {
+                    self.totals.video(unit.record_len());
+                    unit.write_record(&mut frame);
+                    unit.held
+                }
             });
         }
         self.pending_bytes = 0;
@@ -161,6 +173,8 @@ impl Wire {
 enum Record {
     Video(VideoUnit),
     Graphics(GraphicsUnit),
+    Tile(TileUnit),
+    Region(RegionUnit),
 }
 
 impl Record {
@@ -168,6 +182,8 @@ impl Record {
         match self {
             Record::Video(unit) => unit.record_len(),
             Record::Graphics(unit) => unit.record_len(),
+            Record::Tile(unit) => unit.record_len(),
+            Record::Region(unit) => unit.record_len(),
         }
     }
 }
@@ -186,6 +202,10 @@ pub struct Totals {
     /// Runs of a passed graphics pipeline and their record bytes.
     pub graphics: u64,
     pub graphics_bytes: u64,
+    /// PNG tiles of a picture sent for motion and their record bytes. A moving
+    /// region's access units count as video.
+    pub tiles: u64,
+    pub tile_bytes: u64,
     /// Audio packets and their binary-frame bytes. On a separate socket, so on any
     /// one `Wire` these and the video counters are mutually exclusive.
     pub audio_frames: u64,
@@ -221,6 +241,11 @@ impl Totals {
         self.graphics_bytes += len as u64;
     }
 
+    fn tile(&mut self, len: usize) {
+        self.tiles += 1;
+        self.tile_bytes += len as u64;
+    }
+
     fn text(&mut self, len: usize) {
         self.text_frames += 1;
         self.text_bytes += len as u64;
@@ -231,8 +256,8 @@ impl std::fmt::Display for Totals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} binary frames / {} bytes carrying {} video records / {} bytes \
-             and {} graphics records / {} bytes, \
+            "{} binary frames / {} bytes carrying {} video records / {} bytes, \
+             {} graphics records / {} bytes and {} tile records / {} bytes, \
              {} text frames / {} bytes, largest binary {} bytes, \
              {} audio frames / {} bytes carrying {} audio packets",
             self.binary_frames,
@@ -241,6 +266,8 @@ impl std::fmt::Display for Totals {
             self.video_bytes,
             self.graphics,
             self.graphics_bytes,
+            self.tiles,
+            self.tile_bytes,
             self.text_frames,
             self.text_bytes,
             self.largest_binary,

@@ -45,7 +45,10 @@ test("a graphics record is its commands, whole, among the records around it", ()
   ]).buffer;
   const records = decodeBatchFrame(frame);
   assert.deepEqual(
-    records?.map((record) => [record.kind, [...record.data]]),
+    records?.map((record) => [
+      record.kind,
+      record.kind === "graphics" ? [...record.data] : null,
+    ]),
     [
       ["graphics", [0xaa, 0xbb, 0xcc]],
       ["graphics", [0xdd]],
@@ -105,6 +108,129 @@ test("a video record's flags say a keyframe, and which strip of its picture it i
   assert.equal(record(0x04), undefined);
   assert.equal(record(0x10), undefined);
   assert.equal(record(0x22), undefined);
+});
+
+// A batch of `records`, each its op and body bytes: the header transcribed from
+// `batch` in src/protocol.rs, with the count and sequence little-endian.
+const batchOf = (count: number, ...records: number[][]) =>
+  new Uint8Array([
+    0x02,
+    0x00,
+    count,
+    0x00,
+    0x07,
+    0x00,
+    0x00,
+    0x00,
+    ...records.flat(),
+  ]).buffer;
+
+// Transcribed from `TileUnit::write_record`: op 0x05, x, y, w, h and the length
+// little-endian, the PNG.
+const tileRecord = (png: number[]) => [
+  0x05,
+  0x10,
+  0x00,
+  0x20,
+  0x00,
+  0x40,
+  0x00,
+  0x08,
+  0x00,
+  png.length,
+  0x00,
+  0x00,
+  0x00,
+  ...png,
+];
+
+// Transcribed from `RegionUnit::write_record`: op 0x06, the stream, the flags,
+// x, y, w, h and the length little-endian, the unit.
+const regionRecord = (flags: number, w = 0x0101, payload = [0xaa, 0xbb]) => [
+  0x06,
+  0x03,
+  flags,
+  0x00,
+  0x01,
+  0x2c,
+  0x01,
+  w & 0xff,
+  w >> 8,
+  0xc9,
+  0x00,
+  payload.length,
+  0x00,
+  0x00,
+  0x00,
+  ...payload,
+];
+
+test("tile and region records are their rectangles and bytes, in wire order", () => {
+  const records = decodeBatchFrame(
+    batchOf(
+      3,
+      tileRecord([0x89, 0x50]),
+      regionRecord(0x01),
+      regionRecord(0x00),
+    ),
+  );
+  assert.deepEqual(records, [
+    {
+      kind: "tile",
+      x: 16,
+      y: 32,
+      w: 64,
+      h: 8,
+      png: new Uint8Array([0x89, 0x50]),
+    },
+    {
+      kind: "region",
+      stream: 3,
+      x: 256,
+      y: 300,
+      w: 257,
+      h: 201,
+      keyframe: true,
+      data: new Uint8Array([0xaa, 0xbb]),
+    },
+    {
+      kind: "region",
+      stream: 3,
+      x: 256,
+      y: 300,
+      w: 257,
+      h: 201,
+      keyframe: false,
+      data: new Uint8Array([0xaa, 0xbb]),
+    },
+  ]);
+});
+
+test("a region record with a flag this client does not know drops the batch", () => {
+  for (const flags of [0x02, 0x81]) {
+    assert.equal(
+      decodeBatchFrame(batchOf(2, tileRecord([0x89]), regionRecord(flags))),
+      null,
+    );
+  }
+});
+
+test("a tile or region record cut short, empty, or of no area drops the batch", () => {
+  const tile = batchOf(1, tileRecord([0x89, 0x50]));
+  const region = batchOf(1, regionRecord(0x01));
+  // Short of its bytes, and short of its header.
+  assert.equal(decodeBatchFrame(tile.slice(0, tile.byteLength - 1)), null);
+  assert.equal(decodeBatchFrame(region.slice(0, region.byteLength - 1)), null);
+  assert.equal(decodeBatchFrame(region.slice(0, 8 + 10)), null);
+  // A PNG or a unit of nothing, and a region with no width.
+  assert.equal(decodeBatchFrame(batchOf(1, tileRecord([]))), null);
+  assert.equal(
+    decodeBatchFrame(batchOf(1, regionRecord(0x01, 0x0101, []))),
+    null,
+  );
+  assert.equal(decodeBatchFrame(batchOf(1, regionRecord(0x01, 0))), null);
+  // And a count the records do not make up.
+  assert.equal(decodeBatchFrame(batchOf(2, regionRecord(0x01))), null);
 });
 
 test("an ordinary click run is passed through as the browser counted it", () => {

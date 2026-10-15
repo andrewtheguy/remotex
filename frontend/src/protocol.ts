@@ -309,6 +309,22 @@ export type ControlMsg =
   // showing the second display composes nothing, and is painted that part of the
   // session page's picture instead (displayRelay.ts).
   | { type: "graphicsView"; x: number; y: number; w: number; h: number }
+  // ALPHA: the picture from here on is sent for motion — the gateway composes an
+  // RDP host's pipeline itself, and sends TILE records where the desktop is
+  // still, its pixels exactly, and a VP9 stream of its own for each region that
+  // moves, as REGION records. Whatever this page held of a passed pipeline, a
+  // video stream or a region's stream before is done with, and the picture is
+  // blank until tiles draw it. Sent ahead of the first record, and again wherever
+  // the picture starts over: a reattach, and a resize.
+  | { type: "tilesStart" }
+  // Build the decoder for moving region `stream` with this WebCodecs string:
+  // ahead of the stream's first REGION record, and of the first of a new stream
+  // on a reused id, whose rectangle differs from the last one's.
+  | { type: "regionFormat"; stream: number; decode: string }
+  // Moving region `stream` has stopped: no REGION record follows on its id until
+  // a `regionFormat` starts another. What it last drew stays on the canvas until
+  // the TILE records sent after this draw over it.
+  | { type: "regionEnd"; stream: number }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.
@@ -444,7 +460,37 @@ export interface GraphicsMsg {
   data: Uint8Array;
 }
 
-export type BatchRecord = VideoMsg | GraphicsMsg;
+// A rectangle of the desktop as an 8-bit RGB PNG of exactly `w`×`h`, in a picture
+// sent for motion (`tilesStart`): the desktop's pixels exactly, drawn at `(x, y)`
+// with no colour conversion, and the picture there until a later record draws
+// over it. See `TileUnit` in src/protocol.rs.
+export interface TileMsg {
+  kind: "tile";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  png: Uint8Array;
+}
+
+// One VP9 access unit of moving region `stream`, in a picture sent for motion: a
+// link in that stream's chain, as a VIDEO record is in the desktop's. The decoded
+// picture's top-left `w`×`h` is drawn at `(x, y)` — a VP9 picture of an odd side is
+// one pixel larger — and a stream's rectangle is fixed for its life: one of
+// another size on the same id is a new stream behind its own `regionFormat`. See
+// `RegionUnit` in src/protocol.rs.
+export interface RegionMsg {
+  kind: "region";
+  stream: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  keyframe: boolean;
+  data: Uint8Array;
+}
+
+export type BatchRecord = VideoMsg | GraphicsMsg | TileMsg | RegionMsg;
 
 // Why a desktop has no picture: see `oversize`.
 export type HoldCause = "size" | "screens";
@@ -462,6 +508,13 @@ const OP_VIDEO = 0x03;
 const VIDEO_HEADER_LEN = 10;
 const OP_GRAPHICS = 0x04;
 const GRAPHICS_HEADER_LEN = 5;
+const OP_TILE = 0x05;
+const TILE_HEADER_LEN = 13;
+const OP_REGION = 0x06;
+const REGION_HEADER_LEN = 15;
+// A REGION record's one flag: its stream's decoder can start here. Any other bit is
+// dropped as a VIDEO record's unknown bits are.
+const REGION_KEYFRAME = 0x01;
 // A VIDEO record's flags: a decoder that has seen nothing before it can start here;
 // the unit is one strip of the picture, its number in two bits, and whether it is the
 // first sent of its frame. Any other bit means a gateway newer than this client, and
@@ -485,6 +538,9 @@ const VIDEO_STRIP_FLAGS = VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS;
 //
 //   VIDEO (op 0x03):     u8 flags | u16 w | u16 h | u32 len | payload[len]
 //   GRAPHICS (op 0x04):  u32 len | commands[len]
+//   TILE (op 0x05):      u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
+//   REGION (op 0x06):    u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
+//                        | u32 len | payload[len]
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
@@ -535,6 +591,10 @@ function decodeRecord(
   switch (view.getUint8(at)) {
     case OP_GRAPHICS:
       return decodeGraphics(view, buf, at);
+    case OP_TILE:
+      return decodeTile(view, buf, at);
+    case OP_REGION:
+      return decodeRegion(view, buf, at);
     default:
       return decodeVideo(view, buf, at);
   }
@@ -556,6 +616,71 @@ function decodeGraphics(
   }
   return {
     record: { kind: "graphics", data: new Uint8Array(buf, start, len) },
+    next: start + len,
+  };
+}
+
+// A rectangle's four u16s, from `at`: null for one of no area, which no record
+// draws anything into and the gateway never sends.
+function readRect(view: DataView, at: number): MosaicRect | null {
+  const rect = {
+    x: view.getUint16(at, true),
+    y: view.getUint16(at + 2, true),
+    w: view.getUint16(at + 4, true),
+    h: view.getUint16(at + 6, true),
+  };
+  return rect.w === 0 || rect.h === 0 ? null : rect;
+}
+
+function decodeTile(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: TileMsg; next: number } | null {
+  if (at + TILE_HEADER_LEN > buf.byteLength) {
+    return null;
+  }
+  const rect = readRect(view, at + 1);
+  const len = view.getUint32(at + 9, true);
+  const start = at + TILE_HEADER_LEN;
+  // A PNG of nothing is no picture of the rectangle.
+  if (!rect || len === 0 || start + len > buf.byteLength) {
+    return null;
+  }
+  return {
+    record: { kind: "tile", ...rect, png: new Uint8Array(buf, start, len) },
+    next: start + len,
+  };
+}
+
+function decodeRegion(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: RegionMsg; next: number } | null {
+  if (at + REGION_HEADER_LEN > buf.byteLength) {
+    return null;
+  }
+  const flags = view.getUint8(at + 2);
+  const rect = readRect(view, at + 3);
+  const len = view.getUint32(at + 11, true);
+  const start = at + REGION_HEADER_LEN;
+  if (
+    (flags & ~REGION_KEYFRAME) !== 0 ||
+    !rect ||
+    len === 0 ||
+    start + len > buf.byteLength
+  ) {
+    return null;
+  }
+  return {
+    record: {
+      kind: "region",
+      stream: view.getUint8(at + 1),
+      ...rect,
+      keyframe: (flags & REGION_KEYFRAME) !== 0,
+      data: new Uint8Array(buf, start, len),
+    },
     next: start + len,
   };
 }

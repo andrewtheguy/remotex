@@ -12,7 +12,7 @@ This is a manual probe for display selection and dynamic-resolution behavior. St
         --port 52675 --target sandbox2highperf --user admin --resize \
         --viewport 1366x768 --viewport 1920x1080
 
-``--resize``, ``--sound``, ``--passthrough``, ``--whole`` and ``--placement`` are what the picker's
+``--resize``, ``--sound``, ``--passthrough``, ``--whole``, ``--placement`` and ``--motion`` are what the picker's
 Start would carry: the session is started with each one named, and with none otherwise. Without
 ``--resize`` the desktop is kept at the target's size: its configured one, or the
 default.
@@ -89,14 +89,23 @@ def batch_records(frame: bytes) -> int:
     """Print one screen batch's records and return its video units.
 
     Parsed here rather than trusted from anywhere: a VIDEO record is
-    ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``."""
+    ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``; a picture sent for
+    motion's are ``0x05 TILE | u16 x | u16 y | u16 w | u16 h | u32 len | png`` and
+    ``0x06 REGION | u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len |
+    payload``."""
     count = int.from_bytes(frame[2:4], "little")
     sequence = int.from_bytes(frame[4:8], "little")
     at = 8
     video = 0
+    records = 0
     parts = []
+
+    def u16(offset: int) -> int:
+        return int.from_bytes(frame[offset : offset + 2], "little")
+
     while at < len(frame):
         op = frame[at]
+        records += 1
         if op == 0x03:
             w = int.from_bytes(frame[at + 2 : at + 4], "little")
             h = int.from_bytes(frame[at + 4 : at + 6], "little")
@@ -105,10 +114,25 @@ def batch_records(frame: bytes) -> int:
             parts.append(f"video {w}x{h}{key} {length}B")
             video += 1
             at += 10 + length
+        elif op == 0x05:
+            x, y, w, h = u16(at + 1), u16(at + 3), u16(at + 5), u16(at + 7)
+            length = int.from_bytes(frame[at + 9 : at + 13], "little")
+            assert frame[at + 13 : at + 21] == b"\x89PNG\r\n\x1a\n", "a tile is a PNG"
+            parts.append(f"tile {w}x{h}+{x}+{y} {length}B")
+            at += 13 + length
+        elif op == 0x06:
+            stream, flags = frame[at + 1], frame[at + 2]
+            assert flags & ~1 == 0, f"region flags {flags:#x}"
+            x, y, w, h = u16(at + 3), u16(at + 5), u16(at + 7), u16(at + 9)
+            length = int.from_bytes(frame[at + 11 : at + 15], "little")
+            key = " key" if flags & 1 else ""
+            parts.append(f"region {stream} {w}x{h}+{x}+{y}{key} {length}B")
+            video += 1
+            at += 15 + length
         else:
             raise AssertionError(f"unknown record op {op:#x}")
     assert at == len(frame), "records must exactly fill the frame"
-    assert video == count, "the header's count must match the records"
+    assert records == count, "the header's count must match the records"
     shown = ", ".join(parts[:6]) + (f", ... ({len(parts)} records)" if len(parts) > 6 else "")
     print(f"  batch #{sequence}: {shown}")
     return video
@@ -347,6 +371,13 @@ async def main() -> int:
         "long the desktop is left at each size",
     )
     parser.add_argument(
+        "--motion",
+        action="store_true",
+        help="start an rdp target's session with Motion: the gateway composes the host's "
+        "graphics pipeline and sends what moves as VP9 and what is still as PNG, so the "
+        "page states no --rdp-graphics",
+    )
+    parser.add_argument(
         "--whole",
         action="store_true",
         help="ask a High Performance Mac started with --passthrough for one tile, each "
@@ -412,6 +443,7 @@ async def main() -> int:
         "passthrough": args.passthrough,
         "whole": args.whole,
         "placement": args.placement,
+        "motion": args.motion,
     }
     # A display socket carries no token: the login cookie is what lets it in.
     headers = {"Cookie": f"remotex_session={cookie}"}

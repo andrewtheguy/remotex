@@ -11,6 +11,8 @@
 //! followed from its first command: the host draws against what its client already
 //! holds.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 
 use crate::avc::Picture;
@@ -34,7 +36,7 @@ pub struct Composed {
 /// The pipeline's compositor, and the framebuffer it composes into.
 pub struct Compositor {
     graphics: Graphics,
-    framebuffer: Framebuffer,
+    framebuffer: Arc<Framebuffer>,
 }
 
 impl Default for Compositor {
@@ -45,7 +47,15 @@ impl Default for Compositor {
 
 impl Compositor {
     pub fn new() -> Self {
-        Self { graphics: Graphics::new(), framebuffer: Framebuffer::new() }
+        Self::sharing(Arc::new(Framebuffer::new()))
+    }
+
+    /// A compositor that composes into `framebuffer`, which another thread may read
+    /// as it does: the gateway's, which composes a pipeline on a thread of its own
+    /// and encodes the picture from another. What the framebuffer holds is left
+    /// until the pipeline's first reset redefines it.
+    pub fn sharing(framebuffer: Arc<Framebuffer>) -> Self {
+        Self { graphics: Graphics::new(), framebuffer }
     }
 
     /// Compose one run of commands, as a session's `Event::Graphics`

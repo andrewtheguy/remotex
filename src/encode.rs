@@ -32,7 +32,8 @@ use screen_vp9::walk::SETTLE_IDLE;
 use crate::config::RenderPlan;
 use crate::feedback::LinkFeedback;
 use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
-use crate::stream::{DesktopStream, Produced, Round};
+use crate::picture::{Picture, PictureRound};
+use crate::stream::Produced;
 use crate::shadow::Rect;
 use crate::video;
 
@@ -104,9 +105,14 @@ const SETTLE_TICK: Duration = Duration::from_millis(250);
 const VIDEO_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 
 
+/// The paint window's lag past which an adaptive plan's page is behind: the walk's
+/// own threshold for giving quality up, which a picture sent for motion also holds
+/// its cleanups back at ([`crate::motion`]).
+const LAG_BEHIND: Duration = Duration::from_millis(60);
+
 /// The stream, and what the link will bear.
 struct Video {
-    stream: DesktopStream,
+    stream: Picture,
     /// screen-vp9's walk of the dial, with the plan's quality as its ceiling and
     /// [`VIDEO_FRAME_INTERVAL`] as the frame it slows from. Its verdicts are the
     /// push's blocking ([`VideoSink::adjust`]) and, on an adaptive plan, the paint
@@ -157,7 +163,7 @@ enum Pending {
     /// blits meanwhile, and the order task puts the round back when it lands.
     ///
     /// With the share of [`QUEUE_BUDGET`] taken for it, at the last round's size.
-    Round(JoinHandle<(Round, anyhow::Result<Produced>, u64)>, Held),
+    Round(JoinHandle<(PictureRound, anyhow::Result<Produced>, u64)>, Held),
     Msg(ServerMsg),
     /// A caller waiting for everything pushed before it to have reached `frame_tx`.
     Flush(oneshot::Sender<()>),
@@ -252,14 +258,14 @@ struct Shared {
 
 impl Shared {
     fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>, oversize: Oversize) -> Self {
-        let RenderPlan { quality, adaptive, native_vp9, .. } = plan;
+        let RenderPlan { quality, adaptive, .. } = plan;
         Self {
             oversize,
             oversized: AtomicBool::new(false),
             too_many_screens: AtomicBool::new(false),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
-                stream: DesktopStream::new(quality, native_vp9),
+                stream: Picture::new(plan),
                 congestion: QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, adaptive),
                 due_at: None,
             }),
@@ -422,7 +428,10 @@ impl VideoSink {
             // left waiting for a keyframe nothing will send again.
             video.stream.force_keyframe();
         }
-        let Some(mut round) = video.stream.take_round()? else {
+        // The page is behind, on a plan that listens for it: a picture sent for
+        // motion holds back what it would send for pixels already right.
+        let behind = video.congestion.lag_aware() && self.shared.feedback.lag(now) >= LAG_BEHIND;
+        let Some(mut round) = video.stream.take_round(behind)? else {
             return Ok(());
         };
         video.due_at = Some(now + video.congestion.interval());
@@ -496,12 +505,13 @@ impl VideoSink {
             return None;
         }
         let video = self.shared.video.lock().await;
-        if !video.stream.dirty() {
-            return None;
-        }
+        // Now for a dirty mirror; and for a picture sent for motion, also when a
+        // region ends or a tile it drew is owed its PNG, which come due with no
+        // damage to bring them.
+        let owed = tokio::time::Instant::from_std(video.stream.owed_at()?);
         // A dirty mirror with no deadline yet is one whose pixels arrived before any
         // access unit went out; it is owed one now rather than in an interval.
-        Some(video.due_at.unwrap_or_else(tokio::time::Instant::now))
+        Some(video.due_at.map_or(owed, |due| due.max(owed)))
     }
 
     /// Let the congestion policy see how long that frame's push blocked, and move the
@@ -1023,6 +1033,12 @@ async fn order_loop(
                 break;
             }
         }
+        if !produced.records.is_empty() {
+            if forward(&shared, &frame_tx, produced.records, held).await.is_err() {
+                break; // browser gone; the engine learns it from its own next push
+            }
+            continue;
+        }
         let Some(mut unit) = produced.unit else {
             continue;
         };
@@ -1053,6 +1069,46 @@ async fn order_loop(
             break;
         }
     }
+}
+
+/// Send a picture sent for motion's records, in order, counting what they cost.
+/// The round's share of the queue budget, settled at their bytes, rides its last
+/// tile or unit.
+async fn forward(
+    shared: &Shared,
+    frame_tx: &mpsc::Sender<ServerMsg>,
+    mut records: Vec<ServerMsg>,
+    mut held: Held,
+) -> Result<(), mpsc::error::SendError<ServerMsg>> {
+    let mut bytes = 0;
+    for record in &records {
+        match record {
+            ServerMsg::Tile(tile) => bytes += tile.png.len(),
+            ServerMsg::Region(unit) => {
+                bytes += unit.data.len();
+                shared.units.fetch_add(1, Ordering::Relaxed);
+                if unit.keyframe {
+                    shared.keyframes.fetch_add(1, Ordering::Relaxed);
+                    shared.keyframe_bytes.fetch_add(unit.data.len() as u64, Ordering::Relaxed);
+                }
+            }
+            _ => {}
+        }
+    }
+    shared.round_bytes.store(bytes as u64, Ordering::Relaxed);
+    shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    held.settle(bytes);
+    if let Some(last) = records.iter_mut().rev().find_map(|record| match record {
+        ServerMsg::Tile(tile) => Some(&mut tile.held),
+        ServerMsg::Region(unit) => Some(&mut unit.held),
+        _ => None,
+    }) {
+        *last = held;
+    }
+    for record in records {
+        frame_tx.send(record).await?;
+    }
+    Ok(())
 }
 
 /// Record why the queue stopped, for the engine's next push to report.
@@ -1178,7 +1234,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1609,7 +1665,7 @@ mod tests {
         let (sink, mut frame_rx) = video_sink(64, 64).await;
         sink.damage(rect(0, 0, 64, 64), &rgb(64, 64, 1)).await.unwrap();
         let mut round =
-            sink.shared.video.lock().await.stream.take_round().unwrap().expect("a dirty stream");
+            sink.shared.video.lock().await.stream.take_round(false).unwrap().expect("a dirty stream");
 
         // frame() while the round is out: early return, with the keyframe ask left
         // for a call that has streams to arm.
@@ -1898,7 +1954,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2025,7 +2081,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false, motion: false, motion_debug: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

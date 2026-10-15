@@ -354,3 +354,146 @@ fn a_tape_is_summarised() {
         filled as f64 / 1e6
     );
 }
+
+/// A tape played through the compositor and the motion encoder as a session with
+/// Motion plays it, at the times it was recorded: what the picture sent for motion
+/// costs, and whether the page's picture ends exact.
+///
+/// The host's paints go through the gateway's shadow, as the engine's do, so a
+/// repaint of the same pixels costs nothing; a round is taken no more than every
+/// 33 ms and whenever one comes due. The page is played by an independent reading
+/// of the records: PNGs decoded and drawn, and the regions' rectangles marked as not
+/// exact until a tile draws over them.
+///
+/// ```sh
+/// REMOTEX_TAPE=tmp/motion/video-window.tape cargo test --release --test rdp_motion_tape -- --ignored --nocapture replayed
+/// ```
+#[test]
+#[ignore = "reads a tape named by REMOTEX_TAPE"]
+fn a_tape_is_replayed_for_motion() {
+    use remotex::motion::MotionStream;
+    use remotex::protocol::ServerMsg;
+    use remotex::shadow::{Rect as ShadowRect, Shadow};
+
+    const ROUND: Duration = Duration::from_millis(33);
+    let path = std::env::var(TAPE_ENV).unwrap_or_else(|_| panic!("set {TAPE_ENV} to the tape to read"));
+    let events = read_tape(&path);
+    let base = Instant::now();
+    let mut compositor = Compositor::new();
+    let mut stream: Option<(MotionStream, Shadow, (u16, u16))> = None;
+    let mut page: Vec<u8> = Vec::new();
+    let mut lossy: Vec<ShadowRect> = Vec::new();
+    let (mut tiles, mut tile_bytes, mut units, mut unit_bytes, mut keyframes, mut regions) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut encoding = Duration::ZERO;
+    let mut last_round = base;
+    let mut last_ms = 0;
+
+    // Take and play rounds owed at `now`.
+    let mut play = |stream: &mut MotionStream, size: (u16, u16), page: &mut Vec<u8>, lossy: &mut Vec<ShadowRect>, now: Instant| {
+        let Some(mut round) = stream.take_round(now, false).expect("a round") else { return false };
+        let started = Instant::now();
+        let records = round.encode().expect("an encode");
+        encoding += started.elapsed();
+        stream.put_back(round, now);
+        let stride = usize::from(size.0) * 3;
+        for record in records {
+            match record {
+                ServerMsg::TilesStart => {
+                    page.clear();
+                    page.resize(stride * usize::from(size.1), 0);
+                    lossy.clear();
+                }
+                ServerMsg::Tile(tile) => {
+                    tiles += 1;
+                    tile_bytes += tile.png.len() as u64;
+                    let mut reader = png::Decoder::new(std::io::Cursor::new(tile.png)).read_info().unwrap();
+                    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+                    reader.next_frame(&mut buf).unwrap();
+                    let width = usize::from(tile.w) * 3;
+                    for row in 0..usize::from(tile.h) {
+                        let at = (usize::from(tile.y) + row) * stride + usize::from(tile.x) * 3;
+                        page[at..at + width].copy_from_slice(&buf[row * width..(row + 1) * width]);
+                    }
+                }
+                ServerMsg::Region(unit) => {
+                    units += 1;
+                    unit_bytes += unit.data.len() as u64;
+                    keyframes += u64::from(unit.keyframe);
+                    lossy.push(ShadowRect::from_size(unit.x, unit.y, unit.w, unit.h).unwrap());
+                }
+                ServerMsg::RegionFormat { .. } => regions += 1,
+                ServerMsg::RegionEnd { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        true
+    };
+
+    for event in &events {
+        match event {
+            Taped::StartOver => compositor = Compositor::new(),
+            Taped::Run { ms, commands, .. } => {
+                last_ms = *ms;
+                let now = base + Duration::from_millis(u64::from(*ms));
+                let composed = compositor.compose(commands).expect("the tape composes");
+                let (w, h) = compositor.framebuffer().with(|frame| (frame.width as u16, frame.height as u16));
+                if w == 0 {
+                    continue;
+                }
+                if stream.as_ref().is_none_or(|(_, _, size)| *size != (w, h)) {
+                    let mut motion = MotionStream::new(60, false, false);
+                    motion.want(w, h);
+                    stream = Some((motion, Shadow::new("tape", w, h), (w, h)));
+                }
+                let (motion, shadow, size) = stream.as_mut().unwrap();
+                for rect in composed.painted {
+                    let rect = ShadowRect::from_size(rect.x as u16, rect.y as u16, rect.width as u16, rect.height as u16).unwrap();
+                    let rgb = compositor.framebuffer().with(|frame| {
+                        let mut rgb = Vec::with_capacity(usize::from(rect.w()) * usize::from(rect.h()) * 3);
+                        for row in rect.top..=rect.bottom {
+                            let at = usize::from(row) * frame.stride + usize::from(rect.left) * 4;
+                            for px in frame.pixels[at..at + usize::from(rect.w()) * 4].as_chunks::<4>().0 {
+                                rgb.extend_from_slice(&px[..3]);
+                            }
+                        }
+                        rgb
+                    });
+                    if let Some((changed, pixels)) = shadow.changed(rect, &rgb) {
+                        motion.blit(changed, &pixels, now).unwrap();
+                    }
+                }
+                if composed.frames > 0 && now >= last_round + ROUND {
+                    // Rounds the gateway would have taken since, as they came due.
+                    if play(motion, *size, &mut page, &mut lossy, now) {
+                        last_round = now;
+                    }
+                }
+            }
+        }
+    }
+    // The tape's end: everything owed comes due with nothing changing.
+    let (motion, _, size) = stream.as_mut().expect("the tape drew something");
+    let mut now = base + Duration::from_millis(u64::from(last_ms));
+    while let Some(due) = motion.next_due(now) {
+        now = due.max(now + ROUND);
+        play(motion, *size, &mut page, &mut lossy, now);
+        assert!(now < base + Duration::from_millis(u64::from(last_ms)) + Duration::from_secs(30), "it settles");
+    }
+    let exact = compositor.framebuffer().with(|frame| {
+        let mut rgb = Vec::new();
+        for px in frame.pixels.as_chunks::<4>().0 {
+            rgb.extend_from_slice(&px[..3]);
+        }
+        rgb == page
+    });
+    let secs = f64::from(last_ms) / 1000.0;
+    println!(
+        "{path}: {secs:.1} s; {tiles} tiles {:.2} MB, {units} region units {:.2} MB ({keyframes} keyframes) over {regions} regions; \
+         {:.2} MB/s in all; encoding {:.2} s; exact once settled: {exact}",
+        tile_bytes as f64 / 1e6,
+        unit_bytes as f64 / 1e6,
+        (tile_bytes + unit_bytes) as f64 / 1e6 / secs.max(0.001),
+        encoding.as_secs_f64()
+    );
+    assert!(exact, "the page's picture is the host's once everything has settled");
+}

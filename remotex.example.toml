@@ -617,3 +617,11 @@ password = "change-me"
 # side of a measurement.
 #render_adaptive = true
 
+# QA aid for Motion, the alpha box under High quality on an "rdp" target with egfx
+# on and one virtual display: outline what a session started with it sends, in
+# the pixels themselves — a moving region's VP9 in magenta, a PNG cut from beside
+# one in cyan, and the exact PNG that replaces a region once it stops in green.
+# Unmarked is a still tile sent once, exactly. Off by default, and refused on a
+# target that does not offer Motion.
+#render_motion_debug = true
+

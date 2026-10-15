@@ -85,6 +85,12 @@ export interface DesktopPainter {
    * the session's page composes, and is painted from there (displayRelay.ts).
    */
   mirrorGraphics(display: number, part: PicturePart): void;
+  /** The picture is sent for motion from here, TILE and REGION records (`tilesStart`). */
+  startTiles(): void;
+  /** Moving region `stream`'s decoder (`regionFormat`). */
+  setRegionFormat(stream: number, format: VideoFormat): void;
+  /** Moving region `stream` has stopped (`regionEnd`). */
+  endRegion(stream: number): void;
   /** The attachment boundary: wipe the bitmap and the decoder. */
   clear(): void;
 }
@@ -206,6 +212,15 @@ export function desktopPainterFor(
     },
     mirrorGraphics(display, part) {
       post({ type: "graphicsMirror", display, part });
+    },
+    startTiles() {
+      post({ type: "tilesStart" });
+    },
+    setRegionFormat(stream, format) {
+      post({ type: "regionFormat", stream, format });
+    },
+    endRegion(stream) {
+      post({ type: "regionEnd", stream });
     },
     clear() {
       clears += 1;

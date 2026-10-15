@@ -63,6 +63,15 @@ function harness() {
     blank(w, h) {
       calls.push(`blank:${w}x${h}`);
     },
+    startTiles() {
+      calls.push("tiles");
+    },
+    setRegionFormat(stream, format) {
+      calls.push(`region:${stream} ${format.decode}`);
+    },
+    endRegion(stream) {
+      calls.push(`end:${stream}`);
+    },
   };
 
   const ctx = {
@@ -248,6 +257,45 @@ test("a graphics pipeline starts in its place, behind the frames before it", asy
   h.release();
   await settled();
   assert.deepEqual(h.calls, ["draw", "graphics", "draw"]);
+});
+
+test("a picture sent for motion and its regions hold their place among the frames", async () => {
+  // A region's decoder must be built before its first unit and retired after its
+  // last, and a picture started over must not land on frames before it.
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(1),
+    sequence: 1,
+    generation: 1,
+  });
+  await settled();
+  h.host.handle({ type: "tilesStart" });
+  h.host.handle({
+    type: "regionFormat",
+    stream: 2,
+    format: { decode: "vp09.01.10.08" },
+  });
+  h.unstall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(2),
+    sequence: 2,
+    generation: 1,
+  });
+  h.host.handle({ type: "regionEnd", stream: 2 });
+  await settled();
+  assert.deepEqual(h.calls, ["draw"]);
+  h.release();
+  await settled();
+  assert.deepEqual(h.calls, [
+    "draw",
+    "tiles",
+    "region:2 vp09.01.10.08",
+    "draw",
+    "end:2",
+  ]);
 });
 
 test("the part a display shows, and a tab's mirror, hold their place behind a stalled draw", async () => {

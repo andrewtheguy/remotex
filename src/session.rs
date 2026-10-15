@@ -2126,11 +2126,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, motion: false, whole: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, motion: false, whole: false };
     /// A session started with nothing but a Mac's HEVC passed.
-    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false };
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, motion: false, whole: false };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -2163,7 +2163,7 @@ mod tests {
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
             let size = if self.resize { Sizing::Window } else { Sizing::Target };
-            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false }
+            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, motion: false, whole: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -2217,6 +2217,7 @@ mod tests {
             microphone: meta.microphone,
             video_quality: None,
             render_adaptive: None,
+            render_motion_debug: false,
             audio_bitrate: None,
             virtual_display: false,
             audio_adaptive: None,
@@ -2655,7 +2656,7 @@ mod tests {
                 },
             );
             let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false };
+            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, motion: false, whole: false };
 
             let token_a = mgr.claim(false, None, "login").unwrap();
             let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();

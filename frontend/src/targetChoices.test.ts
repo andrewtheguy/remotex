@@ -51,6 +51,7 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     placement: false,
     pipeline: false,
     vp9: false,
+    motion: false,
     ...offers,
   };
 }
@@ -62,6 +63,7 @@ const RDP = target({
   audio: true,
   passthroughs: ["rdp-graphics"],
   pipeline: true,
+  motion: true,
 });
 const HIGH_PERFORMANCE = target({
   subtype: "ard-high-performance",
@@ -192,6 +194,7 @@ test("only what the target's type offers has a row", () => {
     placement: "right",
     pipeline: "high-quality",
     vp9: "libvpx",
+    motion: false,
   });
   assert.equal(standard.blocked, null);
 });
@@ -229,6 +232,7 @@ test("no sound is taken until somebody ticks it", () => {
     placement: "right",
     pipeline: "high-quality",
     vp9: "libvpx",
+    motion: false,
   });
   assert.equal(rdp.sound, false);
   assert.equal(rdp.soundRow?.checked, false);
@@ -244,6 +248,7 @@ test("what was chosen last time is what Start sends", () => {
     placement: "right",
     pipeline: "high-quality",
     vp9: "libvpx",
+    motion: false,
   });
   assert.equal(options.sound, true);
   assert.equal(options.soundRow?.checked, true);
@@ -270,6 +275,7 @@ test("what was chosen last time is what Start sends", () => {
     placement: "right",
     pipeline: "high-quality",
     vp9: "libvpx",
+    motion: false,
   });
   // Nor is something this page never wrote there.
   const stale = targetOptions(RDP, { audio: true as never }, ABLE);
@@ -419,6 +425,31 @@ test("how the host draws the pipeline is high quality until somebody chooses ada
   );
   assert.equal(mac.pipelineRow, null);
   assert.equal(mac.choices.pipeline, "high-quality");
+});
+
+test("Motion is high quality's, and composes the pipeline at the gateway", () => {
+  const offered = targetOptions(RDP, undefined, ABLE);
+  assert.match(offered.pipelineRow?.motion?.label ?? "", /alpha/);
+  assert.equal(offered.choices.motion, false, "not until somebody ticks it");
+  const ticked = targetOptions(RDP, { motion: true }, ABLE);
+  assert.equal(ticked.choices.motion, true);
+  assert.equal(ticked.passed, null, "nothing is passed");
+  // A browser that cannot compose a pipeline can start such a session, and is
+  // told so where it cannot start one that passes it.
+  assert.equal(targetOptions(RDP, { motion: true }, UNABLE).blocked, null);
+  assert.match(targetOptions(RDP, undefined, UNABLE).blocked ?? "", /Motion/);
+  // Adaptive's H.264 is the host's, which the gateway does not decode.
+  for (const pipeline of ["adaptive-desktop", "adaptive-region"] as const) {
+    const adaptive = targetOptions(RDP, { motion: true, pipeline }, ABLE);
+    assert.equal(adaptive.choices.motion, false, pipeline);
+    assert.ok(adaptive.passed, pipeline);
+  }
+  // Not offered on two displays, which the gateway lists without it.
+  const two = target({ ...RDP, placement: true, motion: false });
+  const unoffered = targetOptions(two, { motion: true }, ABLE);
+  assert.equal(unoffered.pipelineRow?.motion, null);
+  assert.equal(unoffered.choices.motion, false);
+  assert.match(targetOptions(two, undefined, UNABLE).blocked ?? "", /egfx/);
 });
 
 test("a browser that cannot decode the H.264 is offered high quality alone", () => {

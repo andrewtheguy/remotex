@@ -192,6 +192,37 @@ test("the video row waits for the format, then names it and whose stream it is",
   );
 });
 
+test("a picture sent for motion says what is drawn where, and which decoder takes the motion", () => {
+  // Before anything has moved, the picture is tiles alone.
+  assert.equal(
+    videoLabel({ decode: "", passthrough: false, motion: true }, null),
+    "PNG tiles so far, nothing has moved · encoded by the gateway",
+  );
+  assert.equal(
+    videoLabel(
+      {
+        decode: "vp09.01.10.08.03.06.06.06.00",
+        passthrough: false,
+        motion: true,
+      },
+      null,
+    ),
+    "VP9 where it moves (vp09.01.10.08.03.06.06.06.00), PNG where it is still · encoded by the gateway · decoded by the browser's native decoder",
+  );
+  assert.equal(
+    videoLabel(
+      {
+        decode: "vp09.01.10.08.03.06.06.06.00",
+        passthrough: false,
+        motion: true,
+        software: true,
+      },
+      null,
+    ),
+    "VP9 where it moves (vp09.01.10.08.03.06.06.06.00), PNG where it is still · encoded by the gateway · decoded by this page's WebAssembly decoder",
+  );
+});
+
 test("the Render row waits for the target, then names its dial", () => {
   const plan = "video q90 · libvpx · adaptive";
   assert.equal(renderLabel(""), "Waiting for the target");
