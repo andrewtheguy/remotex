@@ -67,7 +67,8 @@ area's section before changing what it covers:
   with takeover, and a fresh engine for every `connect`; size, sound, the Mac's
   passthrough, how an RDP host draws its pipeline and the VP9's encoder chosen
   at the picker, not in the config, and held for the session's life; an RDP
-  host's pipeline passed in every session it is on.
+  host's pipeline passed in every session it is on but one started with Motion,
+  which the gateway composes.
 - [Input and display](docs/architecture.md#input-and-display): the two touch
   layers, the display picker as the remote's, presentation at 100%, density as
   the wire's word, and the Apple mosaic as the one rescale.

@@ -59,7 +59,7 @@ config key.
 
 | Target | Window drives the size | Sound | Passthrough | Graphics | VP9 encoder |
 |---|---|---|---|---|---|
-| `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | high quality or adaptive H.264 | — |
+| `rdp` | yes | off, Opus or FLAC | the graphics pipeline, passed unless Motion is ticked | high quality, with Motion (alpha) on one display, or adaptive H.264 | — |
 | `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — | libvpx or native\* |
 | `vnc` | no | none | — | — | libvpx or native\* |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
@@ -103,7 +103,16 @@ amd64 machine under x86-64-v3.
   one. Under it, *H.264 full screen*, the default, draws the whole desktop in
   H.264, and *H.264 region* only what moves like video, with the rest as High quality draws it,
   which keeps text sharp but adapts less. Adaptive is greyed in a browser whose
-  `VideoDecoder` cannot decode the host's H.264.
+  `VideoDecoder` cannot decode the host's H.264. Under High quality, on a target
+  with one display, *Motion* (alpha) has the gateway compose the pipeline and
+  send what moves as VP9 and what is still as PNG. Nothing is then passed, so a
+  browser that cannot compose the pipeline can start it, and a reload resumes the
+  session. For an exact picture, set the host's image quality policy to Lossless
+  ([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)),
+  tick Motion, and check the Info card's *Host's picture* row, which says
+  whether the host draws losslessly. `render_motion_debug = true` on the target
+  outlines what Motion sends: VP9 in magenta, PNG beside it in cyan, and the
+  cleanup after it in green.
 - **VP9 encoder.** Which encoder codes the VP9: *libvpx*, the default, or
   *Native* (alpha), the encoder in Rust that `screen-vp9` has written. On a
   `wlshare` target wlshare codes it, and needs a wlshare that has the encoder:
@@ -112,7 +121,7 @@ amd64 machine under x86-64-v3.
   Mac's picture is never VP9, so it has no such choice.
 
 One gateway holds one session. A reload or a dropped connection normally
-resumes it; an RDP session with the graphics pipeline on instead reconnects the engine,
+resumes it; an RDP session that passes the graphics pipeline instead reconnects the engine,
 because the browser's compositor state is gone. A different browser that finds
 the owner attached is asked whether to take over; one arriving during the
 owner's reattach grace may claim the slot directly. Either starts at the picker
@@ -141,8 +150,9 @@ touch.
   session passes to the browser to compose. That takes nearly all of the
   picture's work off the gateway. It needs WebGL 2 and a cross-origin isolated
   page, which a proxy that drops the gateway's two isolation headers undoes; a
-  browser without them cannot start the target. How the host draws the
-  pipeline, high quality or adaptive H.264 (alpha), is chosen at the picker.
+  browser without them cannot start the target but with Motion. How the host
+  draws the pipeline, high quality or adaptive H.264 (alpha), and whether the
+  gateway composes it for Motion (alpha), is chosen at the picker.
 - `egfx = false` makes the host draw with bitmap updates instead, which the
   gateway encodes as VP9: the target for a browser that cannot compose the
   pipeline. The desktop then keeps its size: without the pipeline Windows

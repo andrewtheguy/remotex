@@ -118,6 +118,32 @@ end it once they stop. What the Mac does with a gesture it is sent that way, and
 whether the phases alone make the horizontal axis feel right, are still to be
 tested, on a physical Mac.
 
+### Motion's scrolls and drags as copies
+
+A session started with Motion sends what a scroll or a window drag moved as
+damage: PNG, or VP9 once it counts as moving. But a Windows host draws most of
+either as copies between surfaces (`SurfaceToSurface`), not as new pixels.
+Recorded from windows-arm set to Lossless, a scroll moved 724 Mpx by copies and
+drew 42 Mpx, and a window drag moved 147 Mpx and drew 51 Mpx, and replayed they
+cost 1.78 and 2.70 MB/s against 0.38 for a video in a window
+([composed for Motion](architecture.md#rdps-graphics-pipeline-composed-for-motion)).
+
+What is planned is a `COPY` record, op `0x07`, `u16 sx | sy | x | y | w | h`,
+that has the page copy a rectangle of the picture it holds, drawn in wire order
+with `drawImage` from its canvas onto itself:
+
+- The compositor reports each copy within the output, in order with what it
+  painted (`Composed.copied`).
+- A copy whose source was not painted earlier in the same frame, which the page
+  therefore already holds, is sent as a `COPY`, and its destination is not
+  damage.
+- Each tile's state moves with the copy: a tile that receives pixels still owed
+  their PNG, under a live stream or not yet cleaned up, owes one too.
+
+A scroll or a drag of exact content then stays exact and costs a few bytes a
+copy; only what the host newly draws, the strip scrolled into view, goes as PNG
+or VP9. Measured by replaying the same recordings.
+
 ## Under consideration
 
 ### Two streams for Standard's Combined Display
@@ -239,45 +265,15 @@ What is left is the residual's Rice codes and the prediction, two loops in which
 every sample waits on the one before. What has been tried, and how a change is
 judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
 
-### A lossless picture that sends its motion as video
+### Motion for a ZRLE picture
 
-For someone who needs every pixel exact on what is still, on a link that cannot
-carry an exact picture of everything that moves. A Windows host set to Lossless
-already sends an exact picture through its graphics pipeline, passed to the
-page untouched and with resize
-([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)),
-but it sends what moves exact too: planar, with no H.264 even to a session that
-offers it, and 7.6 MB for the opening desktop alone, about 15 times what the host's
-default costs. The ZRLE of a plain VNC server or of a Mac in Standard mode
-reaches the gateway exact as well, and leaves it as VP9.
-
-What is considered is a mode chosen at the picker for those targets: the
-regions that are changing fast are coded as VP9 while they move, and each is
-sent again as PNG once it settles, so what is still on the screen is exact and
-only what moves is not. Everything else is PNG throughout. It is the mode the
-gateway once had for a picture it decodes.
-
-On an RDP target it is built on the graphics pipeline, composed at the gateway
-for such a session from a host set to Lossless, and not on bitmap updates
-(`egfx = false`). The bitmap path performs worse than the pipeline, has no frame
-boundary, so its damage is flushed on a 16 ms guess, and keeps the size it
-opened at ([Bitmap updates](rdp-client.md#bitmap-updates)). The pipeline says
-where each frame ends, which rectangles each command drew and which it moved
-by a copy between surfaces or out of a cache, so what moves can be read off the
-commands rather than found by comparing pictures; it keeps resize and virtual
-displays; and what the gateway composes from it is the host's exact picture,
-so a settled region's PNG is too. The compositor is already the gateway's own:
-the page runs `crates/remotex-rdp-graphics`, which builds natively as well.
-
-It is weighed against two things. One is a design rule: every RDP host's
-pipeline is passed to the page and the gateway composes none
-([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)),
-and this mode would be its one exception, with the gateway's cost of composing
-and encoding back for such a session, where a passed one leaves it a few
-percent of a core. The other is what removing the old mode bought. It was a
-second carriage beside the stream, with its own records, a cell grid, the
-detection of what moves and the cleanups after it, where there is now one way a
-decoded picture leaves the gateway ([Media paths](architecture.md#media-paths)).
+The ZRLE of a plain VNC server or of a Mac in Standard mode reaches the gateway
+exact and leaves it as VP9. Motion, which an RDP target has
+([composed for Motion](architecture.md#rdps-graphics-pipeline-composed-for-motion)),
+would send it as PNG where it is still and VP9 where it moves. Its 64-pixel
+tiles are ZRLE's, on a grid anchored at (0,0), where ZRLE's start at each
+rectangle's own origin, so the damage would be mapped onto the grid. Weighed
+against a picture that already follows the link as one stream.
 
 ## Not planned
 

@@ -77,7 +77,7 @@ camera and microphone, and how its picture reaches the browser.
 
 | Server | Target | Displays | Sound | Camera and microphone | Picture |
 |---|---|---|---|---|---|
-| Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; VP9 from the gateway on the bitmap path |
+| Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264, or composed here for Motion (alpha), PNG where still and VP9 where it moves; VP9 from the gateway on the bitmap path |
 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | the Mac's HEVC or its H.264, passed through |
 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
@@ -246,7 +246,8 @@ gateway.
   host draws its pipeline and which encoder codes the VP9 are
   chosen under the target at the picker and carried by `connect`; they are not
   config keys, and the gateway holds the session to them. An RDP host's pipeline
-  is not chosen: a target with it on passes it in every session. The size a session will have is shown before Start: a size
+  is not chosen: a target with it on passes it in every session but one started
+  with Motion (alpha), which the gateway composes. The size a session will have is shown before Start: a size
   the desktop keeps, the target's `size` or the default, or the window's.
   Which of the three a target shows is its type's to say
   (`TargetConfig::offers`): one it does not offer has no row and is refused in a
@@ -319,8 +320,8 @@ A session's picture reaches the browser one of two ways, both ordinary:
 - **Passed untouched**, as the remote made it, for the browser to decode or
   compose: today wlshare's VP9 on a `wlshare` target, a High Performance Mac's
   HEVC or its H.264 in every session, whichever it was started with, and an RDP host's
-  graphics pipeline in every session of a target with it on, each with its rule
-  below. Another stream the user
+  graphics pipeline in every session of a target with it on but one started with
+  Motion, each with its rule below. Another stream the user
   asks to pass joins them with a rule of its own; do not refuse it on this
   rule's account.
 
@@ -499,7 +500,7 @@ An `rdp` target with the pipeline on passes the host's graphics pipeline
 (MS-RDPEGFX) to the browser in every session: its commands out of their bulk
 compression, never altered, as `GRAPHICS` records on the display socket behind a
 `graphicsStart`; the gateway neither composes nor encodes them, and composes no
-pipeline at all. The picker says the pipeline is always passed, with no box to
+pipeline but Motion's, below. The picker says the pipeline is always passed, with no box to
 tick, and only a
 page that said it composes one can start the target: a cross-origin isolated
 page, for the compositor's threads, with a WebGL 2 canvas to present on
@@ -532,6 +533,16 @@ the access units ride inside the pipeline's commands, the page decodes them with
 the browser's `VideoDecoder`, and the compositor paints the pictures. It adds no
 wire format, no record and no second stream. See
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
+
+Motion (alpha) is the one exception to passing the pipeline: a box under High
+quality, offered on a target with the pipeline on and one virtual display, that
+has the gateway compose the pipeline and send what moves as VP9 and what is
+still as exact PNG, for a host whose image quality policy is set to Lossless. It
+is the old motion mode's carriage, its records and its rules, kept to that
+session: do not grow a second one beside it, and do not reach it from another
+target type without a decision of its own. Two displays are one span the page
+composes once, so Motion is refused there. See
+[RDP's graphics pipeline, composed for Motion](#rdps-graphics-pipeline-composed-for-motion).
 
 #### Camera and microphone
 
@@ -590,7 +601,9 @@ VP9 stream, encoded by the gateway or made by wlshare and passed through. Two
 paths keep another representation the remote made: an
 `ard-high-performance` session can pass the Mac's HEVC, chosen at the picker,
 and every session of an RDP target with the pipeline on passes the host's
-graphics pipeline for the browser to compose. A VNC desktop past the stream's picture ceiling in a session started
+graphics pipeline for the browser to compose, save one started with Motion,
+whose picture is the old motion mode's: PNG where it is still and a VP9 stream
+for each region that moves. A VNC desktop past the stream's picture ceiling in a session started
 without resize has no picture until the remote sends a smaller one — see
 [past the ceiling](#past-the-ceiling).
 
@@ -601,6 +614,11 @@ A target's stream keys are per target, and every one has a default:
   gateway track the measured link — see
   [what the link will bear](#colour-and-what-the-link-will-bear) for the signal
   and the walk.
+- `render_motion_debug` (off by default) outlines, in the pixels themselves,
+  what a session started with Motion sends: a region's VP9 in magenta, a PNG cut
+  from beside one in cyan, and a cleanup in green. A QA aid, refused on a target
+  that does not offer Motion
+  ([composed for Motion](#rdps-graphics-pipeline-composed-for-motion)).
 
 There is no chroma key: the stream is always 4:4:4, profile 1. See
 [the codec](#the-codec) for why the chroma, and not the quality, is where a
@@ -614,14 +632,15 @@ for the browsers whose own decoder does not take it.
 Neither reaches a passed stream: a session started with the Mac's passthrough
 sends its HEVC as it came, and an RDP target with the pipeline on sends the
 host's pipeline as it came, so on such a target the two keys reach only VP9
-encoded for a host that answers with bitmap updates.
+encoded for a host that answers with bitmap updates, and the streams of a session
+started with Motion.
 wlshare's stream, passed on every `wlshare` target, is told both and walks
 itself. Which passed streams follow the browser's link, and how, is in
 [A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
 
 The engines never see the config keys. They and the session's choices collapse
 to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `rdp_graphics`,
-`rdp_h264`, `native_vp9`) at the config boundary in
+`rdp_h264`, `native_vp9`, `motion`, `motion_debug`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
@@ -1107,7 +1126,9 @@ Safari on a Mac.
 #### RDP's graphics pipeline, passed through
 
 An `rdp` target with the pipeline on composes nothing of it here: in every
-session the pipeline's commands go to the browser as the host sent them, and the
+session but one started with Motion
+([composed for Motion](#rdps-graphics-pipeline-composed-for-motion)) the
+pipeline's commands go to the browser as the host sent them, and the
 page composes them. Composing it here and encoding the picture as VP9 was
 measured, for a desktop in use, at about three quarters VP9 encoding and a
 quarter decoding; passing the commands leaves the gateway the connection, the
@@ -1310,7 +1331,7 @@ the pipeline.
   compositor that joined with nothing and asked for a repaint was left with most
   of the desktop wrong, after a graphics reset as after a Suppress Output — so a
   page that comes back cannot be repaired by the engine that is running. Every
-  reattach to an RDP session with the pipeline on therefore ends the engine and
+  reattach to an RDP session that passes the pipeline therefore ends the engine and
   starts another ([Session lifecycle](#session-lifecycle)), which is a logon to
   the session the host kept. A `refresh` from a page that still holds the pipeline's state is
   passed to the host as a repaint.
@@ -1319,6 +1340,94 @@ the pipeline.
   updates a host sends before it confirms the pipeline are not the pipeline's:
   that picture is decoded and encoded as VP9 at the target's dial, as with
   `egfx = false`, and a `videoFormat` rather than a `graphicsStart` opens it.
+
+#### RDP's graphics pipeline, composed for Motion
+
+A session started with Motion (alpha), a box under High quality on an `rdp`
+target with the pipeline on and one virtual display, is the one whose pipeline
+is not passed. It is for a host whose image quality policy is set to Lossless
+([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)),
+which draws an exact picture but draws what moves exact too: 7.6 MB for the
+opening desktop, and hundreds of megabytes a minute for a video in a window. The
+gateway composes the pipeline, and sends what is still as exact PNG and each
+region that moves as a VP9 stream of its own, so what is still stays exact and
+only what moves is not. On a host that draws lossily, what settles is the host's
+own picture, exact to it.
+
+- **Composed on a thread of its own.** `src/rdp_composer.rs` runs the gateway's
+  compositor, `crates/remotex-rdp-graphics`, the one the page runs for a passed
+  pipeline, on a thread: a planar desktop is a couple of megabytes a frame, and
+  decoding it on the engine's task would hold up input behind it. The engine is
+  handed each run's painted rectangles in order, stages them as a bitmap
+  update's damage, and flushes them where the run ends a frame. The thread waits
+  at each frame's end until the engine has read the frame, so no frame is read
+  with the next half drawn over it. A run queued before a resize or a pipeline
+  restart is acknowledged but its paint is not sent.
+- **Acknowledged once composed.** The host is acknowledged each frame once the
+  gateway has composed it, not once the page has painted it: the gateway
+  coalesces the host's frames into its own rounds, and the page's link is
+  followed by the regions' walk and the queue budget instead.
+- **Tiles and regions are the old motion mode's.** `src/regions.rs` and
+  `src/motion.rs` bring back the mode the gateway once had for a picture it
+  decodes, by its rules. The desktop is cut into 64-pixel tiles from (0,0),
+  ZRLE's tile. A tile is moving when it changed in at least 4 of the last 8
+  tenths of a second. Moving tiles join into 4-connected components, those
+  under 5 tiles are left to PNG, boxes merge unless the merged box would be more
+  than twice the moving tiles, and at most 4 regions stream at once. Geometry is
+  retuned at most every 500 ms: a region that shrinks keeps its stream, one that
+  grows is rebuilt at a keyframe, and one with no motion for a second ends.
+- **What is still goes as PNG at once.** Each report of damage is compared
+  exactly with what the page was sent, cut into 64-row bands, and encoded as
+  PNG as soon as it arrives: a band no stream touches whole, and one a stream
+  splits as the runs of its changed tiles beside the stream. A still PNG that
+  fails to encode ends the session.
+- **A stopped region is cleaned up exactly.** Every tile a stream covered is
+  owed a PNG. Every 250 ms the cleanups take up to 40 tiles that have been still
+  for half a second, oldest first, as many as the queue budget has room for, held
+  up to 5 s while an adaptive page is behind. A `regionEnd` goes ahead of them on
+  the ordered path, and no PNG is ever sent inside a live stream. A cleanup that
+  fails to encode is dropped with a warning.
+- **The streams are the dial's.** Each region is a VP9 stream of its own over its
+  rectangle, coded by libvpx at the target's `video_quality` and walked by
+  `render_adaptive`, as the bitmap path's desktop is. A session started with
+  Motion has no choice of encoder.
+- **The page draws on a canvas.** `tilesStart` opens the picture. The page draws
+  `TILE` and `REGION` records in wire order onto the desktop's 2D canvas, a PNG
+  through `createImageBitmap` without colour conversion and a region's VP9
+  through a decoder of its own, chosen as the desktop's would be
+  ([Decoded in the page](#decoded-in-the-page)) and cropped to the region's true
+  rectangle. It needs neither WebGL 2 nor cross-origin isolation, so a browser
+  that cannot compose a pipeline can start the target with Motion ticked.
+- **A reattach resumes it.** The gateway holds the picture, so a reattach or a
+  `refresh` resumes the engine: the page is sent `tilesStart` and every tile
+  again, the streams go on from a keyframe, and the churn is forgotten. A resize
+  ends the streams, and the host redraws.
+- **The Info card says whether the host draws losslessly.** For every session
+  with the pipeline, passed or composed, the gateway reads each draw's codec off
+  the commands (`crates/remotex-rdp-graphics/src/fidelity.rs`), ClearCodec's
+  subcodecs included, and sends `hostPicture` when the host draws with something
+  new. The card's *Host's picture* row reads it: exact only for uncompressed,
+  planar, alpha and ClearCodec without NSCodec. A pipeline that starts over
+  starts it over.
+
+`tests/playwright/rdp-motion.spec.ts` reads the display socket of a headless
+browser in such a session.
+`tests/rdp_motion_tape.rs` records what a host draws through the pipeline, with
+its timing, and replays a recording through the compositor and the motion
+encoder. Replayed from windows-arm set to Lossless (2026-10-15), every recording
+ends exact once settled:
+
+| Recording | Sent |
+|---|---|
+| The opening desktop, still | 6.85 MB |
+| A video in a window | 0.38 MB/s |
+| A full-page shader | 0.44 MB/s |
+| A scroll | 1.78 MB/s |
+| A window drag | 2.70 MB/s |
+
+A scroll or a drag arrives mostly as copies between surfaces, which Motion sends
+again as damage; sending them as copies is
+[on the roadmap](roadmap.md#motions-scrolls-and-drags-as-copies).
 
 ### Decoded in the page
 
@@ -1568,7 +1677,7 @@ remote is told how the link is doing. Today two of the three passthroughs are:
 | Passed stream | Who adapts it | What it hears of the browser's link | Target keys that reach it |
 |---|---|---|---|
 | wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`, the same walk as here: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
-| An RDP host's graphics pipeline (passed whenever it is on) | The Windows host: frame rate by acknowledgements; with Adaptive, its H.264's rate control by its network detection, and its Progressive quality by its socket | Frames are acknowledged once the page has composed them; with Adaptive, the detection is answered at the page's pace, and while two large frames wait the host's socket goes unread through a small receive buffer; with High quality, nothing more | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
+| An RDP host's graphics pipeline (passed whenever it is on, save under Motion, whose streams are VP9 encoded here and walk as any) | The Windows host: frame rate by acknowledgements; with Adaptive, its H.264's rate control by its network detection, and its Progressive quality by its socket | Frames are acknowledged once the page has composed them; with Adaptive, the detection is answered at the page's pace, and while two large frames wait the host's socket goes unread through a small receive buffer; with High quality, nothing more | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
 | A High Performance Mac's HEVC or H.264 (always passed) | The Mac's rate controller, a target of 20–60 Mbit/s that a still screen comes far under | Nothing: the delay in its rate reports ends at the gateway | None: the video keys are refused on the target |
 
 - **wlshare** walks its encoder exactly as the gateway walks its own, so a passed
@@ -1754,11 +1863,13 @@ Every `connect` first ends any running engine, including one already connected
 to the same target, and the next engine is not spawned until that process exits;
 `ENGINE_EXIT_GRACE` bounds the wait. Switching targets and logging out likewise
 end the engine outright. The sole resume is the owning browser reattaching to
-the same target after its session socket drops. An RDP engine with the host's
-graphics pipeline on is never resumed: the page that comes back holds none of
+the same target after its session socket drops. An RDP engine that passes the host's
+graphics pipeline is never resumed: the page that comes back holds none of
 what the host draws against
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)),
-so it is started over with the choices it was started with. And an owner that
+so it is started over with the choices it was started with. One started with
+Motion holds the picture itself and is resumed, its page sent every tile again
+([composed for Motion](#rdps-graphics-pipeline-composed-for-motion)). And an owner that
 comes back unable to take the session's passthrough has nothing to resume or
 restart: the session ends, and it lands on the picker with the reason. Opening
 size, density, display selection, and connection state do not carry into any
@@ -1788,14 +1899,15 @@ gateway's to offer as well as the target's. Picking a target at the picker opens
 its options show under it with a Start button, and Start sends `connect` with the
 choices (`Choices` in `src/config.rs`). None of them is a config key. An RDP
 host's pipeline is not among them: a target with it on passes it in every
-session.
+session but one started with Motion, which the Graphics group offers under High
+quality.
 
 Which options a target shows is its type's to say, from `TargetConfig::offers`,
 and `GET /api/targets` carries it:
 
 | Target | Window drives the size | Sound | Passthrough | Graphics | VP9 encoder |
 |---|---|---|---|---|---|
-| `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: high quality or adaptive H.264 | hidden |
+| `rdp` | yes | shown | said, not offered: the graphics pipeline, passed unless Motion is ticked | shown: high quality, with Motion (alpha) on one display, or adaptive H.264 | hidden |
 | `rdp` with `egfx = false` | no | shown | hidden | hidden | shown\* |
 | `vnc` | no | hidden | hidden | hidden | shown\* |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden | shown: wlshare's own |
@@ -1976,6 +2088,8 @@ u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
 VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
 GRAPHICS op 0x04: u32 len | commands[len]
+TILE     op 0x05: u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
+REGION   op 0x06: u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len | vp9[len]
 ```
 
 One frame carries every record ready at once, so a backlog does not cost one
@@ -1991,6 +2105,18 @@ any other bit is rejected the same way, as is a number or a frame bit without
 is a run of that pipeline's commands, whole, which means something only after
 every run before it from the `graphicsStart` that began the pipeline. One of no
 length is rejected.
+
+`TILE` and `REGION` records are a picture
+[composed for Motion](#rdps-graphics-pipeline-composed-for-motion), opened by
+`tilesStart`, which is sent again wherever the picture starts over: a reattach
+and a resize. A `TILE` is an 8-bit RGB PNG of `w`×`h`, the desktop's pixels
+exactly, drawn at `(x, y)`. A `REGION` is an access unit of moving region
+`stream`'s VP9, its flags `0x01` for a keyframe and nothing else; its decoded
+picture's top-left `w`×`h` is drawn at `(x, y)`. `regionFormat {stream, decode}`
+precedes a stream's first unit, and that of a new stream on a reused id;
+`regionEnd {stream}` ends one, and what it last drew stays until `TILE` records
+draw over it, which are sent after it. A `TILE` never falls inside a live
+region.
 
 `sequence` starts at one and increases for the lifetime of one session-socket
 attachment. After the paint worker has finished the batch's ordered
