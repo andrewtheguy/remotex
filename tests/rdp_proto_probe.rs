@@ -27,6 +27,30 @@
 //!
 //! What it decodes is also written out, as `tmp/rdp_proto_probe.ppm`, for an operator
 //! who would rather look at the desktop than read a coverage figure.
+//!
+//! ## What a host draws with, without the graphics pipeline
+//!
+//! Lines starting `PROBE` measure the bitmap path, best with something moving on the
+//! host's desktop:
+//!
+//! - Always: the bytes per second, and the Bitmap Updates grouped into bursts, with
+//!   the rows each burst covered. Measured on 2026-10-14 against a Windows 11 host
+//!   on Arm with a 16 fps animation: a burst of about 30 planar tiles every 15 ms,
+//!   sweeping the animated area top to bottom in about 180 ms, whatever this end
+//!   advertised or how fast it read.
+//! - [`SURFACE_ENV`] (`frames`, `nsc`, `rfx`, or a list) also offers Surface
+//!   Commands with frame markers, Frame Acknowledge, and the codecs named, and
+//!   reports what the host drew with: the codec, each frame's tiles and
+//!   begin-to-end time, and NSCodec's color loss and subsampling levels.
+//!   [`NSC_ENV`] is the NSCodec capability offered. That host drew with NSCodec only
+//!   when dynamic fidelity was allowed, and then at color loss level 3 with chroma
+//!   subsampled whatever was offered, each frame whole within 45 ms; it offers no
+//!   RemoteFX.
+//! - `REMOTEX_PROBE_ACK=0` withholds the frame acknowledgements,
+//!   `REMOTEX_PROBE_UNACKED` is the unacknowledged-frame count advertised,
+//!   `REMOTEX_PROBE_MULTIFRAGMENT` the multifragment size, `REMOTEX_PROBE_NODECODE`
+//!   reads the updates without decoding them, and [`WATCH_ENV`] is how many seconds
+//!   to watch.
 
 mod common;
 
@@ -232,6 +256,9 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             panic!("the server did not demand a share once licensing was done");
         };
         let demand = DemandActive::decode(source, body).expect("an RDP Demand Active PDU");
+        if std::env::var(SURFACE_ENV).is_ok() {
+            server_sets(body);
+        }
         println!(
             "<- Demand Active: share {:#x}, desktop {}x{}, fragments up to {} bytes",
             demand.share_id, demand.width, demand.height, demand.multifragment
@@ -247,9 +274,13 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             width: demand.width,
             height: demand.height,
             keyboard_layout: KEYBOARD_LAYOUT,
-            multifragment: demand.multifragment,
+            multifragment: std::env::var("REMOTEX_PROBE_MULTIFRAGMENT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(demand.multifragment),
         }
         .encode();
+        let confirm = with_surface_commands(confirm);
         let confirm = share::confirm_active(user, &confirm);
         send(&mut stream, user, io_channel, &confirm).await;
         println!("-> Confirm Active, {} bytes", confirm.len());
@@ -398,7 +429,15 @@ async fn watch(
     let mut compressed = 0_usize;
     let mut bytes = 0_usize;
 
-    let deadline = tokio::time::Instant::now() + WATCH;
+    let mut surface = SurfaceStats::default();
+    let mut per_second: std::collections::BTreeMap<u64, usize> = Default::default();
+    // When each Bitmap Update arrived, for how a host's frame spreads over time.
+    let mut arrivals: Vec<Duration> = Vec::new();
+    // Where each rectangle went, and when.
+    let mut places: Vec<(Duration, u16, u16)> = Vec::new();
+    let started = tokio::time::Instant::now();
+    let watch = std::env::var(WATCH_ENV).ok().and_then(|v| v.parse().ok()).map_or(WATCH, Duration::from_secs);
+    let deadline = started + watch;
     while let Ok(frame) = tokio::time::timeout_at(deadline, read_any(stream)).await {
         if !fastpath::is_output(frame[0]) {
             // The slow path still carries everything that is not an update. During a
@@ -499,6 +538,10 @@ async fn watch(
             let what = match share::decode(data.payload).expect("a share control PDU") {
                 Pdu::DemandActive { body, .. } => format!("a Demand Active of {} bytes", body.len()),
                 Pdu::DeactivateAll => "a Deactivate All".to_owned(),
+                Pdu::Data(pdu) if pdu.kind == 0x2f && pdu.body.len() >= 4 => {
+                    let code = u32::from_le_bytes([pdu.body[0], pdu.body[1], pdu.body[2], pdu.body[3]]);
+                    format!("PROBE Set Error Info {code:#010x}")
+                }
                 Pdu::Data(pdu) => {
                     format!("a data PDU of type {:#04x}, {} bytes", pdu.kind, pdu.body.len())
                 }
@@ -507,6 +550,7 @@ async fn watch(
             continue;
         }
         bytes += frame.len();
+        *per_second.entry(started.elapsed().as_secs()).or_insert(0usize) += frame.len();
         for piece in fastpath::updates(&frame).expect("a fast-path output PDU") {
             let piece = piece.expect("a fast-path update");
             let Some(update) = fragments.push(piece).expect("a reassembled update") else {
@@ -527,7 +571,22 @@ async fn watch(
                 }
                 continue;
             }
+            if update.code == fastpath::SURFACE_COMMANDS {
+                surface.read(update.data, started.elapsed().as_secs());
+                continue;
+            }
             if update.code != fastpath::BITMAP {
+                continue;
+            }
+            arrivals.push(started.elapsed());
+            if let Ok(rects) = bitmap::update(update.data) {
+                let at = started.elapsed();
+                for r in &rects {
+                    places.push((at, r.x, r.y));
+                }
+            }
+            if std::env::var("REMOTEX_PROBE_NODECODE").is_ok() {
+                rectangles += bitmap::update(update.data).expect("a Bitmap Update").len();
                 continue;
             }
             for rectangle in bitmap::update(update.data).expect("a Bitmap Update") {
@@ -540,8 +599,20 @@ async fn watch(
                 rectangles += 1;
             }
         }
+        // Every frame the host ended, acknowledged once its updates are in: the
+        // host paces its frames by these.
+        let acking = std::env::var("REMOTEX_PROBE_ACK").as_deref() != Ok("0");
+        for frame_id in surface.unacknowledged.drain(..).filter(|_| acking) {
+            let ack = share::data(PDUTYPE2_FRAME_ACKNOWLEDGE, user, demand.share_id, &frame_id.to_le_bytes());
+            send(stream, user, io_channel, &ack).await;
+
+        }
     }
 
+    surface.report();
+    report_bursts(&arrivals);
+    report_band(&places);
+    println!("PROBE KB per second: {:?}", per_second.iter().map(|(t, b)| format!("{t}:{}", b / 1024)).collect::<Vec<_>>());
     seen.sort_unstable();
     println!("<- {bytes} bytes of fast-path output: {seen:?}");
     println!("   {rectangles} rectangles, {compressed} of them compressed");
@@ -549,9 +620,325 @@ async fn watch(
     println!("   {}% of the desktop painted", covered * 100 / painted.len());
     write_picture(&desktop, width, height);
 
-    assert!(rectangles > 0, "a live share paints itself, and nothing arrived");
-    assert!(covered > 0, "rectangles arrived and none of them landed on the desktop");
+    // A host that draws with surface commands sends no bitmap updates to count.
+    if surface.commands == 0 {
+        assert!(rectangles > 0, "a live share paints itself, and nothing arrived");
+        assert!(covered > 0, "rectangles arrived and none of them landed on the desktop");
+    }
     watched
+}
+
+/// Set to a comma-separated list of `nsc` and `rfx` (or `frames` for neither) to
+/// advertise Surface Commands with frame markers, Frame Acknowledge and, for the
+/// codecs named, Bitmap Codecs ([MS-RDPBCGR] 2.2.7.2.9, 2.2.7.2.10; [MS-RDPRFX]
+/// 2.2.1.3), and report what the host draws with in return.
+const SURFACE_ENV: &str = "REMOTEX_PROBE_SURFACE";
+
+/// The NSCodec capability advertised, as `fAllowDynamicFidelity,fAllowSubsampling,
+/// colorLossLevel` ([MS-RDPNSC] 2.2.1): lossless by default.
+const NSC_ENV: &str = "REMOTEX_PROBE_NSC";
+
+/// How many seconds to watch the desktop, in place of [`WATCH`].
+const WATCH_ENV: &str = "REMOTEX_PROBE_WATCH";
+
+/// [MS-RDPRFX] 2.2.3.1.
+const PDUTYPE2_FRAME_ACKNOWLEDGE: u8 = 0x38;
+
+/// The codec IDs this client assigns: NSCodec's is fixed at 1 ([MS-RDPBCGR]
+/// 2.2.7.2.10.1.1), and RemoteFX's is ours to choose.
+const NSC_ID: u8 = 1;
+const RFX_ID: u8 = 3;
+
+/// `body`, a Confirm Active's, with the capability sets [`SURFACE_ENV`] asks for
+/// appended, and its length and count raised to match.
+fn with_surface_commands(mut body: Vec<u8>) -> Vec<u8> {
+    let Ok(asked) = std::env::var(SURFACE_ENV) else {
+        return body;
+    };
+    let mut sets = Vec::new();
+    let mut added = 0u16;
+    let mut set = |kind: u16, data: &[u8]| {
+        sets.extend_from_slice(&kind.to_le_bytes());
+        sets.extend_from_slice(&u16::try_from(data.len() + 4).unwrap().to_le_bytes());
+        sets.extend_from_slice(data);
+        added += 1;
+    };
+    // SETSURFACEBITS | FRAMEMARKER | STREAMSURFACEBITS, and a reserved word.
+    set(0x001C, &[0x52, 0, 0, 0, 0, 0, 0, 0]);
+    // Two frames unacknowledged, as FreeRDP asks, unless told otherwise.
+    let unacked: u32 = std::env::var("REMOTEX_PROBE_UNACKED").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+    set(0x001E, &unacked.to_le_bytes());
+    let guid = |a: u32, b: u16, c: u16, d: [u8; 8]| {
+        let mut g = a.to_le_bytes().to_vec();
+        g.extend_from_slice(&b.to_le_bytes());
+        g.extend_from_slice(&c.to_le_bytes());
+        g.extend_from_slice(&d);
+        g
+    };
+    let mut codecs = Vec::new();
+    for codec in asked.split(',').map(str::trim) {
+        let (id, properties, g) = match codec {
+            "nsc" => {
+                let nsc = std::env::var(NSC_ENV).unwrap_or_else(|_| "0,0,1".to_owned());
+                let properties: Vec<u8> = nsc.split(',').map(|v| v.trim().parse().unwrap()).collect();
+                let g = guid(0xCA8D_1BB9, 0x000F, 0x154F, [0x58, 0x9F, 0xAE, 0x2D, 0x1A, 0x87, 0xE2, 0xD6]);
+                (NSC_ID, properties, g)
+            }
+            "rfx" => {
+                // TS_RFX_CLNT_CAPS_CONTAINER of one capset with two icaps, RLGR1
+                // and RLGR3, in video mode, mixing with other codecs allowed.
+                let mut icaps = Vec::new();
+                for entropy in [0x01u8, 0x04] {
+                    icaps.extend_from_slice(&0x0100u16.to_le_bytes());
+                    icaps.extend_from_slice(&0x0040u16.to_le_bytes());
+                    icaps.extend_from_slice(&[0, 1, 1, entropy]);
+                }
+                let mut capset = 0xCBC1u16.to_le_bytes().to_vec();
+                capset.extend_from_slice(&u32::try_from(13 + icaps.len()).unwrap().to_le_bytes());
+                capset.push(1);
+                capset.extend_from_slice(&0xCFC0u16.to_le_bytes());
+                capset.extend_from_slice(&2u16.to_le_bytes());
+                capset.extend_from_slice(&8u16.to_le_bytes());
+                capset.extend_from_slice(&icaps);
+                let mut caps = 0xCBC0u16.to_le_bytes().to_vec();
+                caps.extend_from_slice(&8u32.to_le_bytes());
+                caps.extend_from_slice(&1u16.to_le_bytes());
+                caps.extend_from_slice(&capset);
+                let mut container = u32::try_from(12 + caps.len()).unwrap().to_le_bytes().to_vec();
+                container.extend_from_slice(&1u32.to_le_bytes());
+                container.extend_from_slice(&u32::try_from(caps.len()).unwrap().to_le_bytes());
+                container.extend_from_slice(&caps);
+                let g = guid(0x7677_2F12, 0xBD72, 0x4463, [0xAF, 0xB3, 0xB7, 0x3C, 0x9C, 0x6F, 0x78, 0x86]);
+                (RFX_ID, container, g)
+            }
+            _ => continue,
+        };
+        codecs.extend_from_slice(&g);
+        codecs.push(id);
+        codecs.extend_from_slice(&u16::try_from(properties.len()).unwrap().to_le_bytes());
+        codecs.extend_from_slice(&properties);
+        println!("-> offering {codec} as codec {id}");
+    }
+    if !codecs.is_empty() {
+        let count = u8::try_from(asked.split(',').filter(|c| matches!(c.trim(), "nsc" | "rfx")).count()).unwrap();
+        let mut data = vec![count];
+        data.extend_from_slice(&codecs);
+        set(0x001D, &data);
+    }
+    // shareId, originatorId, lengthSourceDescriptor, lengthCombinedCapabilities,
+    // the source descriptor, numberCapabilities.
+    let source = usize::from(u16::from_le_bytes([body[6], body[7]]));
+    let combined = u16::from_le_bytes([body[8], body[9]]) + u16::try_from(sets.len()).unwrap();
+    body[8..10].copy_from_slice(&combined.to_le_bytes());
+    let at = 10 + source;
+    let count = u16::from_le_bytes([body[at], body[at + 1]]) + added;
+    body[at..at + 2].copy_from_slice(&count.to_le_bytes());
+    body.extend_from_slice(&sets);
+    println!("-> surface commands, frame acknowledge{}", if codecs.is_empty() { "" } else { " and bitmap codecs" });
+    body
+}
+
+/// The capability sets a Demand Active body names, and the bodies of the three
+/// [`SURFACE_ENV`] is about: shareId, lengthSourceDescriptor,
+/// lengthCombinedCapabilities, the source, numberCapabilities, a pad, the sets.
+fn server_sets(body: &[u8]) {
+    let source = usize::from(u16::from_le_bytes([body[4], body[5]]));
+    let mut at = 8 + source + 4;
+    let mut kinds = Vec::new();
+    while at + 4 <= body.len() {
+        let kind = u16::from_le_bytes([body[at], body[at + 1]]);
+        let len = usize::from(u16::from_le_bytes([body[at + 2], body[at + 3]]));
+        if len < 4 || at + len > body.len() {
+            break;
+        }
+        kinds.push(format!("{kind:#06x}"));
+        if (0x001C..=0x001E).contains(&kind) {
+            println!("PROBE server set {kind:#06x}: {:02x?}", &body[at + 4..at + len]);
+        }
+        at += len;
+    }
+    println!("PROBE server sets: {}", kinds.join(" "));
+}
+
+/// Bitmap Updates grouped into bursts, a burst ending at a gap of more than
+/// [`BURST_GAP`]: how long each lasts and how far apart they start, which is what a
+/// host with no frame markers spreads one picture over.
+const BURST_GAP: Duration = Duration::from_millis(10);
+
+fn report_bursts(arrivals: &[Duration]) {
+    if arrivals.len() < 2 {
+        return;
+    }
+    let mut bursts: Vec<(Duration, Duration, usize)> = Vec::new();
+    for &at in arrivals {
+        match bursts.last_mut() {
+            Some((_, end, n)) if at - *end <= BURST_GAP => {
+                *end = at;
+                *n += 1;
+            }
+            _ => bursts.push((at, at, 1)),
+        }
+    }
+    // Past the connect's repaints.
+    let steady: Vec<_> = bursts.iter().filter(|b| b.0 > Duration::from_secs(2)).collect();
+    if steady.len() < 2 {
+        return;
+    }
+    let mut lasting: Vec<u128> = steady.iter().map(|b| (b.1 - b.0).as_millis()).collect();
+    let mut apart: Vec<u128> = steady.windows(2).map(|w| (w[1].0 - w[0].0).as_millis()).collect();
+    let mut updates: Vec<usize> = steady.iter().map(|b| b.2).collect();
+    lasting.sort_unstable();
+    apart.sort_unstable();
+    updates.sort_unstable();
+    let q = |v: &[u128], f: f64| v[((v.len() - 1) as f64 * f) as usize];
+    println!(
+        "PROBE bursts after 2s: {} ({:.1}/s); lasting ms p10 {} p50 {} p90 {}; starts apart ms p10 {} p50 {} p90 {}; updates each p50 {}",
+        steady.len(),
+        steady.len() as f64 / (steady.last().unwrap().0 - steady[0].0).as_secs_f64(),
+        q(&lasting, 0.1),
+        q(&lasting, 0.5),
+        q(&lasting, 0.9),
+        q(&apart, 0.1),
+        q(&apart, 0.5),
+        q(&apart, 0.9),
+        updates[updates.len() / 2]
+    );
+    let first: Vec<String> = steady.iter().take(12).map(|b| format!("{}+{}", b.0.as_millis(), (b.1 - b.0).as_millis())).collect();
+    println!("PROBE first bursts (start+length ms): {}", first.join(" "));
+}
+
+/// The rows each burst's rectangles covered, for the first bursts past two seconds.
+fn report_band(places: &[(Duration, u16, u16)]) {
+    let mut out = Vec::new();
+    let mut burst: Option<(Duration, Duration, u16, u16, u16, u16, usize)> = None;
+    for &(at, x, y) in places.iter().filter(|p| p.0 > Duration::from_secs(2)) {
+        match &mut burst {
+            Some((_, end, top, bottom, left, right, n)) if at - *end <= BURST_GAP => {
+                *end = at;
+                *top = (*top).min(y);
+                *bottom = (*bottom).max(y);
+                *left = (*left).min(x);
+                *right = (*right).max(x);
+                *n += 1;
+            }
+            _ => {
+                if let Some(b) = burst.take() {
+                    out.push(b);
+                }
+                burst = Some((at, at, y, y, x, x, 1));
+            }
+        }
+        if out.len() >= 24 {
+            break;
+        }
+    }
+    for (start, _, top, bottom, left, right, n) in out {
+        println!("PROBE burst at {}ms: {n} tiles, rows {top}..{bottom}, columns {left}..{right}", start.as_millis());
+    }
+}
+
+/// One codec's surface bits: commands, bytes, and the bitmap sizes seen.
+type CodecTally = (usize, usize, std::collections::BTreeSet<(u16, u16)>);
+
+/// What the host drew with surface commands ([MS-RDPBCGR] 2.2.9.2).
+#[derive(Default)]
+struct SurfaceStats {
+    commands: usize,
+    /// By codec ID: commands, bytes, and the sizes seen.
+    by_codec: std::collections::BTreeMap<u8, CodecTally>,
+    frames_ended: usize,
+    /// Frames ended in each second of the watch.
+    per_second: std::collections::BTreeMap<u64, usize>,
+    unacknowledged: Vec<u32>,
+    clock: ClockStart,
+    /// NSCodec bitmaps by (color loss level, chroma subsampling level).
+    nsc_levels: std::collections::BTreeMap<(u8, u8), usize>,
+    began: Option<Duration>,
+    in_frame: usize,
+    /// Past two seconds: each frame's begin-to-end time, its tiles, and when it ended.
+    spans: Vec<(u128, usize, u128)>,
+}
+
+/// When the watch began, for the frames' timestamps.
+struct ClockStart(std::time::Instant);
+
+impl Default for ClockStart {
+    fn default() -> Self {
+        Self(std::time::Instant::now())
+    }
+}
+
+impl ClockStart {
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
+}
+
+impl SurfaceStats {
+    fn read(&mut self, mut data: &[u8], second: u64) {
+        let u16_at = |d: &[u8], at: usize| u16::from_le_bytes([d[at], d[at + 1]]);
+        while data.len() >= 2 {
+            self.commands += 1;
+            match u16_at(data, 0) {
+                // Set and Stream Surface Bits: a destination, then TS_BITMAP_DATA_EX.
+                0x0001 | 0x0006 => {
+                    let flags = data[11];
+                    let codec = data[13];
+                    let (w, h) = (u16_at(data, 14), u16_at(data, 16));
+                    let len = u32::from_le_bytes([data[18], data[19], data[20], data[21]]) as usize;
+                    let header = 22 + if flags & 0x01 != 0 { 24 } else { 0 };
+                    self.in_frame += 1;
+                    let entry = self.by_codec.entry(codec).or_default();
+                    entry.0 += 1;
+                    entry.1 += len;
+                    entry.2.insert((w, h));
+                    // NSCodec's stream header: four plane byte counts, then the
+                    // color loss level and the chroma subsampling level.
+                    if codec == NSC_ID && data.len() >= header + 18 {
+                        let levels = (data[header + 16], data[header + 17]);
+                        *self.nsc_levels.entry(levels).or_default() += 1;
+                    }
+                    data = &data[(header + len).min(data.len())..];
+                }
+                0x0004 => {
+                    let action = u16_at(data, 2);
+                    let id = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+
+                    let now = self.clock.elapsed();
+                    if action == 0x0000 {
+                        self.began = Some(now);
+                        self.in_frame = 0;
+                    } else if let Some(began) = self.began.take()
+                        && now > Duration::from_secs(2)
+                    {
+                        self.spans.push(((now - began).as_millis(), self.in_frame, now.as_millis()));
+                    }
+                    if action == 0x0001 {
+                        self.frames_ended += 1;
+                        *self.per_second.entry(second).or_default() += 1;
+                        self.unacknowledged.push(id);
+                    }
+                    data = &data[8.min(data.len())..];
+                }
+                other => {
+                    println!("PROBE an unknown surface command {other:#06x}; the rest of the update skipped");
+                    return;
+                }
+            }
+        }
+    }
+
+    fn report(&self) {
+        println!("PROBE surface commands: {}, frames ended: {}", self.commands, self.frames_ended);
+        for (codec, (n, bytes, sizes)) in &self.by_codec {
+            let shown: Vec<_> = sizes.iter().take(6).collect();
+            println!("PROBE codec {codec}: {n} commands, {bytes} bytes, sizes {shown:?}{}", if sizes.len() > 6 { " …" } else { "" });
+        }
+        println!("PROBE frames per second: {:?}", self.per_second.values().collect::<Vec<_>>());
+        println!("PROBE NSCodec (color loss level, subsampling): {:?}", self.nsc_levels);
+        let shown: Vec<String> = self.spans.iter().take(20).map(|(ms, n, end)| format!("{end}:{n}t/{ms}ms")).collect();
+        println!("PROBE frames (ended at: tiles / begin-to-end): {}", shown.join(" "));
+    }
 }
 
 /// The virtual channels one session's PDUs are addressed to.
