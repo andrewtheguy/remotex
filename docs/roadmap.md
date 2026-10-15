@@ -267,13 +267,13 @@ judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
 
 ### Motion for a ZRLE picture
 
-The ZRLE of a plain VNC server or of a Mac in Standard mode reaches the gateway
-exact and leaves it as VP9. Motion, which an RDP target has
-([composed for Motion](architecture.md#rdps-graphics-pipeline-composed-for-motion)),
-would send it as PNG where it is still and VP9 where it moves. Its 64-pixel
-tiles are ZRLE's, on a grid anchored at (0,0), where ZRLE's start at each
-rectangle's own origin, so the damage would be mapped onto the grid. Weighed
-against a picture that already follows the link as one stream.
+A Mac's virtual display under `ard` can be started with Motion
+([A Mac's virtual display, sent for Motion](architecture.md#a-macs-virtual-display-sent-for-motion)).
+The ZRLE of a plain VNC server, and of a Mac in Standard mode on its physical
+displays, still reaches the gateway exact and leaves it as one VP9 stream.
+Motion would send it the same way: PNG where it is still and VP9 where it moves.
+Weighed against a picture that already follows the link as one stream, and, on
+the physical displays, against Combined Display and a picture the Mac scales.
 
 ## Not planned
 

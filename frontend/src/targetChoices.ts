@@ -85,8 +85,9 @@ export interface TargetInfo {
   /** Whether which encoder codes the VP9 is a choice. */
   vp9: boolean;
   /**
-   * Whether the gateway may compose the host's pipeline for motion, beside
-   * high quality: VP9 where it moves, PNG where it is still.
+   * Whether the picture may be sent for motion, VP9 where it moves and PNG where
+   * it is still: an RDP host's pipeline composed by the gateway, beside high
+   * quality, or a Mac's ZRLE on its virtual display.
    */
   motion: boolean;
 }
@@ -212,6 +213,13 @@ export interface PipelineOption<V> {
   disabled: boolean;
 }
 
+/** Motion as the picker offers it: a tick. */
+export interface MotionRow {
+  label: string;
+  /** What ticking it does. */
+  note: string;
+}
+
 /**
  * How the host draws the pipeline: high quality or adaptive, and under an adaptive
  * one, the whole desktop or by region.
@@ -220,7 +228,7 @@ export interface PipelineRow {
   modes: PipelineOption<"high-quality" | "adaptive">[];
   h264: PipelineOption<Exclude<Pipeline, "high-quality">>[];
   /** Motion, under high quality, on a target that offers it: null otherwise. */
-  motion: { label: string; note: string } | null;
+  motion: MotionRow | null;
 }
 
 /** One encoder the VP9 can be coded with. */
@@ -270,6 +278,11 @@ export interface TargetOptions {
   placements: PlacementOption[] | null;
   /** How the host draws the pipeline, as a choice: null where it is none. */
   pipelineRow: PipelineRow | null;
+  /**
+   * Motion on a target that offers it with no pipeline to tick it under: null
+   * otherwise.
+   */
+  motionRow: MotionRow | null;
   /** The target's stream where it is passed in every session: null otherwise. */
   passed: PassedNote | null;
   /**
@@ -543,6 +556,26 @@ function pipelineRow(
 }
 
 /**
+ * Motion on a target that has no pipeline row to offer it under, a Mac's virtual
+ * display: nothing elsewhere, and unticked until somebody ticks it.
+ */
+function motionRow(
+  target: TargetInfo,
+  remembered: Partial<Choices> | undefined,
+): { row: MotionRow | null; motion: boolean } {
+  if (!target.motion || target.pipeline) {
+    return { row: null, motion: false };
+  }
+  return {
+    row: {
+      label: "Motion (alpha)",
+      note: "The gateway sends what moves as VP9 and what is still as PNG, exactly as the Mac draws it.",
+    },
+    motion: remembered?.motion === true,
+  };
+}
+
+/**
  * An RDP host's pipeline as the picker says it: passed unless the gateway
  * composes it for `motion`, and then said rather than offered, and a target a
  * browser that cannot compose one (`composes`) cannot start without Motion.
@@ -581,6 +614,7 @@ export function targetOptions(
     sizes[0].value;
   const sound = soundRow(target, remembered?.audio, abilities.audio);
   const drawn = pipelineRow(target, remembered, abilities.rdpH264);
+  const moving = motionRow(target, remembered);
   const { passed, blocked } = rdpGraphics(
     target,
     drawn.motion,
@@ -610,13 +644,14 @@ export function targetOptions(
     vp9:
       encoders?.find((option) => option.value === remembered?.vp9)?.value ??
       "libvpx",
-    motion: drawn.motion,
+    motion: drawn.motion || moving.motion,
   };
   return {
     sizes,
     soundRow: sound.row,
     placements,
     pipelineRow: drawn.row,
+    motionRow: moving.row,
     passed,
     pictures,
     encoders,

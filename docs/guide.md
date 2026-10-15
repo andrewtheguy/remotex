@@ -64,7 +64,7 @@ config key.
 | `vnc` | no | none | — | — | libvpx or native\* |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
 | `vnc`, `ard` | no | none | — | — | libvpx or native\* |
-| `vnc`, `ard` with `virtual_display` | yes | none | — | — | libvpx or native\* |
+| `vnc`, `ard` with `virtual_display` | yes | none | — | Motion (alpha), as Picture | libvpx or native\* |
 | `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — | — |
 
 \* Not in a gateway built without the `native-vp9` feature, the build for an
@@ -111,7 +111,11 @@ amd64 machine under x86-64-v3.
   eventually lossless: exact once what moved settles. See
   [An exact picture](#an-exact-picture). `render_motion_debug = true` on the target
   outlines what Motion sends: VP9 in magenta, PNG beside it in cyan, and the
-  cleanup after it in green.
+  cleanup after it in green. On an `ard` target with `virtual_display = true`,
+  *Motion* (alpha) is a box of its own, under Picture: the gateway sends what
+  moves on the Mac's virtual display as VP9 and what is still as PNG, which is
+  exact, since the Mac's ZRLE always is. `render_motion_debug` outlines it
+  there too.
 - **VP9 encoder.** Which encoder codes the VP9: *libvpx*, the default, or
   *Native* (alpha), the encoder in Rust that `screen-vp9` has written. On a
   `wlshare` target wlshare codes it, and needs a wlshare that has the encoder:
@@ -305,7 +309,8 @@ connection with the same error as wrong credentials. See
 - **Unofficial:** `virtual_display = true` on an `ard` target opens Standard
   mode on such a virtual display, with resize and without the media stream or
   sound. Apple's viewer never offers this combination; it was tested on macOS 26
-  only.
+  only. Its picture can be started with Motion (alpha), exact PNG where it is
+  still and VP9 where it moves; the physical displays cannot.
 
 Apple documents none of this protocol. Both modes are reverse engineered and
 only as correct as the Macs they were measured against, and a macOS update is
