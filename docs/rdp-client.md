@@ -347,10 +347,16 @@ small cache and `AVC_DISABLED`, so the host never sends H.264 and draws with the
 pipeline's other codecs alone. `THINCLIENT` is deliberately not set. The host
 confirms one set and then draws.
 
-High quality is not lossless. Of the codecs the host draws
-with, ClearCodec, planar and uncompressed rectangles carry their pixels exactly,
-and RemoteFX Progressive, which it uses for pictures and whatever moves, does
-not: it extends the RemoteFX codec, "a lossy image codec" ([MS-RDPRFX section
+High quality is not lossless unless the host is told to be
+([Lossless, by the host's policy](#lossless-by-the-hosts-policy)). Of the codecs
+the host draws with by default, planar and uncompressed rectangles and ClearCodec's
+raw and RLEX subcodecs carry their pixels exactly. ClearCodec's NSCodec subcodec
+shifts chroma bits away by its colour loss level ([MS-RDPNSC section
+2.2.2](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPNSC.pdf),
+[MS-RDPEGDI section
+3.1.9.1.4](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGDI.pdf)),
+3 on the probed host, and RemoteFX Progressive, which it uses for pictures and
+whatever moves, is lossy too: it extends the RemoteFX codec, "a lossy image codec" ([MS-RDPRFX section
 1](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPRFX.pdf)), by
 sub-band diffing and progressive passes ([MS-RDPEGFX section
 3.1.8.1](https://github.com/andrewtheguy/ms-rdp-specs/blob/main/MS-RDPEGFX.pdf)),
@@ -358,10 +364,11 @@ and a tile at full progressive quality is still quantized by its region's
 tables (3.1.8.1.3, and MS-RDPRFX 3.1.8.1.5). No capability flag of any set asks
 a host for a lossless codec in its place (MS-RDPEGFX 2.2.3.1 to 2.2.3.10): the
 flags size the cache, swap Progressive for the RemoteFX codec, take or refuse
-H.264, and refuse the scaled mappings. What a client can have is every tile
-whole at full quality in its first pass, which a Windows host sends to one that
-takes its network detection and claims UDP
-([The connection sequence](#the-connection-sequence)).
+H.264, and refuse the scaled mappings. What a client can have by asking is every
+tile whole at full quality in its first pass, which a Windows host sends to one
+that takes its network detection and claims UDP
+([The connection sequence](#the-connection-sequence)). Lossless is the host's
+setting alone.
 
 A session started Adaptive advertises otherwise, with `Connect::h264`, for a
 caller that decodes H.264 itself
@@ -422,6 +429,35 @@ Surface-to-surface copy reads the complete source before writing, which preserve
 overlapping scrolls. Cache commands retain rectangles by slot, and solid fills are
 clipped to their surface. When the graphics channel ends, an `info` log records the
 codecs and commands actually received during that session.
+
+### Lossless, by the host's policy
+
+A Windows host draws the pipeline losslessly when its policy says so, and
+`egfx` stays on for it. The policy is *Configure image quality for RemoteFX
+Adaptive Graphics*, under Computer Configuration > Administrative Templates >
+Windows Components > Remote Desktop Services > Remote Desktop Session Host >
+Remote Session Environment, enabled and set to Lossless. Its registry value is
+`ImageQuality` under `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal
+Services`: 1 is Lossless, 2 High, 3 Medium, the default, and 4 Low
+(`TS_SERVER_IMAGE_QUALITY` in `TerminalServer.admx`). A session started after
+`gpupdate /force` draws by it.
+
+Measured on the probed host (2026-10-14) with a still photograph on its
+screen, each session composed as the page composes it and compared with the
+same desktop drawn with bitmap updates:
+
+| Policy | What the host drew with | Pixels of the composed desktop that differ | The opening desktop |
+| --- | --- | --- | --- |
+| Not configured (Medium) | RemoteFX Progressive, and ClearCodec with NSCodec at colour loss level 3 | 46%, by up to 73 | 0.52 MB |
+| Lossless | planar alone, at full colour without subsampling | none, at the opening and after two resizes | 7.6 MB |
+
+Lossless takes no H.264 either. A session that offered it, with something
+moving on the host's screen, was drawn with planar and uncompressed rectangles
+alone, so an Adaptive session against such a host is drawn that way too, at that
+cost. Nothing here needs to change for it: every codec the host chose is one the
+compositor decodes exactly, and the pipeline keeps its resize, which bitmap
+updates do not have. So a target that needs every pixel exact keeps `egfx` on
+and has its host set to Lossless; `egfx = false` is not the way to it.
 
 ### The pipeline, passed on
 

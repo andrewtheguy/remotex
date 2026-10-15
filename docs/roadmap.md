@@ -239,28 +239,45 @@ What is left is the residual's Rice codes and the prediction, two loops in which
 every sample waits on the one before. What has been tried, and how a change is
 judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
 
-### A lossless picture, for a session that asks for one
+### A lossless picture that sends its motion as video
 
-For someone who needs every pixel exact and is on a link that can carry it. No
-session gives that today: a Windows host's graphics pipeline draws pictures with
-RemoteFX Progressive, which is lossy and takes no request to be otherwise
-([The graphics pipeline](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)), and
-every picture the gateway decodes leaves it as VP9. But some targets send the
-gateway an exact picture: an RDP host drawing bitmap updates (`egfx = false`),
-and the ZRLE of a plain VNC server or of a Mac in Standard mode.
+For someone who needs every pixel exact on what is still, on a link that cannot
+carry an exact picture of everything that moves. A Windows host set to Lossless
+already sends an exact picture through its graphics pipeline, passed to the
+page untouched and with resize
+([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)),
+but it sends what moves exact too: planar, with no H.264 even to a session that
+offers it, and 7.6 MB for the opening desktop alone, about 15 times what the host's
+default costs. The ZRLE of a plain VNC server or of a Mac in Standard mode
+reaches the gateway exact as well, and leaves it as VP9.
 
-What is considered is the mode the gateway once had for them, as a choice at
-the picker for those targets alone: the regions that are changing fast are
-coded as VP9 while they move, and each is sent again as PNG once it settles, so
-what is still on the screen is exact and only what moves is not. Everything
-else is PNG throughout.
+What is considered is a mode chosen at the picker for those targets: the
+regions that are changing fast are coded as VP9 while they move, and each is
+sent again as PNG once it settles, so what is still on the screen is exact and
+only what moves is not. Everything else is PNG throughout. It is the mode the
+gateway once had for a picture it decodes.
 
-It is weighed against what removing it bought. It was a second carriage beside
-the stream, with its own records, a cell grid, the detection of what moves and
-the cleanups after it, where there is now one way a decoded picture leaves the
-gateway ([Media paths](architecture.md#media-paths)). It would not reach a
-passed stream, which the gateway never decodes, so a Windows host would get it
-only with the pipeline off, and with that no resize.
+On an RDP target it is built on the graphics pipeline, composed at the gateway
+for such a session from a host set to Lossless, and not on bitmap updates
+(`egfx = false`). The bitmap path performs worse than the pipeline, has no frame
+boundary, so its damage is flushed on a 16 ms guess, and keeps the size it
+opened at ([Bitmap updates](rdp-client.md#bitmap-updates)). The pipeline says
+where each frame ends, which rectangles each command drew and which it moved
+by a copy between surfaces or out of a cache, so what moves can be read off the
+commands rather than found by comparing pictures; it keeps resize and virtual
+displays; and what the gateway composes from it is the host's exact picture,
+so a settled region's PNG is too. The compositor is already the gateway's own:
+the page runs `crates/remotex-rdp-graphics`, which builds natively as well.
+
+It is weighed against two things. One is a design rule: every RDP host's
+pipeline is passed to the page and the gateway composes none
+([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)),
+and this mode would be its one exception, with the gateway's cost of composing
+and encoding back for such a session, where a passed one leaves it a few
+percent of a core. The other is what removing the old mode bought. It was a
+second carriage beside the stream, with its own records, a cell grid, the
+detection of what moves and the cleanups after it, where there is now one way a
+decoded picture leaves the gateway ([Media paths](architecture.md#media-paths)).
 
 ## Not planned
 
