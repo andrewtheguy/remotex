@@ -369,8 +369,8 @@ Displays over more than two screens, whatever its size. On VNC started without
 resize the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
-cropped picture. Two streams for Standard's Combined Display are the planned way, in
-[the roadmap](roadmap.md#two-streams-for-standards-combined-display). See
+cropped picture. Two streams for Standard's Combined Display are the way under
+consideration, in [the roadmap](roadmap.md#two-streams-for-standards-combined-display). See
 [Past the ceiling](#past-the-ceiling).
 
 #### wlshare's VP9 and the `wlshare` subtype

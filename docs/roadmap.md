@@ -84,29 +84,10 @@ carry the stream.
 
 None of it has been measured at 4K.
 
-### Two streams for Standard's Combined Display
-
-Standard's Combined Display over two screens is one framebuffer of both, which is
-often past the video ceiling at factor 1.0 (5376×2287 over a 2x screen beside a
-1x one), and then has no picture: the page offers one screen instead
-([past the ceiling](architecture.md#past-the-ceiling)). The plan is to carry that
-view as two streams, one per screen, each its own VP9 stream within the ceiling,
-for the page to lay out by the mosaic's regions as it composes one framebuffer
-today. How the Mac's rectangles split between the two, how the queue and the
-paint window order two chains, and how each stream starts over are the work.
-
-Two screens is the limit, as it is today: All Displays over three or more is held
-with the notice whatever its size.
-
-High Performance is not part of this. Its All Displays is not one framebuffer:
-each of its virtual displays is a stream of its own already, the second shown in
-a browser tab ([two virtual displays](#two-virtual-displays-past-alpha)).
-
 ### Two virtual displays past alpha
 
-`virtual_displays = 2` on an `rdp` or `ard-high-performance` target is alpha
-([Windows](guide.md#windows-rdp), [Macs](guide.md#macs-vnc-with-an-apple-subtype)).
-What it lacks:
+`virtual_displays = 2` on an `rdp` target is alpha
+([Windows](guide.md#windows-rdp)). What it lacks:
 
 - **A tab left behind.** When the session's page goes — closed, reloading, or
   its socket dropped — the tab showing the second display carries on with no
@@ -118,7 +99,7 @@ What it lacks:
   desktop until the page is back.
 
 Fixing that does not take it out of alpha by itself. It also needs more testing
-than it has had, on both kinds of target, before it is offered as anything else.
+than it has had before it is offered as anything else.
 
 ### A touchpad's scroll as a gesture on a Mac
 
@@ -139,6 +120,24 @@ tested, on a physical Mac.
 
 ## Under consideration
 
+### Two streams for Standard's Combined Display
+
+Standard's Combined Display over two screens is one framebuffer of both, which is
+often past the video ceiling at factor 1.0 (5376×2287 over a 2x screen beside a
+1x one), and then has no picture: the page offers one screen instead
+([past the ceiling](architecture.md#past-the-ceiling)). The plan is to carry that
+view as two streams, one per screen, each its own VP9 stream within the ceiling,
+for the page to lay out by the mosaic's regions as it composes one framebuffer
+today. How the Mac's rectangles split between the two, how the queue and the
+paint window order two chains, and how each stream starts over are the work.
+
+Two screens is the limit, as it is today: All Displays over three or more is held
+with the notice whatever its size.
+
+High Performance is not part of this. Its All Displays is not one framebuffer:
+each of its virtual displays is a stream of its own already, the second shown in
+a browser tab ([two virtual displays](apple-vnc-889.md#two-virtual-displays)).
+
 ### A passed stream for a Mac on a slow link
 
 A High Performance Mac's passed stream does not follow the browser's link: a
@@ -146,6 +145,9 @@ still screen comes far under its 20–60 Mbit/s target, but a slow link falls
 behind one in motion, and such a link is served today by an `ard` target, its
 ZRLE re-encoded here as VP9
 ([A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link)).
+Reporting the browser's delay to the Mac would not bring it there: its rate
+controller walks the target down by the delay only as far as its floor, about
+20 Mbit/s ([Rate control](apple-vnc-889.md#rate-control)).
 A stream the Mac makes itself could be passed in its place, chosen at the
 picker as an RDP host's H.264 is. It has only been probed, and has not been
 decoded.
