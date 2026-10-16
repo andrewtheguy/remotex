@@ -44,9 +44,6 @@ pub struct DesktopStream {
     /// has moved it. A stream rebuilt after a resize starts here, so one built while
     /// the link is behind starts where the link left off.
     quality: u8,
-    /// Whether the encoder is screen-vp9's in Rust rather than libvpx: the plan's
-    /// [`crate::config::RenderPlan::native_vp9`], for the stream's whole life.
-    native: bool,
     /// The desktop, learned from [`crate::protocol::ServerMsg::Resize`]. `None` until
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
@@ -77,10 +74,9 @@ pub struct DesktopStream {
 }
 
 impl DesktopStream {
-    pub fn new(quality: u8, native: bool) -> Self {
+    pub fn new(quality: u8) -> Self {
         Self {
             quality,
-            native,
             size: None,
             mirror: None,
             spare: None,
@@ -220,7 +216,7 @@ impl DesktopStream {
                 let size = self.mirror.as_ref().expect("owed pixels mean a mirror").size();
                 self.owed = false;
                 Live {
-                    stream: Stream::new(size, self.quality, self.native)?,
+                    stream: Stream::new(size, self.quality)?,
                     quality: self.quality,
                     // Its whole picture is owed: nothing has carried these pixels yet.
                     dirty: true,
@@ -524,7 +520,7 @@ mod tests {
     }
 
     fn stream(w: u16, h: u16) -> DesktopStream {
-        let mut stream = DesktopStream::new(60, false);
+        let mut stream = DesktopStream::new(60);
         stream.want(w, h);
         stream
     }

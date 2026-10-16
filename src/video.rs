@@ -352,9 +352,7 @@ mod tests {
         for (w, h) in sizes {
             for quality in qualities {
                 let mut mirror = Mirror::new(w, h).expect("a mirror");
-                let mut stream =
-                    crate::vp9::Stream::new(mirror.size(), quality, false)
-                        .expect("a stream");
+                let mut stream = crate::vp9::Stream::new(mirror.size(), quality).expect("a stream");
                 let mut total = 0usize;
                 let mut keyframe_bytes = 0usize;
                 let mut encode = std::time::Duration::ZERO;

@@ -31,15 +31,8 @@ edition = "2024"
 # Native builds include the local TUI control plane. Container artifacts
 # explicitly disable default features: a remotely deployed gateway must not
 # expose process supervision or its private worker surface.
-default = ["embedded-gateway", "native-vp9"]
+default = ["embedded-gateway"]
 embedded-gateway = ["dep:crossterm", "dep:libc", "dep:windows-sys"]
-# ALPHA: screen-vp9's encoder written in Rust, which a session started with the
-# picker's native VP9 encoder codes its stream with in libvpx's place. On by
-# default, in a container's build as in a native one. It is built for NEON on
-# arm64 and for x86-64-v3 on amd64, which `.cargo/config.toml` sets; a build
-# without the feature and with that flag taken back out is the gateway for an
-# amd64 machine under x86-64-v3 (packaging/README.md, "x86-64 CPU compatibility").
-native-vp9 = ["screen-vp9/native"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -93,8 +86,10 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
 #
-# Its `native` feature, the ALPHA encoder it has written in Rust, is this
-# crate's `native-vp9` above.
+# Its `native` feature, the ALPHA encoder it has written in Rust, is left off:
+# on amd64 it refuses to build under x86-64-v3, and this gateway is built for the
+# baseline (packaging/README.md, "x86-64 CPU compatibility"). A session that
+# chooses that encoder asks wlshare for it, on a `wlshare` target alone.
 screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.22" }
 # Remote audio: resample redirected PCM and encode bare Opus packets, as wlshare
 # codes its own: sound-opus, the one crate that codes a desktop's sound as Opus

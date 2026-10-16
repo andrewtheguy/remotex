@@ -30,8 +30,8 @@
 //   choice on a target with the pipeline on, and under adaptive the whole desktop
 //   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
 //   offered high quality alone.
-// - Which encoder codes the VP9, libvpx or the native one in Rust (alpha), is a
-//   choice on a target that offers it: see `encoderOptions`.
+// - Which encoder wlshare codes the VP9 with, libvpx or the native one in Rust
+//   (alpha), is a choice on a `wlshare` target: see `encoderOptions`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 // - Which decoder takes the picture is no choice: the page decodes the VP9, and
@@ -116,9 +116,9 @@ export type Placement = "right" | "left" | "top" | "bottom";
 export type Pipeline = "high-quality" | "adaptive-desktop" | "adaptive-region";
 
 /**
- * Which encoder codes a session's VP9, as `connect` names it: libvpx, or the
- * native one in Rust (alpha). The gateway's own where it encodes the picture,
- * and wlshare's on a `wlshare` target.
+ * Which encoder wlshare codes a session's VP9 with, as `connect` names it:
+ * libvpx, or the native one in Rust (alpha). What the gateway encodes itself is
+ * libvpx's.
  */
 export type Vp9Encoder = "libvpx" | "native";
 
@@ -318,28 +318,21 @@ function pictureOptions(
 }
 
 /**
- * The encoders `target`'s VP9 can be coded with, libvpx first: by wlshare on a
- * `wlshare` target, and by the gateway on any other. The stream is the same to
- * the page either way.
+ * The encoders wlshare can code a `wlshare` target's VP9 with, libvpx first.
+ * The stream is the same to the page either way.
  */
-function encoderOptions(target: TargetInfo): EncoderOption[] {
-  const coder =
-    target.protocol === "vnc" && target.subtype === "wlshare"
-      ? "wlshare codes"
-      : "The gateway codes";
-  return [
-    {
-      value: "libvpx",
-      label: "libvpx",
-      note: `${coder} the VP9 with libvpx.`,
-    },
-    {
-      value: "native",
-      label: "Native (alpha)",
-      note: `${coder} the VP9 with screen-vp9's encoder in Rust.`,
-    },
-  ];
-}
+const ENCODER_OPTIONS: EncoderOption[] = [
+  {
+    value: "libvpx",
+    label: "libvpx",
+    note: "wlshare codes the VP9 with libvpx.",
+  },
+  {
+    value: "native",
+    label: "Native (alpha)",
+    note: "wlshare codes the VP9 with screen-vp9's encoder in Rust.",
+  },
+];
 
 const FOLLOWS: Record<"window" | "screen", SizeOption> = {
   window: {
@@ -549,7 +542,7 @@ export function targetOptions(
     (able.find((option) => option.value === remembered?.passthrough) ?? able[0])
       ?.value ?? null;
   const placements = target.placement ? PLACEMENTS : null;
-  const encoders = target.vp9 ? encoderOptions(target) : null;
+  const encoders = target.vp9 ? ENCODER_OPTIONS : null;
   const choices: Choices = {
     size,
     audio: sound.audio,

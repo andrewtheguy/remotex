@@ -216,9 +216,9 @@ pub struct RenderPlan {
     /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
     /// [`Self::rdp_graphics`].
     pub rdp_h264: bool,
-    /// ALPHA: the VP9 is coded by screen-vp9's encoder in Rust rather than
-    /// libvpx ([`Vp9Encoder::Native`]), chosen at the picker: here, in a build
-    /// that has it, or in wlshare, for the stream a `wlshare` target passes.
+    /// ALPHA: wlshare codes the stream a `wlshare` target passes with
+    /// screen-vp9's encoder in Rust rather than libvpx ([`Vp9Encoder::Native`]),
+    /// chosen at the picker.
     pub native_vp9: bool,
 }
 
@@ -317,8 +317,7 @@ pub struct Offers {
     /// ([`Pipeline`]): on an RDP target with the pipeline on.
     pub pipeline: bool,
     /// Whether which encoder codes the VP9 is a choice ([`Vp9Encoder`]): on a
-    /// `wlshare` target, whose own encoder codes it, and in a build with the
-    /// `native-vp9` feature on any target whose picture may be VP9 encoded here.
+    /// `wlshare` target alone, whose own encoder codes it.
     pub vp9: bool,
 }
 
@@ -454,10 +453,9 @@ impl Pipeline {
     }
 }
 
-/// Which encoder codes a session's VP9: [`Choices::vp9`], on a target that offers
-/// the choice ([`Offers::vp9`]). Here for a stream this gateway encodes, and in
-/// wlshare for the one a `wlshare` target passes, which is asked for it by name
-/// (`WLSX`).
+/// Which encoder wlshare codes a session's VP9 with: [`Choices::vp9`], on a
+/// `wlshare` target ([`Offers::vp9`]), which asks for it by name (`WLSX`). What
+/// this gateway encodes itself is libvpx's.
 ///
 /// The stream is the same to a decoder either way, 4:4:4 at the dial, so nothing
 /// else of a session changes with it: two sessions of one target that differ in it
@@ -468,15 +466,9 @@ pub enum Vp9Encoder {
     /// libvpx.
     #[default]
     Libvpx,
-    /// ALPHA. The encoder `screen-vp9` has written in Rust. A build without the
-    /// `native-vp9` feature has none of its own, and offers it on a `wlshare`
-    /// target alone.
+    /// ALPHA. The encoder `screen-vp9` has written in Rust, in wlshare.
     Native,
 }
-
-/// Whether this build has the encoder in Rust to code a stream with here
-/// ([`Vp9Encoder::Native`]).
-const NATIVE_VP9: bool = cfg!(feature = "native-vp9");
 
 /// Whether a session takes the remote's sound, and what that sound is sent to the
 /// browser as: [`Choices::audio`], on a target that offers it ([`Offers::audio`]).
@@ -1041,16 +1033,15 @@ impl TargetConfig {
                 passthrough: if self.egfx() { &[Passthrough::RdpGraphics] } else { &[] },
                 placement: self.virtual_displays > 1,
                 pipeline: self.egfx(),
-                // The pipeline passes in every session: only the bitmap path is VP9.
-                vp9: !self.egfx() && NATIVE_VP9,
+                vp9: false,
             },
             // Read as any VNC server, which carries no sound and is shown at its
             // own size.
             (Protocol::Vnc, None) => {
-                Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false, vp9: NATIVE_VP9 }
+                Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false, vp9: false }
             }
             // Its VP9 is the subtype's picture and not a choice, and wlshare's own
-            // encoder is asked for which codes it, in any build.
+            // encoder is asked for which codes it.
             (Protocol::Vnc, Some(Subtype::Wlshare)) => {
                 Offers { resize: true, audio: true, passthrough: &[], placement: false, pipeline: false, vp9: true }
             }
@@ -1063,7 +1054,7 @@ impl TargetConfig {
                     passthrough: &[],
                     placement: false,
                     pipeline: false,
-                    vp9: NATIVE_VP9,
+                    vp9: false,
                 }
             }
             // The sound comes with the picture, so it is not a choice, and the
@@ -1108,7 +1099,7 @@ impl TargetConfig {
             ("adaptive H.264", choices.pipeline != Pipeline::HighQuality && !offers.pipeline),
             (
                 "the native VP9 encoder",
-                choices.vp9 != Vp9Encoder::Libvpx && (!offers.vp9 || self.passthrough(choices).is_some()),
+                choices.vp9 != Vp9Encoder::Libvpx && !offers.vp9,
             ),
         ];
         match refused.into_iter().find(|(_, refused)| *refused) {
@@ -3396,7 +3387,7 @@ mod tests {
         // Standard mode exposes physical displays, which this gateway never resizes,
         // and never touches the Mac's sound: the picker has nothing to offer there.
         let standard = &ard("username = \"andrew\"\npassword = \"h\"").unwrap().targets[0];
-        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false, vp9: NATIVE_VP9 });
+        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false, vp9: false });
 
         // And it is a VNC subtype only.
         let err = ConfigFile::parse(&format!(
@@ -3442,7 +3433,7 @@ mod tests {
         assert!(target.has_virtual_display());
         assert_eq!(
             target.offers(),
-            Offers { resize: true, audio: false, passthrough: &[], placement: false, pipeline: false, vp9: NATIVE_VP9 },
+            Offers { resize: true, audio: false, passthrough: &[], placement: false, pipeline: false, vp9: false },
             "a display to resize, and no sound on Standard's virtual display either"
         );
         assert!(!target.media_stream());
@@ -4019,10 +4010,9 @@ vnc_password = \"x\"")).unwrap();
         assert!(!config.targets[2].camera, "the camera is opt-in");
     }
 
-    /// The alpha VP9 encoder is chosen at the picker, libvpx unless chosen:
-    /// wlshare's on a `wlshare` target in any build, and this gateway's on a
-    /// target whose picture is VP9 encoded here in a build that has it. It is
-    /// refused where the picture is passed, and the key it once was is no key.
+    /// The alpha VP9 encoder is chosen at the picker, libvpx unless chosen, and
+    /// is wlshare's: offered on a `wlshare` target alone, refused on every other,
+    /// and the key it once was is no key.
     #[test]
     fn the_alpha_vp9_encoder_is_chosen_at_the_picker() {
         let parse = |target: &str| {
@@ -4045,13 +4035,8 @@ vnc_password = \"x\"")).unwrap();
         )
         .unwrap();
         for target in [&plain.targets[0], &bitmap.targets[0]] {
-            assert_eq!(target.offers().vp9, NATIVE_VP9);
-            if NATIVE_VP9 {
-                assert_eq!(target.accepts(native), Ok(()));
-                assert!(target.render_plan(native, Decoders::ALL).native_vp9);
-            } else {
-                assert_eq!(target.accepts(native), refused(&target.name));
-            }
+            assert!(!target.offers().vp9, "{} codes its VP9 here, with libvpx", target.name);
+            assert_eq!(target.accepts(native), refused(&target.name));
         }
 
         // An RDP host's pipeline passes in every session, so no VP9 is chosen for it.
@@ -4231,7 +4216,7 @@ vnc_password = \"x\"")).unwrap();
         assert!(!win.render_plan(unasked, decodes).rdp_h264, "high quality unless chosen");
 
         let bitmap = rdp("egfx = false");
-        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false, vp9: NATIVE_VP9 });
+        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false, vp9: false });
         assert_eq!(
             bitmap.accepts(passed),
             Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })
