@@ -2653,6 +2653,17 @@ impl MediaStream {
         };
     }
 
+    /// The Mac has made the session a virtual display again after moving it off
+    /// its own, at a login at the Mac: the new user session's agent took the
+    /// connection over with the stream stopped and names no ports for it, and an
+    /// offer starts its stream on the ports named at the start.
+    pub fn moved_back(&mut self) {
+        self.invited = true;
+        if matches!(self.owed, Owed::Ports(_)) {
+            self.owed = Owed::Nothing;
+        }
+    }
+
     /// A picture of `size` came from the receiver for display `leg`. Each one of
     /// the display the stream was offered for puts the picture's deadline off; one
     /// of another display, the old one's last, does not.

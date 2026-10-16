@@ -1886,13 +1886,16 @@ display is 1280×800, with sessions asking for 1600×1000 or 1440×900:
   controls. It offers only on message 1, which does not come.
 
 A published description saw the same switch on a 5K Mac, after "a login or
-unlock at the Mac, the Mac waking". Remotex takes every High Performance layout
-as its virtual display and offers only after message 1, so after such a login
-it owes ports the Mac never names. Run through a login on the virtual Mac, it
-listed the physical display as its virtual display and resized the page to
-1280×800. It ended the session 10 s later: "the Mac named no ports for its
-media stream within 10s". Read from its code, a physical display past
-3840×2160 ends the session at once.
+unlock at the Mac, the Mac waking". Remotex asks again as Apple's viewer does,
+on the layout rather than the status: a layout with bit 0 clear after one with
+it set is not its desktop, and is not applied. The page is told the screen is
+not available, and remotex asks for its display again at the size it had. The
+virtual display that comes back is a display change like any other, and is
+offered the stream on the ports named at the start, with no message 1. Without
+one within 30 s the session ends. Run through a logout and a login on the
+virtual Mac, the session was moved to the 1280×800 display 2 s after
+`MiscStatus` 17, had a new 1440×900 virtual display 3 s later, and streamed it
+a second after that.
 
 ### Reaching the gateway
 

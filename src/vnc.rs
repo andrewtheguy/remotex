@@ -693,6 +693,12 @@ struct DesktopState {
     /// A High Performance layout has arrived: the virtual display the session
     /// asked for exists, and a media-stream offer can name its size.
     laid_out: bool,
+    /// The Mac's last layout had the session on a virtual display.
+    on_virtual: bool,
+    /// The Mac moved the session off its virtual display, as a login at the Mac
+    /// does, and the session is asking for it back. The desktop is still the
+    /// virtual display's, which is what a request names, never a no-op.
+    moved_off: bool,
     /// The canvas's display has had a picture of its current size from the media
     /// stream since the stream last stopped. A second display's tab keeps its own
     /// ([`TabFeed::live`]): the legs deliver apart.
@@ -1116,8 +1122,12 @@ impl DesktopState {
     /// carries requests in the order they were decided.
     /// Whether asking a High Performance Mac for `points` would change nothing.
     /// The density has to agree too: a 3840×2160 desktop moving from 1x to 2x
-    /// keeps every pixel and still needs the new mode sent.
+    /// keeps every pixel and still needs the new mode sent. Never while the Mac
+    /// has moved the session off its virtual display ([`Self::moved_off`]).
     fn hp_noop(&self, points: (u16, u16)) -> bool {
+        if self.moved_off {
+            return false;
+        }
         let asked = self.hp_modes(points);
         let sizes = self.hp_sizes();
         let scales: Vec<f32> = if self.virtuals.is_empty() {
@@ -3002,6 +3012,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         second_points: None,
         second_density: None,
         laid_out: false,
+        on_virtual: false,
+        moved_off: false,
         canvas_live: false,
         media_live: false,
         covered: media_stream,
@@ -3869,6 +3881,13 @@ async fn hp_resize_step(
             // pixel under a media stream: a full request the Mac is left holding
             // is served after the next display change, at this size.
             Some(HpStep::GiveUp) => {
+                if desktop.lock().unwrap().moved_off {
+                    anyhow::bail!(
+                        "the Mac moved the session off its virtual display, as a login at the Mac \
+                         does, and made it no other within {}s",
+                        HP_RESIZE_STUCK.as_secs()
+                    );
+                }
                 let (size, interval) = {
                     let d = desktop.lock().unwrap();
                     (d.poll_size(), d.push_interval_us)
@@ -5002,6 +5021,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             }
                         }
                     }
+                    17 => info!("vnc: the Mac's user session changed: a login or a logout at the Mac"),
                     _ => debug!("vnc: Apple status command {command}"),
                 }
             }
@@ -6566,6 +6586,10 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     } else {
         vnc_apple::parse_layout(&payload)?
     };
+    if virtual_display && hp_moved_off(shared, &layout, sink).await? {
+        rearm_after_layout(uplink, desktop, false).await?;
+        return Ok(false);
+    }
 
     // The composition goes first: it says how the framebuffer the resize names
     // is presented, and a browser must not present one layout's pixels through
@@ -6621,8 +6645,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         };
         let changed = {
             let mut d = desktop.lock().unwrap();
-            // Either display's change answers a request, which names both.
-            let changed = resized || (!d.virtuals.is_empty() && d.virtuals != virtuals);
+            // Either display's change answers a request, which names both, and
+            // so does the virtual display the Mac makes again after moving the
+            // session off it, which may have the size it had.
+            let back = std::mem::take(&mut d.moved_off);
+            let changed = back || resized || (!d.virtuals.is_empty() && d.virtuals != virtuals);
             d.virtuals.clone_from(&virtuals);
             // The Mac's video legs follow its arrangement: the display that
             // starts the framebuffer first.
@@ -6637,8 +6664,15 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             if changed {
                 stream_stopped(&mut d, &shared.tab);
                 if let Some(media) = &shared.media {
-                    media.lock().unwrap().stopped();
+                    let mut media = media.lock().unwrap();
+                    if back {
+                        media.moved_back();
+                    }
+                    media.stopped();
                 }
+            }
+            if back {
+                info!("vnc: the Mac made the session a virtual display again");
             }
             changed
         };
@@ -6730,23 +6764,73 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         }
     }
 
-    // A layout that answered nothing leaves a High Performance change out, and
-    // the region stays narrowed until the one that answers it — see
-    // [`HP_HOLD_REQUEST`].
+    rearm_after_layout(uplink, desktop, virtual_display).await?;
+    Ok(resized)
+}
+
+/// Re-arm the Mac's unasked updates, which every layout drops, and its
+/// pasteboard watching on a virtual display's. A layout that answered nothing
+/// leaves a High Performance change out, and the region stays narrowed until the
+/// one that answers it — see [`HP_HOLD_REQUEST`].
+async fn rearm_after_layout(
+    uplink: &SharedUplink,
+    desktop: &SharedDesktop,
+    pasteboard: bool,
+) -> anyhow::Result<()> {
     let mut uplink = uplink.lock().await;
     let (armed, interval) = {
         let d = desktop.lock().unwrap();
         (d.poll_size(), d.push_interval_us)
     };
-    if virtual_display {
+    if pasteboard {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
     debug!(
         "vnc: arming auto framebuffer updates for {}x{}",
         armed.0, armed.1
     );
-    uplink.send(&vnc_apple::auto_framebuffer_update(interval, armed)).await?;
-    Ok(resized)
+    uplink.send(&vnc_apple::auto_framebuffer_update(interval, armed)).await
+}
+
+/// Whether `layout` has the Mac's session off the virtual display it had, which
+/// a login at the Mac does: the new user session's agent takes the connection
+/// over with only the physical display, and the stream stopped. Such a layout is
+/// not the session's desktop and is not applied. The first asks for the
+/// session's display again, as Apple's viewer does, and the browser is told the
+/// screen is not available until the stream delivers for it; the virtual display
+/// the Mac then makes is a display change like any other
+/// ([`MediaStream::moved_back`]).
+async fn hp_moved_off(shared: &Shared, layout: &vnc_apple::Layout, sink: &VideoSink) -> anyhow::Result<bool> {
+    let asked = {
+        let mut d = shared.desktop.lock().unwrap();
+        let was = std::mem::replace(&mut d.on_virtual, layout.on_virtual_display);
+        if layout.on_virtual_display || !(was || d.moved_off) {
+            return Ok(false);
+        }
+        if d.moved_off {
+            None
+        } else {
+            d.moved_off = true;
+            stream_stopped(&mut d, &shared.tab);
+            if let Some(media) = &shared.media {
+                media.lock().unwrap().stopped();
+            }
+            let points = d.hp_first_points();
+            d.hp.report(points, false, tokio::time::Instant::now());
+            Some(points)
+        }
+    };
+    if let Some((w, h)) = asked {
+        warn!(
+            "vnc: the Mac moved the session off its virtual display, as a login at the Mac \
+             does, to a {}x{} display; asking for the {w}x{h} point virtual display again",
+            layout.backing.0, layout.backing.1
+        );
+        cover(&shared.desktop, sink).await?;
+        tab_cover(&shared.tab, shared.media.as_ref()).await;
+        shared.hp_wake.notify_one();
+    }
+    Ok(true)
 }
 
 /// Scroll intent turned into what the server's wire can say of it, carrying the
@@ -9636,6 +9720,8 @@ mod tests {
             second_points: None,
             second_density: None,
             laid_out: false,
+            on_virtual: false,
+            moved_off: false,
             canvas_live: false,
             media_live: false,
             covered: false,
@@ -12696,6 +12782,58 @@ mod tests {
 
         state.apple_layout = Some(parse_layout(&test_layout(Some(7), &[(7, (1440, 900), (2880, 1800), 0x00)])).unwrap());
         assert_eq!(state.apple_pointer(1440, 900), (1440, 900));
+    }
+
+    /// A login at the Mac moves the session to the physical display: its layout
+    /// is not applied, the display the session had is asked for again, and the
+    /// virtual display the Mac makes then is offered the stream on the ports it
+    /// named at the start, since it names none again.
+    #[tokio::test]
+    async fn a_session_moved_off_its_virtual_display_asks_for_it_again() {
+        let flagged = |size: (u16, u16), flags: u32| {
+            let mut wire = layout_payload(None, &[(9, size, size, 0x01)]);
+            wire[2 + 0x0e..2 + 0x12].copy_from_slice(&flags.to_be_bytes());
+            wire
+        };
+        let (uplink, _sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let desktop = shared_desktop((1600, 1000), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_stream = true;
+            d.covered = true;
+        }
+        let addr = "127.0.0.1:5900".parse().unwrap();
+        let receive = vnc_apple_media::Receive { codec: vnc_apple_media::Codec::Hevc, strips: true };
+        let media: SharedMedia = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, receive, 1).0));
+        let shared = Shared {
+            media: Some(Arc::clone(&media)),
+            ..test_shared(uplink, Arc::clone(&desktop), test_shadow((1600, 1000)))
+        };
+        read_display_layout(&mut flagged((1600, 1000), 0x5).as_slice(), &shared, true, &sink).await.unwrap();
+        media.lock().unwrap().test_answered(&[(1600, 1000)]);
+        desktop.lock().unwrap().covered = false;
+
+        let physical = flagged((1280, 800), 0x4);
+        assert!(!read_display_layout(&mut physical.as_slice(), &shared, true, &sink).await.unwrap());
+        {
+            let mut d = desktop.lock().unwrap();
+            assert_eq!(d.size, (1600, 1000), "the physical display is not the desktop");
+            assert!(d.moved_off && d.covered);
+            assert_eq!(d.hp.want, Some((1600, 1000)), "the session's display, asked for again");
+            assert!(!d.hp_noop((1600, 1000)), "though the desktop has its size");
+            d.hp.want = None;
+        }
+        read_display_layout(&mut physical.as_slice(), &shared, true, &sink).await.unwrap();
+        assert_eq!(desktop.lock().unwrap().hp.want, None, "asked for once");
+        assert_eq!(media.lock().unwrap().offer(&[(1600, 1000)]), None, "no stream for the physical display");
+
+        read_display_layout(&mut flagged((1600, 1000), 0x5).as_slice(), &shared, true, &sink).await.unwrap();
+        assert!(!desktop.lock().unwrap().moved_off);
+        assert!(
+            matches!(media.lock().unwrap().offer(&[(1600, 1000)]), Some(vnc_apple_media::Offer::Configuration(_))),
+            "offered with no ports named again"
+        );
     }
 
     /// A session that asked for two virtual displays shows one of the two the
