@@ -23,7 +23,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/flac"]
 
 [package]
 name = "remotex"
-version = "0.0.413"
+version = "0.0.414"
 license = "MIT"
 edition = "2024"
 
@@ -95,7 +95,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 #
 # Its `native` feature, the ALPHA encoder it has written in Rust, is this
 # crate's `native-vp9` above.
-screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.21" }
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.22" }
 # Remote audio: resample redirected PCM and encode bare Opus packets, as wlshare
 # codes its own: sound-opus, the one crate that codes a desktop's sound as Opus
 # for this gateway and for wlshare, its own repository pinned at a release tag by
