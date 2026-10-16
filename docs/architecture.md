@@ -683,8 +683,8 @@ itself. Which passed streams follow the browser's link, and how, is in
 [A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
 
 The engines never see the config keys. They and the session's choices collapse
-to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `rdp_graphics`,
-`rdp_h264`, `native_vp9`) at the config boundary in
+to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `apple_h264`,
+`apple_adaptive`, `rdp_graphics`, `rdp_h264`, `native_vp9`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 

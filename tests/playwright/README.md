@@ -151,9 +151,12 @@ over is given none of it: it lands on a picker where a target whose pipeline it
 cannot compose has Start disabled, with the reason, and no VP9 in its place. It
 also checks that the pipeline is said to be always passed, with no box to tick,
 and that the Graphics
-group opens on High quality and, under Adaptive, on H.264 full screen. It needs an
-`rdp` target that configures a `size`, the one type that offers all three
-choices, and the tone harness is one.
+group opens on High quality and, under Adaptive, on H.264 full screen. Its sound
+checks are a browser with no audio decoder, which is offered FLAC alone and plays
+it, and an iPhone, which loads as little WebAssembly as it can: FLAC is greyed
+with the reason, Start sends Opus, and the FLAC decoder's module is never
+fetched. It needs an `rdp` target that configures a `size`, the one type that
+offers all three choices, and the tone harness is one.
 
 `clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It
 proves that unsolicited remote copies still auto-sync, while opening and
