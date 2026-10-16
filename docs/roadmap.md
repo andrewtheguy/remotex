@@ -278,16 +278,6 @@ What is left is the residual's Rice codes and the prediction, two loops in which
 every sample waits on the one before. What has been tried, and how a change is
 judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
 
-### Motion for a ZRLE picture
-
-A Mac's virtual display under `ard` can be started with Motion
-([A Mac's virtual display, sent for Motion](architecture.md#a-macs-virtual-display-sent-for-motion)).
-The ZRLE of a plain VNC server, and of a Mac in Standard mode on its physical
-displays, still reaches the gateway exact and leaves it as one VP9 stream.
-Motion would send it the same way: PNG where it is still and VP9 where it moves.
-Weighed against a picture that already follows the link as one stream, and, on
-the physical displays, against Combined Display and a picture the Mac scales.
-
 ## Not planned
 
 ### Decoding an RDP host's H.264 at the gateway
@@ -310,28 +300,20 @@ RFB baseline and nothing more
 ([Constraints](architecture.md#constraints)). A stream of its own passed
 through is what a `wlshare` target has.
 
-### A Motion tile other than 64 pixels
+### Motion
 
-Motion cuts the desktop into 64-pixel tiles from (0,0), in device pixels at
-every density (`TILE` in `src/regions.rs`). That is the size its pictures
-arrive in: a Mac's ZRLE tiles are 64 device pixels at any density
-([ZRLE](apple-vnc-889.md#the-record-layer)). A tile that followed the density,
-128 pixels at 2x to stay 64 points, or a smaller one to find motion more finely,
-would split or merge the Mac's own tiles, and would retune what is counted in
-tiles: the churn that marks a tile moving, the smallest region, and the
-cleanup's batch. Nothing measured asks for it.
-
-### Motion on an RDP target
-
-Motion was offered under an RDP target's High quality (alpha): the gateway
-composed the host's graphics pipeline and sent what moves as VP9 and what is
-still as PNG. It was removed. It encoded twice, decoding what the host had
-already encoded only to encode it again, and it was redundant beside what the
-pipeline already gives: an exact picture under the host's Lossless policy
-([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)),
-and the host's own Adaptive H.264 for a slow link. Every RDP host's pipeline is
-passed to the page
-([RDP's graphics pipeline](architecture.md#rdps-graphics-pipeline)).
+Motion (alpha) sent what is still as exact PNG and each region that moves as a
+VP9 stream of its own, first under an RDP target's High quality, from the
+pipeline composed at the gateway, then on a Mac's virtual display under `ard`,
+from its ZRLE. It was removed from both, and the gateway again sends a picture it
+decodes one way, as one VP9 stream ([Media paths](architecture.md#media-paths)).
+On an RDP target it encoded twice, decoding what the host had already encoded
+only to encode it again, beside a pipeline that already gives an exact picture
+under the host's Lossless policy
+([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy))
+and the host's own Adaptive H.264 for a slow link. On a Mac, Standard mode's
+Adaptive quality, the Mac's own codecs, covers the same ground
+([Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)).
 
 ### `THINCLIENT` in the graphics capability advertise
 

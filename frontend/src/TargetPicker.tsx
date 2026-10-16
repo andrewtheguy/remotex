@@ -12,7 +12,6 @@ import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 import {
   type Choices,
   type EncoderOption,
-  type MotionRow,
   type PictureOption,
   type Pipeline,
   type PipelineRow,
@@ -320,18 +319,6 @@ export default function TargetPicker({
                         }
                       />
                     )}
-                    {/* Motion, where the target offers it: a Mac's virtual
-                        display. */}
-                    <MotionChoice
-                      row={options.motionRow}
-                      chosen={options.choices.motion}
-                      locked={pendingTarget !== null}
-                      choose={(motion) =>
-                        setRemembered((was) =>
-                          rememberChoice(was, t.name, "motion", motion),
-                        )
-                      }
-                    />
                     {/* How a High Performance Mac's picture reaches this
                         browser, where the target has one to choose. */}
                     <PictureChoice
@@ -448,40 +435,6 @@ function PictureChoice({
           </span>
         </label>
       ))}
-    </fieldset>
-  );
-}
-
-// Motion as a tick of its own, on a target that offers it. Nothing elsewhere.
-function MotionChoice({
-  row,
-  chosen,
-  locked,
-  choose,
-}: {
-  row: MotionRow | null;
-  chosen: boolean;
-  locked: boolean;
-  choose: (motion: boolean) => void;
-}) {
-  if (!row) {
-    return null;
-  }
-  return (
-    <fieldset className="picker-choice">
-      <legend>Picture</legend>
-      <label className="picker-option">
-        <input
-          type="checkbox"
-          checked={chosen}
-          disabled={locked}
-          onChange={(e) => choose(e.target.checked)}
-        />
-        <span className="picker-option-text">
-          <span>{row.label}</span>
-          <span className="picker-option-note">{row.note}</span>
-        </span>
-      </label>
     </fieldset>
   );
 }

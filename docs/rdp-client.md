@@ -708,9 +708,7 @@ the desktop's right and bottom edges cut short are smaller. Every one was
 compressed, and each paints exactly the size it is sent at. Measured on
 windows-arm on 2026-10-15, 1,949 bitmaps at 1440×900 at 1x, whose edge tiles
 are 32 wide and 4 high, and 6,550 at 2880×1800 at 2x, whose bottom tiles are 8
-high. These are the gateway's own 64-pixel Motion tiles
-([sent for Motion](architecture.md#a-macs-virtual-display-sent-for-motion)),
-where a Mac's ZRLE tiles start at each rectangle's origin
+high. A Mac's ZRLE tiles are the same size but start at each rectangle's origin
 ([ZRLE](apple-vnc-889.md#the-record-layer)).
 
 Bitmap updates carry no frame boundary, so the engine flushes damage on a guess:

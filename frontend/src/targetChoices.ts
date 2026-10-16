@@ -30,8 +30,6 @@
 //   choice on a target with the pipeline on, and under adaptive the whole desktop
 //   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
 //   offered high quality alone.
-// - Motion (alpha), what moves sent as VP9 and what is still as PNG, is a tick on
-//   a target that offers it, a Mac's virtual display: see `motionRow`.
 // - Which encoder codes the VP9, libvpx or the native one in Rust (alpha), is a
 //   choice on a target that offers it: see `encoderOptions`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
@@ -83,11 +81,6 @@ export interface TargetInfo {
   pipeline: boolean;
   /** Whether which encoder codes the VP9 is a choice. */
   vp9: boolean;
-  /**
-   * Whether the picture may be sent for motion, VP9 where it moves and PNG where
-   * it is still: a Mac's ZRLE on its virtual display.
-   */
-  motion: boolean;
 }
 
 /** A desktop size in points. */
@@ -142,11 +135,6 @@ export interface Choices {
   placement: Placement;
   pipeline: Pipeline;
   vp9: Vp9Encoder;
-  /**
-   * Whether the gateway sends what moves as VP9 and what is still as PNG,
-   * rather than the whole picture as one VP9 stream.
-   */
-  motion: boolean;
 }
 
 /** What this browser can do with a target. */
@@ -211,13 +199,6 @@ export interface PipelineOption<V> {
   disabled: boolean;
 }
 
-/** Motion as the picker offers it: a tick. */
-export interface MotionRow {
-  label: string;
-  /** What ticking it does. */
-  note: string;
-}
-
 /**
  * How the host draws the pipeline: high quality or adaptive, and under an adaptive
  * one, the whole desktop or by region.
@@ -274,8 +255,6 @@ export interface TargetOptions {
   placements: PlacementOption[] | null;
   /** How the host draws the pipeline, as a choice: null where it is none. */
   pipelineRow: PipelineRow | null;
-  /** Motion on a target that offers it: null otherwise. */
-  motionRow: MotionRow | null;
   /** The target's stream where it is passed in every session: null otherwise. */
   passed: PassedNote | null;
   /**
@@ -535,26 +514,6 @@ function pipelineRow(
 }
 
 /**
- * Motion on a target that offers it, a Mac's virtual display: nothing elsewhere,
- * and unticked until somebody ticks it.
- */
-function motionRow(
-  target: TargetInfo,
-  remembered: Partial<Choices> | undefined,
-): { row: MotionRow | null; motion: boolean } {
-  if (!target.motion) {
-    return { row: null, motion: false };
-  }
-  return {
-    row: {
-      label: "Motion (alpha)",
-      note: "The gateway sends what moves as VP9 and what is still as PNG, exactly as the Mac draws it.",
-    },
-    motion: remembered?.motion === true,
-  };
-}
-
-/**
  * The options under `target`, from what was `remembered` for it and what this
  * browser can do. A size the operator configured is the size until somebody
  * chooses another, and no remote's sound starts playing until somebody asks.
@@ -570,7 +529,6 @@ export function targetOptions(
     sizes[0].value;
   const sound = soundRow(target, remembered?.audio, abilities.audio);
   const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
-  const moving = motionRow(target, remembered);
   // An RDP host's pipeline is passed whatever is chosen, and a browser that
   // cannot compose it cannot start the target.
   const always = target.passthroughs.includes("rdp-graphics");
@@ -603,14 +561,12 @@ export function targetOptions(
     vp9:
       encoders?.find((option) => option.value === remembered?.vp9)?.value ??
       "libvpx",
-    motion: moving.motion,
   };
   return {
     sizes,
     soundRow: sound.row,
     placements,
     pipelineRow: drawn.row,
-    motionRow: moving.row,
     passed,
     pictures,
     encoders,

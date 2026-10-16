@@ -13,13 +13,6 @@ import {
 } from "./egfxCompositor.ts";
 import type { GraphicsPicture, PicturePart } from "./egfxPicture.ts";
 import { createEgfxVideo, type EgfxVideo } from "./egfxVideo.ts";
-import {
-  createMotionPicture,
-  type MotionImage,
-  type MotionPicture,
-  type MotionRecord,
-  type PlanesImage,
-} from "./motionPicture.ts";
 import type { PlanesPicture } from "./planesPicture.ts";
 import {
   type BatchRecord,
@@ -36,10 +29,9 @@ import {
   type VideoFormat,
 } from "./videoDecoder.ts";
 
-// The browser SPA's batch draw loop: each batch's records — access units, runs
-// of an RDP host's graphics pipeline, and a picture sent for motion's tiles and
-// regions (motionPicture.ts) — decoded or composed in wire order and drawn onto
-// the canvas. The decoder lives here rather than beside each caller:
+// The browser SPA's batch draw loop: each batch's records — access units and runs
+// of an RDP host's graphics pipeline — decoded or composed in wire order and
+// drawn onto the canvas. The decoder lives here rather than beside each caller:
 // it belongs to exactly one attachment, and `clear` is the one place that ends it.
 
 // The destination's 2D context. A union rather than the element's alone because
@@ -85,17 +77,6 @@ export interface FramePainter {
    * (displayRelay.ts). The tab composes nothing.
    */
   mirrorGraphics(display: number, part: PicturePart): void;
-  /**
-   * Adopt a `tilesStart`: the picture is sent for motion from here, TILE and
-   * REGION records drawn on the desktop's own canvas. Whatever pipeline, stream
-   * or region decoder stood before is done with, and the canvas is black until
-   * the tiles draw it.
-   */
-  startTiles(): void;
-  /** Adopt a `regionFormat`: the decoder of moving region `stream`. */
-  setRegionFormat(stream: number, format: VideoFormat): void;
-  /** Adopt a `regionEnd`: moving region `stream` has stopped. */
-  endRegion(stream: number): void;
   /**
    * The desktop's canvas was replaced at this size and filled black. A pipeline's
    * picture is shown over that canvas, so its canvas is blanked with it, and what
@@ -162,13 +143,6 @@ export function createFramePainter(options: {
   onGraphicsShown?: (shown: boolean) => void;
   /** How this page decodes (see `createDesktopVideo`). */
   decoding?: PageDecoding;
-  /**
-   * What draws a software decoder's planes of a moving region and what decodes a
-   * tile's PNG (motionPicture.ts). Injectable for a test, which has neither WebGL
-   * nor an image decoder.
-   */
-  makeMotionPlanes?: () => PlanesImage;
-  decodePng?: (png: Uint8Array) => Promise<ImageBitmap>;
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and
   // is not queued behind draws — an eviction closes the socket from under whatever
@@ -323,21 +297,11 @@ export function createFramePainter(options: {
     options.onVideoError(reason);
   };
 
-  // The picture sent for motion, from its `tilesStart`: its region decoders and
-  // the canvas their planes are drawn on.
-  let motion: MotionPicture | null = null;
-
-  const releaseMotion = () => {
-    motion?.close();
-    motion = null;
-  };
-
   const releaseVideo = () => {
     releasePipeline();
     releaseMirror();
     releasePlanes();
     releaseStrips();
-    releaseMotion();
     video?.close();
     video = null;
     videoComplained = false;
@@ -397,7 +361,6 @@ export function createFramePainter(options: {
     }
     releaseStrips();
     video?.restart();
-    motion?.restart();
     options.onVideoNeedsKeyframe("a malformed batch was dropped");
   };
 
@@ -481,16 +444,10 @@ export function createFramePainter(options: {
 
   // One unit's picture. Null when there is nothing to draw — a decoder that dropped
   // the unit has said so itself. A run of the pipeline has no picture of its own: it
-  // is composed in its turn. A tile or a region's unit with no picture sent for
-  // motion started is of one that has ended, and is dropped.
-  const decode = (
-    record: BatchRecord,
-  ): Promise<DecodedPicture | MotionImage | null> => {
+  // is composed in its turn.
+  const decode = (record: BatchRecord): Promise<DecodedPicture | null> => {
     if (record.kind === "graphics") {
       return Promise.resolve(null);
-    }
-    if (record.kind === "tile" || record.kind === "region") {
-      return motion ? motion.decode(record) : Promise.resolve(null);
     }
     return desktopVideo().decode(
       { w: record.w, h: record.h },
@@ -676,36 +633,6 @@ export function createFramePainter(options: {
     }
   };
 
-  // A tile or a region's picture, drawn in its turn on the desktop's own canvas.
-  const showMotion = (
-    record: MotionRecord,
-    image: MotionImage | null,
-    born: number,
-  ) => {
-    if (!image) {
-      return;
-    }
-    const context = options.context();
-    if (generation !== born || !motion || !context) {
-      // Of an attachment or a picture that has ended, or with nowhere to go.
-      image.close();
-      return;
-    }
-    if (motion.draw(context, record, image)) {
-      painted();
-    }
-  };
-
-  // A `regionFormat`'s configuration, said of a refusal as a `videoFormat`'s is.
-  const announce = (format: VideoFormat) => {
-    if (refused !== null && format.decode !== refused) {
-      // Not the configuration that was refused, so the refusal no longer stands —
-      // but the banner stays until a frame paints, as any other complaint's does.
-      refused = null;
-      videoComplained = true;
-    }
-  };
-
   return {
     async draw(frame: ArrayBuffer) {
       const records = decodeBatchFrame(frame);
@@ -725,11 +652,7 @@ export function createFramePainter(options: {
           await compose(record, born);
           continue;
         }
-        if (record.kind === "tile" || record.kind === "region") {
-          showMotion(record, (await decodes[i]) as MotionImage | null, born);
-          continue;
-        }
-        show(record, (await decodes[i]) as DecodedPicture | null, born);
+        show(record, await decodes[i], born);
       }
     },
     clear() {
@@ -860,47 +783,18 @@ export function createFramePainter(options: {
         endPipeline(current, describe(error));
       }
     },
-    startTiles() {
-      releaseVideo();
-      motion = createMotionPicture({
-        handlers: {
-          onError: complainAboutVideo,
-          onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
-        },
-        onBroken: (reason) => {
-          videoComplained = false;
-          options.onVideoError(reason);
-        },
-        decoding: options.decoding,
-        makePlanesImage: options.makeMotionPlanes,
-        decodePng: options.decodePng,
-      });
-      // Blank until the tiles draw it: what the canvas holds is a picture
-      // started over, or another sent for motion before this one.
-      const context = options.context();
-      if (context) {
-        context.fillStyle = "#000";
-        context.fillRect(0, 0, context.canvas.width, context.canvas.height);
-      }
-    },
-    setRegionFormat(stream, format) {
-      if (motion) {
-        announce(format);
-        motion.setFormat(stream, format);
-      }
-    },
-    endRegion(stream) {
-      motion?.end(stream);
-    },
     setVideoFormat(format) {
       // A stream takes the picture back from a pipeline: a host that draws with
       // bitmap updates after all, which the gateway encodes. In a tab, from the
       // mirror of the session page's picture, which shows the display no more.
-      // And from a picture sent for motion, whose regions are done with.
       releasePipeline();
       releaseMirror();
-      releaseMotion();
-      announce(format);
+      if (refused !== null && format.decode !== refused) {
+        // Not the configuration that was refused, so the refusal no longer stands —
+        // but the banner stays until a frame paints, as any other complaint's does.
+        refused = null;
+        videoComplained = true;
+      }
       // A stream announced starts at a keyframe: strips held are the one before's.
       releaseStrips();
       desktopVideo().setFormat(format);

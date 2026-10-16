@@ -107,14 +107,6 @@ export type PainterCommand =
    * the picture the session's page composes: painted from there, not composed.
    */
   | { type: "graphicsMirror"; display: number; part: PicturePart }
-  /**
-   * The picture is sent for motion from here (motionPicture.ts), and moving
-   * region `stream` is announced or has stopped. Queued like a format: a region's
-   * decoder is built, kept and retired in its place among the records.
-   */
-  | { type: "tilesStart" }
-  | { type: "regionFormat"; stream: number; format: VideoFormat }
-  | { type: "regionEnd"; stream: number }
   /** The attachment boundary: wipe the bitmap and the decoder. */
   | { type: "clear" };
 
@@ -352,17 +344,6 @@ export function createPainterWorker(
           break;
         case "graphicsMirror":
           queued(() => painter?.mirrorGraphics(command.display, command.part));
-          break;
-        case "tilesStart":
-          queued(() => painter?.startTiles());
-          break;
-        case "regionFormat":
-          queued(() =>
-            painter?.setRegionFormat(command.stream, command.format),
-          );
-          break;
-        case "regionEnd":
-          queued(() => painter?.endRegion(command.stream));
           break;
         case "clear":
           // Out of the chain, and starting a new one — see the module comment.

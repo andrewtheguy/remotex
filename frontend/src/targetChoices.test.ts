@@ -51,7 +51,6 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     placement: false,
     pipeline: false,
     vp9: false,
-    motion: false,
     ...offers,
   };
 }
@@ -193,7 +192,6 @@ test("only what the target's type offers has a row", () => {
     placement: "right",
     pipeline: "high-quality",
     vp9: "libvpx",
-    motion: false,
   });
   assert.equal(standard.blocked, null);
 });
@@ -231,7 +229,6 @@ test("no sound is taken until somebody ticks it", () => {
     placement: "right",
     pipeline: "high-quality",
     vp9: "libvpx",
-    motion: false,
   });
   assert.equal(rdp.sound, false);
   assert.equal(rdp.soundRow?.checked, false);
@@ -247,7 +244,6 @@ test("what was chosen last time is what Start sends", () => {
     placement: "right",
     pipeline: "high-quality",
     vp9: "libvpx",
-    motion: false,
   });
   assert.equal(options.sound, true);
   assert.equal(options.soundRow?.checked, true);
@@ -274,7 +270,6 @@ test("what was chosen last time is what Start sends", () => {
     placement: "right",
     pipeline: "high-quality",
     vp9: "libvpx",
-    motion: false,
   });
   // Nor is something this page never wrote there.
   const stale = targetOptions(RDP, { audio: true as never }, ABLE);
@@ -424,40 +419,6 @@ test("how the host draws the pipeline is high quality until somebody chooses ada
   );
   assert.equal(mac.pipelineRow, null);
   assert.equal(mac.choices.pipeline, "high-quality");
-});
-
-test("an RDP target offers no Motion, its pipeline passed whatever is remembered", () => {
-  const options = targetOptions(RDP, { motion: true }, ABLE);
-  assert.equal(options.motionRow, null);
-  assert.equal(options.choices.motion, false);
-  assert.ok(options.passed);
-  assert.match(targetOptions(RDP, undefined, UNABLE).blocked ?? "", /egfx/);
-});
-
-test("a Mac's virtual display offers Motion in a row of its own", () => {
-  const VIRTUAL = target({
-    subtype: "ard",
-    resize: true,
-    vp9: true,
-    motion: true,
-  });
-  const offered = targetOptions(VIRTUAL, undefined, ABLE);
-  assert.match(offered.motionRow?.label ?? "", /alpha/);
-  assert.equal(offered.pipelineRow, null);
-  assert.equal(offered.choices.motion, false, "not until somebody ticks it");
-  const ticked = targetOptions(VIRTUAL, { motion: true }, ABLE);
-  assert.equal(ticked.choices.motion, true);
-  assert.equal(ticked.choices.pipeline, "high-quality");
-  assert.ok(ticked.encoders, "its regions are coded by either encoder");
-  assert.equal(ticked.blocked, null);
-  // The physical displays are listed without it.
-  const physical = targetOptions(
-    target({ subtype: "ard", vp9: true }),
-    { motion: true },
-    ABLE,
-  );
-  assert.equal(physical.motionRow, null);
-  assert.equal(physical.choices.motion, false);
 });
 
 test("a browser that cannot decode the H.264 is offered high quality alone", () => {

@@ -83,70 +83,6 @@ pub struct AccessUnit {
     pub keyframe: bool,
 }
 
-/// A `render_motion_debug` outline drawn round a picture sent for motion
-/// ([`crate::motion`]): round the crop a region's stream encodes, and round a
-/// tile.
-///
-/// Painted on the copy handed to an encoder, never on the [`Mirror`]: the mirror
-/// is what a cleanup crops, so a mark left there would be restored as though it
-/// were content and nothing would ever take it off again. On the copy it lives
-/// exactly as long as what it outlines does, and the cleanup that follows erases
-/// it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Mark {
-    pub colour: [u8; 3],
-    /// Border thickness in pixels. One for every outline, so one thickness means
-    /// one thickness.
-    pub px: u16,
-}
-
-/// Paint `mark`'s border round a `w`×`h` packed-RGB888 picture, in place.
-pub fn outline(rgb: &mut [u8], (w, h): (usize, usize), mark: Mark) {
-    let t = usize::from(mark.px);
-    let mut paint = |row: usize, from: usize, to: usize| {
-        for x in from..to {
-            rgb[(row * w + x) * 3..][..3].copy_from_slice(&mark.colour);
-        }
-    };
-    for y in 0..h {
-        if y < t || y + t >= h {
-            paint(y, 0, w);
-        } else {
-            paint(y, 0, t.min(w));
-            paint(y, w.saturating_sub(t), w);
-        }
-    }
-}
-
-/// The `render_motion_debug = "tiles"` grid: a line of `colour` one pixel wide
-/// along the top and left edges of every `cell`-sized tile of the desktop. Painted
-/// on the copy handed to an encoder, as a [`Mark`] is, and under it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Grid {
-    pub colour: [u8; 3],
-    pub cell: u16,
-}
-
-/// Paint `grid` on a `w`×`h` packed-RGB888 picture whose top-left pixel is the
-/// desktop's `origin`, in place, so the lines fall where the desktop's tiles meet
-/// whatever the picture's own corner.
-pub fn grid(rgb: &mut [u8], (w, h): (usize, usize), origin: (u16, u16), grid: Grid) {
-    let cell = usize::from(grid.cell);
-    let (left, top) = (usize::from(origin.0), usize::from(origin.1));
-    for y in 0..h {
-        let row = &mut rgb[y * w * 3..(y + 1) * w * 3];
-        if (top + y) % cell == 0 {
-            for pixel in row.as_chunks_mut::<3>().0 {
-                *pixel = grid.colour;
-            }
-            continue;
-        }
-        for x in ((cell - left % cell) % cell..w).step_by(cell) {
-            row[x * 3..x * 3 + 3].copy_from_slice(&grid.colour);
-        }
-    }
-}
-
 /// The whole framebuffer as packed RGB888, and the copy the stream reads: the
 /// desktop at its own size, odd sides included, which is the picture encoded.
 #[derive(Clone)]
@@ -198,9 +134,9 @@ impl Mirror {
         Ok(())
     }
 
-    /// `rect`'s pixels as packed RGB888, into a buffer the caller reuses: what a
-    /// picture sent for motion sends of it ([`crate::motion`]), and what the tests
-    /// assert landed where.
+    /// `rect`'s pixels as packed RGB888, into a buffer the caller reuses — for the
+    /// tests asserting what landed where.
+    #[cfg(test)]
     pub fn crop_into(&self, rect: Rect, out: &mut Vec<u8>) -> anyhow::Result<()> {
         anyhow::ensure!(
             rect.right < self.size.0 && rect.bottom < self.size.1,
@@ -242,21 +178,6 @@ impl Mirror {
             let at = (usize::from(rect.top) + row) * stride + usize::from(rect.left) * 3;
             self.rgb[at..at + w * 3].copy_from_slice(&src.rgb[at..at + w * 3]);
         }
-    }
-
-    /// Whether `rgb` — packed RGB888 for `rect` — differs from what the mirror
-    /// holds over `part`, a piece of `rect`: the question a picture sent for
-    /// motion asks of each tile a rectangle touches ([`crate::regions`]), so a
-    /// tile the remote redrew with the same pixels is not a tile that changed.
-    pub fn differs(&self, rect: Rect, rgb: &[u8], part: Rect) -> bool {
-        let stride = usize::from(self.size.0) * 3;
-        let src = usize::from(rect.w()) * 3;
-        let len = usize::from(part.w()) * 3;
-        (part.top..=part.bottom).any(|y| {
-            let mine = usize::from(y) * stride + usize::from(part.left) * 3;
-            let theirs = usize::from(y - rect.top) * src + usize::from(part.left - rect.left) * 3;
-            self.rgb[mine..mine + len] != rgb[theirs..theirs + len]
-        })
     }
 
     /// The whole picture as one packed RGB888 slice — what the stream encodes.
