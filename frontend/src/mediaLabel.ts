@@ -165,24 +165,6 @@ export interface VideoStreamInfo {
   software?: boolean;
   // How many strips each picture of the stream comes in, where more than one.
   strips?: number;
-  // ALPHA: a picture sent for motion (`tilesStart`): PNG tiles where the desktop
-  // is still and a stream of its own for each region that moves. `decode` is the
-  // first region's `regionFormat`, and empty until one has moved.
-  motion?: boolean;
-}
-
-// What a configuration string is, as a person names it: VP9 for every `vp09.`.
-function codecName(decode: string): string {
-  return decode.startsWith("vp09.") ? "VP9" : decode;
-}
-
-// The Video row of a picture sent for motion: what it is drawn with where it
-// moves and where it is still, and which decoder decodes the moving part.
-function motionLabel(stream: VideoStreamInfo, decoder: string): string {
-  if (!stream.decode) {
-    return "PNG tiles so far, nothing has moved · encoded by the gateway";
-  }
-  return `${codecName(stream.decode)} where it moves (${stream.decode}), PNG where it is still · encoded by the gateway · ${decoder}`;
 }
 
 /**
@@ -210,15 +192,12 @@ export function videoLabel(
   if (stream.composed) {
     return "Not in use: the host's graphics pipeline is composed by this browser";
   }
-  const decoder = stream.software
-    ? "decoded by this page's WebAssembly decoder"
-    : "decoded by the browser's native decoder";
-  if (stream.motion) {
-    return motionLabel(stream, decoder);
-  }
   const whose = stream.passthrough
     ? "passthrough from the remote"
     : "encoded by the gateway";
   const strips = (stream.strips ?? 1) > 1 ? ` in ${stream.strips} strips` : "";
+  const decoder = stream.software
+    ? "decoded by this page's WebAssembly decoder"
+    : "decoded by the browser's native decoder";
   return `${stream.decode} · ${whose}${strips} · ${decoder}`;
 }

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use common::{Ws, connect_ws};
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, MotionDebug, Protocol, TargetConfig};
+use remotex::config::{AppConfig, Protocol, TargetConfig};
 use remotex::protocol::MAX_CLIPBOARD_BYTES;
 use remotex::server;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -1224,7 +1224,6 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         microphone: false,
         video_quality: None,
         render_adaptive: None,
-        render_motion_debug: MotionDebug::None,
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,

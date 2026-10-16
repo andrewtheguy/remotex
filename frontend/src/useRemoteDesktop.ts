@@ -2165,49 +2165,6 @@ export function useRemoteDesktop(
       setVideoStream({ decode: "", passthrough: true, composed: true });
     };
 
-    // A picture sent for motion. Queued in the worker like a format, behind the
-    // frames already posted: a region's decoder is built, kept and retired in its
-    // place among the records, and the tiles of a picture started over land on a
-    // canvas with nothing of the last one's streams left in it.
-    const handleMotion = (
-      msg: Extract<
-        ControlMsg,
-        { type: "tilesStart" | "regionFormat" | "regionEnd" }
-      >,
-    ) => {
-      if (msg.type === "regionEnd") {
-        painter?.endRegion(msg.stream);
-        return;
-      }
-      if (msg.type === "tilesStart") {
-        painter?.startTiles();
-        // A picture started over on a resize or a reattach decodes its regions
-        // as the last one did, so what the card says of them stands.
-        setVideoStream((prev) =>
-          prev?.motion
-            ? prev
-            : { decode: "", passthrough: false, motion: true },
-        );
-        return;
-      }
-      painter?.setRegionFormat(msg.stream, { decode: msg.decode });
-      // The card names the first region's configuration, and which decoder this
-      // page builds for it: every region is the same VP9 at another size.
-      setVideoStream((prev) =>
-        prev?.motion && !prev.decode
-          ? {
-              ...prev,
-              decode: msg.decode,
-              software:
-                pageModuleFor(msg.decode, {
-                  nativeVp9: nativeVp9(),
-                  nativeHevc: decodesAppleMedia(),
-                }) !== undefined,
-            }
-          : prev,
-      );
-    };
-
     const handleControlMsg = (msg: ControlMsg) => {
       // Any control message proves the socket attached to the slot, so reset
       // the reconnect backoff (an onopen-time reset would let a slot that
@@ -2277,11 +2234,6 @@ export function useRemoteDesktop(
           painter?.startGraphics();
           setVideoStream({ decode: "", passthrough: true, composed: true });
           setHostPicture({ exact: true, codecs: [] });
-          break;
-        case "tilesStart":
-        case "regionFormat":
-        case "regionEnd":
-          handleMotion(msg);
           break;
         case "hostPicture":
           setHostPicture({ exact: msg.exact, codecs: msg.codecs });

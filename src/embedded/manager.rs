@@ -761,9 +761,6 @@ fn describe_offers(target: &TargetConfig) -> String {
     if offers.pipeline {
         choices.push("high quality or adaptive H.264".to_owned());
     }
-    if offers.motion {
-        choices.push("the alpha motion mode".to_owned());
-    }
     if offers.vp9 {
         choices.push("libvpx or the alpha native VP9 encoder".to_owned());
     }

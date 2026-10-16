@@ -79,7 +79,7 @@ camera and microphone, and how its picture reaches the browser.
 |---|---|---|---|---|---|
 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; VP9 from the gateway on the bitmap path |
 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | the Mac's HEVC or its H.264, passed through |
-| macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway; in a session on the virtual display started with Motion (alpha), PNG where still and VP9 where it moves |
+| macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | VP9 from the gateway |
 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
 | any other VNC server, not prioritized | `vnc` | one framebuffer at the size the server says, at 1x, never resized from the browser | none | no | VP9 from the gateway |
 
@@ -590,13 +590,7 @@ VP9 stream, encoded by the gateway or made by wlshare and passed through. Two
 paths keep another representation the remote made: an
 `ard-high-performance` session can pass the Mac's HEVC, chosen at the picker,
 and every session of an RDP target with the pipeline on passes the host's
-graphics pipeline for the browser to compose. An `ard` session on its virtual
-display can be started with Motion (alpha), whose picture is the old motion
-mode's: PNG where it is still and a VP9 stream for each region that moves
-([A Mac's virtual display, sent for Motion](#a-macs-virtual-display-sent-for-motion)).
-It is the old motion mode's carriage, its records and its rules, kept to that
-session: do not grow a second one beside it, and do not reach it from another
-target type without a decision of its own. A VNC desktop past the stream's picture ceiling in a session started
+graphics pipeline for the browser to compose. A VNC desktop past the stream's picture ceiling in a session started
 without resize has no picture until the remote sends a smaller one — see
 [past the ceiling](#past-the-ceiling).
 
@@ -607,15 +601,6 @@ A target's stream keys are per target, and every one has a default:
   gateway track the measured link — see
   [what the link will bear](#colour-and-what-the-link-will-bear) for the signal
   and the walk.
-- `render_motion_debug` (`"none"` by default) draws, in the pixels themselves,
-  what a session started with Motion sends. `"motion"` outlines a region's VP9 in
-  magenta, a PNG cut from beside one in cyan, and a cleanup in green. `"tiles"`
-  adds the 64-pixel tile grid on everything sent, and tints each tile a report
-  changed that went as PNG, with a pip for each 100 ms slot of its churn: yellow
-  below the four that are motion, orange at four or more, for a tile in motion
-  that no stream took, such as one or two tiles changing apart from any other. A
-  QA aid, refused on a target that does not offer Motion
-  ([sent for Motion](#a-macs-virtual-display-sent-for-motion)).
 
 There is no chroma key: the stream is always 4:4:4, profile 1. See
 [the codec](#the-codec) for why the chroma, and not the quality, is where a
@@ -636,7 +621,7 @@ itself. Which passed streams follow the browser's link, and how, is in
 
 The engines never see the config keys. They and the session's choices collapse
 to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `rdp_graphics`,
-`rdp_h264`, `native_vp9`, `motion`, `motion_debug`) at the config boundary in
+`rdp_h264`, `native_vp9`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
@@ -1357,67 +1342,6 @@ the pipeline.
   over. A host draws an exact picture when its image quality policy is set to
   Lossless ([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)).
 
-#### A Mac's virtual display, sent for Motion
-
-An `ard` target with the unofficial `virtual_display = true` offers Motion
-(alpha), as a box of its own under Picture, since it has no Graphics group. A
-session started with it sends what is still as exact PNG and each region that
-moves as a VP9 stream of its own, from the ZRLE the gateway decodes anyway, so
-what is still stays exact, since ZRLE is lossless, and only what moves is not.
-
-- **Tiles and regions are the old motion mode's.** `src/regions.rs` and
-  `src/motion.rs` bring back the mode the gateway once had for a picture it
-  decodes, by its rules. The desktop is cut into 64-pixel tiles from (0,0),
-  ZRLE's tile. A tile is moving when it changed in at least 4 of the last 8
-  tenths of a second. Moving tiles join into 4-connected components, those
-  under 5 tiles are left to PNG, boxes merge unless the merged box would be more
-  than twice the moving tiles, and at most 4 regions stream at once. Geometry is
-  retuned at most every 500 ms: a region that shrinks keeps its stream, one that
-  grows is rebuilt at a keyframe, and one with no motion for a second ends.
-- **Damage is the ZRLE rectangles, mapped onto the grid.** The Mac's ZRLE tiles
-  are 64 device pixels as the gateway's are, but they start at each rectangle's
-  origin, and the rectangles fall on no grid
-  ([ZRLE](apple-vnc-889.md#the-record-layer)). Each rectangle reaches the motion
-  encoder as damage after what the page already has is taken out of it, and is
-  mapped onto the 64-pixel grid from (0,0) there.
-- **A picture that starts over is seen as video first.** The session's first
-  picture, a resize's and a repaint's go out as one VP9 stream over the whole
-  desktop, its keyframe the first thing the page draws, where every tile as PNG
-  was the largest thing the page was ever sent and all of it ahead of the first
-  pixel. The stream ends once a round has carried every tile with nothing more
-  arriving for it, a second after it started at the latest, or as soon as motion
-  inside it takes a region of its own; every tile it carried is then owed a PNG
-  like a stopped region's.
-- **What is still goes as PNG at once.** Each report of damage is compared
-  exactly with what the page was sent, cut into 64-row bands, and encoded as
-  PNG as soon as it arrives: a band no stream touches whole, and one a stream
-  splits as the runs of its changed tiles beside the stream. A still PNG that
-  fails to encode ends the session.
-- **A stopped region is cleaned up exactly.** Every tile a stream covered is
-  owed a PNG. Every 250 ms the cleanups take up to 40 tiles that have been still
-  for half a second, oldest first, as many as the queue budget has room for, held
-  up to 5 s while an adaptive page is behind. A `regionEnd` goes ahead of them on
-  the ordered path, and no PNG is ever sent inside a live stream. A cleanup that
-  fails to encode is dropped with a warning.
-- **The streams are the dial's.** Each region is a VP9 stream of its own over its
-  rectangle, coded at the target's `video_quality` and walked by
-  `render_adaptive`, as the desktop's one stream is. The VP9 encoder stays a
-  choice on this target, and the regions' streams are coded by the one chosen.
-- **The page draws on a canvas.** `tilesStart` opens the picture. The page draws
-  `TILE` and `REGION` records in wire order onto the desktop's 2D canvas, a PNG
-  through `createImageBitmap` without colour conversion and a region's VP9
-  through a decoder of its own, chosen as the desktop's would be
-  ([Decoded in the page](#decoded-in-the-page)) and cropped to the region's true
-  rectangle.
-- **A reattach resumes it.** The gateway holds the picture, so a reattach or a
-  `refresh` resumes the engine: the page is sent `tilesStart`, the streams end,
-  the whole picture goes again as video first, and the churn is forgotten. A
-  resize ends the streams, and the Mac's repaint of the resized display starts
-  the picture over at the new size.
-- **The physical displays keep the one VP9 stream.** Standard's Combined Display
-  and a display the Mac scales are left to it; see
-  [the roadmap](roadmap.md#motion-for-a-zrle-picture).
-
 ### Decoded in the page
 
 The page has two software decoders of its own, in WebAssembly, for the two
@@ -1898,7 +1822,7 @@ and `GET /api/targets` carries it:
 | `vnc` | no | hidden | hidden | hidden | shown\* |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden | shown: wlshare's own |
 | `vnc`, `ard` | no | hidden | hidden | hidden | shown\* |
-| `vnc`, `ard` with `virtual_display` | yes | hidden | hidden | hidden; Motion (alpha) shown as Picture | shown\* |
+| `vnc`, `ard` with `virtual_display` | yes | hidden | hidden | hidden | shown\* |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden | hidden: the picture is never VP9 |
 
 \* In a build with the `native-vp9` feature, the default.
@@ -2074,8 +1998,6 @@ u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
 VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
 GRAPHICS op 0x04: u32 len | message[len]
-TILE     op 0x05: u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
-REGION   op 0x06: u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len | vp9[len]
 ```
 
 One frame carries every record ready at once, so a backlog does not cost one
@@ -2091,18 +2013,6 @@ any other bit is rejected the same way, as is a number or a frame bit without
 is one message of that pipeline as the host sent it, in its bulk compression,
 which means something only after every message before it from the
 `graphicsStart` that began the pipeline. One of no length is rejected.
-
-`TILE` and `REGION` records are a picture
-[sent for Motion](#a-macs-virtual-display-sent-for-motion), opened by
-`tilesStart`, which is sent again wherever the picture starts over: a reattach
-and a resize. A `TILE` is an 8-bit RGB PNG of `w`×`h`, the desktop's pixels
-exactly, drawn at `(x, y)`. A `REGION` is an access unit of moving region
-`stream`'s VP9, its flags `0x01` for a keyframe and nothing else; its decoded
-picture's top-left `w`×`h` is drawn at `(x, y)`. `regionFormat {stream, decode}`
-precedes a stream's first unit, and that of a new stream on a reused id;
-`regionEnd {stream}` ends one, and what it last drew stays until `TILE` records
-draw over it, which are sent after it. A `TILE` never falls inside a live
-region.
 
 `sequence` starts at one and increases for the lifetime of one session-socket
 attachment. After the paint worker has finished the batch's ordered
