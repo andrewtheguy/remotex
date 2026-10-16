@@ -60,7 +60,7 @@ area's section before changing what it covers:
 
 - [The client and its bundle](docs/architecture.md#the-client-and-its-bundle):
   one client, the browser SPA; one frontend build compiled into the gateway; its
-  WebAssembly modules, two built here and the software VP9 decoder a pinned
+  WebAssembly modules, three built here and the software VP9 decoder a pinned
   release; the pinned HEVC decoder archive as the one file read at run time; no
   fallback browser paths.
 - [Sessions](docs/architecture.md#sessions): one active session per gateway,

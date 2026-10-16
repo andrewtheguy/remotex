@@ -131,9 +131,8 @@ pub fn under_minimum(points: (u16, u16)) -> bool {
 ///
 /// Every entry is decoded or deliberately stepped over, which is a requirement and
 /// not a courtesy: a server takes the list as a promise and will send what it finds
-/// here. That is why Apple's own private framebuffer codecs are absent — the
-/// reference leaves their payload formats unresolved, so advertising them would
-/// ask for rectangles this client could only guess at. Media-stream encoding 1010 is
+/// here. Apple's own framebuffer codecs are listed only by a session that passes the
+/// Mac's Adaptive picture, whose page decodes them ([`ADAPTIVE_ENCODINGS`]). Media-stream encoding 1010 is
 /// absent from the opening list: High Performance puts it first in a second
 /// `SetEncodings` once the display it offers the stream for exists
 /// ([`crate::vnc_apple_media::encodings_preferring_media_stream`]).
@@ -148,6 +147,33 @@ pub const ENCODINGS: &[i32] = &[
     ENCODING_KEYBOARD_SOURCE,
     ENCODING_DESKTOP_SIZE,
     ENCODING_LAST_RECT,
+    ENCODING_ZRLE,
+];
+
+/// Apple's 8×8 tiles, the framebuffer encoding of Standard's Adaptive quality.
+pub const ENCODING_ADAPTIVE: i32 = 0x3f3;
+
+/// What a session that passes the Mac's Adaptive picture advertises:
+/// [`ENCODINGS`] with Apple's 8×8 tiles ahead of ZRLE.
+///
+/// The Mac sends one codec, the first it knows of in the list, and remembers the
+/// last of zlib, ZRLE and its zlib variants as the lossless one, so this asks for
+/// what Apple's viewer's Adaptive list does (`0x3f3`, `0x3ea`, zlib, ZRLE) with
+/// neither of the two between, which the Mac would not send: the tiles alone,
+/// which the page decodes. The rectangles are passed as they came, so ZRLE's
+/// arriving in such a session is the Mac breaking the list's promise, and ends it.
+pub const ADAPTIVE_ENCODINGS: &[i32] = &[
+    ENCODING_RAW,
+    ENCODING_CURSOR_POS,
+    ENCODING_DISPLAY_INFO,
+    ENCODING_REKEY,
+    ENCODING_CURSOR_IMAGE,
+    ENCODING_DISPLAY_LAYOUT,
+    ENCODING_VENDOR_KEYSYMS,
+    ENCODING_KEYBOARD_SOURCE,
+    ENCODING_DESKTOP_SIZE,
+    ENCODING_LAST_RECT,
+    ENCODING_ADAPTIVE,
     ENCODING_ZRLE,
 ];
 
@@ -1377,6 +1403,17 @@ mod tests {
             assert!(ENCODINGS.contains(&encoding), "{encoding:#x}");
         }
         assert!(!ENCODINGS.contains(&0x3f2), "the media stream is asked for once a display exists");
+    }
+
+    /// The Mac sends the first codec of the list it knows, so the tiles go ahead of
+    /// ZRLE, and the list is otherwise the one every Apple session sends.
+    #[test]
+    fn an_adaptive_session_lists_the_tiles_ahead_of_zrle() {
+        let tiles = ADAPTIVE_ENCODINGS.iter().position(|&e| e == ENCODING_ADAPTIVE).unwrap();
+        let zrle = ADAPTIVE_ENCODINGS.iter().position(|&e| e == ENCODING_ZRLE).unwrap();
+        assert!(tiles < zrle);
+        let others: Vec<i32> = ADAPTIVE_ENCODINGS.iter().copied().filter(|&e| e != ENCODING_ADAPTIVE).collect();
+        assert_eq!(others, ENCODINGS);
     }
 
     /// The `AppleDisplayLayout` a macOS 26 VM sent for its two real screens, off

@@ -63,8 +63,8 @@ config key.
 | `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — | — |
 | `vnc` | no | none | — | — | — |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
-| `vnc`, `ard` | no | none | — | — | — |
-| `vnc`, `ard` with `virtual_display` | yes | none | — | — | — |
+| `vnc`, `ard` | no | none | VP9, or the Mac's Adaptive picture passed (alpha) | — | — |
+| `vnc`, `ard` with `virtual_display` | yes | none | VP9, or the Mac's Adaptive picture passed (alpha) | — | — |
 | `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — | — |
 
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
@@ -91,7 +91,12 @@ config key.
   follows the browser's link: the Windows host draws fewer and smaller frames
   for a browser that falls behind. A Mac's passed stream does not: the Mac sends
   at its own rate, little on a still screen and much with motion. For a slow
-  link with much motion, an `ard` target's VP9 follows the link.
+  link with much motion, an `ard` target follows the link, with its VP9 or with
+  the Mac's Adaptive picture. On an `ard` target the Picture group is *VP9*,
+  the default, or *Adaptive (alpha)*: the Mac's own Adaptive quality, as Apple's
+  viewer has it, which the Mac codes coarse first and sharpens as the link
+  allows, and which this page decodes. A session started with it is started over,
+  not resumed, when the browser comes back, as a passed RDP pipeline is.
   See [A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link).
 - **Graphics.** How an RDP host draws its pipeline. *High quality*, the default,
   is the pipeline's codecs without H.264, for a
@@ -243,8 +248,11 @@ connection with the same error as wrong credentials. See
 
 - **`subtype = "ard"`** is Screen Sharing's Standard mode: the Mac's physical
   displays, one or all of them, at their own density. Its lossless ZRLE source
-  is decoded by the gateway and encoded as VP9, adaptive by default. It has no
-  resize and no sound; the Mac keeps playing on its own output.
+  is decoded by the gateway and encoded as VP9, adaptive by default, unless the
+  session is started with the picker's Adaptive (alpha), which passes the Mac's
+  own Adaptive picture for the page to decode; that has been tried on a virtual
+  Mac alone, and shows Combined Display whole at any size. It has no resize and
+  no sound; the Mac keeps playing on its own output.
 - Every Apple subtype carries the Mac's native pasteboard.
 - **`subtype = "ard-high-performance"`** is High Performance mode as Apple's
   viewer has it, and is **experimental**. The Mac disables its physical displays

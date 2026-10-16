@@ -3,8 +3,8 @@ name: Frontend bundle
 # The web client, built once: one bundle, platform-independent, holding the
 # WebAssembly modules the frontend's own build makes: the compositor, from the
 # gateway's graphics crate (frontend/wasm/egfx) with the nightly toolchain that
-# directory pins, and the lossless sound's decoder (frontend/wasm/flac) with
-# stable.
+# directory pins, and the lossless sound's decoder (frontend/wasm/flac) and a
+# Mac's Adaptive picture's (frontend/wasm/adaptive) with stable.
 # The release workflow calls this for the bundle every platform build stages
 # through REMOTEX_PREBUILT_FRONTEND, and a push that touches what the bundle is
 # built from builds it here on its own, so the module's toolchain and its build
@@ -29,6 +29,7 @@ jobs:
         run: |
           (cd frontend/wasm/egfx && rustup toolchain install)
           (cd frontend/wasm/flac && rustup toolchain install)
+          (cd frontend/wasm/adaptive && rustup toolchain install)
 
       - name: Build frontend
         run: cd frontend && bun install --frozen-lockfile && bun run build

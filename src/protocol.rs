@@ -423,6 +423,7 @@ pub enum ClientMsg {
 ///
 /// 0x03 VIDEO     u8 flags | u16 w | u16 h | u32 len | payload[len]
 /// 0x04 GRAPHICS  u32 len | commands[len]
+/// 0x05 ADAPTIVE  u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
 /// ```
 ///
 /// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
@@ -434,6 +435,9 @@ pub enum ClientMsg {
 /// A `GRAPHICS` record is a run of an RDP host's graphics pipeline commands, as the host sent
 /// them — see [`GraphicsUnit`]. A receiver rejects one with no payload.
 ///
+/// An `ADAPTIVE` record is one of a Mac's rectangles in its Adaptive picture, as the Mac sent
+/// it — see [`AdaptiveUnit`]. A receiver rejects one with no body.
+///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
@@ -441,12 +445,16 @@ pub mod batch {
 
     pub const OP_VIDEO: u8 = 0x03;
     pub const OP_GRAPHICS: u8 = 0x04;
+    pub const OP_ADAPTIVE: u8 = 0x05;
 
     /// Bytes a `VIDEO` record costs besides its payload.
     pub const VIDEO_HEADER_LEN: usize = 10;
 
     /// Bytes a `GRAPHICS` record costs besides its commands.
     pub const GRAPHICS_HEADER_LEN: usize = 5;
+
+    /// Bytes an `ADAPTIVE` record costs besides its body.
+    pub const ADAPTIVE_HEADER_LEN: usize = 13;
 
     /// A `VIDEO` record's flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
@@ -838,6 +846,57 @@ impl GraphicsUnit {
     }
 }
 
+/// One of a Mac's rectangles in its Adaptive picture (Standard mode's Adaptive
+/// quality), carried as an `ADAPTIVE` record inside a [`batch`] frame: where the
+/// Mac said it is, and its body as the Mac sent it, the bytes after its `u32`
+/// length — Apple's 8×8 tiles (`0x3f3`), which docs/apple-vnc-889.md describes.
+///
+/// The contract every client implements:
+///
+/// - [`ServerMsg::AdaptiveStart`] arrives first, and says the picture starts from
+///   nothing: no quantization tables, no tile coded and no cache entry. A
+///   rectangle is drawn on what the rectangles before it left, by copies, by
+///   cached tiles and by refining the last full update's coefficients, so a
+///   client decodes every record, in order, from that message on, and one that
+///   has missed any cannot go on.
+/// - The framebuffer is the size [`ServerMsg::Resize`] last said, in pixels, and
+///   a resize leaves it black with no tile coded, the tables and the cache kept.
+/// - A record of zero area at 0,0 carries the quantization tables.
+/// - A client acknowledges a batch when it has drawn it and not before: the
+///   gateway reads the Mac's next rectangles as the client paints, which is what
+///   the Mac sees of the client's link.
+#[derive(Debug, Clone)]
+pub struct AdaptiveUnit {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    /// The rectangle's body.
+    pub data: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
+    /// What the engine is owed once the browser has painted the rectangle: room
+    /// to read the Mac's next — see [`crate::encode::VideoSink::pass_adaptive`].
+    pub painted: Painted,
+}
+
+impl AdaptiveUnit {
+    /// What this rectangle will cost inside a batch, its body included.
+    pub fn record_len(&self) -> usize {
+        batch::ADAPTIVE_HEADER_LEN + self.data.len()
+    }
+
+    /// Append this rectangle as an `ADAPTIVE` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_ADAPTIVE);
+        for value in [self.x, self.y, self.w, self.h] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.data);
+    }
+}
+
 /// Largest cursor edge a client is asked to draw. Real pointers are 32x32 or
 /// 64x64; a shape past this is dropped rather than sent, because a CSS cursor
 /// that big is ignored by the browser and would leave no pointer at all.
@@ -1019,6 +1078,13 @@ pub enum ServerMsg {
     /// the [`ServerMsg::Graphics`] records after this compose, and whatever a client
     /// held of a pipeline or a video stream before it is done with.
     GraphicsStart,
+    /// One of a Mac's rectangles in its Adaptive picture, passed for the browser to
+    /// decode. A binary record like [`ServerMsg::Video`], ordered the same way.
+    Adaptive(AdaptiveUnit),
+    /// A Mac's Adaptive picture starts here, from nothing: the picture is what the
+    /// [`ServerMsg::Adaptive`] records after this draw, and whatever a client held
+    /// of a video stream before it is done with.
+    AdaptiveStart,
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1347,6 +1413,7 @@ enum ControlMsg<'a> {
     Picker,
     GraphicsStart,
     GraphicsView { x: u16, y: u16, w: u16, h: u16 },
+    AdaptiveStart,
     Connected {
         name: &'a str,
         protocol: &'a str,
@@ -1439,6 +1506,8 @@ impl ServerMsg {
                 | ServerMsg::Graphics(_)
                 | ServerMsg::GraphicsStart
                 | ServerMsg::GraphicsView { .. }
+                | ServerMsg::Adaptive(_)
+                | ServerMsg::AdaptiveStart
                 | ServerMsg::VideoFormat { .. }
                 | ServerMsg::Resize { .. }
                 | ServerMsg::Cursor(_)
@@ -1461,10 +1530,15 @@ impl ServerMsg {
     /// caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Video(_) | ServerMsg::Graphics(_) | ServerMsg::Audio(_) | ServerMsg::AudioGap => {
+            ServerMsg::Video(_)
+            | ServerMsg::Graphics(_)
+            | ServerMsg::Adaptive(_)
+            | ServerMsg::Audio(_)
+            | ServerMsg::AudioGap => {
                 return None;
             }
             ServerMsg::GraphicsStart => control(&ControlMsg::GraphicsStart),
+            ServerMsg::AdaptiveStart => control(&ControlMsg::AdaptiveStart),
             ServerMsg::GraphicsView { x, y, w, h } => {
                 control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
             }

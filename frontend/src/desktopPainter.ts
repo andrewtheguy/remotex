@@ -78,6 +78,8 @@ export interface DesktopPainter {
   setVideoFormat(format: VideoFormat): void;
   /** An RDP host's graphics pipeline starts, for the worker to compose. */
   startGraphics(): void;
+  /** A Mac's Adaptive picture starts, for the worker to decode. */
+  startAdaptive(): void;
   /** The part of the pipeline's picture this page's display is (`graphicsView`). */
   setGraphicsView(part: PicturePart): void;
   /**
@@ -200,6 +202,9 @@ export function desktopPainterFor(
     },
     startGraphics() {
       post({ type: "graphicsStart" });
+    },
+    startAdaptive() {
+      post({ type: "adaptiveStart" });
     },
     setGraphicsView(part) {
       post({ type: "graphicsView", part });

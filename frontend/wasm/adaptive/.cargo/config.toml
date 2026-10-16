@@ -1,0 +1,3 @@
+# SIMD, which every browser that has the page's WebCodecs decoders also has.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

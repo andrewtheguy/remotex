@@ -158,7 +158,7 @@ export function readRemoteClipboard(): string {
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
-  passthrough?: "apple-media" | "apple-h264";
+  passthrough?: "apple-media" | "apple-h264" | "apple-adaptive";
   pipeline?: "high-quality" | "adaptive-desktop" | "adaptive-region";
 }
 
@@ -278,17 +278,16 @@ export async function startTarget(
       })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
-  // A High Performance Mac's picture: which of its streams is passed, where one
-  // is asked for.
+  // A Mac's picture: which of its streams is passed, where one is asked for.
   if (choices.passthrough) {
+    const names = {
+      "apple-media": /^HEVC, passed through/,
+      "apple-h264": /^H\.264, passed through/,
+      "apple-adaptive": /^Adaptive \(alpha\), passed through/,
+    };
     await item
       .getByRole("group", { name: "Picture" })
-      .getByRole("radio", {
-        name:
-          choices.passthrough === "apple-media"
-            ? /^HEVC, passed through/
-            : /^H\.264, passed through/,
-      })
+      .getByRole("radio", { name: names[choices.passthrough] })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
   await item.getByRole("button", { name: "Start", exact: true }).click();

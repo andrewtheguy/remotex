@@ -60,6 +60,31 @@ test("a graphics record is its commands, whole, among the records around it", ()
   assert.equal(decodeBatchFrame(empty), null);
 });
 
+test("an adaptive record is where its rectangle is, then its body, whole", () => {
+  // Transcribed from `AdaptiveUnit::write_record` in src/protocol.rs: op 0x05, x,
+  // y, w and h as u16, a u32 length, the body, little-endian.
+  const frame = new Uint8Array([
+    0x02, 0x00, 0x01, 0x00, 0x09, 0x00, 0x00, 0x00, 0x05, 0x08, 0x00, 0x10,
+    0x00, 0x00, 0x01, 0x18, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02,
+  ]).buffer;
+  const records = decodeBatchFrame(frame);
+  assert.equal(records?.length, 1);
+  const record = records?.[0];
+  assert.equal(record?.kind, "adaptive");
+  if (record?.kind === "adaptive") {
+    assert.deepEqual(
+      [record.x, record.y, record.w, record.h, [...record.data]],
+      [8, 16, 256, 24, [1, 2]],
+    );
+  }
+  assert.equal(decodeBatchFrame(frame.slice(0, frame.byteLength - 1)), null);
+  const empty = new Uint8Array([
+    0x02, 0x00, 0x01, 0x00, 0x09, 0x00, 0x00, 0x00, 0x05, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+  ]).buffer;
+  assert.equal(decodeBatchFrame(empty), null, "a rectangle with no body");
+});
+
 test("a video record's flags say a keyframe, and which strip of its picture it is", () => {
   // Transcribed from `VideoUnit::write_record` in src/protocol.rs: op 0x03, flags,
   // the size and the length little-endian, the unit.
