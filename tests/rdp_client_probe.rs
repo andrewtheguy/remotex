@@ -461,6 +461,9 @@ async fn record_microphone() {
 struct Tally {
     /// What the page did with the pipeline's commands.
     page: Page,
+    /// When the pipeline first began, against which the wait for it is judged
+    /// (`PIPELINE_WAIT` in the RDP client).
+    pipeline_began: Option<Instant>,
     /// What the pipeline has drawn with so far, and so whether it is exact.
     host_picture: Option<Fidelity>,
     paints: u64,
@@ -540,6 +543,7 @@ async fn pump(
             Event::FramesMarked => {
                 tally.page.started += 1;
                 tally.page.compositor = Compositor::new();
+                tally.pipeline_began.get_or_insert_with(Instant::now);
             }
             Event::Graphics { wrapped, frame } => {
                 let page = &mut tally.page;
@@ -680,6 +684,7 @@ async fn case() {
         panic!("the session did not connect: {first:?}");
     };
     println!("  connected at {width}x{height}");
+    let connected = Instant::now();
     // Plugged as a browser's enable plugs it: once, early, before the host has opened
     // anything for it to be announced on.
     let camera = session.camera().expect("the session was given a camera");
@@ -705,11 +710,14 @@ async fn case() {
     assert_eq!(tally.resize_ready, egfx, "Display Control is offered under the pipeline alone");
     assert!(tally.clipboard_ready, "the host never opened its clipboard channel");
     if egfx {
+        let began = tally.pipeline_began.expect("the pipeline never began");
+        println!("  the pipeline began {:.2}s after the desktop connected", (began - connected).as_secs_f32());
         assert_eq!(tally.page.started, 1, "the pipeline was said to begin once");
+        assert_eq!(tally.paints, 0, "a session that passes the pipeline painted");
         assert_eq!(tally.page.composed_frames, tally.frames, "every frame the session marked was in what it passed");
         assert_eq!(picture(&session, &tally).with(|frame| (frame.width, frame.height)), (width, height));
         session.framebuffer().with(|frame| {
-            assert!(frame.pixels.iter().all(|b| *b == 0), "the session drew into its own framebuffer");
+            assert!(frame.pixels.is_empty(), "a session that passes the pipeline sized a framebuffer of its own");
         });
     }
 

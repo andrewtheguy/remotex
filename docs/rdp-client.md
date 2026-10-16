@@ -333,7 +333,12 @@ far end's clipboard then costs a report of its size instead of the session.
 
 Two paths, chosen by the target's `egfx` key, `true` by default: the graphics
 pipeline, passed to the caller in every session, and bitmap updates, decoded
-here, with `egfx = false`.
+here, with `egfx = false`. They never mix. With the pipeline offered it is the
+only picture: the framebuffer is left unsized, a bitmap update is dropped
+undecoded and no `Event::Paint` is sent. A host that has not confirmed the
+pipeline `PIPELINE_WAIT` (20 s) after the share began, or after it closed the
+channel, ends the session, as does one that joined no dynamic channel to carry
+it.
 
 ### The graphics pipeline (MS-RDPEGFX)
 
@@ -558,9 +563,9 @@ was 640 ms behind. The receive buffer bounds what the host can send in one round
 trip, so a gateway far from its host is limited by it: 32 KB carries the 31 Mbit/s
 of that picture only while the round trip is under 8 ms. So the socket has that
 buffer only in a session with `Connect::paced`, while the host has a graphics
-pipeline open (`PassedSocket`): a host
-that draws with bitmap updates instead, or has closed the pipeline, has no frames
-to be held for, and keeps the buffer the socket came with.
+pipeline open (`PassedSocket`): a host that has not opened the pipeline yet, or
+has closed it, has no frames to be held for, and keeps the buffer the socket came
+with.
 
 With `Connect::h264` set to `H264::ByRegion` or `H264::WholeDesktop`, a session
 started with the picker's *H.264 region* or *H.264 full screen*, the session
@@ -616,9 +621,9 @@ VP9. The client announces no drawing orders either, so the path is bitmaps
 throughout. The desktop keeps its opening size: without the pipeline a resize is
 the Deactivation-Reactivation Sequence, which this client does not implement, so
 Display Control is not taken without it, and a target with `egfx = false` offers
-no resize at the picker. Every server that is not Windows takes this path whatever
-the key, as do the bitmap updates a Windows host sends before it confirms the
-pipeline.
+no resize at the picker. A server without the pipeline takes this path only with
+`egfx = false`: with the pipeline offered its bitmap updates are dropped, and the
+session ends when it has not confirmed one in time.
 
 That is a deliberate narrowing, not an oversight, and not a limit of the protocol.
 MS-RDPEDISP 1.3 has a server without the pipeline answer a monitor layout with a

@@ -333,9 +333,10 @@ password = "change-me"
 # Where the second sits against the first is chosen at the picker, on an rdp
 # target: right, left, top or bottom. The session starts on the floating menu's
 # Display picker's All Displays, the first display on the page and the second a
-# link away in a tab of its own; the picker shows either alone, and
-# the gateway encodes only what is shown; the host renders the other for the
-# windows left on it. 1 is the one desktop every target opens; at most 2. RDP
+# link away in a tab of its own; the picker shows either alone, and the host
+# renders the other for the windows left on it. Neither is encoded by the
+# gateway: each is passed as the remote sent it, so an rdp target takes 2 only
+# with its pipeline on, and refuses `egfx = false` beside it. 1 is the one desktop every target opens; at most 2. RDP
 # and `subtype = "ard-high-performance"` — the key is shared by the target types
 # that can create virtual displays, and refused elsewhere. On RDP the pipeline is
 # passed beside 2 as beside 1: the browser composes the whole

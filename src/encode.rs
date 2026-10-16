@@ -703,9 +703,8 @@ impl VideoSink {
     /// from now on ([`Self::pass_graphics`]): said ahead of its first command, and
     /// again for a pipeline the host closed and opened anew.
     ///
-    /// What the mirror holds of a picture encoded here is left where it is. Such a
-    /// picture is a host's bitmap updates, which a host that has confirmed its
-    /// pipeline sends no more of.
+    /// A session that passes the pipeline encodes nothing, before it or beside it:
+    /// its RDP client decodes no bitmap update.
     pub async fn graphics_start(&self) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
         self.push(Pending::Msg(ServerMsg::GraphicsStart { engine: 0 })).await

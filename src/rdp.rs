@@ -1076,18 +1076,18 @@ fn graphics_view(rect: Rect) -> ServerMsg {
 }
 
 /// A display shown in a browser tab of its own while *All Displays* is chosen: a
-/// column of the same framebuffer beside the one on the session's canvas, with a
-/// sink, an encoder and a shadow of its own, sent to the display socket the
-/// session handed over ([`ClientMsg::DisplayShown`]).
+/// column of the same desktop beside the one on the session's canvas, told on the
+/// display socket the session handed over ([`ClientMsg::DisplayShown`]) which part
+/// of the browser's picture it shows. Only a passed pipeline lays out a second
+/// display — the bitmap path is one, as [`TargetConfig::virtual_displays`] holds
+/// it — so nothing is ever encoded for a tab.
 ///
 /// What goes wrong with it ends it and nothing else: its socket is a tab the
 /// person can close, so a failed send marks it `failed`, and the loop lets it go.
 struct Tab {
     /// Its number on its socket: its column, plus one.
     display: u32,
-    /// Shared so the loop's flush timer can wait on it beside everything else.
-    sink: Arc<VideoSink>,
-    shadow: Shadow,
+    sink: VideoSink,
     failed: bool,
 }
 
@@ -1111,65 +1111,24 @@ impl Tab {
         }
     }
 
-    async fn frame(&mut self) {
-        if !self.failed {
-            let result = self.sink.frame().await;
-            self.note(result);
-        }
-    }
-
-    /// Whatever part of `rect` falls in this tab's column.
-    async fn damage(&mut self, framebuffer: &Framebuffer, rect: Rect, view: View) {
-        if !self.failed {
-            let column = view.column_rect(self.column());
-            let result = send_damage(framebuffer, rect, column, &mut self.shadow, &self.sink).await;
-            self.note(result);
-        }
-    }
-
-    /// The desktop was laid out again at `size`: what the tab is told, ahead of
-    /// the repaint the host is asked for — or, while the pipeline is `passing`,
-    /// with which part of the browser's picture the column now is, since no
-    /// pixels follow from here.
-    async fn resized(&mut self, size: (u16, u16), density: Density, passing: Option<ServerMsg>) {
-        if passing.is_none() {
-            self.shadow.resize(size.0, size.1);
-            self.sink.reset_render();
-        }
-        self.msg(ServerMsg::Resize { w: size.0, h: size.1, scale: density.scale() }).await;
-        if let Some(view) = passing {
-            self.msg(view).await;
-        }
+    /// The desktop was laid out again as `view`: the tab's size, and which part of
+    /// the browser's picture the column now is.
+    async fn resized(&mut self, view: View, density: Density) {
+        let (w, h) = view.column_size(self.column());
+        self.msg(ServerMsg::Resize { w, h, scale: density.scale() }).await;
+        self.msg(graphics_view(view.column_rect(self.column()))).await;
     }
 
     /// Everything a socket holding nothing is owed: the size, the remote's system,
-    /// the pointer, and every pixel of the column — or, while the pipeline is
-    /// `passing`, which part of the browser's own picture the column is: the
-    /// framebuffer here holds nothing of a passed pipeline, and the tab is painted
-    /// from the picture the session's page composes ([`ServerMsg::GraphicsView`]).
-    async fn repaint(
-        &mut self,
-        framebuffer: &Framebuffer,
-        view: View,
-        density: Density,
-        pointer: ServerMsg,
-        passing: bool,
-    ) {
-        if !passing {
-            self.shadow.forget();
-            self.sink.reset_render();
-        }
+    /// the pointer, and which part of the browser's own picture the column is —
+    /// the tab is painted from the picture the session's page composes
+    /// ([`ServerMsg::GraphicsView`]).
+    async fn repaint(&mut self, view: View, density: Density, pointer: ServerMsg) {
         let (w, h) = view.column_size(self.column());
         self.msg(ServerMsg::Resize { w, h, scale: density.scale() }).await;
         self.msg(ServerMsg::RemoteOs { macos: false }).await;
         self.msg(pointer).await;
-        let column = view.column_rect(self.column());
-        if passing {
-            self.msg(graphics_view(column)).await;
-            return;
-        }
-        self.damage(framebuffer, column, view).await;
-        self.frame().await;
+        self.msg(graphics_view(view.column_rect(self.column()))).await;
     }
 }
 
@@ -1447,9 +1406,10 @@ async fn active_loop(
 
     // The pixels the browser has already been sent, of the display it is looking
     // at. Lives beside the framebuffer it shadows, and is forgotten on a repaint,
-    // on a resize and on a switch.
+    // on a resize and on a switch. Only on the bitmap path: a passed pipeline is
+    // the browser's picture alone, and nothing of it is decoded or encoded here.
     let (view_w, view_h) = view.size();
-    let mut shadow = Shadow::new("rdp", view_w, view_h);
+    let mut shadow = (!pass_graphics).then(|| Shadow::new("rdp", view_w, view_h));
 
     // Last known pointer position, in the framebuffer, so button/wheel events
     // (which the browser sends without coordinates) land where the cursor
@@ -1583,18 +1543,6 @@ async fn active_loop(
                 None => sink.round_returned().await,
             }
         };
-        // The same, for the display in a tab. Owned rather than borrowed, so the
-        // branches below can change the tab.
-        let tab_sink = tab.as_ref().filter(|tab| !tab.failed).map(|tab| Arc::clone(&tab.sink));
-        let tab_flush = async move {
-            match tab_sink {
-                Some(sink) => match sink.due_at().await {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => sink.round_returned().await,
-                },
-                None => std::future::pending().await,
-            }
-        };
         // Damage waiting out its accumulation interval — see `pending_damage` above.
         let damage_flush = async {
             match damage_due {
@@ -1614,10 +1562,14 @@ async fn active_loop(
                     anyhow::bail!("the RDP client stopped reporting");
                 };
                 match event {
+                    // Never under a passed pipeline, whose session decodes no bitmap
+                    // update; staged only where there is a shadow to flush it against.
                     Event::Paint(rect) => {
                         // Staged rather than sent: whether this goes out now or at
                         // the deadline is decided once, at the end of the loop.
-                        stage_damage(&mut pending_damage, damaged(rect));
+                        if shadow.is_some() {
+                            stage_damage(&mut pending_damage, damaged(rect));
+                        }
                     }
                     // The server says this is where its frame ends, which is the fact
                     // the damage interval was built to guess at: everything staged
@@ -1625,7 +1577,7 @@ async fn active_loop(
                     // out now — not in up-to-16ms, and never cut in half.
                     Event::Frame => {
                         frame_marks = true;
-                        flush_damage(framebuffer, &mut pending_damage, view, &mut shadow, sink, &mut tab)
+                        flush_damage(framebuffer, &mut pending_damage, view, shadow.as_mut(), sink)
                             .await?;
                         damage_flushed = Instant::now();
                         damage_due = None;
@@ -1640,9 +1592,8 @@ async fn active_loop(
                         // composes it from here.
                         if pass_graphics {
                             sink.graphics_start().await?;
-                            // A tab shown before the pipeline began was painted
-                            // from the framebuffer; from here it is painted from
-                            // the browser's picture, and is told which part.
+                            // A tab is painted from the browser's picture, which
+                            // starts over here, and is told again which part.
                             if let Some(tab) = &mut tab {
                                 tab.msg(graphics_view(view.column_rect(tab.column()))).await;
                             }
@@ -1726,8 +1677,10 @@ async fn active_loop(
                         pending_damage.clear();
                         damage_due = None;
                         let (w, h) = view.size();
-                        shadow.resize(w, h);
-                        sink.reset_render();
+                        if let Some(shadow) = &mut shadow {
+                            shadow.resize(w, h);
+                            sink.reset_render();
+                        }
                         last_pos = (
                             last_pos.0.min(desktop.0.saturating_sub(1)),
                             last_pos.1.min(desktop.1.saturating_sub(1)),
@@ -1741,9 +1694,7 @@ async fn active_loop(
                             tab = None;
                         }
                         if let Some(tab) = &mut tab {
-                            let size = view.column_size(tab.column());
-                            let passing = sink.passing().then(|| graphics_view(view.column_rect(tab.column())));
-                            tab.resized(size, applied.of(tab.column()), passing).await;
+                            tab.resized(view, applied.of(tab.column())).await;
                         }
                         if let Some(msg) = view.displays(applied) {
                             sink.msg(msg).await?;
@@ -1796,15 +1747,14 @@ async fn active_loop(
                         // Best effort, and only for the pixels still pending: the
                         // session is over either way, and the shadow's claim about them
                         // dies with it.
-                        for rect in pending_damage.drain(..) {
-                            if send_damage(framebuffer, rect, view.rect(), &mut shadow, sink)
-                                .await
-                                .is_err()
-                            {
-                                break;
+                        if let Some(shadow) = &mut shadow {
+                            for rect in pending_damage.drain(..) {
+                                if send_damage(framebuffer, rect, view.rect(), shadow, sink).await.is_err() {
+                                    break;
+                                }
                             }
+                            let _ = sink.frame().await;
                         }
-                        let _ = sink.frame().await;
                         return result.map_err(anyhow::Error::new);
                     }
                     // Only ever the first event, which `await_desktop` consumed.
@@ -1830,11 +1780,13 @@ async fn active_loop(
                     // reattach — and it is what keeps the session layer's
                     // frame dropping while nobody is attached from turning into
                     // a permanently blank region.
-                    shadow.forget();
-                    // The repaint that follows re-sends every pixel at the base
-                    // encode, which settles every debt and makes every cell's
-                    // history a single redraw rather than motion.
-                    sink.reset_render();
+                    if let Some(shadow) = &mut shadow {
+                        shadow.forget();
+                        // The repaint that follows re-sends every pixel at the base
+                        // encode, which settles every debt and makes every cell's
+                        // history a single redraw rather than motion.
+                        sink.reset_render();
+                    }
                     let (w, h) = view.size();
                     sink.msg(ServerMsg::Resize { w, h, scale: applied.of(view.active).scale() }).await?;
                     sink.msg(ServerMsg::RemoteOs { macos: false }).await?;
@@ -1857,12 +1809,11 @@ async fn active_loop(
                     // which repairs a browser that still holds the pipeline's state
                     // and no other — one without it is given a session that starts
                     // ([`crate::session::SessionManager::attach`]).
-                    if sink.passing() {
+                    let Some(shadow) = &mut shadow else {
                         input.refresh();
                         continue;
-                    }
-                    send_damage(framebuffer, view.rect(), view.rect(), &mut shadow, sink)
-                        .await?;
+                    };
+                    send_damage(framebuffer, view.rect(), view.rect(), shadow, sink).await?;
                     // A repaint is a frame. Without this, the whole repaint would
                     // sit in the video mirror unsent, while the shadow already
                     // counts every pixel of it as delivered.
@@ -1899,35 +1850,17 @@ async fn active_loop(
                                     );
                                 }
                             }
+                            // Only a passed pipeline has a second display, and its
+                            // picture is the browser's, which the view moves across:
+                            // nothing is repainted here.
                             if moved {
                                 info!("rdp: showing display {} of {}", view.active + 1, view.columns);
-                                pending_damage.clear();
-                                damage_due = None;
                                 let (w, h) = view.size();
-                                shadow.resize(w, h);
-                                shadow.forget();
-                                sink.reset_render();
                                 sink.msg(ServerMsg::Resize { w, h, scale: applied.of(view.active).scale() }).await?;
-                                if pass_graphics {
-                                    sink.msg(view.graphics_view()).await?;
-                                }
+                                sink.msg(view.graphics_view()).await?;
                             }
                             if let Some(msg) = view.displays(applied) {
                                 sink.msg(msg).await?;
-                            }
-                            // A passed pipeline's picture is the browser's, which
-                            // the view above moves across; the framebuffer here
-                            // holds nothing of it to repaint from.
-                            if moved && !sink.passing() {
-                                send_damage(
-                                    framebuffer,
-                                    view.rect(),
-                                    view.rect(),
-                                    &mut shadow,
-                                    sink,
-                                )
-                                .await?;
-                                sink.frame().await?;
                             }
                         }
                     }
@@ -1940,20 +1873,12 @@ async fn active_loop(
                     match feed {
                         Some(feed) if view.tab_column(display).is_some() => {
                             info!("rdp: showing display {display} in a tab of its own");
-                            let (w, h) = view.column_size(view.tab_column(display).unwrap_or(1));
                             let mut shown = Tab {
                                 display,
-                                sink: Arc::new(VideoSink::new(
-                                    "rdp",
-                                    feed.frames,
-                                    plan,
-                                    feed.feedback,
-                                    Oversize::Refuse,
-                                )),
-                                shadow: Shadow::new("rdp", w, h),
+                                sink: VideoSink::new("rdp", feed.frames, plan, feed.feedback, Oversize::Refuse),
                                 failed: false,
                             };
-                            shown.repaint(framebuffer, view, applied.of(shown.column()), pointer.current(), sink.passing()).await;
+                            shown.repaint(view, applied.of(shown.column()), pointer.current()).await;
                             tab = Some(shown);
                         }
                         Some(_) => debug!("rdp: display {display} is not shown in a tab"),
@@ -1984,7 +1909,7 @@ async fn active_loop(
                         continue;
                     };
                     if matches!(*made, ClientMsg::Refresh) {
-                        shown.repaint(framebuffer, view, applied.of(shown.column()), pointer.current(), sink.passing()).await;
+                        shown.repaint(view, applied.of(shown.column()), pointer.current()).await;
                         continue;
                     }
                     // The tab's window: the second monitor's size, in points, as
@@ -2190,23 +2115,14 @@ async fn active_loop(
                 sink.frame().await?;
                 continue;
             }
-            _ = tab_flush => {
-                if let Some(tab) = &mut tab {
-                    tab.frame().await;
-                }
-                continue;
-            }
             _ = damage_flush => {
-                flush_damage(framebuffer, &mut pending_damage, view, &mut shadow, sink, &mut tab).await?;
+                flush_damage(framebuffer, &mut pending_damage, view, shadow.as_mut(), sink).await?;
                 damage_flushed = Instant::now();
                 damage_due = None;
                 // The flush is a frame boundary of its own: under a video plan those
                 // blits just landed in the mirror, and nothing else may come to
                 // collect them.
                 sink.frame().await?;
-                if let Some(tab) = &mut tab {
-                    tab.frame().await;
-                }
                 continue;
             }
         }
@@ -2236,7 +2152,7 @@ async fn active_loop(
                     damage_due = Some(Instant::now() + FRAME_NET);
                 }
             } else if damage_flushed.elapsed() >= DAMAGE_INTERVAL {
-                flush_damage(framebuffer, &mut pending_damage, view, &mut shadow, sink, &mut tab).await?;
+                flush_damage(framebuffer, &mut pending_damage, view, shadow.as_mut(), sink).await?;
                 damage_flushed = Instant::now();
                 damage_due = None;
             } else if damage_due.is_none() {
@@ -2248,15 +2164,14 @@ async fn active_loop(
         // stop accumulating and encode. Most turns of this loop redraw nothing, which
         // is why this is a no-op when nothing was blitted rather than a frame per PDU.
         sink.frame().await?;
-        if let Some(tab) = &mut tab {
-            tab.frame().await;
-        }
         if tab.as_ref().is_some_and(|tab| tab.failed) {
             tab = None;
         }
     }
 
-    shadow.report();
+    if let Some(shadow) = &shadow {
+        shadow.report();
+    }
     Ok(())
 }
 
@@ -2670,20 +2585,20 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
 }
 
 /// Drain the staged damage into the mirror, the part of it inside the view's
-/// column — and into the tab's, the part inside its column.
+/// column. Nothing is staged without a `shadow`, which a passed pipeline has none
+/// of.
 async fn flush_damage(
     framebuffer: &Framebuffer,
     pending: &mut Vec<Rect>,
     view: View,
-    shadow: &mut Shadow,
+    shadow: Option<&mut Shadow>,
     sink: &VideoSink,
-    tab: &mut Option<Tab>,
 ) -> anyhow::Result<()> {
+    let Some(shadow) = shadow else {
+        return Ok(());
+    };
     for rect in pending.drain(..) {
         send_damage(framebuffer, rect, view.rect(), shadow, sink).await?;
-        if let Some(tab) = tab {
-            tab.damage(framebuffer, rect, view).await;
-        }
     }
     Ok(())
 }

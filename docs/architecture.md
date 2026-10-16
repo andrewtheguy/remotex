@@ -136,9 +136,10 @@ floor: a screen with little movement comes far under it, so a slow link carries
 a still screen and falls behind one in motion. A slow link with much motion is
 an `ard` target's, whose VP9 and whose Mac's Adaptive picture both follow it. See
 [A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
-On RDP VP9 serves only the bitmap path: a target with `egfx = false`, and a host
-that answers the offer of the pipeline with plain bitmap updates. The gateway
-composes no graphics pipeline.
+On RDP VP9 serves only the bitmap path, a target with `egfx = false`. With the
+pipeline on nothing is encoded: the gateway composes no graphics pipeline, and a
+host that does not draw one ends the session
+([A host without the pipeline is refused](#rdps-graphics-pipeline-passed-through)).
 
 #### A Mac's Standard Screen Sharing
 
@@ -179,8 +180,8 @@ as needed rather than ahead of the prioritized servers.
 Another RDP server, an older Windows or xrdp say, may happen to work if it
 speaks what the client implements ([The RDP client](rdp-client.md)), but it is
 not a target: it is not tested against. Its picture follows Windows' rule: a
-pipeline it draws is passed, and bitmap updates are encoded as VP9 in the
-gateway.
+pipeline it draws is passed, and one without the pipeline needs `egfx = false`,
+whose bitmap updates are encoded as VP9 in the gateway.
 
 ### The client and its bundle
 
@@ -599,9 +600,9 @@ displays: the page composes the span once and shows the column `graphicsView`
 names, and on *All Displays* the second display's tab is painted that column of
 the same picture, handed across the browser (`frontend/src/displayRelay.ts`).
 Do not compose a pipeline in two tabs, and do not deal its commands out by
-display. A host that draws with bitmap updates, on a target with
-`egfx = false` or one that answers the offer of the pipeline with them, is
-encoded here as VP9.
+display. A target with `egfx = false` draws with bitmap updates, encoded here
+as VP9; with the pipeline on, the pipeline is the only picture, and no bitmap
+update is decoded or encoded.
 
 How the host draws the pipeline is chosen at the picker: High quality, the
 pipeline's codecs without H.264, by default, or Adaptive
@@ -694,8 +695,7 @@ for the browsers whose own decoder does not take it.
 
 Neither reaches a passed stream: a session started with the Mac's passthrough
 sends its HEVC as it came, and an RDP target with the pipeline on sends the
-host's pipeline as it came, so on such a target the two keys reach only VP9
-encoded for a host that answers with bitmap updates.
+host's pipeline as it came, so the two keys reach nothing on such a target.
 wlshare's stream, passed on every `wlshare` target, is told both and walks
 itself. Which passed streams follow the browser's link, and how, is in
 [A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
@@ -1462,11 +1462,14 @@ the pipeline.
   starts another ([Session lifecycle](#session-lifecycle)), which is a logon to
   the session the host kept. A `refresh` from a page that still holds the pipeline's state is
   passed to the host as a repaint.
-- **A host without the pipeline is encoded here.** A server that answers the
-  offer of the pipeline with bitmap updates has none to pass, and the bitmap
-  updates a host sends before it confirms the pipeline are not the pipeline's:
-  that picture is decoded and encoded as VP9 at the target's dial, as with
-  `egfx = false`, and a `videoFormat` rather than a `graphicsStart` opens it.
+- **A host without the pipeline is refused.** With the pipeline on, nothing of
+  the picture is decoded or encoded here: the RDP client sizes no framebuffer,
+  drops a bitmap update undecoded, before the host confirms the pipeline or
+  beside it, and the engine keeps no shadow, so no VP9 stream is ever built. A
+  host that has not confirmed the pipeline 20 s after the share began, or after
+  it closed the channel, ends the session, as does one that joined no dynamic
+  channel; the message names `egfx = false`, which is the target for such a
+  host. The page shows nothing until `graphicsStart`.
 - **The Info card says whether the host draws losslessly.** For every session
   with the pipeline the gateway reads each draw's codec off the commands it
   passes (`crates/remotex-rdp-graphics/src/fidelity.rs`), ClearCodec's subcodecs
@@ -2694,18 +2697,19 @@ sends the message and the picker stays hidden there. An `rdp` target with
 `virtual_displays = 2` (alpha) asks the host for two monitors of the session's
 size, the second against the edge of the first chosen at the picker, in the
 connect-time monitor data and in every monitor layout, and the host spans one
-framebuffer over both. Where each monitor is in that framebuffer is read from
-the host's own graphics reset. The engine shows one monitor's part of it, a
-column: it
-announces the column's size as the desktop, cuts damage to it, offsets pointer
-positions into it, and lists the columns as `Display 1` and `Display 2`. A
-`selectDisplay` is answered in the gateway, out of the framebuffer it already
-holds, with the list, the size and a repaint of the chosen column, and the host
-is asked for nothing. The list follows what the host laid out, read off the
-desktop it opened and off each graphics reset's monitor count, so a host that
-opens one desktop lists nothing. The pipeline is passed beside it as over one
-display: the browser composes a passed pipeline whole and shows one column of it
-([Two displays, one picture](#rdps-graphics-pipeline-passed-through)).
+desktop over both. Where each monitor is in it is read from the host's own
+graphics reset. The engine shows one monitor's part of it, a column: it
+announces the column's size as the desktop, offsets pointer positions into it,
+and lists the columns as `Display 1` and `Display 2`. A `selectDisplay` is
+answered in the gateway with the list, the size and the column's
+`graphicsView`, and the host is asked for nothing. The list follows what the
+host laid out, read off the desktop it opened and off each graphics reset's
+monitor count, so a host that opens one desktop lists nothing. The pipeline is
+passed beside it as over one display: the browser composes a passed pipeline
+whole and shows one column of it
+([Two displays, one picture](#rdps-graphics-pipeline-passed-through)). Two
+displays are never encoded here, so `egfx = false` beside them is refused at
+load: the bitmap path is one display.
 
 With two columns the list ends with *All Displays* (alpha), under the id Apple's
 own entry uses: the first column on the canvas and the second in a browser tab of

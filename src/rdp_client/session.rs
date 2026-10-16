@@ -82,11 +82,15 @@ pub struct Connect {
     ///
     /// The channel is still this client's: it unwraps the bulk compression, answers
     /// the capability exchange and writes every frame's acknowledgement. What it does
-    /// not do is decode — no [`Event::Paint`] follows a command, and the framebuffer
-    /// holds nothing of what the pipeline draws — and so it does not know when a
-    /// frame is finished: the caller says, with [`Input::frame_composed`], and the
-    /// host is told then. A host that answers the offer with bitmap updates has them
-    /// decoded into the framebuffer as always.
+    /// not do is decode — no [`Event::Paint`] follows a command — and so it does not
+    /// know when a frame is finished: the caller says, with [`Input::frame_composed`],
+    /// and the host is told then.
+    ///
+    /// Offered, the pipeline is the only picture: the framebuffer is never sized,
+    /// a bitmap update is dropped undecoded, and no [`Event::Paint`] is sent at all.
+    /// A host that has not confirmed the pipeline [`PIPELINE_WAIT`] after the share
+    /// began, or after it closed the channel, ends the session, as does one that
+    /// joined no dynamic channel to carry it.
     pub egfx: bool,
     /// Whether, and how, the host may draw with H.264 on the pipeline: the
     /// capability advertise says so ([`gfx_proto::caps_advertise`]), and the access
@@ -164,7 +168,8 @@ pub enum Event {
     /// The desktop exists and its size is settled. Always the first event of a
     /// successful session; a failed one goes straight to [`Event::Ended`].
     Connected { width: u32, height: u32 },
-    /// This rectangle of the framebuffer changed.
+    /// This rectangle of the framebuffer changed. Never sent on a session that
+    /// passes the pipeline ([`Connect::egfx`]).
     ///
     /// Bitmap updates carry no frame boundary, so on a session without
     /// [`Event::Frame`] nothing says where one picture ends and the next begins; a
@@ -266,6 +271,15 @@ pub enum Event {
     /// orderly disconnection from either side.
     Ended(Result<(), Error>),
 }
+
+/// How long a session that passes the pipeline ([`Connect::egfx`]) waits for the
+/// host to confirm it: from when the share begins, and from when the host closes
+/// the channel. A host that has not by then draws without the pipeline, and its
+/// picture is nothing this client hands on.
+///
+/// A Windows host confirms it as the share begins. The rest is room for a host
+/// that is slow to.
+const PIPELINE_WAIT: Duration = Duration::from_secs(20);
 
 /// How many frames of a passed pipeline the caller is left holding, uncomposed,
 /// before the host is kept from drawing another.
@@ -709,7 +723,8 @@ impl Session {
         &self.input
     }
 
-    /// The framebuffer, kept up to date by the session thread.
+    /// The framebuffer, kept up to date by the session thread. Empty on a session
+    /// that passes the pipeline ([`Connect::egfx`]).
     pub fn framebuffer(&self) -> &Framebuffer {
         &self.framebuffer
     }
@@ -802,9 +817,12 @@ async fn run(
     };
     let (width, height) = (u32::from(connected.demand.width), u32::from(connected.demand.height));
     info!("rdp: connected, desktop {width}x{height}");
-    // Before the framebuffer is sized to it.
+    // Before the framebuffer is sized to it. A pipeline that is passed draws none
+    // of its picture there, so it is left empty.
     affordable(width, height)?;
-    framebuffer.resize(width, height);
+    if !config.egfx {
+        framebuffer.resize(width, height);
+    }
     // The first event of the session, so there is room for it.
     let _ = events.send(Event::Connected { width, height }).await;
     let mut config = config;
@@ -971,6 +989,12 @@ struct Active<'a> {
     caller_paced: bool,
     /// Network detection answered at the caller's pace while it is passed frames.
     paced: Paced,
+    /// When a session that passes the pipeline ends unless the host has confirmed
+    /// it by then ([`PIPELINE_WAIT`]); `None` while a pipeline runs, and always
+    /// on one that does not pass it.
+    pipeline_due: Option<Instant>,
+    /// Whether a bitmap update dropped under the pipeline has been logged.
+    bitmaps_dropped: bool,
     /// Whether [`Event::ResizeReady`] has gone out.
     resize_ready: bool,
     /// The most recent size asked for before the channel was ready — only the most
@@ -1220,6 +1244,8 @@ impl<'a> Active<'a> {
             passed: PassedFrames::default(),
             caller_paced: config.paced,
             paced: Paced::default(),
+            pipeline_due: config.egfx.then(|| Instant::now() + PIPELINE_WAIT),
+            bitmaps_dropped: false,
             resize_ready: false,
             pending_resize: None,
             clip_ready: false,
@@ -1238,6 +1264,12 @@ impl<'a> Active<'a> {
         feeds: Feeds,
     ) -> Result<()> {
         let Feeds { mut camera, mut microphone } = feeds;
+        if self.pipeline_due.is_some() && self.dynamic.is_none() {
+            bail!(
+                "the host joined no dynamic virtual channel, so it cannot draw the graphics pipeline; \
+                 a host that draws without it needs egfx = false"
+            );
+        }
         // Updates that arrived while the share was being finalized were read past
         // there — the server may start painting once it has the Font List, which is
         // before this client has the Font Map that ends the sequence — so the desktop
@@ -1257,6 +1289,15 @@ impl<'a> Active<'a> {
                     if let Some(ended) = self.on_frame().await? {
                         return ended;
                     }
+                }
+                // A host that has not started the pipeline: see `PIPELINE_WAIT`.
+                () = tokio::time::sleep_until(self.pipeline_due.unwrap_or_else(Instant::now)),
+                    if self.pipeline_due.is_some() => {
+                    bail!(
+                        "the host did not start the graphics pipeline within {}s; a host that draws \
+                         without it needs egfx = false",
+                        PIPELINE_WAIT.as_secs()
+                    );
                 }
                 // Round trips held for the caller's queue ([`Paced`]), each answered
                 // when it is due.
@@ -1391,10 +1432,19 @@ impl<'a> Active<'a> {
             let cursor = {
                 // Disjoint pieces of the session, so that an update may borrow the
                 // reassembler it came out of while the decoders it feeds are used.
-                let Self { fragments, scratch, pixels, cursors, framebuffer, share, .. } = self;
+                let Self { fragments, scratch, pixels, cursors, framebuffer, share, graphics, bitmaps_dropped, .. } =
+                    self;
                 let Some(update) = fragments.push(piece)? else {
                     continue;
                 };
+                // Under the pipeline it is the only picture: a bitmap update a
+                // host sends beside it, or before it confirms it, is not decoded.
+                if graphics.is_some() && update.code == fastpath::BITMAP {
+                    if !std::mem::replace(bitmaps_dropped, true) {
+                        info!("rdp: the host drew with bitmap updates outside the graphics pipeline; they are dropped");
+                    }
+                    continue;
+                }
                 draw(update, scratch, pixels, cursors, framebuffer, share, &mut painted)?
             };
             for rect in painted.drain(..) {
@@ -1443,8 +1493,9 @@ impl<'a> Active<'a> {
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
         let (replies, updates) = {
-            let Self { chunks, incoming, dynamics, graphics, passed, sound, capture, recorder, framebuffer, .. } =
-                self;
+            let Self {
+                chunks, incoming, dynamics, graphics, passed, pipeline_due, sound, capture, recorder, framebuffer, ..
+            } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
@@ -1480,6 +1531,9 @@ impl<'a> Active<'a> {
                     // for a channel that is no longer there to be told. The
                     // caller's distance is the caller's, and is not said again.
                     *passed = PassedFrames { distance: passed.distance, ..PassedFrames::default() };
+                    // And it was the only picture, so another is waited for as
+                    // the first was.
+                    *pipeline_due = Some(Instant::now() + PIPELINE_WAIT);
                     (vec![dvc::close(channel)], Vec::new())
                 }
                 // The sound, on the channel a current host prefers for it. Every
@@ -1572,7 +1626,10 @@ impl<'a> Active<'a> {
             match update {
                 // The host confirmed the pipeline, so every paint from here on
                 // arrives inside a marked frame; said before the first of them.
-                gfx::Update::Confirmed => self.send(Event::FramesMarked).await,
+                gfx::Update::Confirmed => {
+                    self.pipeline_due = None;
+                    self.send(Event::FramesMarked).await;
+                }
                 // The framebuffer is already the new size; the caller is told now,
                 // before the paints that follow in the same PDU. The share's size
                 // follows too: a Refresh Rect asked for later — and one is, after
