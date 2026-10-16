@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import DisplayMenu from "./DisplayMenu.tsx";
 import FloatingMenu from "./FloatingMenu.tsx";
+import { saysOutOfMemory } from "./memoryBudget.ts";
 import type { DisplayInfo, HoldCause } from "./protocol.ts";
 import TargetPicker from "./TargetPicker.tsx";
 import {
@@ -340,6 +341,7 @@ export default function RemoteDesktop({
     requestClipboard,
     sendClipboard,
     setBottomInset,
+    canvasGeneration,
   } = useRemoteDesktop(
     canvasRef,
     graphicsRef,
@@ -379,14 +381,23 @@ export default function RemoteDesktop({
         {/* Starts 0×0 so no ghost block shows before the first resize; the
             resize handler keeps the full pixel bitmap separate from its
             remote-point CSS size. Kept
-            mounted in both modes so the hook's canvas ref stays stable. */}
-        <canvas ref={canvasRef} className="framebuffer" width={0} height={0} />
+            mounted in both modes so the hook's canvas ref stays stable, and
+            replaced, with the one below, only when a session's end takes the
+            paint worker they were transferred to (desktopPainter.ts). */}
+        <canvas
+          key={`picture-${canvasGeneration}`}
+          ref={canvasRef}
+          className="framebuffer"
+          width={0}
+          height={0}
+        />
         {/* What is drawn on the GPU is drawn here and not on the canvas above:
             an RDP host's graphics pipeline, passed through, and a software
             decoder's pictures (glPicture.ts). The paint worker shows it
             while it holds one of them. It takes the canvas above's box, and
             lies under the input overlay like it. */}
         <canvas
+          key={`graphics-${canvasGeneration}`}
           ref={graphicsRef}
           className="framebuffer graphics"
           width={0}
@@ -495,10 +506,27 @@ export default function RemoteDesktop({
           line in the status overlay, because the overlay hides itself the moment the
           session is up — and this is a session that *is* up, showing nothing. It is
           also not `connectError`: nothing is wrong with the session or the gateway,
-          it is this browser that cannot decode what is arriving. */}
+          it is this browser that cannot decode what is arriving. One that ran
+          out of memory says so and offers the reload that gives the memory
+          back: the page reattaches to the session as it was. */}
       {videoError && mode === "desktop" && (
         <div className="video-banner" role="alert">
+          {saysOutOfMemory(videoError) && (
+            <p className="video-banner-lead">
+              This page ran out of memory. Reload it to free the memory; the
+              session stays connected and comes back.
+            </p>
+          )}
           {videoError}
+          {saysOutOfMemory(videoError) && (
+            <button
+              type="button"
+              className="status-action video-banner-action"
+              onClick={() => location.reload()}
+            >
+              Reload
+            </button>
+          )}
         </div>
       )}
 

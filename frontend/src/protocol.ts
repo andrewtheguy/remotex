@@ -222,7 +222,10 @@ export type ControlMsg =
       pointSized: boolean;
     }
   | { type: "error"; message: string }
-  | { type: "picker" }
+  // `engines` is how many engines the gateway has started, none of which numbered
+  // up to it is running: a picture start (`engine`, below) of one of them arriving
+  // after this, late on the display socket, is from a session that has ended.
+  | { type: "picker"; engines: number }
   // `resize` means this window drives the remote's size, continuously and on
   // every engine alike — what the session was started with, with no client-side
   // mode. True is auto-follow (and the mobile one-shot); false is a session
@@ -296,15 +299,17 @@ export type ControlMsg =
       // How many strips each picture comes in, a unit each (`VideoStrip`): 4 for
       // a High Performance Mac's passed in strips, 1 for whole pictures.
       strips: number;
+      // The engine that sent it, as `picker` numbers them.
+      engine: number;
     }
   // An RDP host's graphics pipeline starts here, from nothing, and the GRAPHICS
   // records after it are the picture: this page composes them. Whatever it held of
-  // a pipeline or a video stream before is done with.
-  | { type: "graphicsStart" }
+  // a pipeline or a video stream before is done with. `engine` as a format's.
+  | { type: "graphicsStart"; engine: number }
   // A Mac's Adaptive picture starts here, from nothing, and the ADAPTIVE records
   // after it are the picture: this page decodes them (adaptivePicture.ts).
-  // Whatever it held of a video stream before is done with.
-  | { type: "adaptiveStart" }
+  // Whatever it held of a video stream before is done with. `engine` as a format's.
+  | { type: "adaptiveStart"; engine: number }
   // The part of a passed pipeline's picture this display is, in the picture's
   // pixels: the host draws its virtual displays as one span, and this names one
   // display's column of it, `w` by `h` from `x`, `y`. Only a session started with

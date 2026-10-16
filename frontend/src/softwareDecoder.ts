@@ -223,10 +223,10 @@ interface Client {
   onEvent: (event: Exclude<DecoderEvent, { type: "broken" }>) => void;
 }
 
-// One decode worker for each module, for the paint worker's lifetime, started by
-// the first stream the module decodes: loading a module compiles it and starts
-// its threads, which a resize should not pay for again. Each stream is a decoder
-// of its own inside it.
+// One decode worker for each module, started by the first stream the module
+// decodes: loading a module compiles it and starts its threads, which a resize
+// should not pay for again. Each stream is a decoder of its own inside it. Each
+// ends with its session (`endDecodeWorker`): few targets' pictures need either.
 const workers: Record<SoftwareModule, Worker | null> = {
   hevc: null,
   vp9: null,
@@ -391,11 +391,19 @@ export function createSoftwareDecoder(
   };
 }
 
+/**
+ * End `module`'s decode worker, and with it its threads and the module's memory,
+ * which a WebAssembly memory gives back no other way. The next stream starts
+ * another.
+ */
+export function endDecodeWorker(module: SoftwareModule): void {
+  workers[module]?.terminate();
+  workers[module] = null;
+  clients[module].clear();
+}
+
 /** Test seam: end every decode worker, so the next stream starts its module's. */
 export function resetSoftwareDecodersForTests(): void {
-  for (const module of ["hevc", "vp9"] as const) {
-    workers[module]?.terminate();
-    workers[module] = null;
-    clients[module].clear();
-  }
+  endDecodeWorker("hevc");
+  endDecodeWorker("vp9");
 }

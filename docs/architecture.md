@@ -228,6 +228,24 @@ gateway.
   start-up, and a choice that is an edge case on such a device and would load a
   module for itself alone is greyed there with the reason rather than offered,
   as lossless sound is ([Lossless sound](#lossless-sound)).
+- On every page, what a session's picture alone loaded goes when the session
+  leaves the page: at the gateway's `picker`, a takeover, or a logout. A
+  WebAssembly memory grows and never
+  shrinks, so ending the worker that holds a module is the only way to give its
+  memory back (`frontend/src/desktopPainter.ts`). The VP9's and the HEVC's
+  decode workers end. The pipeline's compositor and the Adaptive picture's
+  decoder run in the paint worker itself, so a session that loaded either ends
+  that worker, and the page mounts new canvases for the next, since a canvas is
+  transferred to one worker once. A display tab that stops showing its display
+  lets go of its decode workers too. The display socket outlives a session and
+  is not ordered against the session socket, so an ended engine's format or
+  picture start can arrive after its `picker`. Each carries its `engine`, which
+  the session layer stamps in on the way out (`ServerMsg::stamped`), and
+  `picker` carries `engines`, how many the gateway has started, none of them
+  running; the page drops a start whose engine is at or below that.
+  A picture that fails because the browser ran out of memory says so in the video
+  banner, with a Reload: the page that comes back reattaches to the session with
+  its memory whole (`saysOutOfMemory` in `frontend/src/memoryBudget.ts`).
 - The only versioned client asset read at run time is the software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at

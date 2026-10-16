@@ -31,9 +31,15 @@
 //
 //     REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=win-h264 \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, type Worker } from "@playwright/test";
 
-import { leaveSession, logInAndConnectTo, returnToPicker } from "./support";
+import {
+  leaveSession,
+  logIn,
+  logInAndConnectTo,
+  returnToPicker,
+  startTarget,
+} from "./support";
 import { Zgfx } from "./zgfx";
 
 /// The opt-in, and the target name in one, as the video spec has it.
@@ -44,6 +50,9 @@ const EGFX_H264_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET;
 /// What every session here is started with: nothing chosen, the pipeline passed
 /// as it is in every session.
 const PASSED = {};
+
+/// The paint worker's script, as the build names it (desktopPainter.ts).
+const PAINT_WORKER = "**/desktopPainter.worker-*.js";
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
@@ -377,13 +386,21 @@ test.describe("a target that passes its graphics pipeline", () => {
     // given is a session from its first command: connected, and a pipeline that
     // starts, with nothing resumed in between.
     const before = seen.controlTypes.length;
+    // The list the first page's display socket filled, which stays `seen`'s
+    // until the page that comes back opens a socket of its own.
+    const firstAcknowledged = seen.acknowledged;
     await page.reload();
     await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
       timeout: 20_000,
     });
     await expect
-      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
-      .toBeGreaterThan(0);
+      .poll(
+        () =>
+          seen.acknowledged !== firstAcknowledged &&
+          seen.acknowledged.length > 0,
+        { timeout: 20_000 },
+      )
+      .toBe(true);
     const after = seen.controlTypes.slice(before);
     expect(after).toContain("connected");
     expect(after).toContain("graphicsStart");
@@ -394,6 +411,161 @@ test.describe("a target that passes its graphics pipeline", () => {
     expect(seen.batches[0]?.sequence).toBe(1);
     await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(page.locator("canvas.graphics")).toBeVisible();
+
+    await returnToPicker(page);
+  });
+
+  test("ends its paint worker with the session, and composes the next in another", async ({
+    page,
+  }) => {
+    // The compositor is a module of the paint worker's own, and a WebAssembly
+    // memory gives nothing back short of its worker ending, so the session's end
+    // ends that worker (desktopPainter.ts). Its decode workers and the
+    // compositor's threads are its own, and are not counted here.
+    const painters: Worker[] = [];
+    page.on("worker", (worker) => {
+      if (/desktopPainter\.worker/.test(worker.url())) {
+        painters.push(worker);
+      }
+    });
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, EGFX_TARGET ?? "", "", PASSED);
+    await expect
+      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
+      .toBeGreaterThan(0);
+    expect(painters, "one paint worker for the first session").toHaveLength(1);
+    const first = painters[0];
+    const firstEnded = new Promise<void>((resolve) =>
+      first.once("close", () => resolve()),
+    );
+
+    await returnToPicker(page);
+    await firstEnded;
+    // What was acknowledged so far is the first session's. A display socket the
+    // next session opens starts a list of its own, and one the picker kept goes
+    // on adding to this one.
+    const firstAcknowledged = seen.acknowledged;
+    const firstAcknowledgedCount = firstAcknowledged.length;
+    const firstControl = seen.controlTypes.length;
+
+    await startTarget(page, EGFX_TARGET ?? "", PASSED);
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    // Composed by the paint worker the second session started, on the canvases
+    // mounted for it.
+    await expect
+      .poll(() => painters.length, {
+        message: "a paint worker of the second session's own",
+        timeout: 20_000,
+      })
+      .toBe(2);
+    await expect
+      .poll(
+        () =>
+          seen.controlTypes.slice(firstControl).includes("graphicsStart") &&
+          seen.acknowledged.length >
+            (seen.acknowledged === firstAcknowledged
+              ? firstAcknowledgedCount
+              : 0),
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+    expect(
+      seen.unannounced,
+      "runs that arrived before their session's graphicsStart",
+    ).toBe(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.locator("canvas.graphics")).toBeVisible();
+
+    await returnToPicker(page);
+  });
+
+  test("ends the paint worker of a page whose session another browser takes over", async ({
+    page,
+    browser,
+  }) => {
+    // A page left on "taken over" may stay there for good, so it holds nothing
+    // the session's picture loaded: the compositor's paint worker ends.
+    const painters: Worker[] = [];
+    page.on("worker", (worker) => {
+      if (/desktopPainter\.worker/.test(worker.url())) {
+        painters.push(worker);
+      }
+    });
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, EGFX_TARGET ?? "", "", PASSED);
+    await expect
+      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
+      .toBeGreaterThan(0);
+    expect(painters).toHaveLength(1);
+    const ended = new Promise<void>((resolve) =>
+      painters[0].once("close", () => resolve()),
+    );
+
+    const other = await browser.newContext();
+    try {
+      const taker = await other.newPage();
+      await logIn(taker);
+      await expect(
+        page.getByRole("button", { name: "Take it back" }),
+      ).toBeVisible({ timeout: 20_000 });
+      await ended;
+    } finally {
+      await other.close();
+    }
+    // A takeover ends the session, so the page that takes the slot back lands on
+    // the picker.
+    await page.getByRole("button", { name: "Take it back" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Pick a target" }),
+    ).toBeVisible({ timeout: 20_000 });
+  });
+
+  test("says a compositor that ran out of memory did, and reloads into the session", async ({
+    page,
+  }) => {
+    // The paint worker's WebAssembly memories refuse to be made, as an engine out
+    // of memory refuses them: the compositor's is the first it makes.
+    await page.context().route(PAINT_WORKER, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        body: `WebAssembly.Memory = class { constructor() { throw new RangeError("Out of memory"); } };\n${await response.text()}`,
+      });
+    });
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, EGFX_TARGET ?? "", "", PASSED);
+
+    const banner = page.getByRole("alert");
+    await expect(banner).toContainText("This page ran out of memory", {
+      timeout: 20_000,
+    });
+    await expect(banner).toContainText(
+      "could not load the graphics compositor (Out of memory)",
+    );
+
+    // The reload gives the memory back, which a page whose memory is whole again
+    // shows by composing: the same session, reattached, from its first command.
+    await page.context().unrouteAll();
+    const firstAcknowledged = seen.acknowledged;
+    const before = seen.controlTypes.length;
+    await banner.getByRole("button", { name: "Reload" }).click();
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect
+      .poll(
+        () =>
+          seen.acknowledged !== firstAcknowledged &&
+          seen.acknowledged.length > 0,
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+    const after = seen.controlTypes.slice(before);
+    expect(after).toContain("connected");
+    expect(after).toContain("graphicsStart");
+    await expect(page.getByRole("alert")).toHaveCount(0);
 
     await returnToPicker(page);
   });

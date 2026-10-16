@@ -2586,7 +2586,7 @@ mod tests {
         let mut replacement = assertions.attach(&replacement_token, None, Decoders::ALL).await.unwrap();
         assert!(matches!(
             replacement.events.recv().await,
-            Some(AttachEvent::Msg(ServerMsg::Picker))
+            Some(AttachEvent::Msg(ServerMsg::Picker { .. }))
         ));
 
         drop(client);
@@ -2716,7 +2716,7 @@ mod tests {
         let mut att = sessions.attach(&token, None, Decoders::ALL).await.unwrap();
         assert!(matches!(
             att.events.recv().await,
-            Some(AttachEvent::Msg(ServerMsg::Picker))
+            Some(AttachEvent::Msg(ServerMsg::Picker { .. }))
         ));
         let sound = crate::config::Choices { audio: crate::config::Sound::Opus, ..Default::default() };
         sessions.connect(att.id, "fake", None, sound).await.unwrap();
