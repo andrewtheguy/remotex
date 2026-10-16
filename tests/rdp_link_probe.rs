@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 
 use remotex::rdp_client::proto::gfx::{self, H264, Message};
 use remotex::rdp_client::proto::wire::{Malformed, Reader};
-use remotex::rdp_client::{Connect, Event, Session};
+use remotex::rdp_client::{Compositor, Connect, Event, Session};
 
 const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 const H264_ENV: &str = "REMOTEX_UAT_H264";
@@ -346,9 +346,10 @@ impl Progressive {
 }
 
 impl Tally {
-    fn add(&mut self, commands: &[u8], frame: bool) {
+    /// A message `bytes` long as the host sent it, which unwraps to `commands`.
+    fn add(&mut self, commands: &[u8], bytes: usize, frame: bool) {
         self.frames += u64::from(frame);
-        self.bytes += commands.len() as u64;
+        self.bytes += bytes as u64;
         for message in gfx::messages(commands) {
             let (codec, data) = match message.expect("the passed commands parse") {
                 // [MS-RDPEGFX] 2.2.2.11: milliseconds, seconds, minutes, hours.
@@ -480,6 +481,8 @@ async fn a_real_host_draws_for_a_slow_client() {
         let _ = acks.send((composed, frame?));
         Some(composed.duration_since(epoch).as_millis() as i64)
     };
+    // What the page would unwrap the messages with: the one pipeline the run has.
+    let mut unwrapper = Compositor::new();
     // The smallest offset seen between the two clocks: a frame that waited for
     // nothing.
     let mut nearest = i64::MAX;
@@ -502,9 +505,10 @@ async fn a_real_host_draws_for_a_slow_client() {
     let settled = Instant::now() + Duration::from_secs(8);
     while let Ok(event) = tokio::time::timeout_at(settled.into(), events.recv()).await {
         match event.expect("the event channel closed without an Ended") {
-            Event::Graphics { commands, frame } => {
-                opening.add(&commands, frame.is_some());
-                if let (Some(composed), Some(began)) = (acknowledge(frame, commands.len()), opening.began) {
+            Event::Graphics { wrapped, frame } => {
+                let commands = unwrapper.unwrap(&wrapped).expect("the passed message unwraps");
+                opening.add(&commands, wrapped.len(), frame.is_some());
+                if let (Some(composed), Some(began)) = (acknowledge(frame, wrapped.len()), opening.began) {
                     nearest = nearest.min(composed - began);
                 }
             }
@@ -529,9 +533,10 @@ async fn a_real_host_draws_for_a_slow_client() {
         let due = window_started + WINDOW;
         match tokio::time::timeout_at(due.into(), events.recv()).await {
             Ok(event) => match event.expect("the event channel closed without an Ended") {
-                Event::Graphics { commands, frame } => {
-                    window.add(&commands, frame.is_some());
-                    if let (Some(composed), Some(began)) = (acknowledge(frame, commands.len()), window.began) {
+                Event::Graphics { wrapped, frame } => {
+                    let commands = unwrapper.unwrap(&wrapped).expect("the passed message unwraps");
+                    window.add(&commands, wrapped.len(), frame.is_some());
+                    if let (Some(composed), Some(began)) = (acknowledge(frame, wrapped.len()), window.began) {
                         nearest = nearest.min(composed - began);
                         window.behind.push(composed - began);
                     }

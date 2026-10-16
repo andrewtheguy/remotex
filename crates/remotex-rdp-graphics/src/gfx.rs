@@ -66,12 +66,14 @@ pub enum Update {
     Paint(Rect),
     /// The server finished frame `id`, and this client has finished `decoded` in all.
     Frame { id: u32, decoded: u32 },
-    /// Commands for whoever composes the desktop in this client's place
-    /// ([`Graphics::passing`]): whole PDUs as the host sent them, decompressed, in
-    /// the order they came. Each run ends at a frame's end or at the buffer's, and
-    /// `frame` is the frame it ends: the one the host is owed an acknowledgement
-    /// for once whoever composes the run has.
-    Passed { commands: Vec<u8>, frame: Option<u32> },
+    /// One message off the channel for whoever composes the desktop in this
+    /// client's place ([`Graphics::passing`]): as the host sent it, still in its
+    /// bulk compression, which whoever composes it unwraps with a history of its
+    /// own ([`crate::Compositor::unwrap`]). Every message is passed, in the order
+    /// they came, since each is compressed against all the ones before it.
+    /// `frames` are the frames its commands end, in order: each is owed an
+    /// acknowledgement once whoever composes the message has.
+    Passed { wrapped: Vec<u8>, frames: Vec<u32> },
     /// A passed pipeline drew with something it had not drawn with before: what it
     /// has drawn with so far, all of it ([`Fidelity`]). Ahead of the run that
     /// carries that draw.
@@ -317,11 +319,11 @@ impl Graphics {
         }
     }
 
-    /// A pipeline whose commands are composed somewhere else: unwrapped here,
-    /// because the bulk compression's history is the connection's, and handed on
-    /// whole ([`Update::Passed`]). Nothing is decoded, no surface is kept and the
-    /// framebuffer is never drawn into; what this end still reads is what the
-    /// session itself answers — the confirmation, the output's size and each
+    /// A pipeline whose commands are composed somewhere else: each message handed
+    /// on as the host sent it, still compressed ([`Update::Passed`]), and unwrapped
+    /// here too, for the commands' headers. Nothing is decoded, no surface is kept
+    /// and the framebuffer is never drawn into; what this end still reads is what
+    /// the session itself answers — the confirmation, the output's size and each
     /// frame's end, which is owed an acknowledgement once whoever draws the frame
     /// has: a frame is not finished here, so none is counted here.
     pub fn passing() -> Self {
@@ -358,11 +360,18 @@ impl Graphics {
         buffer: &mut Vec<u8>,
         framebuffer: &Framebuffer,
     ) -> Result<Vec<Update>> {
-        self.zgfx.decompress(data, buffer).context("unwrapping a graphics pipeline PDU")?;
+        self.unwrap(data, buffer)?;
         if self.pass {
-            return self.hand_on(buffer);
+            return self.hand_on(data, buffer);
         }
         self.compose(buffer, framebuffer)
+    }
+
+    /// One message off the channel out of its bulk compression, into `commands`:
+    /// against everything this pipeline has unwrapped before it, so every message
+    /// comes through here, in order.
+    pub(crate) fn unwrap(&mut self, data: &[u8], commands: &mut Vec<u8>) -> Result<()> {
+        self.zgfx.decompress(data, commands).context("unwrapping a graphics pipeline PDU")
     }
 
     /// Act on a buffer of commands that is already unwrapped. The pictures supplied
@@ -388,20 +397,14 @@ impl Graphics {
         self.supplied.insert(unit, picture);
     }
 
-    /// A buffer of commands for whoever composes them, cut where the session has
-    /// something of its own to do: before the confirmation and before a reset, so
-    /// what the session says about either reaches its caller ahead of the commands
-    /// that follow it, and after each frame's end, so that a run names the one
-    /// frame it ends. Each draw's codec is read on the way, for [`Update::Drawn`].
-    fn hand_on(&mut self, commands: &[u8]) -> Result<Vec<Update>> {
+    /// A message for whoever composes it, `wrapped` as the host sent it, behind
+    /// what the session has to say of its `commands`: the confirmation and a reset,
+    /// which so reach the caller ahead of the message that carries them, and the
+    /// draws' codecs, for [`Update::Drawn`]. The message is not cut: compressed, it
+    /// has no boundary between its commands, so it names every frame it ends.
+    fn hand_on(&mut self, wrapped: &[u8], commands: &[u8]) -> Result<Vec<Update>> {
         let mut updates = Vec::new();
-        let mut from = 0;
-        let cut = |updates: &mut Vec<Update>, from: &mut usize, to: usize, frame: Option<u32>| {
-            if to > *from {
-                updates.push(Update::Passed { commands: commands[*from..to].to_vec(), frame });
-            }
-            *from = to;
-        };
+        let mut frames = Vec::new();
         for command in gfx::commands(commands) {
             let command = command?;
             self.tally.command(command.id);
@@ -436,7 +439,6 @@ impl Graphics {
                     // A pipeline that starts over has drawn with nothing yet, so
                     // the codecs it draws with again are reported again.
                     self.fidelity = Fidelity::default();
-                    cut(&mut updates, &mut from, command.start, None);
                     updates.push(Update::Confirmed);
                 }
                 Some(Message::ResetGraphics { width, height, monitors }) => {
@@ -444,14 +446,13 @@ impl Graphics {
                     let monitors = gfx::arrangement(width, height, &monitors);
                     debug!("rdp: graphics reset to {width}x{height}, over {monitors:?}");
                     self.output = Some((width, height));
-                    cut(&mut updates, &mut from, command.start, None);
                     updates.push(Update::Reset { width, height, monitors });
                 }
-                Some(Message::EndFrame { frame }) => cut(&mut updates, &mut from, command.end, Some(frame)),
+                Some(Message::EndFrame { frame }) => frames.push(frame),
                 _ => {}
             }
         }
-        cut(&mut updates, &mut from, commands.len(), None);
+        updates.push(Update::Passed { wrapped: wrapped.to_vec(), frames });
         Ok(updates)
     }
 
@@ -1360,11 +1361,12 @@ mod tests {
         pdu(CMD_CAPS_CONFIRM, &w.finish())
     }
 
-    /// A passing pipeline hands every command on as it came and draws none of them:
-    /// what it says for itself is the confirmation and the reset, each ahead of the
-    /// commands that follow it, and which frame a run ends.
+    /// A passing pipeline hands every message on as the host sent it, still
+    /// compressed, and draws none of its commands: what it says for itself is the
+    /// confirmation and the reset, ahead of the message that carries them, and the
+    /// frames the message ends.
     #[test]
-    fn a_passing_pipeline_hands_its_commands_on_whole_and_in_order() {
+    fn a_passing_pipeline_hands_each_message_on_as_the_host_sent_it() {
         let framebuffer = Framebuffer::new();
         let mut graphics = Graphics::passing();
         let opening = [confirm(), reset(4, 4), create(1, 4, 4), map(1, 0, 0)];
@@ -1373,46 +1375,53 @@ mod tests {
         let pdus: Vec<Vec<u8>> = opening.iter().chain(&first).chain(&second).cloned().collect();
 
         let updates = receive(&mut graphics, &framebuffer, &pdus);
-        // Said once the uncompressed draw is read, ahead of the run that carries it.
         let mut drawn = Fidelity::default();
         drawn.saw(CODEC_UNCOMPRESSED, &[]);
         assert_eq!(updates, vec![
             Update::Confirmed,
-            Update::Passed { commands: opening[0].clone(), frame: None },
             Update::Reset { width: 4, height: 4, monitors: vec![gfx::Placed { x: 0, y: 0, w: 4, h: 4 }] },
             Update::Drawn(drawn),
-            Update::Passed { commands: [&opening[1..], &first[..]].concat().concat(), frame: Some(1) },
-            Update::Passed { commands: second.concat(), frame: None },
+            Update::Passed { wrapped: packet(&pdus), frames: vec![1] },
         ]);
-        let passed: Vec<u8> = updates
-            .iter()
-            .filter_map(|update| match update {
-                Update::Passed { commands, .. } => Some(commands.clone()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        assert_eq!(passed, pdus.concat(), "every byte the host sent, once, in order");
         framebuffer.with(|frame| assert_eq!((frame.width, frame.height), (0, 0), "nothing is drawn here"));
         assert!(graphics.surfaces.is_empty() && graphics.clear.is_none(), "and nothing is kept");
     }
 
-    /// A frame that ends in a later packet is passed as it arrives, and the run that
-    /// ends it is the only one that names it.
+    /// A frame that ends in a later message is passed as it arrives, and the message
+    /// that ends it is the only one that names it; one that ends two names both.
     #[test]
-    fn a_passing_pipeline_passes_a_frame_split_across_packets() {
+    fn a_passing_pipeline_names_the_frames_each_message_ends() {
         let framebuffer = Framebuffer::new();
         let mut graphics = Graphics::passing();
         let head = [reset(4, 4), create(1, 4, 4), map(1, 0, 0), start(7)];
-        let tail = [solidfill(1, [1, 2, 3, 0], &[(0, 0, 4, 4)]), end(7)];
+        let tail = [solidfill(1, [1, 2, 3, 0], &[(0, 0, 4, 4)]), end(7), start(8), end(8), start(9)];
         assert_eq!(receive(&mut graphics, &framebuffer, &head), vec![
             Update::Reset { width: 4, height: 4, monitors: vec![gfx::Placed { x: 0, y: 0, w: 4, h: 4 }] },
-            Update::Passed { commands: head.concat(), frame: None },
+            Update::Passed { wrapped: packet(&head), frames: Vec::new() },
         ]);
         assert_eq!(receive(&mut graphics, &framebuffer, &tail), vec![Update::Passed {
-            commands: tail.concat(),
-            frame: Some(7),
+            wrapped: packet(&tail),
+            frames: vec![7, 8],
         }]);
+    }
+
+    /// The history a compositor unwraps against is the pipeline's: a message may
+    /// match into the one before it, as a host's do.
+    #[test]
+    fn a_compositor_unwraps_each_message_against_the_ones_before_it() {
+        use crate::Compositor;
+        let mut compositor = Compositor::new();
+        assert_eq!(compositor.unwrap(&zgfx::wrap(b"ab")).unwrap(), b"ab");
+        // A compressed segment of one match, distance 2 and length 6: see
+        // `a_match_longer_than_its_distance_repeats_itself` in proto/zgfx.rs.
+        let bits = (0b10_0010_0010_1010_u16 << 2).to_be_bytes();
+        let matched = [0xE0, 0x24, bits[0], bits[1], 2];
+        assert_eq!(compositor.unwrap(&matched).unwrap(), b"ababab");
+        assert_ne!(
+            Compositor::new().unwrap(&matched).unwrap(),
+            b"ababab",
+            "a compositor of its own has nothing of the other's history to match into"
+        );
     }
 
     /// What is passed is what a compositor composes: the same commands, handed on
@@ -1460,8 +1469,10 @@ mod tests {
         let mut passing = Graphics::passing();
         let relayed = Framebuffer::new();
         let mut composer = Graphics::new();
+        let mut compositor = crate::Compositor::new();
         for update in receive(&mut passing, &Framebuffer::new(), &pdus) {
-            if let Update::Passed { commands, .. } = update {
+            if let Update::Passed { wrapped, .. } = update {
+                let commands = compositor.unwrap(&wrapped).expect("a well-formed message");
                 composer.compose(&commands, &relayed).expect("well-formed commands");
             }
         }

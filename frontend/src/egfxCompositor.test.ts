@@ -190,6 +190,49 @@ test("each compositor holds a pipeline of its own", async () => {
   second.close();
 });
 
+// [MS-RDPEGFX] 4.2.1.1.2 and 4.2.1.1.3: a message the host left uncompressed, and
+// one it coded as three literals and a match that repeats them.
+const FOX = "The quick brown fox jumps over the lazy dog";
+const foxUncompressed = new Uint8Array([
+  0xe0,
+  0x04,
+  ...new TextEncoder().encode(FOX),
+]);
+const abcCompressed = new Uint8Array([
+  0xe0, 0x24, 0x20, 0x90, 0x88, 0x71, 0x1f, 0xb2, 0x01,
+]);
+// A compressed message of one match, by the token table of 2.2.5.3: distance 43
+// (prefix 10010, then 0001011 over its base of 32) and count 43 (1, then 1110 for
+// 32 and 01011 over it), two bits of padding — the fox again, out of the message
+// before it.
+const foxAgain = new Uint8Array([0xe0, 0x24, 0x90, 0xbf, 0x2c, 0x02]);
+
+const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+
+test("each message is unwrapped against the messages before it", async () => {
+  const make = await loadEgfx(module);
+  const compositor = make();
+  assert.equal(text(compositor.unwrap(foxUncompressed)), FOX);
+  assert.equal(text(compositor.unwrap(abcCompressed)), "ABC".repeat(20));
+  const fresh = make();
+  assert.equal(text(fresh.unwrap(foxUncompressed)), FOX);
+  assert.equal(text(fresh.unwrap(foxAgain)), FOX);
+  // The first has the alphabet run between the fox and this match, so the match
+  // reaches into that instead: the history is each compositor's own.
+  assert.notEqual(text(compositor.unwrap(foxAgain)), FOX);
+  compositor.close();
+  fresh.close();
+});
+
+test("a message that does not unwrap is thrown, with the reason", async () => {
+  const compositor = (await loadEgfx(module))();
+  assert.throws(
+    () => compositor.unwrap(new Uint8Array([0xe2, 0x04, 1])),
+    /unwrapping a graphics pipeline PDU: .*descriptor/,
+  );
+  compositor.close();
+});
+
 test("a command that does not decode is thrown, with the reason", async () => {
   const compositor = (await loadEgfx(module))();
   // A header that says its PDU is shorter than a header.

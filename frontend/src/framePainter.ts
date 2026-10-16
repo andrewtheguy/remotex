@@ -457,10 +457,13 @@ export function createFramePainter(options: {
     }
     let run: ReturnType<EgfxCompositor["compose"]>;
     try {
-      if (!(await decodeUnits(current, compositor, record.data))) {
+      // Unwrapped first and in its turn, whatever becomes of it after: the
+      // messages after it are compressed against it.
+      const commands = compositor.unwrap(record.data);
+      if (!(await decodeUnits(current, compositor, commands))) {
         return;
       }
-      run = compositor.compose(record.data);
+      run = compositor.compose(commands);
       picture.upload(run);
     } catch (error) {
       endPipeline(current, describe(error));

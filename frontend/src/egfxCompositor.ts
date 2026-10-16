@@ -9,8 +9,10 @@
 //
 // A compositor is right only for a pipeline it has followed from its first
 // command: the host draws against what its client already holds — surfaces, cache
-// slots, each codec's own caches. So one is made at every `graphicsStart` and never
-// carried past the next, and one that has refused a command is not fed again.
+// slots, each codec's own caches — and compresses each message against the ones
+// before it. So one is made at every `graphicsStart` and never carried past the
+// next, every record is unwrapped by it in order, and one that has refused a
+// message or a command is not fed again.
 //
 // Progressive's tiles are decoded side by side, on threads: workers this one
 // starts, each an instance of the module on the one memory (egfxPool.worker.ts).
@@ -111,7 +113,15 @@ export type DecodedFrame = Pick<
 
 export interface EgfxCompositor {
   /**
-   * Find the H.264 access units in one GRAPHICS record's commands, and the
+   * One GRAPHICS record's message, as the host sent it, out of its bulk
+   * compression: the commands `scan` and `compose` take. Every record of the
+   * pipeline is unwrapped here, in order, since each is compressed against the
+   * ones before it. Throws for a message that does not unwrap, after which none
+   * after it can be.
+   */
+  unwrap(wrapped: Uint8Array): Uint8Array;
+  /**
+   * Find the H.264 access units in one GRAPHICS record's commands, unwrapped, and the
    * surfaces whose streams end in it. Throws for a command that does not decode,
    * as `compose` would.
    */
@@ -127,7 +137,7 @@ export interface EgfxCompositor {
     frame: DecodedFrame,
   ): Promise<void>;
   /**
-   * Compose one GRAPHICS record's commands. Throws for a command that does not
+   * Compose one GRAPHICS record's commands, unwrapped. Throws for a command that does not
    * decode, after which this compositor is no longer the host's picture of its
    * client.
    */
@@ -324,6 +334,9 @@ export function loadEgfx(
           };
         };
         return {
+          unwrap(wrapped: Uint8Array): Uint8Array {
+            return egfx.unwrap(wrapped);
+          },
           scan(commands: Uint8Array): Scanned[] {
             return scanned(egfx.units(commands));
           },

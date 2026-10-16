@@ -813,42 +813,47 @@ impl VideoUnit {
     }
 }
 
-/// A run of an RDP host's graphics pipeline (MS-RDPEGFX), carried as a `GRAPHICS`
-/// record inside a [`batch`] frame: whole `RDPGFX` PDUs, headers and all, as the host
-/// sent them, out of the channel's bulk compression and otherwise untouched.
+/// A message of an RDP host's graphics pipeline (MS-RDPEGFX), carried as a
+/// `GRAPHICS` record inside a [`batch`] frame: one message off the channel, as the
+/// host sent it — an `RDP_SEGMENTED_DATA` in the channel's bulk compression
+/// (MS-RDPEGFX 2.2.5), which holds whole `RDPGFX` PDUs, headers and all.
 ///
 /// The contract every client implements:
 ///
 /// - [`ServerMsg::GraphicsStart`] arrives first, and says the pipeline starts from
-///   nothing: no surface, no cache slot, no codec state. Everything after it is drawn
-///   against what the commands before it built, so a client composes every record,
-///   in order, from that message on, and one that has missed any cannot go on.
-/// - A record ends at a frame's end or where the host's own PDU did, never inside a
-///   command. The output changes at each `EndFrame`, as on the host's own clients,
-///   and the record that ends a frame is the last of its batch: a batch is drawn
-///   and then shown, so one that held two frames would show one of them.
+///   nothing: no surface, no cache slot, no codec state, and no bulk compression
+///   history. Every message is compressed against the ones before it and drawn
+///   against what the commands before it built, so a client unwraps and composes
+///   every record, in order, from that message on, and one that has missed any
+///   cannot go on.
+/// - A record is a whole message, never cut: compressed, it has no boundary
+///   between its commands. The output changes at each `EndFrame`, as on the host's
+///   own clients, and the record that ends a frame is the last of its batch: a
+///   batch is drawn and then shown, so one that held two frames would show one of
+///   them. A Windows host ends a message at a frame's end, so a record ending two
+///   frames is one the host made so, and one of them is not shown.
 /// - A client answers nothing to the host. Its `paintAck` for a batch is what the
-///   gateway acknowledges that batch's frame to the host on, and the host paces
-///   its drawing by how soon that comes, so a client acknowledges a batch when it
-///   has composed it and not before.
+///   gateway acknowledges the frames that batch ends to the host on, and the host
+///   paces its drawing by how soon that comes, so a client acknowledges a batch
+///   when it has composed it and not before.
 #[derive(Debug, Clone)]
 pub struct GraphicsUnit {
-    /// The commands.
+    /// The message, as the host sent it.
     pub data: Vec<u8>,
-    /// For a run that ends a frame, the acknowledgement the host is owed for that
-    /// frame — see [`Painted`].
+    /// For a message that ends a frame, the acknowledgement the host is owed for
+    /// the last frame it ends, and so for those before it — see [`Painted`].
     pub frame: Option<Painted>,
     /// This payload's share of the queue budget — see [`Held`].
     pub held: Held,
 }
 
 impl GraphicsUnit {
-    /// What this run will cost inside a batch, commands included.
+    /// What this message will cost inside a batch, its bytes included.
     pub fn record_len(&self) -> usize {
         batch::GRAPHICS_HEADER_LEN + self.data.len()
     }
 
-    /// Append this run as a `GRAPHICS` record.
+    /// Append this message as a `GRAPHICS` record.
     pub fn write_record(&self, out: &mut Vec<u8>) {
         out.push(batch::OP_GRAPHICS);
         out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());

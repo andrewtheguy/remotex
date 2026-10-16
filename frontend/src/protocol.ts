@@ -450,11 +450,12 @@ export function stripRows(h: number): number {
   return Math.ceil(Math.floor(h / 4) / 16) * 16;
 }
 
-// A run of an RDP host's graphics pipeline, as the host sent it: whole commands, out
-// of their bulk compression, for this page to compose (egfxCompositor.ts). It means
-// something only after every run before it, from the `graphicsStart` that began the
-// pipeline: the host draws against what its client already holds. See `GraphicsUnit`
-// in src/protocol.rs for the contract.
+// A message of an RDP host's graphics pipeline, as the host sent it: whole commands
+// in the channel's bulk compression, for this page to unwrap and compose
+// (egfxCompositor.ts). It means something only after every message before it, from
+// the `graphicsStart` that began the pipeline: the host compresses each against the
+// ones before it, and draws against what its client already holds. See
+// `GraphicsUnit` in src/protocol.rs for the contract.
 export interface GraphicsMsg {
   kind: "graphics";
   data: Uint8Array;
@@ -537,7 +538,7 @@ const VIDEO_STRIP_FLAGS = VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS;
 //   offset 8: records, back to back
 //
 //   VIDEO (op 0x03):     u8 flags | u16 w | u16 h | u32 len | payload[len]
-//   GRAPHICS (op 0x04):  u32 len | commands[len]
+//   GRAPHICS (op 0x04):  u32 len | message[len]
 //   TILE (op 0x05):      u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 //   REGION (op 0x06):    u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
 //                        | u32 len | payload[len]

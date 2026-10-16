@@ -785,9 +785,9 @@ impl VideoSink {
         self.push(Pending::Msg(ServerMsg::GraphicsStart)).await
     }
 
-    /// Queue a run of an RDP host's graphics pipeline as the next record, untouched:
-    /// whole commands out of their bulk compression, for the browser to compose
-    /// ([`crate::rdp_client::Event::Graphics`]).
+    /// Queue a message of an RDP host's graphics pipeline as the next record,
+    /// untouched: as the host sent it, in its bulk compression, for the browser to
+    /// unwrap and compose ([`crate::rdp_client::Event::Graphics`]).
     ///
     /// As [`Self::pass`] in what the queue does — the run takes its size out of
     /// [`QUEUE_BUDGET`] and goes out in order with the messages around it — and
@@ -795,19 +795,19 @@ impl VideoSink {
     /// run is never dropped for one. A browser that needs the picture from the
     /// start is given a session that starts.
     ///
-    /// `frame` is the acknowledgement the host is owed for the frame the run ends,
-    /// if it ends one, said once the browser has painted it. That, and not the
+    /// `frame` is the acknowledgement the host is owed for the last frame the
+    /// message ends, if it ends one, said once the browser has painted it. That, and not the
     /// queue, is what paces the host: no frame can be dropped between it and the
     /// page, so a page that composes more slowly than the host draws has to be what
     /// the host hears from. The budget is what is left for a browser that says
     /// nothing at all.
-    pub async fn pass_graphics(&self, commands: Vec<u8>, frame: Option<Painted>) -> anyhow::Result<()> {
+    pub async fn pass_graphics(&self, wrapped: Vec<u8>, frame: Option<Painted>) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
-        let bytes = commands.len();
+        let bytes = wrapped.len();
         let held = self.hold(bytes).await;
         self.shared.graphics.fetch_add(1, Ordering::Relaxed);
         self.shared.graphics_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-        self.push(Pending::Msg(ServerMsg::Graphics(GraphicsUnit { data: commands, frame, held }))).await
+        self.push(Pending::Msg(ServerMsg::Graphics(GraphicsUnit { data: wrapped, frame, held }))).await
     }
 
     /// Whether the picture is the remote's stream passed through ([`Self::pass`]).
