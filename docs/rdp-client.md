@@ -451,6 +451,14 @@ same desktop drawn with bitmap updates:
 | Not configured (Medium) | RemoteFX Progressive, and ClearCodec with NSCodec at colour loss level 3 | 46%, by up to 73 | 0.52 MB |
 | Lossless | planar alone, at full colour without subsampling | none, at the opening and after two resizes | 7.6 MB |
 
+The opening desktop is the commands unwrapped. What reaches the browser is
+smaller by the host's own bulk compression, which is passed with them
+([The pipeline, passed on](#the-pipeline-passed-on)): measured on a 3456×1802
+desktop under Lossless (2026-10-15), the opening paint went from 25.7 MB
+unwrapped to 18.8 MB as the host sent it, a desktop busy about half the time
+1.47 times smaller,
+scrolling 2.07 times and a video in a window 1.45 times, at 17 MB a second.
+
 Lossless takes no H.264 either. A session that offered it, with something
 moving on the host's screen, was drawn with planar and uncompressed rectangles
 alone, so an Adaptive session against such a host is drawn that way too, at that
@@ -468,18 +476,22 @@ exact only for uncompressed, planar, alpha and ClearCodec without NSCodec.
 
 `Connect::egfx` offers the pipeline and has the session hand its commands to its
 caller, which composes them: every session with the pipeline on. The channel is
-still this client's: the capability exchange and the bulk compression are as
-above, since the history is the connection's, and so is writing each frame's
-acknowledgement, which the host stops drawing without. `Graphics::passing` reads
+still this client's: the capability exchange is as above, and so is writing each
+frame's acknowledgement, which the host stops drawing without. Each message is
+still unwrapped here, out of the bulk compression, and `Graphics::passing` reads
 the commands by their headers alone (`proto/gfx.rs::commands`) and decodes three:
 the confirmation, the reset, whose size the session announces, and each
-EndFrame. Everything the host sent goes out as `Event::Graphics`, whole PDUs in
-order, cut where the session has something of its own to say — before the
-confirmation and the reset, so `Event::FramesMarked` and `Event::Resize` reach
-the caller ahead of the commands that follow them, and after each EndFrame, so
-that a run names the frame it ends and an `Event::Frame` follows it. Nothing is
-decoded, no surface is kept, and the session's framebuffer holds nothing of what
-the pipeline draws.
+EndFrame. What goes out as `Event::Graphics` is the message as the host sent it,
+still compressed, every one of them in order: each is compressed against the
+ones before it, so the caller unwraps them with a history of its own, started
+where the pipeline is (`Compositor::unwrap`). What the session says of a
+message goes ahead of it — `Event::FramesMarked` for a confirmation and
+`Event::Resize` for a reset — and the message names the last frame it ends,
+with an `Event::Frame` after it. A message is not cut: compressed, it has no
+boundary between its commands. A Windows host ends one at a frame's end, so in
+practice each names the frame it ends, and one that ended two would have both
+acknowledged once it is composed. Nothing is decoded, no surface is kept, and
+the session's framebuffer holds nothing of what the pipeline draws.
 
 What the session no longer knows is when a frame is finished, so the caller
 says: `Input::frame_composed` once it has composed the run, and the host is

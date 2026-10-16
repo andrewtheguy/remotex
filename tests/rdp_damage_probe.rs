@@ -128,7 +128,8 @@ impl Page {
             match self.events.recv().await? {
                 // A pipeline begins: whoever composes it starts from nothing.
                 Event::FramesMarked => self.compositor = Compositor::new(),
-                Event::Graphics { commands, frame } => {
+                Event::Graphics { wrapped, frame } => {
+                    let commands = self.compositor.unwrap(&wrapped).expect("the passed message unwraps");
                     let composed = self.compositor.compose(&commands).expect("the passed commands compose");
                     if let Some((width, height)) = composed.resized {
                         self.composed.push_back(Event::Resize { width, height, monitors: Vec::new() });

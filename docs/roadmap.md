@@ -206,6 +206,27 @@ It was measured at a 1280×800 desktop and not above. The step after it is to
 present a decoded picture on the GPU, and read it back only when a later command
 copies from it.
 
+### The pipeline compressed again for the browser
+
+Taken up if a pipeline's bytes to the browser come to matter, a Lossless host
+over anything short of a LAN first. A passed pipeline reaches the browser in the
+host's own bulk compression
+([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)),
+whose history is 2.5 MB. Unwrapped and compressed again with zstd at level 1,
+with a 32 MB window and long-distance matching, captures of a Windows 11 host
+under the Lossless policy at 3456×1802 (2026-10-15) came out smaller than the
+host's compression on every one: by 21% on a still desktop's opening paint, 25%
+on a desktop busy about half the time, 19% with a video in a window, and 66% on
+scrolling, where a scrolled page is mostly rows the host sent a frame or two
+earlier, megabytes back. Compressing ran at 280 to 580 MB/s on one core,
+against at most 25 MB/s from the host. The cost is a C library in the gateway,
+which the packaging rules and the fallback build have to take, a zstd decoder in
+the page's WebAssembly module, and 32 MB of window in the page per pipeline; a
+64 MB window gained only on scrolling, from 6.15 to 7.36 times smaller than
+unwrapped. The record and its
+acknowledgement would stay as they are: one stream per pipeline, started at
+`graphicsStart` and flushed at each record, in place of the host's.
+
 ### Touch on an RDP target (MS-RDPEI)
 
 Taken up if the need for it shows. The RDP client does not carry touch: it is a

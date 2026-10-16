@@ -205,7 +205,8 @@ async fn a_real_host_is_recorded_to_a_tape() {
                 tape.write_all(&[START_OVER]).expect("writing the tape");
                 tape.write_all(&ms.to_le_bytes()).expect("writing the tape");
             }
-            Event::Graphics { commands, frame } => {
+            Event::Graphics { wrapped, frame } => {
+                let commands = compositor.unwrap(&wrapped).expect("the passed message unwraps");
                 tape.write_all(&[RUN]).expect("writing the tape");
                 tape.write_all(&ms.to_le_bytes()).expect("writing the tape");
                 tape.write_all(&frame.unwrap_or(u32::MAX).to_le_bytes()).expect("writing the tape");

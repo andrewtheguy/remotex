@@ -7,8 +7,9 @@
 // it, the records' own framing, the acknowledgment the page sends once its paint
 // worker has composed a batch, and the DOM's account of a compositor that refused
 // what it was fed and of the canvas the picture is shown on. Nothing here looks at
-// a pixel. A GRAPHICS record is a header this
-// file parses for itself, and what is inside one is the host's.
+// a pixel. A GRAPHICS record is a header this file parses for itself around a
+// message as the host sent it, in its bulk compression, which this file unwraps
+// for itself too (zgfx.ts) to read the commands inside.
 //
 // It needs a gateway whose local config names a live RDP host with the pipeline
 // on, which the picker passes unasked. Keep that gitignored file under `tmp/`, for
@@ -33,6 +34,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import { leaveSession, logInAndConnectTo, returnToPicker } from "./support";
+import { Zgfx } from "./zgfx";
 
 /// The opt-in, and the target name in one, as the video spec has it.
 const EGFX_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_TARGET;
@@ -59,13 +61,15 @@ interface Batch {
   flags: number;
   count: number;
   sequence: number;
-  /** Each record's commands' length. */
+  /** Each record's message's length. */
   runs: number[];
+  /** Whether every record was a message that unwraps, against the ones before it. */
+  unwrapped: boolean;
   /** Whether the records exactly filled the frame. */
   exact: boolean;
   /** The first record op this parser did not recognize, if any. */
   badOp?: number;
-  /** Whether every run was whole commands, by the headers' own lengths. */
+  /** Whether every message held whole commands, by the headers' own lengths. */
   whole: boolean;
   /** How many of its commands draw with H.264. */
   h264: number;
@@ -108,11 +112,15 @@ function wholeCommands(run: Buffer): boolean {
   return at === run.length;
 }
 
-function parseBatch(payload: Buffer): Batch {
+/// A batch's records, each message unwrapped by `zgfx`, the pipeline's decoder, in
+/// order: none for records that arrived before their pipeline was said to begin,
+/// which are only counted.
+function parseBatch(payload: Buffer, zgfx: Zgfx | null): Batch {
   const count = payload.readUInt16LE(2);
   const runs: number[] = [];
   let at = BATCH_HEADER_LEN;
   let exact = true;
+  let unwrapped = true;
   let whole = true;
   let h264 = 0;
   let badOp: number | undefined;
@@ -133,8 +141,19 @@ function parseBatch(payload: Buffer): Batch {
       exact = false;
       break;
     }
-    whole &&= wholeCommands(payload.subarray(start, start + length));
-    h264 += h264Commands(payload.subarray(start, start + length));
+    if (zgfx) {
+      let commands: Buffer | null = null;
+      try {
+        const message = payload.subarray(start, start + length);
+        commands = Buffer.from(zgfx.unwrap(message));
+      } catch {
+        unwrapped = false;
+      }
+      if (commands) {
+        whole &&= wholeCommands(commands);
+        h264 += h264Commands(commands);
+      }
+    }
     runs.push(length);
     at = start + length;
   }
@@ -143,6 +162,7 @@ function parseBatch(payload: Buffer): Batch {
     count,
     sequence: payload.readUInt32LE(4),
     runs,
+    unwrapped,
     exact: exact && at === payload.length,
     badOp,
     whole,
@@ -205,7 +225,9 @@ function watchSession(page: Page): Session {
     // announced is its own too, so the socket before cannot answer for it.
     seen.batches = [];
     seen.acknowledged = [];
-    let started = false;
+    // The pipeline's decoder, made where it starts: its messages are compressed
+    // against each other from there.
+    let zgfx: Zgfx | null = null;
     ws.on("framesent", ({ payload }) => {
       if (typeof payload !== "string") {
         return;
@@ -222,7 +244,7 @@ function watchSession(page: Page): Session {
       }
       seen.controlTypes.push(message.type);
       if (message.type === "graphicsStart") {
-        started = true;
+        zgfx = new Zgfx();
       }
     };
     ws.on("framereceived", ({ payload }) => {
@@ -235,8 +257,8 @@ function watchSession(page: Page): Session {
         seen.badKinds.push(kind);
         return;
       }
-      const batch = parseBatch(payload);
-      if (!started) {
+      const batch = parseBatch(payload, zgfx);
+      if (!zgfx) {
         seen.unannounced += batch.runs.length;
       }
       seen.batches.push(batch);
@@ -300,9 +322,14 @@ test.describe("a target that passes its graphics pipeline", () => {
         batch.runs.length,
         "the header's record count must match the records present",
       ).toBe(batch.count);
-      expect(batch.whole, "a run is whole commands, never part of one").toBe(
-        true,
-      );
+      expect(
+        batch.unwrapped,
+        "a record is a message that unwraps against the ones before it",
+      ).toBe(true);
+      expect(
+        batch.whole,
+        "a message is whole commands, never part of one",
+      ).toBe(true);
     }
     for (const length of runs(seen)) {
       expect(length).toBeGreaterThan(0);
@@ -413,9 +440,14 @@ test.describe("a target whose passed pipeline may carry H.264", () => {
       .toBe(true);
     for (const batch of seen.batches) {
       expect(batch.exact, "records must exactly fill the frame").toBe(true);
-      expect(batch.whole, "a run is whole commands, never part of one").toBe(
-        true,
-      );
+      expect(
+        batch.unwrapped,
+        "a record is a message that unwraps against the ones before it",
+      ).toBe(true);
+      expect(
+        batch.whole,
+        "a message is whole commands, never part of one",
+      ).toBe(true);
     }
     await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(page.locator("canvas.graphics")).toBeVisible();

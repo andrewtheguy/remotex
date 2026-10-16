@@ -99,8 +99,18 @@ impl Egfx {
         Egfx { compositor: Compositor::new(), painted: Vec::new(), resized: false, landing: Vec::new() }
     }
 
-    /// Compose one `GRAPHICS` record's commands, and return how many frames they
-    /// ended. What they painted is [`Self::painted`] until the next call.
+    /// One `GRAPHICS` record's message, as the host sent it, out of its bulk
+    /// compression: the commands [`Self::units`] and [`Self::compose`] take. Every
+    /// record of the pipeline comes through here, in order, since each is
+    /// compressed against the ones before it.
+    ///
+    /// Throws for a message that does not unwrap, after which none after it can be.
+    pub fn unwrap(&mut self, wrapped: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.compositor.unwrap(wrapped).map_err(|e| JsError::new(&format!("{e:#}")))
+    }
+
+    /// Compose one `GRAPHICS` record's commands, unwrapped, and return how many
+    /// frames they ended. What they painted is [`Self::painted`] until the next call.
     ///
     /// Throws for a command that does not decode. The compositor is then no longer
     /// the host's picture of its client, and is not to be fed again.

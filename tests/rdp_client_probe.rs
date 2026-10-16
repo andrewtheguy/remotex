@@ -500,7 +500,9 @@ struct Page {
     /// How many times a pipeline began.
     started: u32,
     runs: u64,
+    /// The messages' bytes as the host sent them, and as they unwrap.
     bytes: u64,
+    unwrapped: u64,
     /// Frames the passed runs ended.
     composed_frames: u64,
 }
@@ -511,6 +513,7 @@ impl std::fmt::Debug for Page {
             .field("started", &self.started)
             .field("runs", &self.runs)
             .field("bytes", &self.bytes)
+            .field("unwrapped", &self.unwrapped)
             .field("composed_frames", &self.composed_frames)
             .finish()
     }
@@ -538,13 +541,15 @@ async fn pump(
                 tally.page.started += 1;
                 tally.page.compositor = Compositor::new();
             }
-            Event::Graphics { commands, frame } => {
+            Event::Graphics { wrapped, frame } => {
                 let page = &mut tally.page;
                 assert!(page.started > 0, "commands arrived before the pipeline was said to begin");
                 page.runs += 1;
-                page.bytes += commands.len() as u64;
+                page.bytes += wrapped.len() as u64;
+                let commands = page.compositor.unwrap(&wrapped).expect("the passed message unwraps");
+                page.unwrapped += commands.len() as u64;
                 let composed = page.compositor.compose(&commands).expect("the passed commands compose");
-                assert_eq!(composed.frames, u32::from(frame.is_some()), "a run names the frame it ends");
+                assert_eq!(composed.frames > 0, frame.is_some(), "a message names the last frame it ends");
                 if let Some(frame) = frame {
                     session.input().frame_composed(frame);
                 }
@@ -1114,8 +1119,9 @@ async fn pass_h264() {
         let Ok(event) = tokio::time::timeout(left, events.recv()).await else { break };
         match event.expect("the event channel closed without an Ended") {
             Event::FramesMarked => compositor = Compositor::new(),
-            Event::Graphics { commands, frame } => {
+            Event::Graphics { wrapped, frame } => {
                 runs += 1;
+                let commands = compositor.unwrap(&wrapped).expect("the passed message unwraps");
                 for found in scan(&commands).expect("the passed commands scan") {
                     match found {
                         Scanned::Gone { surface } => {

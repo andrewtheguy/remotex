@@ -223,8 +223,10 @@ every pixel exactly:
    instead, and means the policy has not reached the session.
 
 Lossless is costly, because the host draws what moves exactly too: the opening
-desktop alone is about 7.6 MB, and a video in a window about 19 MB a second.
-That suits a LAN. Adaptive H.264 changes nothing on such a host: it draws no
+desktop alone is about 7.6 MB, and a video in a window about 19 MB a second,
+before the host's own compression, which reaches the browser with them and
+takes about a third off planar drawing and half off scrolling. That suits a
+LAN. Adaptive H.264 changes nothing on such a host: it draws no
 H.264 under Lossless. See [Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)
 for what was measured.
 

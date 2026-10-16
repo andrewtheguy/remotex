@@ -1648,16 +1648,16 @@ async fn active_loop(
                             }
                         }
                     }
-                    // The pipeline's commands, for the browser to compose. The
-                    // frame a run ends is acknowledged to the host when the
-                    // browser has painted it, which is what the host paces its
-                    // drawing by.
-                    Event::Graphics { commands, frame } => {
+                    // The pipeline's commands, as the host sent them, for the
+                    // browser to unwrap and compose. The frames a message ends
+                    // are acknowledged to the host when the browser has painted
+                    // it, which is what the host paces its drawing by.
+                    Event::Graphics { wrapped, frame } => {
                         let frame = frame.map(|frame| {
                             let input = input.clone();
                             Painted::new(move || input.frame_composed(frame))
                         });
-                        sink.pass_graphics(commands, frame).await?;
+                        sink.pass_graphics(wrapped, frame).await?;
                     }
                     Event::Drawn(fidelity) => {
                         let msg = ServerMsg::HostPicture { exact: fidelity.exact(), codecs: fidelity.names() };

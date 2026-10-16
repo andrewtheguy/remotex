@@ -177,12 +177,14 @@ pub enum Event {
     /// the upgrade it is.
     Frame,
     /// The graphics pipeline's commands, for a session configured with
-    /// [`Connect::egfx`]: whole PDUs as the host sent them, out of their
-    /// bulk compression, in order. A run ends at a frame's end or where the host's
-    /// own PDU did.
+    /// [`Connect::egfx`]: one message off the channel as the host sent it, still in
+    /// its bulk compression, and every one of them, in order, since each is
+    /// compressed against the ones before it. Whoever composes them unwraps them
+    /// ([`remotex_rdp_graphics::Compositor::unwrap`]).
     ///
-    /// `frame` is the frame the run ends, and an [`Event::Frame`] follows it. The
-    /// host is owed that frame's acknowledgement once the run has been composed,
+    /// `frame` is the last frame the message ends, and an [`Event::Frame`] follows
+    /// it. The host is owed that frame's acknowledgement, and those of any it ended
+    /// before it, once the message has been composed,
     /// and paces what it draws by how long that takes, as it does with a client
     /// that decodes for itself: the caller says so with [`Input::frame_composed`],
     /// for every frame, in any order, and the session holds the host a few frames
@@ -192,7 +194,7 @@ pub enum Event {
     /// cache slot and each codec's own state are built by the commands before.
     /// [`Event::FramesMarked`] is where a pipeline begins, and it is sent again when
     /// a host closes the channel and opens another.
-    Graphics { commands: Vec<u8>, frame: Option<u32> },
+    Graphics { wrapped: Vec<u8>, frame: Option<u32> },
     /// The server confirmed the graphics pipeline, so every [`Event::Paint`] from
     /// here on arrives inside a frame that ends in an [`Event::Frame`]. Sent before
     /// the first such paint, so a consumer pacing frames itself stops guessing
@@ -1582,11 +1584,18 @@ impl<'a> Active<'a> {
                     self.share.height = height;
                     self.announce_desktop(width, height, monitors).await;
                 }
-                // Handed over, not finished: the frame a run ends is acknowledged
-                // when the caller says it has been composed.
-                gfx::Update::Passed { commands, frame } => {
-                    self.passed.handed(commands.len(), frame, Instant::now());
-                    self.send(Event::Graphics { commands, frame }).await;
+                // Handed over, not finished: the frames a message ends are
+                // acknowledged when the caller says it has been composed. Its bytes
+                // go with the first of them, and any after it end in the same
+                // message, with nothing more to compose.
+                gfx::Update::Passed { wrapped, frames } => {
+                    let now = Instant::now();
+                    self.passed.handed(wrapped.len(), frames.first().copied(), now);
+                    for &frame in frames.iter().skip(1) {
+                        self.passed.handed(0, Some(frame), now);
+                    }
+                    let frame = frames.last().copied();
+                    self.send(Event::Graphics { wrapped, frame }).await;
                     if frame.is_some() {
                         self.send(Event::Frame).await;
                     }

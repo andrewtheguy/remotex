@@ -567,14 +567,21 @@ test("a refusal gives way to a configuration the browser takes", async () => {
   assert.equal(configured.at(-1), "vp09.01.40.08");
 });
 
-// A GRAPHICS record: op 0x04, a length, the commands.
+// The byte the fake compositor's messages start with, which its `unwrap` takes off:
+// a record composed without being unwrapped would start with it.
+const WRAPPED = 0xe0;
+
+// A GRAPHICS record: op 0x04, a length, the message — each run wrapped as the fake
+// compositor below unwraps it, but for an empty one, which stays a record of no
+// length.
 function graphicsFrame(runs: number[][]): ArrayBuffer {
   const bytes: number[] = [0x02, 0x00, runs.length & 0xff, runs.length >> 8];
   bytes.push(1, 0, 0, 0);
   for (const run of runs) {
-    const n = run.length;
+    const message = run.length === 0 ? [] : [WRAPPED, ...run];
+    const n = message.length;
     bytes.push(0x04, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, n >>> 24);
-    bytes.push(...run);
+    bytes.push(...message);
   }
   return new Uint8Array(bytes).buffer;
 }
@@ -611,8 +618,12 @@ function h264Runs(commands: Uint8Array): Scanned[] {
   return found;
 }
 
-function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
+function fakeCompositors(
+  options: { refuse?: number; garbled?: number; fail?: boolean } = {},
+) {
   const made: {
+    /** The first byte of each message unwrapped, in order. */
+    unwrapped: number[];
     fed: number[][];
     closed: boolean;
     /** Each picture supplied: its number in its run, and the unit's byte. */
@@ -624,6 +635,7 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
     }
     return Promise.resolve((): EgfxCompositor => {
       const record = {
+        unwrapped: [] as number[],
         fed: [] as number[][],
         closed: false,
         supplied: [] as number[][],
@@ -637,6 +649,15 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
           ? { width: 0, height: 0, pixels: new Uint8ClampedArray(0) }
           : { width: 64, height: 48, pixels };
       return {
+        unwrap(wrapped) {
+          assert.equal(wrapped[0], WRAPPED, "a message unwrapped twice");
+          const commands = wrapped.subarray(1);
+          if (commands[0] === options.garbled) {
+            throw new Error("a message that does not unwrap");
+          }
+          record.unwrapped.push(commands[0]);
+          return commands;
+        },
         scan: h264Runs,
         supply(number, _window, frame) {
           assert.equal(
@@ -651,6 +672,7 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
           return Promise.resolve();
         },
         compose(commands): ComposedRun {
+          assert.notEqual(commands[0], WRAPPED, "a message composed wrapped");
           if (commands[0] === options.refuse) {
             throw new Error("a command that does not decode");
           }
@@ -1158,6 +1180,20 @@ test("a run with no pipeline started is dropped", async () => {
   await p.draw(graphicsFrame([[1]]));
   assert.deepEqual(made, []);
   assert.deepEqual(uploaded, []);
+});
+
+test("a message that does not unwrap ends the pipeline, and none after it is unwrapped", async () => {
+  const { made, load } = fakeCompositors({ garbled: 66 });
+  const p = graphicsPainter(load);
+  p.startGraphics();
+  await p.draw(graphicsFrame([[1], [66], [3]]));
+  await p.draw(graphicsFrame([[4]]));
+  assert.deepEqual(made[0].unwrapped, [1]);
+  assert.deepEqual(made[0].fed, [[1]], "nothing is composed after it");
+  assert.equal(made[0].closed, true);
+  const said = videoErrors.filter((error) => error !== null);
+  assert.equal(said.length, 1);
+  assert.match(said[0] ?? "", /a message that does not unwrap/);
 });
 
 test("a command that does not decode ends the pipeline and says so", async () => {

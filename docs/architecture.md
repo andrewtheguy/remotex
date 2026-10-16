@@ -496,11 +496,11 @@ that selects the stream. See
 #### RDP's graphics pipeline
 
 An `rdp` target with the pipeline on passes the host's graphics pipeline
-(MS-RDPEGFX) to the browser in every session: its commands out of their bulk
-compression, never altered, as `GRAPHICS` records on the display socket behind a
-`graphicsStart`; the gateway neither composes nor encodes them, and composes no
-pipeline at all. The picker says the pipeline is always passed, with no box to
-tick, and only a
+(MS-RDPEGFX) to the browser in every session: each message as the host sent it,
+in its bulk compression, never altered, as `GRAPHICS` records on the display
+socket behind a `graphicsStart`; the gateway neither composes nor encodes
+them, and composes no pipeline at all. The picker says the pipeline is always
+passed, with no box to tick, and only a
 page that said it composes one can start the target: a cross-origin isolated
 page, for the compositor's threads, with a WebGL 2 canvas to present on
 (`frontend/src/rdpGraphics.ts`). Any other has Start disabled with the reason,
@@ -1125,12 +1125,13 @@ An `rdp` target with the pipeline on composes nothing of it here: in every
 session the pipeline's commands go to the browser as the host sent them, and the
 page composes them. Composing it here and encoding the picture as VP9 was
 measured, for a desktop in use, at about three quarters VP9 encoding and a
-quarter decoding; passing the commands leaves the gateway the connection, the
-channel's bulk compression and the frame acknowledgements, a few percent of a
-core whatever the desktop is doing. What it costs is the browser's work, and
-the quality walk: what the host draws with is sent as it is, so `video_quality`
-and `render_adaptive` reach nothing of it. A browser that cannot compose it
-cannot start the target, and there is no VP9 to fall back to: a target with
+quarter decoding; passing the commands leaves the gateway the connection,
+unwrapping the channel's bulk compression to read the commands' headers, and the
+frame acknowledgements, a few percent of a core whatever the desktop is doing.
+What it costs is the browser's work, and the quality walk: what the host draws
+with is sent as it is, so `video_quality` and `render_adaptive` reach nothing of
+it. A browser that cannot compose it cannot start the target, and there is no
+VP9 to fall back to: a target with
 `egfx = false` is the one for it. The host still follows the browser's link by
 its own pacing, as *The page paces the host* and *The host finds a slow page
 for itself* below describe, and with Adaptive by its rate control
@@ -1160,14 +1161,27 @@ the pipeline.
   page has the session ended. `render_plan` sets `rdp_graphics` on every session
   of such a target.
 - **What passes** (`VideoSink::pass_graphics`). The RDP client still owns the
-  channel: it answers the capability exchange, unwraps the bulk compression —
-  whose history is the connection's — and writes every frame's acknowledgement
+  channel: it answers the capability exchange, unwraps the bulk compression to
+  read the commands' headers, and writes every frame's acknowledgement
   (`Graphics::passing` in `crates/remotex-rdp-graphics/src/gfx.rs`). It decodes
-  nothing. What it unwrapped goes to the engine as `Event::Graphics`: whole
-  `RDPGFX` PDUs, headers and all, in order, each run ending at a frame's end or
-  where the host's own packet did, and naming the frame it ends. The engine
-  queues each as a `GRAPHICS` record, which takes its share of `QUEUE_BUDGET`
-  like an access unit.
+  nothing. What goes to the engine as `Event::Graphics` is each message as the
+  host sent it, still compressed, in order, naming the last frame it ends; the
+  page unwraps it with a history of its own, started at `graphicsStart`
+  (`Compositor::unwrap`), since each message is compressed against the ones
+  before it. The engine queues each as a `GRAPHICS` record, which takes its
+  share of `QUEUE_BUDGET` like an access unit.
+- **Compressed as the host compressed it.** A message is passed whole, not cut
+  at a frame's end as the commands inside it could be: compressed, it has no
+  boundary between them. A Windows host ends a message at a frame's end, so a
+  record ends a frame as before: over 3,100 messages captured from a Windows 11
+  host under the Lossless policy (2026-10-15), still, busy about half the time,
+  scrolling and with a video playing, none held anything after an EndFrame, and
+  none a reset or a confirmation past its first command. A record that ended two
+  frames would show the last, and its acknowledgement covers both. The host's
+  compression on those, to what the page was sent unwrapped before: 1.37 to 1.47
+  times smaller on planar drawing, 2.07 times on scrolling. A compression of the
+  gateway's own does better
+  ([Roadmap](roadmap.md#the-pipeline-compressed-again-for-the-browser)).
 - **H.264, where the session chose Adaptive** (ALPHA). Otherwise the host is
   told its client takes none. With it, a session
   whose page said it decodes H.264 advertises the capability sets that take it
@@ -2059,7 +2073,7 @@ Screen updates use little-endian binary frames:
 u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
 VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
-GRAPHICS op 0x04: u32 len | commands[len]
+GRAPHICS op 0x04: u32 len | message[len]
 TILE     op 0x05: u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 REGION   op 0x06: u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len | vp9[len]
 ```
@@ -2074,9 +2088,9 @@ number from the top in `0x0C` and `0x10` on the last strip of its frame —
 any other bit is rejected the same way, as is a number or a frame bit without
 `0x02`. A session's records are `VIDEO` unless its target passes an RDP host's
 [graphics pipeline](#rdps-graphics-pipeline-passed-through): a `GRAPHICS` record
-is a run of that pipeline's commands, whole, which means something only after
-every run before it from the `graphicsStart` that began the pipeline. One of no
-length is rejected.
+is one message of that pipeline as the host sent it, in its bulk compression,
+which means something only after every message before it from the
+`graphicsStart` that began the pipeline. One of no length is rejected.
 
 `TILE` and `REGION` records are a picture
 [sent for Motion](#a-macs-virtual-display-sent-for-motion), opened by
@@ -2857,8 +2871,9 @@ Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
 the 16 ms coalescer demoted to a 100 ms safety net — and answers a monitor layout
 with a graphics reset. The channel is answered and acknowledged here, its bulk
-compression unwrapped, and its commands passed to the browser in every session,
-where the page composes them; malformed PDU framing still ends the session. The
+compression unwrapped for the commands' headers, and its messages passed to the
+browser as the host sent them in every session, where the page unwraps and
+composes them; malformed PDU framing still ends the session. The
 compositor the page runs implements ClearCodec and its NSCodec subcodec, RemoteFX
 Progressive, planar and uncompressed rectangles, with the copies and caches
 between updates, and decodes the H.264 a session started with Adaptive (alpha)

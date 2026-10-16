@@ -48,8 +48,20 @@ impl Compositor {
         Self { graphics: Graphics::new(), framebuffer: Framebuffer::new() }
     }
 
-    /// Compose one run of commands, as a session's `Event::Graphics`
-    /// carries them: whole PDUs, out of their bulk compression.
+    /// One message of a session's `Event::Graphics`, as the host sent it, out of
+    /// its bulk compression: the commands [`Self::compose`] takes.
+    ///
+    /// Each message is compressed against every one before it on the channel, so
+    /// this takes every message of the pipeline, in order, from its first. An
+    /// error is a message that does not unwrap, after which none after it can be.
+    pub fn unwrap(&mut self, wrapped: &[u8]) -> Result<Vec<u8>> {
+        let mut commands = Vec::new();
+        self.graphics.unwrap(wrapped, &mut commands)?;
+        Ok(commands)
+    }
+
+    /// Compose one run of commands: a message [`Self::unwrap`] has unwrapped,
+    /// whole PDUs.
     ///
     /// An error is a command that does not decode, after which the pipeline's state
     /// is not the host's and nothing composed from it can be trusted. A codec
