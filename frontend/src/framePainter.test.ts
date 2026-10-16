@@ -1490,3 +1490,168 @@ test("the attachment's end gives the software decoder's picture back", async () 
   assert.deepEqual(shown, [true, false]);
   assert.deepEqual([planes.made, planes.closed], [1, 1]);
 });
+
+/** A batch of a Mac's Adaptive rectangles: op 0x05, x, y, w, h, a length, the body. */
+function adaptiveFrame(rects: { at: number[]; body: number[] }[]): ArrayBuffer {
+  const bytes: number[] = [0x02, 0x00];
+  const u16 = (n: number) => bytes.push(n & 0xff, (n >> 8) & 0xff);
+  const u32 = (n: number) =>
+    bytes.push(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff);
+  u16(rects.length);
+  u32(1);
+  for (const rect of rects) {
+    bytes.push(0x05);
+    for (const value of rect.at) {
+      u16(value);
+    }
+    u32(rect.body.length);
+    bytes.push(...rect.body);
+  }
+  return new Uint8Array(bytes).buffer;
+}
+
+/**
+ * Decoders of a Mac's Adaptive picture that record what they are fed: a body
+ * whose first byte is 2 draws nothing, as the tables do, and one whose first
+ * byte is 9 does not decode.
+ */
+function fakeAdaptive() {
+  const made: { resized: number[][]; fed: number[][]; closed: boolean }[] = [];
+  const load = () =>
+    Promise.resolve(() => {
+      const picture = {
+        resized: [] as number[][],
+        fed: [] as number[][],
+        closed: false,
+      };
+      made.push(picture);
+      return {
+        resize(w: number, h: number) {
+          picture.resized.push([w, h]);
+        },
+        decode(x: number, y: number, w: number, h: number, body: Uint8Array) {
+          if (body[0] === 9) {
+            throw new Error("an update that ran past its body");
+          }
+          picture.fed.push([x, y, w, h, body[0]]);
+          return body[0] !== 2;
+        },
+        pixels: () => null,
+        image: () => ({}) as ImageData,
+        close() {
+          picture.closed = true;
+        },
+      };
+    });
+  return { made, load };
+}
+
+function adaptivePainter(load: ReturnType<typeof fakeAdaptive>["load"]) {
+  const put: number[][] = [];
+  const ctx = {
+    putImageData(_image: unknown, dx: number, dy: number, ...dirty: number[]) {
+      assert.deepEqual(
+        [dx, dy],
+        [0, 0],
+        "the framebuffer is painted where it lies",
+      );
+      put.push(dirty);
+    },
+  } as unknown as CanvasRenderingContext2D;
+  const p = createFramePainter({
+    context: () => ctx,
+    onVideoError: (error) => {
+      videoErrors.push(error);
+    },
+    onVideoNeedsKeyframe: (reason) => {
+      videoKeyframeAsks.push(reason);
+    },
+    loadAdaptive: load,
+  });
+  return { p, put };
+}
+
+test("a Mac's Adaptive rectangles are decoded in order and painted where they drew", async () => {
+  const { made, load } = fakeAdaptive();
+  const { p, put } = adaptivePainter(load);
+  // The resize comes ahead of the picture's start, and is its framebuffer.
+  p.blank(64, 32);
+  p.startAdaptive();
+  await p.draw(
+    adaptiveFrame([
+      { at: [0, 0, 0, 0], body: [2] },
+      { at: [8, 0, 16, 8], body: [0, 1] },
+    ]),
+  );
+  await p.draw(adaptiveFrame([{ at: [0, 8, 64, 24], body: [1] }]));
+  assert.equal(made.length, 1, "one picture follows the whole session");
+  assert.deepEqual(made[0].resized, [[64, 32]]);
+  assert.deepEqual(made[0].fed, [
+    [0, 0, 0, 0, 2],
+    [8, 0, 16, 8, 0],
+    [0, 8, 64, 24, 1],
+  ]);
+  assert.deepEqual(put, [
+    [8, 0, 16, 8],
+    [0, 8, 64, 24],
+  ]);
+  assert.equal(decoders, 0, "no video decoder was built");
+  assert.deepEqual(videoKeyframeAsks, []);
+
+  // A resize starts the framebuffer over at the new size.
+  p.blank(32, 32);
+  assert.deepEqual(made[0].resized, [
+    [64, 32],
+    [32, 32],
+  ]);
+  p.clear();
+  assert.equal(made[0].closed, true);
+});
+
+test("a rectangle that does not decode ends the picture, said once", async () => {
+  const { made, load } = fakeAdaptive();
+  const { p, put } = adaptivePainter(load);
+  p.blank(16, 8);
+  p.startAdaptive();
+  await p.draw(
+    adaptiveFrame([
+      { at: [0, 0, 8, 8], body: [9] },
+      { at: [8, 0, 8, 8], body: [0] },
+    ]),
+  );
+  await p.draw(adaptiveFrame([{ at: [8, 0, 8, 8], body: [0] }]));
+  assert.deepEqual(
+    made[0].fed,
+    [],
+    "nothing after it is drawn on what it left",
+  );
+  assert.deepEqual(put, []);
+  const said = videoErrors.filter((error) => error !== null);
+  assert.equal(said.length, 1);
+  assert.match(
+    said[0] ?? "",
+    /could not decode the Mac's picture \(an update that ran past its body\)/,
+  );
+  assert.deepEqual(
+    videoKeyframeAsks,
+    [],
+    "and nothing is asked of the gateway",
+  );
+});
+
+test("a malformed batch ends an Adaptive picture", async () => {
+  const { made, load } = fakeAdaptive();
+  const { p } = adaptivePainter(load);
+  p.blank(16, 8);
+  p.startAdaptive();
+  await p.draw(
+    new Uint8Array([0x02, 0x00, 0x01, 0x00, 0x01, 0, 0, 0, 0x05]).buffer,
+  );
+  await p.draw(adaptiveFrame([{ at: [0, 0, 8, 8], body: [0] }]));
+  assert.ok(made.every((picture) => picture.fed.length === 0));
+  assert.match(
+    videoErrors.filter((error) => error !== null)[0] ?? "",
+    /arrived malformed/,
+  );
+  assert.deepEqual(videoKeyframeAsks, []);
+});

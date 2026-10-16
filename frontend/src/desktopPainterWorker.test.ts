@@ -54,6 +54,9 @@ function harness() {
     startGraphics() {
       calls.push("graphics");
     },
+    startAdaptive() {
+      calls.push("adaptive");
+    },
     setGraphicsView(part) {
       calls.push(`view:${part.x},${part.y} ${part.w}x${part.h}`);
     },
@@ -248,6 +251,32 @@ test("a graphics pipeline starts in its place, behind the frames before it", asy
   h.release();
   await settled();
   assert.deepEqual(h.calls, ["draw", "graphics", "draw"]);
+});
+
+test("a Mac's Adaptive picture starts in its place, behind the frames before it", async () => {
+  // The first rectangle after the start must find a decoder with nothing in it.
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(1),
+    sequence: 1,
+    generation: 1,
+  });
+  await settled();
+  h.host.handle({ type: "adaptiveStart" });
+  h.unstall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(2),
+    sequence: 2,
+    generation: 1,
+  });
+  await settled();
+  assert.deepEqual(h.calls, ["draw"]);
+  h.release();
+  await settled();
+  assert.deepEqual(h.calls, ["draw", "adaptive", "draw"]);
 });
 
 test("the part a display shows, and a tab's mirror, hold their place behind a stalled draw", async () => {

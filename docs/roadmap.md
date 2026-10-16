@@ -150,34 +150,13 @@ today. How the Mac's rectangles split between the two, how the queue and the
 paint window order two chains, and how each stream starts over are the work.
 
 Two screens is the limit, as it is today: All Displays over three or more is held
-with the notice whatever its size.
+with the notice whatever its size. A session that passes the Mac's Adaptive
+picture is no video and has neither limit
+([A Mac's Adaptive picture](architecture.md#a-macs-adaptive-picture)).
 
 High Performance is not part of this. Its All Displays is not one framebuffer:
 each of its virtual displays is a stream of its own already, the second shown in
 a browser tab ([two virtual displays](apple-vnc-889.md#two-virtual-displays)).
-
-### A passed stream for a Mac on a slow link
-
-A High Performance Mac's passed stream does not follow the browser's link: a
-still screen comes far under its 20–60 Mbit/s target, but a slow link falls
-behind one in motion, and such a link is served today by an `ard` target, its
-ZRLE re-encoded here as VP9
-([A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link)).
-Reporting the browser's delay to the Mac would not bring it there: its rate
-controller walks the target down by the delay only as far as its floor, about
-20 Mbit/s ([Rate control](apple-vnc-889.md#rate-control)).
-A stream the Mac makes itself could be passed in its place, chosen at the
-picker as an RDP host's H.264 is. It has only been probed, and has not been
-decoded.
-
-- **Standard mode's Adaptive encoding.** Asked as Apple's viewer's Adaptive
-  quality asks, a Mac sends its own 8×8 DCT tiles: a changed area comes coarse,
-  and its refinement waits for the motion to stop when the link is slow
-  ([What a Mac sends](apple-vnc-889.md#what-a-mac-sends-a-viewer-that-lists-them)).
-  No browser decodes it, so it takes a decoder in the page, the rectangles
-  forwarded undecoded, and the Mac's socket paced by the browser's link. Open:
-  the decoder itself, how the coarse picture looks and for how long, and the
-  session against ZRLE re-encoded as VP9 on the same link.
 
 ### Verifying an RDP host's certificate
 

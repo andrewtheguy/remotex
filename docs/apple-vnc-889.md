@@ -25,9 +25,9 @@ layer.
 
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
-| `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
+| `ard` | Standard, the physical displays | ZRLE, or in a session started with Adaptive (alpha) the Mac's 8×8 tiles, passed | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC, or H.264, over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
-| `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
+| `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | as `ard` | none; the Mac's own output is left alone |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Its picture
 and its sound are always passed, for the browser to decode: the picture as the
@@ -128,8 +128,10 @@ ZRLE session on it, a combination the viewer never offers (above):
   session in cleartext after authentication, keystrokes and the media stream's
   keys included. Remotex always asks, in both modes.
 - **Standard's picture.** `ard` asks for ZRLE alone, where Full quality asks for
-  zlib first and Adaptive first for
-  [private codecs](#apples-own-framebuffer-encodings) remotex does not decode.
+  zlib first. A session started with the picker's Adaptive (alpha) asks as
+  Adaptive quality does, for the 8×8 tiles first
+  ([private codecs](#apples-own-framebuffer-encodings)), and leaves out `0x3ea`
+  and zlib, which the Mac would not send after them; its page decodes the tiles.
 
 ## Connecting
 
@@ -948,11 +950,21 @@ Read from the daemon, for a reader of Apple's viewer's captures:
 
 ### Apple's own framebuffer encodings
 
-Remotex advertises none of these, but Adaptive quality lists `0x3f3` and `0x3ea`
-first, so a capture of Apple's viewer is full of them. This is read from the
-Mac's encoders and the viewer's decoders, and
+Adaptive quality lists `0x3f3` and `0x3ea` first, so a capture of Apple's
+viewer is full of them, and remotex lists `0x3f3` in a session started with the
+picker's Adaptive, whose page decodes it. This is read from the Mac's encoders
+and the viewer's decoders, and
 [what the Mac sends](#what-a-mac-sends-a-viewer-that-lists-them) from a probe's
-captures of a virtual Mac. No decoder has been run against those captures.
+captures of a virtual Mac, every rectangle of which remotex's decoder
+(`frontend/wasm/adaptive`) decodes with each stream ending on its mark.
+
+**The Mac sends one codec.** Of the encodings a `SetEncodings` lists, it takes
+the first of zlib, ZRLE, `0x3e8`–`0x3ea` and `0x3f3` as the one it codes every
+rectangle in, and the last of zlib, ZRLE and `0x3e8`–`0x3ea` as a lossless one.
+Nothing changes the first but another `SetEncodings`. So a viewer listing
+Adaptive's four is sent `0x3f3` and nothing else, and one listing Full's zlib.
+Listing the same codecs again, or ZRLE alone and then Adaptive's again, does not
+start the tiles over: the Mac sends no new quantization tables.
 
 **`0x3e8`, `0x3e9` and `0x3ea` are zlib with fewer bits per pixel.** A rectangle
 is a `u32` length and that many bytes of zlib. Each encoding keeps its own deflate
@@ -1007,7 +1019,7 @@ A command's operands come from the data stream:
 | 1 | a copy of the previous tile |
 | 2 | a copy of the tile above |
 | 3 | black and white: an 8-bit row mask, then an 8-bit pixel mask for each row whose bit is clear. A set bit is white. |
-| 4 | one or two colours. The first bit says two; the second says to reuse the colours last read in this update instead of reading new ones. A colour is 8-bit Y, then the top six bits of Cb and of Cr. Two colours are followed by command 3's masks, a set bit taking the first colour. |
+| 4 | one or two colours. The first bit says two; the second says to reuse the colours last read in this update instead of reading new ones: one tile's colour and two tiles' pair are kept apart, and start as black and as white and (254, 213, 181). A colour is 8-bit Y, then the top six bits of Cb and of Cr. Two colours are followed by command 3's masks, a set bit taking the first colour. |
 | 5 | DCT-coded |
 | 6 | a cached tile, by a 16-bit index |
 | 7 | the cached tile after the last one used |
@@ -1073,8 +1085,8 @@ update works on those.
 - **Cr and then Cb** each take one bit for the DC, which moves it one from zero,
   or for a zero DC leaves it or is followed by a sign bit. Then come the AC
   coefficients up to the count in byte 1 for Cr and byte 2 for Cb, as JPEG codes
-  them: a Huffman symbol for a run of zeros and a size, from one of JPEG's
-  standard AC tables, then that many value bits.
+  them: a Huffman symbol for a run of zeros and a size, from JPEG's standard
+  table for luminance AC coefficients, then that many value bits.
 - **The refined tile goes into a cache,** as 64 Y, 15 Cr and 20 Cb coefficients
   under the next index. Indices run from 1 and wrap after 64,999. A full
   update's commands 6 and 7, and a partial update's code 3, draw a tile from
@@ -1110,6 +1122,11 @@ socket no faster than a set rate. The same was run listing ZRLE alone.
   when the refinement comes.
 - **ZRLE on the same links** moved a sixteenth of the pixels at 2 Mbit/s, and at
   500 kbit/s delivered its first picture and nothing more in 20 s.
+- **Through remotex, paced by a browser's painting,** the same: behind a
+  300 kbit/s browser, a screen in constant motion came as about one and a half
+  updates a second, full ones with their refinement among them, where the same
+  screen read freely came as seventy
+  ([A Mac's Adaptive picture, passed through](architecture.md#a-macs-adaptive-picture-passed-through)).
 
 ### The numbers, in both forms
 
@@ -1131,7 +1148,7 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 | 1-bit zlib | `0x3e8` | 1000 | not advertised |
 | 4-bit grey zlib | `0x3e9` | 1001 | not advertised |
 | RGB 5-5-5 zlib | `0x3ea` | 1002 | not advertised |
-| 8×8 tiles | `0x3f3` | 1011 | not advertised |
+| 8×8 tiles | `0x3f3` | 1011 | advertised in a session started with Adaptive |
 | ZRLE | `0x10` | 16 | standard RFB |
 | zlib | `0x06` | 6 | standard RFB, not advertised |
 | Raw | `0x00` | 0 | standard RFB |
@@ -1911,12 +1928,9 @@ is 10 s overdue.
 
 ## Still unknown
 
-- **`0x3f3` decoded:** the coding is read from the viewer and no decoder has
-  been run against a capture, so which of JPEG's AC tables the chrominance uses,
-  and the order of a pixel's bytes, are unchecked. What the Mac measures to
-  hold a refinement back, and how the picture looks before it, are unknown, and
-  nothing was captured from a physical Mac
-  ([Apple's own framebuffer encodings](#apples-own-framebuffer-encodings)).
+- **`0x3f3` on a physical Mac:** what the Mac measures to hold a refinement
+  back is unknown, and nothing was captured from a physical Mac, or at a Retina
+  density ([Apple's own framebuffer encodings](#apples-own-framebuffer-encodings)).
 - **Other login types:** type 35's Kerberos tokens
   ([Other login types](#other-login-types)).
 - **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers

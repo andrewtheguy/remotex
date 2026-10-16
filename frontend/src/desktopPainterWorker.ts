@@ -100,6 +100,8 @@ export type PainterCommand =
   | { type: "videoFormat"; format: VideoFormat }
   /** An RDP host's graphics pipeline starts, and this worker composes it. */
   | { type: "graphicsStart" }
+  /** A Mac's Adaptive picture starts, and this worker decodes it. */
+  | { type: "adaptiveStart" }
   /** The part of the pipeline's picture this page's display is, to show. */
   | { type: "graphicsView"; part: PicturePart }
   /**
@@ -338,6 +340,9 @@ export function createPainterWorker(
           break;
         case "graphicsStart":
           queued(() => painter?.startGraphics());
+          break;
+        case "adaptiveStart":
+          queued(() => painter?.startAdaptive());
           break;
         case "graphicsView":
           queued(() => painter?.setGraphicsView(command.part));

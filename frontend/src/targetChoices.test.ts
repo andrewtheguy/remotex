@@ -69,6 +69,11 @@ const HIGH_PERFORMANCE = target({
   passthroughs: ["apple-media", "apple-h264"],
 });
 
+const STANDARD = target({
+  subtype: "ard",
+  passthroughs: ["apple-adaptive"],
+});
+
 const SIZED = { w: 1920, h: 1080 };
 
 /** A target's picture options as value and whether it is greyed, in the order shown. */
@@ -181,9 +186,13 @@ test("only what the target's type offers has a row", () => {
   );
   assert.equal(wlshare.pictures, null);
   assert.deepEqual(formats(wlshare), ["opus", "flac"]);
-  // Standard Screen Sharing on the Mac's physical displays offers nothing.
-  const standard = targetOptions(target({ subtype: "ard" }), undefined, ABLE);
-  assert.equal(standard.pictures, null);
+  // Standard Screen Sharing on the Mac's physical displays offers its picture
+  // alone, which is VP9 until the Mac's own is chosen.
+  const standard = targetOptions(STANDARD, undefined, ABLE);
+  assert.deepEqual(pictures(standard), [
+    [null, false],
+    ["apple-adaptive", false],
+  ]);
   assert.equal(standard.soundRow, null);
   assert.deepEqual(standard.choices, {
     size: "target",
@@ -194,6 +203,31 @@ test("only what the target's type offers has a row", () => {
     vp9: "libvpx",
   });
   assert.equal(standard.blocked, null);
+});
+
+test("a Standard Mac's picture is VP9 or its Adaptive picture passed", () => {
+  const vp9 = targetOptions(STANDARD, undefined, UNABLE);
+  assert.deepEqual(
+    pictures(vp9),
+    [
+      [null, false],
+      ["apple-adaptive", false],
+    ],
+    "a browser that takes no other passthrough takes this one",
+  );
+  assert.equal(vp9.choices.passthrough, null, "VP9 until the other is chosen");
+  assert.equal(vp9.encoders, null, "the gateway codes it with libvpx alone");
+  assert.match(vp9.pictures?.[1].label ?? "", /alpha/);
+
+  const adaptive = targetOptions(
+    STANDARD,
+    { passthrough: "apple-adaptive" },
+    ABLE,
+  );
+  assert.equal(adaptive.choices.passthrough, "apple-adaptive");
+  assert.equal(adaptive.choices.vp9, "libvpx");
+  assert.equal(adaptive.blocked, null);
+  assert.equal(adaptive.sound, false);
 });
 
 test("a Mac's picture is its HEVC passed or its H.264 passed", () => {

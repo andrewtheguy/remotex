@@ -86,10 +86,11 @@ def coordinates(value: str) -> tuple[int, int]:
 
 
 def batch_records(frame: bytes) -> int:
-    """Print one screen batch's records and return its video units.
+    """Print one screen batch's records and return how many there were.
 
     Parsed here rather than trusted from anywhere: a VIDEO record is
-    ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``."""
+    ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``, and an ADAPTIVE one
+    ``0x05 | u16 x | u16 y | u16 w | u16 h | u32 len | body``."""
     count = int.from_bytes(frame[2:4], "little")
     sequence = int.from_bytes(frame[4:8], "little")
     at = 8
@@ -105,6 +106,13 @@ def batch_records(frame: bytes) -> int:
             parts.append(f"video {w}x{h}{key} {length}B")
             video += 1
             at += 10 + length
+        elif op == 0x05:
+            x, y, w, h = (int.from_bytes(frame[at + 1 + 2 * i : at + 3 + 2 * i], "little") for i in range(4))
+            length = int.from_bytes(frame[at + 9 : at + 13], "little")
+            kind = {0: "full", 1: "partial", 2: "tables"}.get(frame[at + 13], "?")
+            parts.append(f"adaptive {kind} {w}x{h}+{x}+{y} {length}B")
+            video += 1
+            at += 13 + length
         else:
             raise AssertionError(f"unknown record op {op:#x}")
     assert at == len(frame), "records must exactly fill the frame"
@@ -145,12 +153,12 @@ async def main() -> int:
         "--passthrough",
         nargs="?",
         const="apple-media",
-        choices=["apple-media", "apple-h264"],
+        choices=["apple-media", "apple-h264", "apple-adaptive"],
         help="start the session with the target's own stream passed, by its name: a "
         "High Performance Mac's HEVC (apple-media, the default, to a client that states "
         "--apple-media) or its H.264 (apple-h264), one of which such a target's session "
-        "has to name. An RDP host's graphics pipeline passes in every session and is not "
-        "named",
+        "has to name, or a Standard Mac's Adaptive picture (apple-adaptive). An RDP "
+        "host's graphics pipeline passes in every session and is not named",
     )
     parser.add_argument(
         "--placement",
@@ -904,7 +912,7 @@ async def main() -> int:
         if args.tab:
             print(f"  [2] {tab_frames} binary frames")
         if args.records:
-            print(f"  {video_units} video records")
+            print(f"  {video_units} video and adaptive records")
         if args.audio:
             print(f"  {audio_frames} audio frames; format={audio_format}")
             if audio_error is not None:

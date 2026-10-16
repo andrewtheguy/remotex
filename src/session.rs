@@ -998,12 +998,15 @@ impl SessionManager {
             st.take_engine();
             st.clear_selection();
         }
-        // A passed graphics pipeline has no resume, whatever the browser says: the host draws against what its client already holds — surfaces,
-        // cache slots, each codec's caches — and answers even a repaint out of
-        // them, so a page that comes back holding none of it cannot be made whole
-        // by the engine that is running. It is given one that starts.
-        if st.engine.as_ref().is_some_and(|engine| engine.plan.rdp_graphics) {
-            info!("session: a passed graphics pipeline cannot be resumed; starting it over");
+        // A passed stream drawn against what the page holds has no resume, whatever
+        // the browser says ([`Passthrough::resumes`]): an RDP host's pipeline is
+        // drawn against its client's surfaces, cache slots and each codec's caches,
+        // and answers even a repaint out of them, and a Mac's Adaptive picture
+        // against the page's framebuffer, coefficients and tile cache. A page that
+        // comes back holding none of it cannot be made whole by the engine that is
+        // running. It is given one that starts.
+        if st.engine.as_ref().is_some_and(|engine| !engine.plan.resumes()) {
+            info!("session: a passed stream drawn against the page cannot be resumed; starting it over");
             st.take_engine();
         }
 
@@ -1975,6 +1978,16 @@ impl SessionManager {
                         match st.displays.get(&FIRST_DISPLAY) {
                             Some(slot) => Route::Send(slot.event_tx.clone()),
                             None if st.client.is_some() && st.display_wait && !waited => Route::Wait,
+                            // No socket for it, with the page attached: a picture
+                            // drawn against what the page holds cannot be repainted,
+                            // so its session ends rather than going on broken.
+                            None if st.client.is_some()
+                                && st.engine.as_ref().is_some_and(|engine| !engine.plan.resumes()) =>
+                            {
+                                st.take_engine();
+                                st.clear_selection();
+                                Route::Lost(st.client.as_ref().map(|c| c.event_tx.clone()))
+                            }
                             // No socket for it: dropped, and repainted for the next.
                             None => {
                                 st.display_lost = true;
@@ -2013,12 +2026,40 @@ impl SessionManager {
                     mgr.state.lock().unwrap().display_wait = false;
                 }
             };
-            let Route::Send(event_tx) = route else {
-                continue;
+            let event_tx = match route {
+                Route::Send(event_tx) => event_tx,
+                Route::Lost(client) => {
+                    Self::picture_lost(client).await;
+                    return;
+                }
+                Route::Wait | Route::Drop => continue,
             };
-            // A send error means that socket is gone mid-frame; it will detach
-            // itself, so just drop the frame like the detached case.
-            let _ = event_tx.send(AttachEvent::Msg(msg)).await;
+            let display = msg.is_display();
+            if event_tx.send(AttachEvent::Msg(msg)).await.is_ok() || !display {
+                continue;
+            }
+            // The display socket went away mid-frame; it detaches itself. A picture
+            // that resumes is repainted for the next one, so the frame is dropped
+            // like the detached case. One drawn against what the page holds has
+            // lost a piece no repaint brings back, so with the page still
+            // attached its session ends.
+            let lost = {
+                let mut st = mgr.state.lock().unwrap();
+                let ends = st.client.is_some()
+                    && st
+                        .engine
+                        .as_ref()
+                        .is_some_and(|engine| engine.generation == generation && !engine.plan.resumes());
+                ends.then(|| {
+                    st.take_engine();
+                    st.clear_selection();
+                    st.client.as_ref().map(|c| c.event_tx.clone())
+                })
+            };
+            if let Some(client) = lost {
+                Self::picture_lost(client).await;
+                return;
+            }
         }
         info!("session: engine ended");
         // If this is still the current engine (not a disconnect that already
@@ -2039,6 +2080,20 @@ impl SessionManager {
             let _ = event_tx.send(AttachEvent::Msg(ServerMsg::Picker)).await;
         }
     }
+
+    /// A picture that cannot be repainted lost a message on its way to the page,
+    /// and its session has ended: the attached client, if any, is told and lands
+    /// on the picker.
+    async fn picture_lost(client: Option<mpsc::Sender<AttachEvent>>) {
+        warn!("session: the passed picture could not reach a display socket; the session ends");
+        if let Some(client) = client {
+            let message =
+                "The picture could not reach this page, and a passed stream cannot be repainted: start the session again."
+                    .to_owned();
+            let _ = client.send(AttachEvent::Msg(ServerMsg::Error { message })).await;
+            let _ = client.send(AttachEvent::Msg(ServerMsg::Picker)).await;
+        }
+    }
 }
 
 /// Where the pump sends one engine message.
@@ -2047,6 +2102,9 @@ enum Route {
     /// Hold it for the first display's socket ([`DISPLAY_ATTACH_GRACE`]).
     Wait,
     Drop,
+    /// Ended: a picture that cannot be repainted lost this message, and the
+    /// attached client is told.
+    Lost(Option<mpsc::Sender<AttachEvent>>),
 }
 
 /// Spawn the protocol engine for `target` on its own thread.
@@ -2795,6 +2853,197 @@ mod tests {
         let mut ended = mgr.attach(&token, None, cannot).await.unwrap();
         assert!(hook_rx.try_recv().is_err());
         expect_beyond_then_picker(&mut ended.events, "graphics pipeline").await;
+    }
+
+    /// A Mac's passed Adaptive picture is never resumed either: each rectangle is
+    /// drawn on what the page holds. And a picture of it that cannot reach a page
+    /// still attached ends the session, said, rather than going on broken.
+    #[tokio::test(start_paused = true)]
+    async fn a_passed_adaptive_picture_is_started_over_and_never_repainted() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner = Box::new(
+            move |_target, _choices, plan, _display, input_rx, frame_tx, _audio, _camera, _feedback| {
+                hook_tx.send((plan, input_rx, frame_tx)).unwrap();
+            },
+        );
+        let mac = TargetConfig {
+            protocol: Protocol::Vnc,
+            subtype: Some(crate::config::Subtype::Ard),
+            ..video_target("mac")
+        };
+        let mgr = Arc::new(SessionManager::with_spawner(vec![mac], spawner));
+        let token = mgr.claim(false, None, "login").unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        expect_picker(&mut att.events).await;
+        let adaptive = Choices { passthrough: Some(Passthrough::AppleAdaptive), ..Choices::default() };
+        mgr.connect(att.id, "mac", None, adaptive).await.unwrap();
+        let (plan, _input, _frames) = hook_rx.try_recv().expect("engine spawned on connect");
+        assert!(plan.apple_adaptive);
+        let expect_passed_mac = async |events: &mut mpsc::Receiver<AttachEvent>| match recv(events).await {
+            AttachEvent::Msg(ServerMsg::Connected { name, passthrough, .. }) => {
+                assert_eq!(name, "mac");
+                assert_eq!(passthrough, Some("apple-adaptive"));
+            }
+            other => panic!("expected connected(mac), got {other:?}"),
+        };
+        expect_passed_mac(&mut att.events).await;
+
+        let mut back = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        let (plan, _input, frame_tx) = hook_rx.try_recv().expect("the same browser is given a session that starts");
+        assert!(plan.apple_adaptive);
+        expect_passed_mac(&mut back.events).await;
+
+        // No display socket comes for the picture.
+        frame_tx.send(ServerMsg::AdaptiveStart).await.unwrap();
+        tokio::time::sleep(DISPLAY_ATTACH_GRACE * 2).await;
+        match recv(&mut back.events).await {
+            AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
+            other => panic!("expected the error, got {other:?}"),
+        }
+        expect_picker(&mut back.events).await;
+        assert!(hook_rx.try_recv().is_err(), "nothing is started in its place");
+    }
+
+    /// A display socket that closes before it has detached loses the rectangle
+    /// sent to it. A passed Adaptive picture has no repaint to bring it back, so
+    /// with the page still attached its session ends, said; a picture encoded
+    /// here drops it and is repainted for the next socket.
+    #[tokio::test]
+    async fn a_display_socket_that_closes_mid_frame_ends_only_a_picture_that_cannot_resume() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner = Box::new(
+            move |_target, _choices, _plan, _display, input_rx, frame_tx, _audio, _camera, _feedback| {
+                hook_tx.send((input_rx, frame_tx)).unwrap();
+            },
+        );
+        let mac = TargetConfig {
+            protocol: Protocol::Vnc,
+            subtype: Some(crate::config::Subtype::Ard),
+            ..video_target("mac")
+        };
+        let mgr = Arc::new(SessionManager::with_spawner(vec![mac], spawner));
+        let token = mgr.claim(false, None, "login").unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        expect_picker(&mut att.events).await;
+
+        // Encoded here: the frame is dropped and the session goes on.
+        mgr.connect(att.id, "mac", None, Choices::default()).await.unwrap();
+        expect_connected(&mut att.events, "mac").await;
+        let (input_rx, frame_tx) = hook_rx.try_recv().expect("engine spawned on connect");
+        drop(mgr.attach_display("login", FIRST_DISPLAY, None).unwrap());
+        frame_tx.send(ServerMsg::Resize { w: 10, h: 20, scale: UNSCALED }).await.unwrap();
+        frame_tx.send(ServerMsg::Error { message: "said".into() }).await.unwrap();
+        match recv(&mut att.events).await {
+            AttachEvent::Msg(ServerMsg::Error { message }) => assert_eq!(message, "said"),
+            other => panic!("expected the engine's own message, got {other:?}"),
+        }
+        assert!(!input_rx.is_closed(), "the session goes on");
+        // The engine's own exit, which the next connect waits for.
+        drop(frame_tx);
+
+        // Passed Adaptive: the session ends.
+        let adaptive = Choices { passthrough: Some(Passthrough::AppleAdaptive), ..Choices::default() };
+        mgr.connect(att.id, "mac", None, adaptive).await.unwrap();
+        match recv(&mut att.events).await {
+            AttachEvent::Msg(ServerMsg::Connected { passthrough, .. }) => {
+                assert_eq!(passthrough, Some("apple-adaptive"));
+            }
+            other => panic!("expected connected(mac), got {other:?}"),
+        }
+        let (input_rx, frame_tx) = hook_rx.try_recv().expect("engine spawned on connect");
+        drop(mgr.attach_display("login", FIRST_DISPLAY, None).unwrap());
+        frame_tx.send(ServerMsg::AdaptiveStart).await.unwrap();
+        match recv(&mut att.events).await {
+            AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
+            other => panic!("expected the error, got {other:?}"),
+        }
+        expect_picker(&mut att.events).await;
+        assert!(input_rx.is_closed(), "the engine is ended");
+        assert!(mgr.state.lock().unwrap().selected.is_none());
+        assert!(hook_rx.try_recv().is_err(), "nothing is started in its place");
+    }
+
+    /// A page whose display socket went comes back on both sockets, which are not
+    /// ordered against each other. When its new display socket attaches first, it
+    /// is the running Adaptive engine's until the session socket's reattach, which
+    /// still starts the picture over: the engine that went on without the page is
+    /// ended, nothing of it reaches the page after, and the new display socket is
+    /// the fresh engine's.
+    #[tokio::test]
+    async fn a_display_socket_back_before_its_reattach_still_starts_an_adaptive_picture_over() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner = Box::new(
+            move |_target, _choices, plan, _display, input_rx, frame_tx, _audio, _camera, _feedback| {
+                hook_tx.send((plan, input_rx, frame_tx)).unwrap();
+            },
+        );
+        let mac = TargetConfig {
+            protocol: Protocol::Vnc,
+            subtype: Some(crate::config::Subtype::Ard),
+            ..video_target("mac")
+        };
+        let mgr = Arc::new(SessionManager::with_spawner(vec![mac], spawner));
+        let token = mgr.claim(false, None, "login").unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        expect_picker(&mut att.events).await;
+        let adaptive = Choices { passthrough: Some(Passthrough::AppleAdaptive), ..Choices::default() };
+        mgr.connect(att.id, "mac", None, adaptive).await.unwrap();
+        let (plan, mut old_input, old_frames) = hook_rx.try_recv().expect("engine spawned on connect");
+        assert!(plan.apple_adaptive);
+        let display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        let resize = |w| ServerMsg::Resize { w, h: 1, scale: UNSCALED };
+
+        // The display socket goes, and the page closes its session socket with it.
+        mgr.detach_display(display.id);
+        mgr.detach(att.id);
+        // The page comes back, its display socket first. A repaint is asked of the
+        // running engine, which an Adaptive one does not answer, and what it draws
+        // meanwhile reaches the socket: the page holds no picture before an
+        // `adaptiveStart`, and drops it.
+        let mut display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        assert!(matches!(old_input.recv().await, Some(ClientMsg::Refresh)));
+        old_frames.send(resize(1)).await.unwrap();
+        assert!(matches!(
+            recv(&mut display.events).await,
+            AttachEvent::Msg(ServerMsg::Resize { w: 1, .. })
+        ));
+
+        // Then its session socket.
+        let token = mgr.claim(false, Some(&token), "login").unwrap();
+        let reattach = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.attach(&token, None, Decoders::ALL).await.unwrap() }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !old_input.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reattach ends the engine that went on without the page");
+        // Whatever it still sends is dropped, and its exit lets the next start.
+        old_frames.send(resize(2)).await.unwrap();
+        drop(old_frames);
+        let mut att = reattach.await.unwrap();
+        let (plan, _input, frames) = hook_rx.try_recv().expect("the picture is started over");
+        assert!(plan.apple_adaptive);
+        match recv(&mut att.events).await {
+            AttachEvent::Msg(ServerMsg::Connected { passthrough, .. }) => {
+                assert_eq!(passthrough, Some("apple-adaptive"));
+            }
+            other => panic!("expected connected(mac), got {other:?}"),
+        }
+
+        // The display socket that came back first is the fresh engine's.
+        frames.send(resize(3)).await.unwrap();
+        frames.send(ServerMsg::AdaptiveStart).await.unwrap();
+        assert!(matches!(
+            recv(&mut display.events).await,
+            AttachEvent::Msg(ServerMsg::Resize { w: 3, .. })
+        ));
+        assert!(matches!(recv(&mut display.events).await, AttachEvent::Msg(ServerMsg::AdaptiveStart)));
+        assert!(display.events.try_recv().is_err(), "nothing of the engine that was ended");
+        assert!(hook_rx.try_recv().is_err(), "one fresh engine");
     }
 
     #[tokio::test]

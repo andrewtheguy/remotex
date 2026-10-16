@@ -31,7 +31,7 @@ use screen_vp9::walk::SETTLE_IDLE;
 
 use crate::config::RenderPlan;
 use crate::feedback::LinkFeedback;
-use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
+use crate::protocol::{AdaptiveUnit, GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
 use crate::shadow::Rect;
 use crate::video;
@@ -75,6 +75,21 @@ const ENCODE_DEPTH: usize = 16;
 /// behind at 1 Mbit/s where the message counts alone left it 23 s, and 0.6 s
 /// behind at 4 Mbit/s; an unthrottled link 100 ms away carried what it did before.
 const QUEUE_BUDGET: u32 = 512 * 1024;
+
+/// How many bytes of a Mac's Adaptive rectangles may be passed and not yet
+/// painted by the browser ([`VideoSink::pass_adaptive`]).
+///
+/// The Mac decides what to send by its own connection: the refinement after a
+/// full update waits for the motion when the connection is slow ("What a Mac
+/// sends a viewer that lists them" in docs/apple-vnc-889.md). The queue budget
+/// cannot show it a slow browser: a burst of rectangles passes the paint window
+/// together and waits in the kernel's send buffer, and against a 300 kbit/s
+/// browser the picture ran 5.7 s behind, the Mac refining throughout. Held to
+/// what the browser has painted, the connection to the Mac backs up instead.
+///
+/// The size of the receive buffer an RDP host's passed pipeline is held behind,
+/// which the connection to the Mac has too.
+const ADAPTIVE_AHEAD: u32 = 32 * 1024;
 
 /// How often the order task wakes to look for a quiet stream to settle. It has to
 /// be its own timer rather than something the next frame does, because a screen
@@ -241,6 +256,9 @@ struct Shared {
     stalled_micros: AtomicU64,
     /// The bound on encoded bytes queued towards the browser — see [`QUEUE_BUDGET`].
     budget: Arc<Semaphore>,
+    /// The bound on a Mac's Adaptive rectangles passed and not yet painted — see
+    /// [`ADAPTIVE_AHEAD`].
+    adaptive_ahead: Arc<Semaphore>,
     /// What the last round came to, which the next is taken at.
     round_bytes: AtomicU64,
     /// How long the engine has waited on the budget since the last round was
@@ -283,6 +301,7 @@ impl Shared {
             waited_micros: AtomicU64::new(0),
             stalled_micros: AtomicU64::new(0),
             budget: Arc::new(Semaphore::new(QUEUE_BUDGET as usize)),
+            adaptive_ahead: Arc::new(Semaphore::new(ADAPTIVE_AHEAD as usize)),
             round_bytes: AtomicU64::new(0),
             held_micros: AtomicU64::new(0),
         }
@@ -715,6 +734,47 @@ impl VideoSink {
         self.shared.graphics.fetch_add(1, Ordering::Relaxed);
         self.shared.graphics_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         self.push(Pending::Msg(ServerMsg::Graphics(GraphicsUnit { data: wrapped, frame, held }))).await
+    }
+
+    /// A Mac's Adaptive picture starts here, from nothing, and is the picture from
+    /// now on ([`Self::pass_adaptive`]): said ahead of the Mac's first rectangle.
+    pub async fn adaptive_start(&self) -> anyhow::Result<()> {
+        self.shared.passing.store(true, Ordering::Relaxed);
+        self.push(Pending::Msg(ServerMsg::AdaptiveStart)).await
+    }
+
+    /// Queue one of a Mac's rectangles in its Adaptive picture as the next record,
+    /// untouched: where it is and its body as the Mac sent it, for the page to
+    /// decode.
+    ///
+    /// As [`Self::pass_graphics`] in what the queue does, and in having no restart:
+    /// each rectangle is drawn on what the ones before it left, so none is ever
+    /// dropped, and a browser that needs the picture from the start is given a
+    /// session that starts.
+    ///
+    /// What paces the Mac is the browser's painting: a rectangle waits here while
+    /// [`ADAPTIVE_AHEAD`] of the ones before it are passed and not yet painted, and
+    /// while it waits the engine reads nothing more of the Mac's connection,
+    /// which backs up, so the Mac codes for the link the browser is on.
+    pub async fn pass_adaptive(&self, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> anyhow::Result<()> {
+        self.shared.passing.store(true, Ordering::Relaxed);
+        let bytes = data.len();
+        let started = Instant::now();
+        // One larger than the whole bound waits for every rectangle before it, and
+        // holds the next until it is painted.
+        let ahead = u32::try_from(bytes).unwrap_or(u32::MAX).clamp(1, ADAPTIVE_AHEAD);
+        let ahead = Arc::clone(&self.shared.adaptive_ahead)
+            .acquire_many_owned(ahead)
+            .await
+            .expect("the bound is never closed");
+        self.shared.stalled_micros.fetch_add(micros(started), Ordering::Relaxed);
+        let painted = Painted::new(move || drop(ahead));
+        let held = self.hold(bytes).await;
+        self.shared.feedback.handed(tokio::time::Instant::now());
+        self.shared.units.fetch_add(1, Ordering::Relaxed);
+        self.shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        let unit = AdaptiveUnit { x, y, w, h, data, held, painted };
+        self.push(Pending::Msg(ServerMsg::Adaptive(unit))).await
     }
 
     /// Whether the picture is the remote's stream passed through ([`Self::pass`]).
@@ -1178,7 +1238,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1246,6 +1306,51 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), sink.pass_graphics(vec![0; 16], None))
             .await
             .expect("the share came back with the run")
+            .unwrap();
+    }
+
+    /// A Mac's Adaptive rectangles go out in order behind the message that starts
+    /// them, and a rectangle waits while the ones passed before it, as many as
+    /// [`ADAPTIVE_AHEAD`] allows, are not yet painted: the engine is held, and with
+    /// it the Mac, by the browser's painting.
+    #[tokio::test]
+    async fn adaptive_rectangles_wait_for_the_ones_before_them_to_be_painted() {
+        let (sink, mut rx) = video_sink(64, 32).await;
+        sink.adaptive_start().await.unwrap();
+        sink.pass_adaptive(0, 0, 64, 16, vec![1; 16 * 1024]).await.unwrap();
+        sink.pass_adaptive(0, 16, 64, 16, vec![2; 16 * 1024]).await.unwrap();
+        assert!(sink.passing());
+        assert!(sink.due_at().await.is_none(), "there is nothing to come back and encode");
+        sink.flush().await;
+        let out = drain(&mut rx, 3).await;
+        assert!(matches!(out[0], ServerMsg::AdaptiveStart));
+        assert!(matches!(&out[1], ServerMsg::Adaptive(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (0, 0)));
+        assert!(matches!(&out[2], ServerMsg::Adaptive(unit) if unit.data[0] == 2 && (unit.x, unit.y) == (0, 16)));
+
+        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_adaptive(0, 0, 8, 8, vec![3; 8])).await;
+        assert!(waiting.is_err(), "two unpainted rectangles fill the bound, so the next waits");
+        let mut out = out.into_iter();
+        drop(out.nth(1));
+        tokio::time::timeout(Duration::from_secs(1), sink.pass_adaptive(0, 0, 8, 8, vec![3; 8]))
+            .await
+            .expect("painting the first made room")
+            .unwrap();
+
+        // One larger than the whole bound waits for everything before it, and
+        // holds the next until it is painted itself.
+        drop(out);
+        sink.flush().await;
+        let small = drain(&mut rx, 1).await;
+        drop(small);
+        sink.pass_adaptive(0, 0, 64, 32, vec![4; 64 * 1024]).await.unwrap();
+        sink.flush().await;
+        let large = drain(&mut rx, 1).await;
+        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_adaptive(0, 0, 8, 8, vec![5; 8])).await;
+        assert!(waiting.is_err());
+        drop(large);
+        tokio::time::timeout(Duration::from_secs(1), sink.pass_adaptive(0, 0, 8, 8, vec![5; 8]))
+            .await
+            .expect("painting the large one made room")
             .unwrap();
     }
 
@@ -1898,7 +2003,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2025,7 +2130,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

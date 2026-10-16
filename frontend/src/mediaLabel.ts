@@ -159,6 +159,9 @@ export interface VideoStreamInfo {
   // Not a stream at all: an RDP host's graphics pipeline, composed here
   // (`graphicsStart`). No decoder is configured and `decode` names nothing.
   composed?: boolean;
+  // Not a stream either: a Mac's Adaptive picture, decoded by this page
+  // (`adaptiveStart`). No decoder is configured and `decode` names nothing.
+  adaptive?: boolean;
   // Decoded by one of the page's WebAssembly decoders (softwareDecoder.ts) and
   // not by the browser's own: the VP9 where the browser's own does not take it,
   // and a Mac's HEVC where the gateway said so with the format.
@@ -191,6 +194,9 @@ export function videoLabel(
   }
   if (stream.composed) {
     return "Not in use: the host's graphics pipeline is composed by this browser";
+  }
+  if (stream.adaptive) {
+    return "Not in use: the Mac's Adaptive picture is decoded by this page";
   }
   const whose = stream.passthrough
     ? "passthrough from the remote"

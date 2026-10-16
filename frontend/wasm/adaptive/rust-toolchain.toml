@@ -1,0 +1,6 @@
+# The stable toolchain, as the gateway is built with, and the one target this
+# module has, so rustup brings it wherever the frontend is built.
+[toolchain]
+channel = "stable"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
