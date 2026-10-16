@@ -108,6 +108,15 @@ area's section before changing what it covers:
   Apple's own viewer too. Judge performance, sound quality and long sessions on
   a physical Mac, or against Apple's viewer on the same machine first. See
   [The sound](docs/apple-vnc-889.md#the-sound).
+- The iOS Simulator is not an iPhone. Its Safari cannot start an RDP host's
+  pipeline compositor (`startPool` traps out of bounds on a fresh page, iOS 26.2)
+  where an iPhone composes it, and it runs WebKit as processes of the Mac,
+  without iOS's memory limits, so nothing it shows of memory holds for a device.
+  QA the pipeline, and any question of memory, on a real iPhone or iPad. Measure
+  a device's memory with `xcrun xctrace record --template "Activity Monitor"`,
+  reading the tab's WebContent physical footprint against the gateway log's
+  session lines, with the device on USB and Auto-Lock off, since a lock ends the
+  recording.
 - When a test on a Mac needs a still screen, do not rely on the desktop or the
   lock screen for one: something not yet identified keeps them sending changes
   that do not show or are hard to see, which inflates a measured bitrate or picture rate. Put up
