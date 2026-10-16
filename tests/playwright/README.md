@@ -47,6 +47,17 @@ a batch whose commands draw with H.264 is acknowledged: the acknowledgment follo
 the decode of every access unit in the batch, and a decoder that gave no picture
 says so in the DOM instead.
 
+`adaptive-passthrough.spec.ts` is a Standard Mac's Adaptive picture passed for
+the page to decode, read from the same socket: that `adaptiveStart` follows the
+`resize` and comes ahead of the first `ADAPTIVE` record, that the Mac's
+quantization tables come first, that every record is framed by its own header
+and lies on the framebuffer the last `resize` announced, that the page
+acknowledges each batch once its paint worker has decoded it, and that a page
+that comes back is given the picture from its start. A rectangle that did not
+decode says so in the DOM. Against a Mac on a virtual display it also resizes
+the window, and checks that the picture goes on at the new size, decoded,
+without starting again.
+
 `egfx-two-displays.spec.ts` is the same pipeline passed over two virtual
 displays, read from both displays' sockets of one browser: that each socket
 names the column of the composed picture its display is (`graphicsView`) beside
@@ -250,6 +261,17 @@ video playing:
 ```sh
 REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET='win-h264' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
+```
+
+The Adaptive spec needs a live Mac in an `ard` target, named by
+`REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET`. Its resize case needs one whose
+desktop follows the window, an `ard` target with `virtual_display = true`, named
+by `REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET`:
+
+```sh
+REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET='mac' \
+REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET='mac-virtual' \
+bunx playwright test '/adaptive-passthrough\.spec\.ts$'
 ```
 
 The two-display spec needs the same kind of host, in a target with

@@ -20,12 +20,17 @@
 //     REMOTEX_PLAYWRIGHT_PASSWORD=… \
 //     REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET=macvmstandard \
 //     bunx playwright test '/adaptive-passthrough\.spec\.ts$'
+//
+// The resize case needs a target whose desktop follows the window, an `ard`
+// target with `virtual_display = true`, named by
+// REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET.
 import { expect, type Page, test } from "@playwright/test";
 
 import { leaveSession, logInAndConnectTo, returnToPicker } from "./support";
 
 /// The opt-in, and the target name in one, as the other live specs have it.
 const ADAPTIVE_TARGET = process.env.REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET;
+const RESIZE_TARGET = process.env.REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
@@ -325,6 +330,85 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     expect(seen.unannounced).toBe(0);
     expect(seen.batches[0]?.sequence).toBe(1);
     expect(rects(seen)[0]?.kind).toBe("tables");
+    await expect(page.getByRole("alert")).toHaveCount(0);
+
+    await returnToPicker(page);
+  });
+});
+
+test.describe("a Mac's virtual display whose Adaptive picture is passed", () => {
+  test.skip(
+    !RESIZE_TARGET,
+    "set REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET=<target> against a gateway with a live Mac on a virtual display",
+  );
+
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
+  test("goes on decoding at the size a resize brings", async ({ page }) => {
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, RESIZE_TARGET ?? "", "", {
+      passthrough: "apple-adaptive",
+      resize: true,
+    });
+    await expect
+      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
+      .toBeGreaterThan(0);
+    const before = seen.size;
+    expect(before, "the size announced ahead of the picture").toBeDefined();
+
+    // A window of another size, which a virtual display follows.
+    const viewport = page.viewportSize();
+    expect(viewport).not.toBeNull();
+    await page.setViewportSize({
+      width: (viewport?.width ?? 1280) - 160,
+      height: (viewport?.height ?? 720) - 120,
+    });
+    await expect
+      .poll(() => seen.size, { timeout: 20_000 })
+      .not.toEqual(before);
+    const resized = seen.batches.length;
+    const acknowledged = seen.acknowledged.length;
+
+    // The Mac draws the new desktop whole, and the page decodes it: its tables
+    // and its cache outlive the resize, as the Mac's do, so nothing here asks
+    // for them again.
+    await expect
+      .poll(
+        () =>
+          seen.batches
+            .slice(resized)
+            .flatMap((b) => b.rects)
+            .filter((r) => r.kind === "full").length,
+        { timeout: 20_000 },
+      )
+      .toBeGreaterThan(0);
+    await expect
+      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
+      .toBeGreaterThan(acknowledged);
+
+    expect(seen.badKinds, "binary frames that were not batches").toEqual([]);
+    expect(seen.unannounced).toBe(0);
+    for (const batch of seen.batches) {
+      expect(batch.badOp).toBe(undefined);
+      expect(batch.exact, "records must exactly fill the frame").toBe(true);
+    }
+    expect(
+      rects(seen).filter((r) => r.kind === "unknown"),
+      "every body is a full update, a partial one or the tables",
+    ).toEqual([]);
+    expect(
+      seen.outside,
+      "rectangles off the framebuffer the last resize announced",
+    ).toEqual([]);
+    expect(
+      seen.controlTypes.filter((type) => type === "adaptiveStart"),
+      "a resize goes on with the picture rather than starting it again",
+    ).toHaveLength(1);
+    expect(seen.acknowledged).toEqual(
+      seen.acknowledged.map((_, index) => index + 1),
+    );
     await expect(page.getByRole("alert")).toHaveCount(0);
 
     await returnToPicker(page);
