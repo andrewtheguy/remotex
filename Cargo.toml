@@ -24,7 +24,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/flac", "frontend/wasm/adaptive"]
 
 [package]
 name = "remotex"
-version = "0.0.418"
+version = "0.0.419"
 license = "MIT"
 edition = "2024"
 
