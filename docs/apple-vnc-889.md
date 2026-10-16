@@ -1127,7 +1127,7 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 | vendor keysyms | `0x453` | 1107 | |
 | keyboard source | `0x455` | 1109 | |
 | `DeviceInfo` | `0x456` | 1110 | not advertised |
-| media stream | `0x3f2` | 1010 | in a second `SetEncodings` |
+| media stream | `0x3f2` | 1010 | first in High Performance's list |
 | 1-bit zlib | `0x3e8` | 1000 | not advertised |
 | 4-bit grey zlib | `0x3e9` | 1001 | not advertised |
 | RGB 5-5-5 zlib | `0x3ea` | 1002 | not advertised |
@@ -1173,9 +1173,13 @@ page says the screen is not available, and the stream comes back at an IDR. See
 
 ### Negotiation
 
-After the first layout the viewer sends a second `SetEncodings`, the opening list
-with encoding 1010 (`0x3f2`) appended. The Mac answers it with message 1, below,
-naming its ports, and the viewer makes its offer only then: message `0x1c`
+Apple's viewer lists encoding 1010 (`0x3f2`) first in the `SetEncodings` it
+sends right behind its `SetDisplayConfiguration`, and sends the same list again
+when the session is ready and once more when its media stream is up. Remotex opens without it and sends the list
+naming it after the first layout. The Mac answers the first `SetEncodings`
+naming 1010 with message 1, below, naming its ports, and the viewer makes its
+offer only then. The Mac itself does not wait for message 1: it answers an offer
+sent before it. The offer is message `0x1c`
 (`RFBMediaStreamServerConfiguration`, version 3):
 
 ```text
@@ -1204,8 +1208,9 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
   the Mac having two displays to send; remotex requires video 2 on exactly when the
   session asked for two. The measured ports were always
   5900 and 5901, the RFB port and the next, and 5902 for a second display. The viewer receives on the same
-  numbers. The Mac sends message 1 once for the `SetEncodings` naming 1010, and
-  again after each display change, never in reply to an offer.
+  numbers. The Mac sends message 1 once a stream, for the first `SetEncodings`
+  naming 1010, and a later one brings none. It sends it again after each display
+  change while that stream lasts, and never in reply to an offer.
 - **message 2**, AVConference's answer: the common eight-byte header, `u16`
   lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
   those blobs. Remotex checks that their lengths describe the whole body and
@@ -1859,9 +1864,13 @@ display is 1280×800, with sessions asking for 1600×1000 or 1440×900:
   the next `SetDisplayConfiguration` closed the connection.
 - **Unlocking a locked session and waking the Mac change no user session,** so,
   as read from the daemon, they move nothing. Neither was run.
-- **Apple's viewer does not ask again.** Read from its code, a change of the
-  flags' bit 0 changes only its window's controls; going back to a virtual
-  display is the user's choice.
+- **No message 1 comes after a login,** as read from the daemon: the login
+  leaves the stream neither started nor waiting to start, and a display change
+  sends message 1 only for a started stream.
+- **Apple's viewer asks again.** Read from its code, `MiscStatus` 17 makes a
+  High Performance session send its `SetDisplayConfiguration` again, at its
+  window's current size. A change of the flags' bit 0 changes only its window's
+  controls. It offers only on message 1, which does not come.
 
 A published description saw the same switch on a 5K Mac, after "a login or
 unlock at the Mac, the Mac waking". Remotex takes every High Performance layout
