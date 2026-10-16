@@ -337,8 +337,7 @@ export default function TargetPicker({
                         )
                       }
                     />
-                    {/* Which encoder codes the VP9, where the picture is
-                        VP9. */}
+                    {/* Which encoder wlshare codes the VP9 with. */}
                     <EncoderChoice
                       target={t.name}
                       encoders={options.encoders}
@@ -439,8 +438,8 @@ function PictureChoice({
   );
 }
 
-// Which encoder codes the VP9: libvpx, or the native one in Rust (alpha).
-// Nothing where that is no choice.
+// Which encoder wlshare codes the VP9 with: libvpx, or the native one in Rust
+// (alpha). Nothing where that is no choice.
 function EncoderChoice({
   target,
   encoders,

@@ -1455,15 +1455,11 @@ mod tests {
             serde_json::to_string(&TargetInfo::of(target, false)).unwrap()
         };
 
-        // Standard mode offers nothing but the VP9's encoder, in a build with the
-        // one in Rust: physical displays, which no session sizes, no sound, no
-        // stream.
-        let native = cfg!(feature = "native-vp9");
+        // Standard mode offers nothing: physical displays, which no session
+        // sizes, no sound, no stream, and a VP9 coded here with libvpx alone.
         assert_eq!(
             entry("mac"),
-            format!(
-                r#"{{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":[],"placement":false,"pipeline":false,"vp9":{native}}}"#
-            )
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":[],"placement":false,"pipeline":false,"vp9":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.

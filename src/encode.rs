@@ -252,14 +252,14 @@ struct Shared {
 
 impl Shared {
     fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>, oversize: Oversize) -> Self {
-        let RenderPlan { quality, adaptive, native_vp9, .. } = plan;
+        let RenderPlan { quality, adaptive, .. } = plan;
         Self {
             oversize,
             oversized: AtomicBool::new(false),
             too_many_screens: AtomicBool::new(false),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
-                stream: DesktopStream::new(quality, native_vp9),
+                stream: DesktopStream::new(quality),
                 congestion: QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, adaptive),
                 due_at: None,
             }),

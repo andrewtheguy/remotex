@@ -289,9 +289,6 @@ test("the VP9 encoder is libvpx until somebody chooses the native one", () => {
     targetOptions(wlshare, { vp9: "native" }, ABLE).choices.vp9,
     "native",
   );
-  // The gateway codes it on any other target.
-  const plain = targetOptions(target({ vp9: true }), undefined, ABLE);
-  assert.match(plain.encoders?.[1].note ?? "", /^The gateway codes/);
   // Not offered, not shown and not sent.
   const unoffered = targetOptions(target({}), { vp9: "native" }, ABLE);
   assert.equal(unoffered.encoders, null);

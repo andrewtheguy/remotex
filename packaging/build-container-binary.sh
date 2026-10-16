@@ -2,10 +2,7 @@
 # Build the container-only gateway binary. Containers expose only the deployed
 # `serve` shape; the process-local managed-instance surface is a native concern.
 #
-# REMOTEX_CONTAINER_FEATURES names the features the binary has, which unset is
-# `native-vp9` alone, as release CI leaves it, and one for an
-# amd64 machine under x86-64-v3 sets it empty beside the RUSTFLAGS that
-# packaging/README.md ("x86-64 CPU compatibility") gives.
+# REMOTEX_CONTAINER_FEATURES names any features the binary has beyond none.
 # Whatever it names, the checks below still refuse a binary that carries the
 # managed-instance surface, or lacks a feature it was asked for.
 set -euo pipefail
@@ -13,7 +10,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 output="$(realpath -m "${1:-tmp/container-bin/remotex}")"
-features="${REMOTEX_CONTAINER_FEATURES-native-vp9}"
+features="${REMOTEX_CONTAINER_FEATURES-}"
 
 echo ">> building container gateway without default features${features:+, but with ${features}}"
 cargo build --release --no-default-features ${features:+--features "$features"}

@@ -311,11 +311,9 @@ gateway.
 
 A session's picture reaches the browser one of two ways, both ordinary:
 - **Encoded here** as VP9 by the `screen-vp9` crate wlshare codes its own
-  stream with, pinned by release tag in `Cargo.toml`: libvpx, or for a session
-  started with the native VP9 encoder the **alpha** encoder that crate has
-  written in Rust. A libvpx setting, how the Rust encoder codes, the
-  conversion in front of them, the codec string or the quality walk changes in
-  the screen-vp9 repository and reaches here as a pin bump.
+  stream with, pinned by release tag in `Cargo.toml`, with libvpx. A libvpx
+  setting, the conversion in front of it, the codec string or the quality walk
+  changes in the screen-vp9 repository and reaches here as a pin bump.
 - **Passed untouched**, as the remote made it, for the browser to decode or
   compose: today wlshare's VP9 on a `wlshare` target, a High Performance Mac's
   HEVC or its H.264 in every session, whichever it was started with, and an RDP host's
@@ -780,8 +778,8 @@ sends.
   browser's lag. So the target's keys mean on a passed stream what they mean on
   one coded here. A session started with the native VP9 encoder lists `WLSX`
   too, which has wlshare code the stream with its **alpha** encoder
-  written in Rust in place of libvpx, as the same choice has this gateway code
-  what it encodes itself; nothing here reads the stream any differently for it.
+  written in Rust in place of libvpx; nothing here reads the stream any
+  differently for it.
   Pseudo-encodings rather than a client message because a server that is not
   wlshare ignores an encoding it does not know where a message it does not know
   ends the connection, and because they ride the list that names the encoding, so
@@ -1646,14 +1644,12 @@ remote is told how the link is doing. Today two of the three passthroughs are:
 
 The gateway **encodes VP9 only** (`src/vp9.rs`), and there is no codec key: one
 codec is one to maintain. The encoder is the `screen-vp9` crate, its own
-repository pinned by release tag here and in wlshare. It holds two: libvpx, which
-every stream is coded with unless its session says otherwise, and an
-**alpha** one written in Rust, which a session asks for at the picker
-([What a session is started with](#what-a-session-is-started-with)) and the
-default `native-vp9` feature builds in. That one is built for
-NEON on arm64 and x86-64-v3 on amd64, so an amd64 gateway is built for x86-64-v3, and one
-for a machine under it is built without the feature
-([x86-64 CPU compatibility](../packaging/README.md#x86-64-cpu-compatibility)).
+repository pinned by release tag here and in wlshare. Every stream coded here is
+libvpx's. The crate's other encoder, an **alpha** one written in Rust, is built
+for x86-64-v3 on amd64, above the baseline this gateway is built for
+([x86-64 CPU compatibility](../packaging/README.md#x86-64-cpu-compatibility)),
+so it is wlshare's alone: a session asks wlshare for it at the picker
+([What a session is started with](#what-a-session-is-started-with)).
 The crate is the one place libvpx is
 spoken to for this gateway and for wlshare's own stream: the quantizer pinned to the dial, screen-content
 tuning, no lag, no dropped frames, no keyframe unasked, the colour declared in the
@@ -1818,14 +1814,12 @@ and `GET /api/targets` carries it:
 | Target | Window drives the size | Sound | Passthrough | Graphics | VP9 encoder |
 |---|---|---|---|---|---|
 | `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: high quality or adaptive H.264 | hidden |
-| `rdp` with `egfx = false` | no | shown | hidden | hidden | shown\* |
-| `vnc` | no | hidden | hidden | hidden | shown\* |
+| `rdp` with `egfx = false` | no | shown | hidden | hidden | hidden: libvpx |
+| `vnc` | no | hidden | hidden | hidden | hidden: libvpx |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden | shown: wlshare's own |
-| `vnc`, `ard` | no | hidden | hidden | hidden | shown\* |
-| `vnc`, `ard` with `virtual_display` | yes | hidden | hidden | hidden | shown\* |
+| `vnc`, `ard` | no | hidden | hidden | hidden | hidden: libvpx |
+| `vnc`, `ard` with `virtual_display` | yes | hidden | hidden | hidden | hidden: libvpx |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden | hidden: the picture is never VP9 |
-
-\* In a build with the `native-vp9` feature, the default.
 
 - **The size is shown before Start.** A desktop is sized one of three ways
   (`Sizing` in `src/config.rs`): kept at the target's size, which is its
@@ -1896,18 +1890,15 @@ and `GET /api/targets` carries it:
   host's network detection. An adaptive session also claims UDP and answers at
   the page's pace; a high quality one claims none and answers with what the
   gateway's connection measures ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
-- **The VP9 is coded by libvpx unless the native encoder is chosen.**
+- **The VP9 is coded by libvpx unless wlshare is asked for its native encoder.**
   `choices.vp9` says `libvpx` or `native` (`Vp9Encoder` in `src/config.rs`):
-  the encoder in Rust, alpha, that `screen-vp9` has written, here for a picture
-  this gateway encodes and in wlshare for a `wlshare` target's, which is asked
-  for it as `WLSX`. The picker's VP9 encoder group shows libvpx, the default,
-  and Native (alpha). The stream is the same to the page either way, so two
-  sessions of one target that differ in it alone are the two encoders side by
-  side. A gateway built without the `native-vp9` feature offers it on a
-  `wlshare` target alone, and no target offers it whose picture is passed: an
-  RDP target with the pipeline on, and a High Performance Mac with the Mac's
-  stream chosen, where a `connect` that names it is refused. A `connect` that
-  names none is coded by libvpx.
+  the encoder in Rust, alpha, that `screen-vp9` has written, in wlshare for a
+  `wlshare` target's stream, which is asked for it as `WLSX`. The picker's VP9
+  encoder group shows libvpx, the default, and Native (alpha). The stream is
+  the same to the page either way, so two sessions of one target that differ in
+  it alone are the two encoders side by side. No other target offers it: what
+  this gateway encodes is libvpx's, and a `connect` that names it there is
+  refused. A `connect` that names none is coded by libvpx.
 - **The second display is placed once.** `choices.placement` says `right`,
   `left`, `top` or `bottom` (`Placement` in `src/config.rs`): where the second
   of two virtual displays sits against the first, so the remote's arrangement
@@ -3234,8 +3225,8 @@ The entire substrate is behind the default `embedded-gateway` Cargo feature:
 the module, token authentication, config audience, CLI commands, and their
 `check-config --embedded` validation mode compile out together. Native packages
 retain it. Container artifacts are built separately with
-`--no-default-features` and the features the script names, `native-vp9` unless
-told otherwise; the build script and Dockerfile reject a
+`--no-default-features` and the features the script names, none unless told
+otherwise; the build script and Dockerfile reject a
 binary that exposes any embedded CLI surface.
 
 There is no separate native client: every instance is the same SPA loaded

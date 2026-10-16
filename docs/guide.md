@@ -60,15 +60,12 @@ config key.
 | Target | Window drives the size | Sound | Passthrough | Graphics | VP9 encoder |
 |---|---|---|---|---|---|
 | `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | high quality or adaptive H.264 | — |
-| `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — | libvpx or native\* |
-| `vnc` | no | none | — | — | libvpx or native\* |
+| `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — | — |
+| `vnc` | no | none | — | — | — |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
-| `vnc`, `ard` | no | none | — | — | libvpx or native\* |
-| `vnc`, `ard` with `virtual_display` | yes | none | — | — | libvpx or native\* |
+| `vnc`, `ard` | no | none | — | — | — |
+| `vnc`, `ard` with `virtual_display` | yes | none | — | — | — |
 | `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — | — |
-
-\* Not in a gateway built without the `native-vp9` feature, the build for an
-amd64 machine under x86-64-v3.
 
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
   or 1440×900 where it sets none, or follows the window: the remote is asked to
@@ -105,12 +102,12 @@ amd64 machine under x86-64-v3.
   which keeps text sharp but adapts less. Adaptive is greyed in a browser whose
   `VideoDecoder` cannot decode the host's H.264. See
   [An exact picture](#an-exact-picture) for having the host draw losslessly.
-- **VP9 encoder.** Which encoder codes the VP9: *libvpx*, the default, or
-  *Native* (alpha), the encoder in Rust that `screen-vp9` has written. On a
-  `wlshare` target wlshare codes it, and needs a wlshare that has the encoder:
-  an older one codes with libvpx. The stream is the same to the browser either
-  way, so starting one target with each compares the two. A High Performance
-  Mac's picture is never VP9, so it has no such choice.
+- **VP9 encoder.** Which encoder wlshare codes a `wlshare` target's VP9 with:
+  *libvpx*, the default, or *Native* (alpha), the encoder in Rust that
+  `screen-vp9` has written. It needs a wlshare that has the encoder: an older
+  one codes with libvpx. The stream is the same to the browser either way, so
+  starting one target with each compares the two. Every other target's VP9 is
+  coded by the gateway with libvpx, so it has no such choice.
 
 One gateway holds one session. A reload or a dropped connection normally
 resumes it; an RDP session with the graphics pipeline on instead reconnects the engine,
