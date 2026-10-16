@@ -62,6 +62,14 @@ decode says so in the DOM. Against a Mac on a virtual display it also resizes
 the window, and checks that the picture goes on at the new size, decoded,
 without starting again.
 
+`target-switch.spec.ts` switches one page, without a reload, between an RDP
+host's pipeline and bitmap targets and a Mac's VP9, Adaptive and High
+Performance pictures, with the browser's own decoder made to refuse the VP9 and
+the HEVC: that each session's picture starts and is acknowledged, that a session
+that loaded the compositor or the Adaptive decoder ends its paint worker and any
+other keeps it, and, by how often each module's file is fetched, that a kept
+worker keeps its VP9 decode worker and ends its HEVC's.
+
 `egfx-two-displays.spec.ts` is the same pipeline passed over two virtual
 displays, read from both displays' sockets of one browser: that each socket
 names the column of the composed picture its display is (`graphicsView`) beside
