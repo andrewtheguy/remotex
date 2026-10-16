@@ -221,10 +221,10 @@ gateway.
 - A page whose browser gives it less memory than a desktop's does loads as
   little WebAssembly as it can. No browser says how much a page may have, so the
   page goes by what they do say (`frontend/src/memoryBudget.ts`): an iPhone or
-  an iPad, whatever the browser, since every browser there is WebKit's and none
-  reports its memory, and a device whose browser reports 4 GB or less of
-  `navigator.deviceMemory`. Do not go by touch: a touchscreen says nothing of
-  memory. Each module is loaded by the session that needs it, never at
+  an iPad, whatever the browser, since iOS caps the memory each app's
+  processes may use whatever engine runs in them, and a device whose browser
+  reports 4 GB or less of `navigator.deviceMemory`. Do not go by touch: a
+  touchscreen says nothing of memory. Each module is loaded by the session that needs it, never at
   start-up, and a choice that is an edge case on such a device and would load a
   module for itself alone is greyed there with the reason rather than offered,
   as lossless sound is ([Lossless sound](#lossless-sound)).

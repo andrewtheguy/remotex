@@ -2,10 +2,10 @@
 // The client and its bundle): one whose browser gives a page less memory than a
 // desktop's does. No browser says how much a page may have, so this goes by what
 // they do say. An iPhone or an iPad holds it tight whatever the browser, since
-// every browser there is WebKit's, which gives a page the least and reports no
-// device memory; elsewhere a Chromium browser reports the device's memory
-// (`navigator.deviceMemory`, in GiB, rounded), and Safari and Firefox on a
-// desktop report none.
+// iOS caps the memory each app's processes may use whatever engine runs in them,
+// and its WebKit reports no device memory; elsewhere a Chromium browser reports
+// the device's memory (`navigator.deviceMemory`, in GiB, rounded), and Safari
+// and Firefox on a desktop report none.
 
 /** The most device memory, in GiB, that is still held tight. */
 export const TIGHT_DEVICE_MEMORY = 4;
