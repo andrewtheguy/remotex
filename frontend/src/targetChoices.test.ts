@@ -33,7 +33,8 @@ const UNABLE: Abilities = {
   runsHevc: false,
   follows: "window",
 };
-// A phone's or a tablet's browser, which is offered no lossless sound.
+// An iPad's and an iPhone's browser, which load as little WebAssembly as they
+// can and are offered no lossless sound.
 const TABLET: Abilities = { ...ABLE, lossless: false, follows: "screen" };
 const PHONE: Abilities = { ...ABLE, lossless: false, follows: null };
 const DEFAULT_SIZE = { w: 1440, h: 900 };
@@ -386,7 +387,7 @@ test("a browser with no audio decoder is offered FLAC alone", () => {
   assert.equal(mac.pictures?.[0].disabled, false);
 });
 
-test("a phone or a tablet is offered no lossless sound", () => {
+test("a browser held to little WebAssembly is offered no lossless sound", () => {
   const formats = (options: ReturnType<typeof targetOptions>) =>
     options.soundRow?.formats.map((format) => [format.value, format.disabled]);
 
@@ -400,7 +401,7 @@ test("a phone or a tablet is offered no lossless sound", () => {
       ["opus", false],
       ["flac", true],
     ]);
-    assert.match(options.soundRow?.formats[1].note ?? "", /phone/);
+    assert.match(options.soundRow?.formats[1].note ?? "", /WebAssembly/);
 
     // A FLAC remembered from before is not sent, and is kept for a browser
     // that is offered it.

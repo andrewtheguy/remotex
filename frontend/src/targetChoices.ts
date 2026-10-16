@@ -162,9 +162,9 @@ export interface Abilities {
    */
   audio: boolean;
   /**
-   * Whether it is offered lossless sound: not on a phone or a tablet, which
-   * loads as little WebAssembly as it can, and FLAC's decoder is a module of its
-   * own (useRemoteDesktop.ts).
+   * Whether it is offered lossless sound: not where the page loads as little
+   * WebAssembly as it can (memoryBudget.ts), since FLAC's decoder is a module of
+   * its own.
    */
   lossless: boolean;
   /** Whether this page can run its software HEVC decoder (softwareSupport.ts). */
@@ -432,8 +432,8 @@ function sizeOptions(
  * otherwise a tick and, under a ticked one, Opus or FLAC. Ticking it takes
  * Opus. A browser with no audio decoder plays FLAC alone, so there Opus is
  * greyed and ticking takes FLAC; an Opus remembered from before is not sent,
- * and stays remembered for a browser that can. A phone or a tablet greys FLAC
- * in the same way, to load as little WebAssembly as it can, and one with no
+ * and stays remembered for a browser that can. A browser that loads as little
+ * WebAssembly as it can greys FLAC in the same way, and one of those with no
  * audio decoder either has nothing to tick.
  */
 function soundRow(
@@ -459,7 +459,7 @@ function soundRow(
       label: "FLAC",
       note: lossless
         ? "Lossless, about a megabit a second of music. For a LAN."
-        : "Not on a phone or a tablet, which loads as little WebAssembly as it can: its decoder is a module of its own.",
+        : "Not on this device, which loads as little WebAssembly as it can: its decoder is a module of its own.",
       disabled: !lossless,
     },
   ];
@@ -474,7 +474,7 @@ function soundRow(
         ? "Take the remote's sound and play it here."
         : lossless
           ? "Take the remote's sound and play it here, lossless: this browser has no decoder for Opus."
-          : "This browser has no decoder for Opus, and a phone or a tablet is not offered lossless.",
+          : "This browser has no decoder for Opus, and this device is not offered lossless.",
       checked: audio !== "off",
       disabled: !plays && !lossless,
       ticks: plays ? "opus" : "flac",

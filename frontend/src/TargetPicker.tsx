@@ -4,6 +4,7 @@ import { decodesAppleMedia } from "./appleMedia.ts";
 import { connectionShortLabel } from "./connectionLabel.ts";
 import { gatewayFetch } from "./gateway.ts";
 import { versionMismatch } from "./gatewayVersion.ts";
+import { pageMemoryIsTight } from "./memoryBudget.ts";
 import { decodesAudio } from "./preflight.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { decodesRdpH264 } from "./rdpH264.ts";
@@ -23,7 +24,7 @@ import {
   targetOptions,
   type Vp9Encoder,
 } from "./targetChoices.ts";
-import { OFFERS_LOSSLESS, sizeFollows } from "./useRemoteDesktop.ts";
+import { sizeFollows } from "./useRemoteDesktop.ts";
 
 // The post-login target picker: the state where the user is authenticated and
 // holds the session slot, but no connection has started yet (see
@@ -135,7 +136,7 @@ export default function TargetPicker({
     rdpGraphics: composesRdpGraphics(),
     rdpH264: decodesRdpH264(),
     audio: decodesAudio(),
-    lossless: OFFERS_LOSSLESS,
+    lossless: !pageMemoryIsTight(),
     runsHevc: runnableDecoders().hevc,
     follows: sizeFollows(),
   };
