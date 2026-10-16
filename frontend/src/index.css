@@ -163,6 +163,17 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* What a banner for a page that ran out of memory says first, and its reload. */
+.video-banner-lead {
+  margin: 0 0 0.35rem;
+  font-weight: 600;
+}
+
+.video-banner-action {
+  display: block;
+  margin: 0.5rem auto 0;
+}
+
 /* A settling High Performance resize, or a High Performance display whose
    picture has not come: the last frame dimmed and blurred under a label, over
    the desktop but under the menu (z-index 900 and up), and transparent to

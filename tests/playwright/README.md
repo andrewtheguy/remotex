@@ -41,7 +41,9 @@ headers' lengths, that the page acknowledges each batch once its paint worker ha
 composed it, that a page that reloads is given a pipeline from its first
 command rather than the one that was running, and that a session's end ends the
 paint worker that loaded the compositor, the next session composing in a paint
-worker of its own, which Playwright reports starting and closing. A compositor that refused a command
+worker of its own, which Playwright reports starting and closing. A compositor
+whose memory the paint worker could not make says the page ran out of memory and
+offers a reload, which comes back to the session composing. A compositor that refused a command
 says so in the DOM, which is what stands in for the picture here. Started with
 the picker's Adaptive (ALPHA), H.264 over the full screen, it also asserts
 that the page said it decodes H.264, that the session says it carries it, and that

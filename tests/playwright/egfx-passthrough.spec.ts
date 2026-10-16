@@ -50,6 +50,9 @@ const EGFX_H264_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET;
 /// as it is in every session.
 const PASSED = {};
 
+/// The paint worker's script, as the build names it (desktopPainter.ts).
+const PAINT_WORKER = "**/desktopPainter.worker-*.js";
+
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
@@ -473,6 +476,54 @@ test.describe("a target that passes its graphics pipeline", () => {
     ).toBe(0);
     await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(page.locator("canvas.graphics")).toBeVisible();
+
+    await returnToPicker(page);
+  });
+
+  test("says a compositor that ran out of memory did, and reloads into the session", async ({
+    page,
+  }) => {
+    // The paint worker's WebAssembly memories refuse to be made, as an engine out
+    // of memory refuses them: the compositor's is the first it makes.
+    await page.context().route(PAINT_WORKER, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        body: `WebAssembly.Memory = class { constructor() { throw new RangeError("Out of memory"); } };\n${await response.text()}`,
+      });
+    });
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, EGFX_TARGET ?? "", "", PASSED);
+
+    const banner = page.getByRole("alert");
+    await expect(banner).toContainText("This page ran out of memory", {
+      timeout: 20_000,
+    });
+    await expect(banner).toContainText(
+      "could not load the graphics compositor (Out of memory)",
+    );
+
+    // The reload gives the memory back, which a page whose memory is whole again
+    // shows by composing: the same session, reattached, from its first command.
+    await page.context().unrouteAll();
+    const firstAcknowledged = seen.acknowledged;
+    const before = seen.controlTypes.length;
+    await banner.getByRole("button", { name: "Reload" }).click();
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect
+      .poll(
+        () =>
+          seen.acknowledged !== firstAcknowledged &&
+          seen.acknowledged.length > 0,
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+    const after = seen.controlTypes.slice(before);
+    expect(after).toContain("connected");
+    expect(after).toContain("graphicsStart");
+    await expect(page.getByRole("alert")).toHaveCount(0);
 
     await returnToPicker(page);
   });

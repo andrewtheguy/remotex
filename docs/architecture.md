@@ -238,6 +238,9 @@ gateway.
   since a canvas is transferred to one worker once. The VP9's decode worker is
   kept with a paint worker that is kept, being what most targets' pictures are
   decoded with where the browser's own decoder refuses them.
+  A picture that fails because the browser ran out of memory says so in the video
+  banner, with a Reload: the page that comes back reattaches to the session with
+  its memory whole (`saysOutOfMemory` in `frontend/src/memoryBudget.ts`).
 - The only versioned client asset read at run time is the software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at

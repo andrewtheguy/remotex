@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import DisplayMenu from "./DisplayMenu.tsx";
 import FloatingMenu from "./FloatingMenu.tsx";
+import { saysOutOfMemory } from "./memoryBudget.ts";
 import type { DisplayInfo, HoldCause } from "./protocol.ts";
 import TargetPicker from "./TargetPicker.tsx";
 import {
@@ -505,10 +506,27 @@ export default function RemoteDesktop({
           line in the status overlay, because the overlay hides itself the moment the
           session is up — and this is a session that *is* up, showing nothing. It is
           also not `connectError`: nothing is wrong with the session or the gateway,
-          it is this browser that cannot decode what is arriving. */}
+          it is this browser that cannot decode what is arriving. One that ran
+          out of memory says so and offers the reload that gives the memory
+          back: the page reattaches to the session as it was. */}
       {videoError && mode === "desktop" && (
         <div className="video-banner" role="alert">
+          {saysOutOfMemory(videoError) && (
+            <p className="video-banner-lead">
+              This page ran out of memory. Reload it to free the memory; the
+              session stays connected and comes back.
+            </p>
+          )}
           {videoError}
+          {saysOutOfMemory(videoError) && (
+            <button
+              type="button"
+              className="status-action video-banner-action"
+              onClick={() => location.reload()}
+            >
+              Reload
+            </button>
+          )}
         </div>
       )}
 
