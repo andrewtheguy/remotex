@@ -312,8 +312,9 @@ password = "change-me"
 # With the pipeline on, every session passes it to the browser, which composes
 # it; the gateway composes none, and a browser that cannot is not sent VP9 in
 # its place. What the host draws with is sent as it is, with no quality walk
-# behind it, so the video keys further down reach only the bitmap updates of a
-# host that answers the offer with them. How the host draws it, high quality or
+# behind it, so the video keys further down do nothing here: nothing of the
+# picture is encoded. A host that does not start the pipeline within 20 seconds
+# ends the session, and needs `egfx = false`. How the host draws it, high quality or
 # adaptive H.264, is chosen at the picker (Graphics, above). It takes the encoding
 # and the decoding off the gateway — a few percent of a core are left, whatever
 # the desktop is doing — and puts the decoding on the browser, where a desktop in

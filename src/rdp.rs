@@ -1820,13 +1820,13 @@ async fn active_loop(
                     sink.frame().await?;
                     continue;
                 }
-                // The picker's choice of display: a column of the framebuffer this
-                // end already holds, so the switch is made here and the host is
-                // asked for nothing. Everything the browser is told follows from
-                // the new view — the size, the list with its checkmark, and a
-                // repaint of the column out of the framebuffer — and a choice of
-                // the display already shown is answered with the list as it
-                // stands, as wlshare answers one. An id the list does not have is
+                // The picker's choice of display: a column of the picture the
+                // browser composes from the passed pipeline, the only one with two
+                // displays, so the switch is made here and the host is asked for
+                // nothing. Everything the browser is told follows from the new view
+                // — the size, the column's `graphicsView` and the list with its
+                // checkmark — and a choice of the display already shown is
+                // answered with the list as it stands, as wlshare answers one. An id the list does not have is
                 // dropped, so a browser cannot name a column that is not there.
                 if let ClientMsg::SelectDisplay { id } = msg {
                     let was_all = view.all;
@@ -2501,8 +2501,8 @@ fn translate_input(
         // Session-control messages act on the slot, not an engine — the ws
         // bridge handles them and they never reach here.
         ClientMsg::Connect { .. } | ClientMsg::Disconnect | ClientMsg::PaintAck { .. } => Vec::new(),
-        // Answered by the active loop, out of the framebuffer, before translation:
-        // the host has no message for it and is asked for nothing.
+        // Answered by the active loop before translation: the host has no
+        // message for it and is asked for nothing.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
         // A tab's socket and the input made over it, both answered by the active
         // loop before translation.

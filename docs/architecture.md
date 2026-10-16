@@ -2730,9 +2730,11 @@ starts with a copy of the first tab's `sessionStorage` and a reference to that
 tab, and its page drops the token, the choice of sound and the reference as it
 loads, before anything reads them. The session lets that
 socket in only while the engine's last list names the tab, and hands the engine a
-feed for it (`ClientMsg::DisplayShown`): a sink, an encoder and a shadow of its
-own over the second column, the same pointer shape, and a repaint when it
-attaches or asks. Its input arrives wrapped as `ClientMsg::OnDisplay` and is
+feed for it (`ClientMsg::DisplayShown`): a sink of its own that carries control
+messages alone — the second column's size, which part of the picture the session's
+page composes it is (`graphicsView`), and the same pointer shape, sent again when
+it attaches or asks — since only a passed pipeline lays out two displays, and the
+tab is painted from that picture across the browser. Its input arrives wrapped as `ClientMsg::OnDisplay` and is
 offset into its column. A pointer position is held to the display it was made
 on, except towards the display shown beside it: a browser keeps delivering a held
 drag's positions to the page it began on, past that page's window and onto the
