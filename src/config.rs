@@ -211,9 +211,9 @@ pub struct RenderPlan {
     pub apple_adaptive: bool,
     /// An RDP host's graphics pipeline passes as it came, for the browser to
     /// compose: [`Passthrough::RdpGraphics`], in every session of a target with the
-    /// pipeline on, which is never composed here. The fields above reach only the
-    /// picture of a host that answers the offer of the pipeline with bitmap
-    /// updates, which is encoded here as always.
+    /// pipeline on, which is never composed here. None of the fields above reach
+    /// it: such a session encodes nothing, and a host that draws no pipeline ends
+    /// it ([`crate::rdp_client::Connect::egfx`]).
     pub rdp_graphics: bool,
     /// The host may draw with H.264 on that passed pipeline, for the browser to
     /// decode: [`Pipeline::h264`], in a session that passes the pipeline
@@ -799,13 +799,15 @@ pub struct TargetConfig {
     /// browser in every session, for the page to compose
     /// ([`Passthrough::RdpGraphics`]): the gateway composes none, and a browser
     /// that cannot is turned away. How the host draws it, high quality or adaptive
-    /// H.264, is chosen at the picker ([`Choices::pipeline`]).
+    /// H.264, is chosen at the picker ([`Choices::pipeline`]). Nothing of the
+    /// picture is decoded or encoded here, and a host that draws without the
+    /// pipeline ends the session.
     ///
     /// `false` is the bitmap path: the host draws with bitmap updates, decoded here
     /// and encoded as VP9, and the desktop keeps its opening size, so the picker
     /// offers no resize. That is the target for a browser that cannot compose the
     /// pipeline, the escape hatch for a host whose pipeline the page's decoders
-    /// cannot yet paint, and the path every non-Windows server takes regardless.
+    /// cannot yet paint, and the target for a server without the pipeline.
     ///
     /// `Option` rather than a bare default so that setting it on a VNC target,
     /// which has no graphics pipeline, is refused at parse time instead of
@@ -818,11 +820,12 @@ pub struct TargetConfig {
     /// at most [`MAX_VIRTUAL_DISPLAYS`].
     ///
     /// The browser shows one of them at a time, chosen from the display picker
-    /// in the floating menu, and the gateway encodes only the one shown: each
-    /// display is held under the stream's ceiling on its own, and the host
-    /// renders the other for the windows left on it. The key is a count the
-    /// remote is *asked* for; the list the picker shows is what the remote laid
-    /// out, so a server that opens one desktop shows no picker.
+    /// in the floating menu, and the host renders the other for the windows left
+    /// on it. Nothing of two displays is encoded here: each is passed as the
+    /// remote sent it, so an `rdp` target takes two only with its pipeline on,
+    /// and `egfx = false` beside it is refused. The key is a count the remote is
+    /// *asked* for; the list the picker shows is what the remote laid out, so a
+    /// server that opens one desktop shows no picker.
     ///
     /// Shared by every target type that can create virtual displays: `rdp` and
     /// `ard-high-performance`. A Windows host lays the displays out from the
@@ -1895,6 +1898,15 @@ impl ConfigFile {
                 "target {:?} sets virtual_displays = {}, and only an rdp target or one with \
                  subtype = \"ard-high-performance\" lays out more than one virtual display. \
                  Remove the key.",
+                target.name,
+                target.virtual_displays
+            );
+            // Two displays are passed, never encoded here: an RDP host's as its
+            // pipeline, which the bitmap path does not have.
+            anyhow::ensure!(
+                target.virtual_displays == 1 || target.protocol != Protocol::Rdp || target.egfx(),
+                "target {:?} sets virtual_displays = {} with egfx = false, and two displays are \
+                 passed as the graphics pipeline, never encoded here. Remove one of the keys.",
                 target.name,
                 target.virtual_displays
             );
@@ -3797,6 +3809,9 @@ mod tests {
 
         let two = ConfigFile::parse(&rdp_toml("virtual_displays = 2")).unwrap().targets.remove(0);
         assert_eq!(two.virtual_displays, 2);
+        // Two displays are passed, never encoded: the bitmap path is one.
+        let err = ConfigFile::parse(&rdp_toml("virtual_displays = 2\negfx = false")).unwrap_err();
+        assert!(format!("{err:#}").contains("never encoded here"), "{err:#}");
         assert_eq!(two.offers().passthrough, [Passthrough::RdpGraphics], "the passthrough shows one display of the span");
         assert!(two.offers().resize, "the window still drives each display's size");
         assert_eq!(two.accepts(Choices { passthrough: Some(Passthrough::RdpGraphics), ..Choices::default() }), Ok(()));

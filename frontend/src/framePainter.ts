@@ -923,9 +923,9 @@ export function createFramePainter(options: {
       }
     },
     setVideoFormat(format) {
-      // A stream takes the picture back from a pipeline: a host that draws with
-      // bitmap updates after all, which the gateway encodes. In a tab, from the
-      // mirror of the session page's picture, which shows the display no more.
+      // A stream takes the picture from whatever passed picture was painted:
+      // a pipeline, the Mac's Adaptive picture, or in a tab the mirror of the
+      // session page's picture, which shows the display no more.
       releasePipeline();
       releaseAdaptive();
       releaseMirror();

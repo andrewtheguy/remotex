@@ -83,9 +83,11 @@ moving the session's page to the other display moves the view without starting
 the pipeline over.
 
 `display-drag.spec.ts` reads the input each display socket sends while a held
-drag crosses the edge between two virtual displays. It checks that the edge
-towards the display beside it is open and every outer edge still clamps the
-pointer, without judging whether a remote window visibly followed the drag.
+drag crosses the edge between two virtual displays. It checks that a page
+showing one display holds the pointer at every edge, and that while a display
+is shown beside, the page sends where the pointer is, past any edge, for the
+gateway's engine to hold on a display (unit tested in `src/engine.rs`), without
+judging whether a remote window visibly followed the drag.
 
 `software-hevc-chrome.spec.ts`, `software-hevc-firefox.spec.ts` and
 `software-hevc-faked.spec.ts` are the software HEVC decoder, which a page

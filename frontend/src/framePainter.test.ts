@@ -1053,8 +1053,7 @@ test("a tab is painted from the session page's picture, not composed", async () 
 });
 
 test("a video format takes the display back from a tab's mirror", async () => {
-  // The session stops passing (a host that draws with bitmap updates after all):
-  // the tab is sent a stream, which is drawn on the desktop's canvas the mirror's
+  // The tab is sent a stream: it is drawn on the desktop's canvas the mirror's
   // picture covered.
   const { load } = fakeCompositors();
   const relay = fakeRelay();

@@ -1,14 +1,16 @@
 // A drag held past the edge between two virtual displays, each in a page of its
-// own, crosses to the other: the position the page sends is let through towards
-// the display shown beside it and held at every other edge.
+// own, crosses to the other: while a display is shown beside, the position the
+// page sends is where the pointer is, past any edge, and the gateway's engine
+// holds it on a display (`hold_on_display` in src/engine.rs, unit tested there);
+// with one display shown, the page holds it at every edge itself
+// (frontend/src/remotePoint.ts).
 //
 // Everything asserted is a decision of the client or of the remote, not a pixel
 // or a paint: the `mouseMove` the display socket carries while a button is held
-// and the pointer is past the window — past the display's width towards the
-// display beside it, and at zero upward, where nothing is — read off the socket
-// as the page sends it. A browser hit-tests a held drag's moves, so past the
-// window they target the document and not the desktop surface, which is what
-// this guards. With `REMOTEX_PLAYWRIGHT_DRAG_MAC_SSH` set, the Mac is also asked
+// and the pointer is past the window, read off the socket as the page sends it,
+// against the position the pointer is at on the canvas. A browser hit-tests a
+// held drag's moves, so past the window they target the document and not the
+// desktop surface, which is what this guards. With `REMOTEX_PLAYWRIGHT_DRAG_MAC_SSH` set, the Mac is also asked
 // where its pointer is while a drag is held past the edge: on the display
 // beyond it. Whether a window dragged that way follows is left to a hand on a
 // physical Mac; a virtual one applies the drag too late to judge it.
@@ -101,14 +103,21 @@ async function surface(page: Page) {
 }
 
 /// Press at the surface's centre and hold the pointer past the window at
-/// `clientX`, then past the top as well; the positions sent meanwhile.
+/// `clientX`, then past the top as well; the positions sent meanwhile. The last
+/// is where the pointer ended up in the display's pixels: held inside the display
+/// where `through` is false, and as it is, past the window, where it is true.
 async function dragPast(
   page: Page,
   traffic: Traffic,
   display: number,
   clientX: number,
+  through: boolean,
 ): Promise<{ held: { x: number; y: number }[]; released: boolean }> {
   const box = await surface(page);
+  const size = traffic.size.get(display);
+  if (!size) {
+    throw new Error(`display ${display} was never given a size`);
+  }
   const moves = traffic.moves.get(display) ?? [];
   const buttons = traffic.buttons.get(display) ?? [];
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -116,14 +125,21 @@ async function dragPast(
   const from = moves.length;
   await page.mouse.move(clientX, box.y + box.height / 2, { steps: 10 });
   await page.mouse.move(clientX, -PAST, { steps: 5 });
+  // The pointer's last place on the canvas, in the display's pixels.
+  let x = Math.round(((clientX - box.x) * size.w) / box.width);
+  let y = Math.round(((-PAST - box.y) * size.h) / box.height);
+  if (!through) {
+    x = Math.min(Math.max(x, 0), size.w - 1);
+    y = Math.min(Math.max(y, 0), size.h - 1);
+  }
   // Motion is coalesced to one position a frame (outbound.ts), so what is
-  // asserted is the newest, sent before the release is: a position past the
-  // top, which is held at zero wherever the pointer is.
+  // asserted is the newest, sent before the release is.
   await expect
-    .poll(() => moves.length > from && moves[moves.length - 1].y === 0, {
+    .poll(() => (moves.length > from ? moves[moves.length - 1] : null), {
+      message: `the position past the top of display ${display}`,
       timeout: 5_000,
     })
-    .toBe(true);
+    .toEqual({ x, y });
   const held = moves.slice(from);
   const releases = buttons.filter((b) => !b.pressed).length;
   await page.mouse.up();
@@ -184,7 +200,7 @@ test.describe("a drag held past the edge between two displays", () => {
     await leaveSession(page);
   });
 
-  test("crosses to the display shown beside, and is held at every other edge", async ({
+  test("is held at the display's edges alone, and let through beside another", async ({
     page,
     context,
   }) => {
@@ -205,7 +221,7 @@ test.describe("a drag held past the edge between two displays", () => {
     // One display shown, nothing beside it: held at the display's edge both ways.
     // Chosen, since two displays start shown beside each other.
     await chooseDisplay(page, "All Displays", "Display 1");
-    const alone = await dragPast(page, traffic, 1, viewport.width + PAST);
+    const alone = await dragPast(page, traffic, 1, viewport.width + PAST, false);
     const aloneLast = alone.held[alone.held.length - 1];
     expect(aloneLast).toEqual({ x: first.w - 1, y: 0 });
     expect(alone.held.every((m) => m.x <= first.w - 1 && m.y >= 0)).toBe(true);
@@ -223,23 +239,24 @@ test.describe("a drag held past the edge between two displays", () => {
       throw new Error("unreachable");
     }
 
-    // From this page, past the right edge: through, towards the second display;
-    // upward still held.
-    const across = await dragPast(page, traffic, 1, viewport.width + PAST);
+    // From this page, past the right edge: through, towards the second display,
+    // and past the top as well, which the engine holds on a display.
+    const across = await dragPast(page, traffic, 1, viewport.width + PAST, true);
     const acrossLast = across.held[across.held.length - 1];
     expect(acrossLast.x, "past the edge towards the second display").toBeGreaterThan(
       first.w - 1,
     );
-    expect(acrossLast.y, "held at the top, where nothing is shown").toBe(0);
+    expect(acrossLast.y, "past the top, for the engine to hold").toBeLessThan(0);
 
     // From the tab, past the left edge: through, towards the first display.
-    const back = await dragPast(tab, tabTraffic, 2, -PAST);
+    const back = await dragPast(tab, tabTraffic, 2, -PAST, true);
     const backLast = back.held[back.held.length - 1];
     expect(backLast.x, "past the edge towards the first display").toBeLessThan(0);
-    expect(backLast.y).toBe(0);
-    // And past its right edge, where nothing is shown: held.
-    const beyond = await dragPast(tab, tabTraffic, 2, viewport.width + PAST);
-    expect(beyond.held[beyond.held.length - 1]).toEqual({ x: second.w - 1, y: 0 });
+    expect(backLast.y, "past the top, for the engine to hold").toBeLessThan(0);
+    // And past its right edge, where nothing is shown: through as well, for the
+    // engine to hold on the second display.
+    const beyond = await dragPast(tab, tabTraffic, 2, viewport.width + PAST, true);
+    expect(beyond.held[beyond.held.length - 1].x).toBeGreaterThan(second.w - 1);
 
     if (MAC_SSH) {
       // The Mac's own account. Its displays are the two, side by side, and a

@@ -312,8 +312,9 @@ password = "change-me"
 # With the pipeline on, every session passes it to the browser, which composes
 # it; the gateway composes none, and a browser that cannot is not sent VP9 in
 # its place. What the host draws with is sent as it is, with no quality walk
-# behind it, so the video keys further down reach only the bitmap updates of a
-# host that answers the offer with them. How the host draws it, high quality or
+# behind it, so the video keys further down do nothing here: nothing of the
+# picture is encoded. A host that does not start the pipeline within 20 seconds
+# ends the session, and needs `egfx = false`. How the host draws it, high quality or
 # adaptive H.264, is chosen at the picker (Graphics, above). It takes the encoding
 # and the decoding off the gateway — a few percent of a core are left, whatever
 # the desktop is doing — and puts the decoding on the browser, where a desktop in
@@ -333,9 +334,10 @@ password = "change-me"
 # Where the second sits against the first is chosen at the picker, on an rdp
 # target: right, left, top or bottom. The session starts on the floating menu's
 # Display picker's All Displays, the first display on the page and the second a
-# link away in a tab of its own; the picker shows either alone, and
-# the gateway encodes only what is shown; the host renders the other for the
-# windows left on it. 1 is the one desktop every target opens; at most 2. RDP
+# link away in a tab of its own; the picker shows either alone, and the host
+# renders the other for the windows left on it. Neither is encoded by the
+# gateway: each is passed as the remote sent it, so an rdp target takes 2 only
+# with its pipeline on, and refuses `egfx = false` beside it. 1 is the one desktop every target opens; at most 2. RDP
 # and `subtype = "ard-high-performance"` — the key is shared by the target types
 # that can create virtual displays, and refused elsewhere. On RDP the pipeline is
 # passed beside 2 as beside 1: the browser composes the whole
