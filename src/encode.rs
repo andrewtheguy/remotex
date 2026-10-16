@@ -662,7 +662,7 @@ impl VideoSink {
             self.shared.keyframe_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
         if let Some(decode) = announce {
-            self.push(Pending::Msg(ServerMsg::VideoFormat { decode, passthrough: true, strips })).await?;
+            self.push(Pending::Msg(ServerMsg::VideoFormat { decode, passthrough: true, strips, engine: 0 })).await?;
         }
         let unit = VideoUnit { w, h, strip: passed.strip, keyframe: passed.keyframe, data: frame, held };
         self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
@@ -708,7 +708,7 @@ impl VideoSink {
     /// pipeline sends no more of.
     pub async fn graphics_start(&self) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
-        self.push(Pending::Msg(ServerMsg::GraphicsStart)).await
+        self.push(Pending::Msg(ServerMsg::GraphicsStart { engine: 0 })).await
     }
 
     /// Queue a message of an RDP host's graphics pipeline as the next record,
@@ -740,7 +740,7 @@ impl VideoSink {
     /// now on ([`Self::pass_adaptive`]): said ahead of the Mac's first rectangle.
     pub async fn adaptive_start(&self) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
-        self.push(Pending::Msg(ServerMsg::AdaptiveStart)).await
+        self.push(Pending::Msg(ServerMsg::AdaptiveStart { engine: 0 })).await
     }
 
     /// Queue one of a Mac's rectangles in its Adaptive picture as the next record,
@@ -1078,7 +1078,7 @@ async fn order_loop(
         // that needs it arrives. Sent here rather than pushed, because this *is* the
         // ordered task: nothing queued behind this round can overtake it.
         if let Some(decode) = produced.format {
-            let msg = ServerMsg::VideoFormat { decode, passthrough: false, strips: 1 };
+            let msg = ServerMsg::VideoFormat { decode, passthrough: false, strips: 1, engine: 0 };
             if frame_tx.send(msg).await.is_err() {
                 break;
             }
@@ -1284,7 +1284,7 @@ mod tests {
         sink.flush().await;
 
         let out = drain(&mut rx, 4).await;
-        assert!(matches!(out[0], ServerMsg::GraphicsStart));
+        assert!(matches!(out[0], ServerMsg::GraphicsStart { .. }));
         assert!(matches!(&out[1], ServerMsg::Graphics(run) if run.data == vec![1; 40] && run.frame.is_none()));
         assert!(matches!(out[2], ServerMsg::Resize { w: 32, h: 32, .. }));
         assert!(matches!(&out[3], ServerMsg::Graphics(run) if run.data == vec![2; 9] && run.frame.is_some()));
@@ -1323,7 +1323,7 @@ mod tests {
         assert!(sink.due_at().await.is_none(), "there is nothing to come back and encode");
         sink.flush().await;
         let out = drain(&mut rx, 3).await;
-        assert!(matches!(out[0], ServerMsg::AdaptiveStart));
+        assert!(matches!(out[0], ServerMsg::AdaptiveStart { .. }));
         assert!(matches!(&out[1], ServerMsg::Adaptive(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (0, 0)));
         assert!(matches!(&out[2], ServerMsg::Adaptive(unit) if unit.data[0] == 2 && (unit.x, unit.y) == (0, 16)));
 

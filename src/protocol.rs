@@ -1076,15 +1076,17 @@ pub enum ServerMsg {
     Graphics(GraphicsUnit),
     /// An RDP host's graphics pipeline starts here, from nothing: the picture is what
     /// the [`ServerMsg::Graphics`] records after this compose, and whatever a client
-    /// held of a pipeline or a video stream before it is done with.
-    GraphicsStart,
+    /// held of a pipeline or a video stream before it is done with. `engine` is the
+    /// engine that sent it ([`ServerMsg::stamped`]).
+    GraphicsStart { engine: u64 },
     /// One of a Mac's rectangles in its Adaptive picture, passed for the browser to
     /// decode. A binary record like [`ServerMsg::Video`], ordered the same way.
     Adaptive(AdaptiveUnit),
     /// A Mac's Adaptive picture starts here, from nothing: the picture is what the
     /// [`ServerMsg::Adaptive`] records after this draw, and whatever a client held
-    /// of a video stream before it is done with.
-    AdaptiveStart,
+    /// of a video stream before it is done with. `engine` is the engine that sent it
+    /// ([`ServerMsg::stamped`]).
+    AdaptiveStart { engine: u64 },
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1111,7 +1113,12 @@ pub enum ServerMsg {
     /// No target is selected: show the post-login target picker. Sent on attach
     /// to an idle slot, on disconnect ("End session"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
-    Picker,
+    ///
+    /// `engines` is how many engines the slot has started, and none numbered up to
+    /// it is running: a picture start from one of them that reaches the page after
+    /// this, late on the display socket, which is not ordered against the session
+    /// socket, is from a session that has ended ([`ServerMsg::stamped`]).
+    Picker { engines: u64 },
     /// A live target, what its session was started with and its client-visible
     /// capabilities. `audio` says the session carries the remote's sound, not
     /// whether any is arriving.
@@ -1339,8 +1346,9 @@ pub enum ServerMsg {
     ///
     /// `strips` says how many strips each picture of the stream comes in, a unit
     /// each ([`Strip`]): [`Strip::COUNT`] for a High Performance Mac's passed in
-    /// strips, and 1 for every stream whose units are whole pictures.
-    VideoFormat { decode: String, passthrough: bool, strips: u8 },
+    /// strips, and 1 for every stream whose units are whole pictures. `engine` is the
+    /// engine that sent it ([`ServerMsg::stamped`]).
+    VideoFormat { decode: String, passthrough: bool, strips: u8, engine: u64 },
     /// The remote started consuming the camera — an application on it opened
     /// the device — and the browser should encode and send from now on,
     /// starting at a keyframe. Camera-socket traffic only, like the two below:
@@ -1410,10 +1418,10 @@ enum ControlMsg<'a> {
         point_sized: bool,
     },
     Error { message: &'a str },
-    Picker,
-    GraphicsStart,
+    Picker { engines: u64 },
+    GraphicsStart { engine: u64 },
     GraphicsView { x: u16, y: u16, w: u16, h: u16 },
-    AdaptiveStart,
+    AdaptiveStart { engine: u64 },
     Connected {
         name: &'a str,
         protocol: &'a str,
@@ -1466,6 +1474,7 @@ enum ControlMsg<'a> {
         decode: &'a str,
         passthrough: bool,
         strips: u8,
+        engine: u64,
     },
     CameraStart {
         width: u32,
@@ -1495,6 +1504,21 @@ struct WireDisplay<'a> {
 }
 
 impl ServerMsg {
+    /// This message with `engine`, the engine that sent it, written into a picture
+    /// start: a format, or a pipeline's or an Adaptive picture's start. An engine
+    /// does not know which it is, so it sends 0 there, and the session layer's
+    /// pump, which does, writes it in on the way to the display socket. The page
+    /// drops a start whose engine a `Picker` has since numbered ended.
+    pub fn stamped(mut self, engine: u64) -> Self {
+        if let ServerMsg::GraphicsStart { engine: slot }
+        | ServerMsg::AdaptiveStart { engine: slot }
+        | ServerMsg::VideoFormat { engine: slot, .. } = &mut self
+        {
+            *slot = engine;
+        }
+        self
+    }
+
     /// Whether this message is a display's — its picture, size, pointer and what
     /// goes with them — and so travels on a display socket, rather than the
     /// session's, which travels on the session socket ([`crate::ws`]). The
@@ -1504,10 +1528,10 @@ impl ServerMsg {
             self,
             ServerMsg::Video(_)
                 | ServerMsg::Graphics(_)
-                | ServerMsg::GraphicsStart
+                | ServerMsg::GraphicsStart { .. }
                 | ServerMsg::GraphicsView { .. }
                 | ServerMsg::Adaptive(_)
-                | ServerMsg::AdaptiveStart
+                | ServerMsg::AdaptiveStart { .. }
                 | ServerMsg::VideoFormat { .. }
                 | ServerMsg::Resize { .. }
                 | ServerMsg::Cursor(_)
@@ -1537,8 +1561,8 @@ impl ServerMsg {
             | ServerMsg::AudioGap => {
                 return None;
             }
-            ServerMsg::GraphicsStart => control(&ControlMsg::GraphicsStart),
-            ServerMsg::AdaptiveStart => control(&ControlMsg::AdaptiveStart),
+            ServerMsg::GraphicsStart { engine } => control(&ControlMsg::GraphicsStart { engine: *engine }),
+            ServerMsg::AdaptiveStart { engine } => control(&ControlMsg::AdaptiveStart { engine: *engine }),
             ServerMsg::GraphicsView { x, y, w, h } => {
                 control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
             }
@@ -1566,7 +1590,7 @@ impl ServerMsg {
                 },
             }),
             ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
-            ServerMsg::Picker => control(&ControlMsg::Picker),
+            ServerMsg::Picker { engines } => control(&ControlMsg::Picker { engines: *engines }),
             ServerMsg::Connected {
                 name,
                 protocol,
@@ -1603,8 +1627,8 @@ impl ServerMsg {
             ServerMsg::CameraKeyframe => control(&ControlMsg::CameraKeyframe),
             ServerMsg::MicOpen => control(&ControlMsg::MicOpen),
             ServerMsg::MicClose => control(&ControlMsg::MicClose),
-            ServerMsg::VideoFormat { decode, passthrough, strips } => {
-                control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough, strips: *strips })
+            ServerMsg::VideoFormat { decode, passthrough, strips, engine } => {
+                control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough, strips: *strips, engine: *engine })
             }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::HostPicture { exact, codecs } => {
@@ -2048,15 +2072,26 @@ mod tests {
         // How to decode the stream, which is the message a client cannot work out for
         // itself: VP9 carries no parameter sets, so every field here is the gateway's
         // answer and a renamed one is a decoder that never gets configured.
-        match (ServerMsg::VideoFormat { decode: "vp09.01.40.08".to_owned(), passthrough: true, strips: 1 })
+        // The engine is what the session layer stamped in, which the page fences a
+        // late start of an ended session on.
+        match (ServerMsg::VideoFormat { decode: "vp09.01.40.08".to_owned(), passthrough: true, strips: 1, engine: 0 })
+            .stamped(7)
             .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"videoFormat","decode":"vp09.01.40.08","passthrough":true,"strips":1}"#
+                r#"{"type":"videoFormat","decode":"vp09.01.40.08","passthrough":true,"strips":1,"engine":7}"#
             ),
             None => panic!("videoFormat must be a text frame"),
         }
+        assert_eq!(
+            ServerMsg::GraphicsStart { engine: 0 }.stamped(7).text_frame().as_deref(),
+            Some(r#"{"type":"graphicsStart","engine":7}"#)
+        );
+        assert_eq!(
+            ServerMsg::Picker { engines: 7 }.text_frame().as_deref(),
+            Some(r#"{"type":"picker","engines":7}"#)
+        );
         // A composition: each screen's pixels and its points, named so the page's
         // parser can tell the two spaces apart; empty ends it.
         let rect = |x, y, w, h| MosaicRect { x, y, w, h };

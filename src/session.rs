@@ -642,6 +642,13 @@ struct State {
 }
 
 impl State {
+    /// The picker, numbering every engine started so far as not running: said
+    /// under the lock that ended the last of them, so no engine it numbers can
+    /// still be.
+    fn picker(&self) -> ServerMsg {
+        ServerMsg::Picker { engines: self.next_generation }
+    }
+
     /// End the running engine, and with it any audio, reporting whether there was
     /// one. Every path that stops an engine goes through here.
     fn take_engine(&mut self) -> bool {
@@ -1026,7 +1033,7 @@ impl SessionManager {
             // instead of showing the picker, below, once the ended engine is gone.
             (Some(_), None) => None,
             // Nothing selected: the picker.
-            (None, _) => Some(ServerMsg::Picker),
+            (None, _) => Some(st.picker()),
         };
         let reconnect = status.is_none();
         if let Some(status) = status {
@@ -1065,7 +1072,7 @@ impl SessionManager {
                 // The session ended while this waited: the picker, as a plain
                 // attach would get.
                 if let Some(client) = &st.client {
-                    let _ = client.event_tx.try_send(AttachEvent::Msg(ServerMsg::Picker));
+                    let _ = client.event_tx.try_send(AttachEvent::Msg(st.picker()));
                 }
                 false
             }
@@ -1153,11 +1160,13 @@ impl SessionManager {
             if let Some(engine) = &mut st.engine {
                 // A tab reconnecting starts with nothing held of its own.
                 engine.release_tab(display);
-                let (frames, mut frames_rx) = mpsc::channel(FRAME_BUFFER);
+                let (frames, mut frames_rx) = mpsc::channel::<ServerMsg>(FRAME_BUFFER);
                 let forward = event_tx.clone();
+                // Stamped as the pump stamps the first display's.
+                let generation = engine.generation;
                 tokio::spawn(async move {
                     while let Some(msg) = frames_rx.recv().await {
-                        if forward.send(AttachEvent::Msg(msg)).await.is_err() {
+                        if forward.send(AttachEvent::Msg(msg.stamped(generation))).await.is_err() {
                             break;
                         }
                     }
@@ -1813,7 +1822,7 @@ impl SessionManager {
         // Reliable send: the engine may have left the frame channel full, so a
         // try_send could drop the picker transition and strand the browser on a
         // dead desktop.
-        Self::notify(st.client.as_ref(), ServerMsg::Picker);
+        Self::notify(st.client.as_ref(), st.picker());
     }
 
     /// Route one browser input message to the current engine, dropping it in the
@@ -1986,7 +1995,7 @@ impl SessionManager {
                             {
                                 st.take_engine();
                                 st.clear_selection();
-                                Route::Lost(st.client.as_ref().map(|c| c.event_tx.clone()))
+                                Route::Lost(st.client.as_ref().map(|c| (c.event_tx.clone(), st.picker())))
                             }
                             // No socket for it: dropped, and repainted for the next.
                             None => {
@@ -2035,7 +2044,7 @@ impl SessionManager {
                 Route::Wait | Route::Drop => continue,
             };
             let display = msg.is_display();
-            if event_tx.send(AttachEvent::Msg(msg)).await.is_ok() || !display {
+            if event_tx.send(AttachEvent::Msg(msg.stamped(generation))).await.is_ok() || !display {
                 continue;
             }
             // The display socket went away mid-frame; it detaches itself. A picture
@@ -2053,7 +2062,7 @@ impl SessionManager {
                 ends.then(|| {
                     st.take_engine();
                     st.clear_selection();
-                    st.client.as_ref().map(|c| c.event_tx.clone())
+                    st.client.as_ref().map(|c| (c.event_tx.clone(), st.picker()))
                 })
             };
             if let Some(client) = lost {
@@ -2074,24 +2083,24 @@ impl SessionManager {
             }
             st.take_engine();
             st.clear_selection();
-            st.client.as_ref().map(|c| c.event_tx.clone())
+            st.client.as_ref().map(|c| (c.event_tx.clone(), st.picker()))
         };
-        if let Some(event_tx) = event_tx {
-            let _ = event_tx.send(AttachEvent::Msg(ServerMsg::Picker)).await;
+        if let Some((event_tx, picker)) = event_tx {
+            let _ = event_tx.send(AttachEvent::Msg(picker)).await;
         }
     }
 
     /// A picture that cannot be repainted lost a message on its way to the page,
     /// and its session has ended: the attached client, if any, is told and lands
     /// on the picker.
-    async fn picture_lost(client: Option<mpsc::Sender<AttachEvent>>) {
+    async fn picture_lost(client: Option<(mpsc::Sender<AttachEvent>, ServerMsg)>) {
         warn!("session: the passed picture could not reach a display socket; the session ends");
-        if let Some(client) = client {
+        if let Some((client, picker)) = client {
             let message =
                 "The picture could not reach this page, and a passed stream cannot be repainted: start the session again."
                     .to_owned();
             let _ = client.send(AttachEvent::Msg(ServerMsg::Error { message })).await;
-            let _ = client.send(AttachEvent::Msg(ServerMsg::Picker)).await;
+            let _ = client.send(AttachEvent::Msg(picker)).await;
         }
     }
 }
@@ -2104,7 +2113,7 @@ enum Route {
     Drop,
     /// Ended: a picture that cannot be repainted lost this message, and the
     /// attached client is told.
-    Lost(Option<mpsc::Sender<AttachEvent>>),
+    Lost(Option<(mpsc::Sender<AttachEvent>, ServerMsg)>),
 }
 
 /// Spawn the protocol engine for `target` on its own thread.
@@ -2355,7 +2364,7 @@ mod tests {
     /// Assert the next event is the picker status.
     async fn expect_picker(events: &mut mpsc::Receiver<AttachEvent>) {
         assert!(
-            matches!(recv(events).await, AttachEvent::Msg(ServerMsg::Picker)),
+            matches!(recv(events).await, AttachEvent::Msg(ServerMsg::Picker { .. })),
             "expected a picker status message"
         );
     }
@@ -2894,7 +2903,7 @@ mod tests {
         expect_passed_mac(&mut back.events).await;
 
         // No display socket comes for the picture.
-        frame_tx.send(ServerMsg::AdaptiveStart).await.unwrap();
+        frame_tx.send(ServerMsg::AdaptiveStart { engine: 0 }).await.unwrap();
         tokio::time::sleep(DISPLAY_ATTACH_GRACE * 2).await;
         match recv(&mut back.events).await {
             AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
@@ -2952,7 +2961,7 @@ mod tests {
         }
         let (input_rx, frame_tx) = hook_rx.try_recv().expect("engine spawned on connect");
         drop(mgr.attach_display("login", FIRST_DISPLAY, None).unwrap());
-        frame_tx.send(ServerMsg::AdaptiveStart).await.unwrap();
+        frame_tx.send(ServerMsg::AdaptiveStart { engine: 0 }).await.unwrap();
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
             other => panic!("expected the error, got {other:?}"),
@@ -3036,12 +3045,12 @@ mod tests {
 
         // The display socket that came back first is the fresh engine's.
         frames.send(resize(3)).await.unwrap();
-        frames.send(ServerMsg::AdaptiveStart).await.unwrap();
+        frames.send(ServerMsg::AdaptiveStart { engine: 0 }).await.unwrap();
         assert!(matches!(
             recv(&mut display.events).await,
             AttachEvent::Msg(ServerMsg::Resize { w: 3, .. })
         ));
-        assert!(matches!(recv(&mut display.events).await, AttachEvent::Msg(ServerMsg::AdaptiveStart)));
+        assert!(matches!(recv(&mut display.events).await, AttachEvent::Msg(ServerMsg::AdaptiveStart { .. })));
         assert!(display.events.try_recv().is_err(), "nothing of the engine that was ended");
         assert!(hook_rx.try_recv().is_err(), "one fresh engine");
     }
@@ -3312,10 +3321,10 @@ mod tests {
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let (mut input_rx, frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
-        frame_tx.send(ServerMsg::GraphicsStart).await.unwrap();
+        frame_tx.send(ServerMsg::GraphicsStart { engine: 0 }).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let mut display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
-        assert!(matches!(recv(&mut display.events).await, AttachEvent::Msg(ServerMsg::GraphicsStart)));
+        assert!(matches!(recv(&mut display.events).await, AttachEvent::Msg(ServerMsg::GraphicsStart { engine: 1 })));
         // Nothing was lost, so nothing is repainted.
         assert!(input_rx.try_recv().is_err());
     }

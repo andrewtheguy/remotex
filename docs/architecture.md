@@ -236,10 +236,13 @@ gateway.
   decode workers end. The pipeline's compositor and the Adaptive picture's
   decoder run in the paint worker itself, so a session that loaded either ends
   that worker, and the page mounts new canvases for the next, since a canvas is
-  transferred to one worker once. The display socket outlives a session and
-  is not ordered against the session socket, so the ended session's format or
-  picture start arriving late on it starts nothing until this page sends a
-  `connect` or opens another display socket.
+  transferred to one worker once. A display tab that stops showing its display
+  lets go of its decode workers too. The display socket outlives a session and
+  is not ordered against the session socket, so an ended engine's format or
+  picture start can arrive after its `picker`. Each carries its `engine`, which
+  the session layer stamps in on the way out (`ServerMsg::stamped`), and
+  `picker` carries `engines`, how many the gateway has started, none of them
+  running; the page drops a start whose engine is at or below that.
   A picture that fails because the browser ran out of memory says so in the video
   banner, with a Reload: the page that comes back reattaches to the session with
   its memory whole (`saysOutOfMemory` in `frontend/src/memoryBudget.ts`).

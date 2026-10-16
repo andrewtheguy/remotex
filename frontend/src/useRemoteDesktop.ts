@@ -381,13 +381,6 @@ const ATTEMPTS_BEFORE_REPORTING = 4;
 // a slow link or a fetch made mid-reconnect can still leave a request unanswered.
 const CLIPBOARD_FETCH_TIMEOUT_MS = 5000;
 
-// The control messages that start a session's picture, and load what it needs.
-const STARTS_PICTURE: ReadonlySet<string> = new Set([
-  "videoFormat",
-  "graphicsStart",
-  "adaptiveStart",
-]);
-
 // One instance for the one desktop canvas a page has: `applyCanvasCss` is a
 // module-level function, and this is how it reaches the cache the pointer
 // mapping reads. See pointerRect.ts for why invalidation has two triggers.
@@ -648,12 +641,6 @@ export function useRemoteDesktop(
   // they were transferred to, so the next session paints on new ones
   // (desktopPainter.ts).
   const [canvasGeneration, setCanvasGeneration] = useState(0);
-  // Whether the session's picture is over and no other has begun: set where it
-  // ends, cleared where this page starts a session or opens a display socket.
-  // The display socket outlives a session and is not ordered against the
-  // session socket, so what it still says of the ended session's picture, a
-  // format or a start, arrives after the end and must load nothing again.
-  const pictureEndedRef = useRef(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
@@ -1192,8 +1179,13 @@ export function useRemoteDesktop(
     // and a worker that goes takes the canvases with it, the next session
     // painting on new ones. Every way a session leaves this page comes here: the
     // picker, a takeover, and the page leaving the session.
+    // Every engine numbered up to this has ended, as the last `picker` said. The
+    // display socket outlives a session and is not ordered against the session
+    // socket, so an ended engine's format or picture start can arrive after its
+    // `picker`; numbered by its engine, it is told from the next session's, and
+    // must load nothing again.
+    let endedEngines = 0;
     const endPicture = () => {
-      pictureEndedRef.current = true;
       if (bound?.endSession()) {
         bound = null;
         setCanvasGeneration((generation) => generation + 1);
@@ -1443,9 +1435,14 @@ export function useRemoteDesktop(
       } catch {
         return;
       }
-      // An ended session's format or start, late on the display socket, starts
-      // nothing (`pictureEndedRef`).
-      if (pictureEndedRef.current && STARTS_PICTURE.has(msg.type)) {
+      // An ended engine's format or start, late on the display socket, starts
+      // nothing (`endedEngines`).
+      if (
+        (msg.type === "videoFormat" ||
+          msg.type === "graphicsStart" ||
+          msg.type === "adaptiveStart") &&
+        msg.engine <= endedEngines
+      ) {
         return;
       }
       handleControlMsg(msg);
@@ -1508,6 +1505,8 @@ export function useRemoteDesktop(
       // holds or takes the session: this tab takes it only when asked to.
       if (code === CLOSE_IN_USE || code === CLOSE_TAKEN) {
         clearDesktop();
+        // Nothing reconnects from here, so the tab holds nothing it decoded with.
+        endPicture();
         setConnectError(null);
         setStatus(code === CLOSE_IN_USE ? "busy" : "takenOver");
         return;
@@ -1519,6 +1518,7 @@ export function useRemoteDesktop(
       }
       // Nothing to wait for: opening it again is the Retry.
       clearDesktop();
+      endPicture();
       setConnectError(reason);
       setStatus("unavailable");
     };
@@ -1598,8 +1598,9 @@ export function useRemoteDesktop(
     ) => {
       const socket = new WebSocket(gatewayDisplaySocketUrl(display, tab));
       const generation = advancePaintGeneration(paintGenerationRef);
-      // A new socket says nothing of an ended session's picture.
-      pictureEndedRef.current = false;
+      // A new socket carries no ended engine's start, and may be to a gateway
+      // that came back numbering its engines from one again.
+      endedEngines = 0;
       // What a display socket says of its picture starts over with the socket,
       // here and not at the session socket's `connected`: the two sockets are
       // not ordered against each other, and a reattach's replay of either word
@@ -2373,6 +2374,7 @@ export function useRemoteDesktop(
           setMode("picker");
           setConnection("");
           endDesktop();
+          endedEngines = Math.max(endedEngines, msg.engines);
           endPicture();
           break;
       }
@@ -2407,6 +2409,7 @@ export function useRemoteDesktop(
       clearTimeout(retryTimer);
       closeDisplay();
       clearDesktop();
+      endPicture();
       setConnectError(null);
       setStatus("idle");
     };
@@ -2529,8 +2532,6 @@ export function useRemoteDesktop(
     (target: string, choices: Choices, sound: boolean) => {
       setConnectError(null);
       setPendingTarget(target);
-      // What the display socket says from here is this session's picture.
-      pictureEndedRef.current = false;
       // A new session starts from the default: a mute or an unmute was the last
       // one's.
       writeMuted(null);
