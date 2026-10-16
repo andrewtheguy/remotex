@@ -309,10 +309,10 @@ export type ControlMsg =
   // showing the second display composes nothing, and is painted that part of the
   // session page's picture instead (displayRelay.ts).
   | { type: "graphicsView"; x: number; y: number; w: number; h: number }
-  // ALPHA: the picture from here on is sent for motion — the gateway composes an
-  // RDP host's pipeline itself, and sends TILE records where the desktop is
-  // still, its pixels exactly, and a VP9 stream of its own for each region that
-  // moves, as REGION records. Whatever this page held of a passed pipeline, a
+  // ALPHA: the picture from here on is sent for motion — a Mac's virtual display
+  // under ard, whose ZRLE the gateway sends as TILE records where the desktop is
+  // still, its pixels exactly, and as a VP9 stream of its own for each region
+  // that moves, as REGION records. Whatever this page held of a passed pipeline, a
   // video stream or a region's stream before is done with, and the picture is
   // blank until tiles draw it. Sent ahead of the first record, and again wherever
   // the picture starts over: a reattach, and a resize.

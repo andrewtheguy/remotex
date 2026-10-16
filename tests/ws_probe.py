@@ -374,8 +374,7 @@ async def main() -> int:
         "--motion",
         action="store_true",
         help="start the session with Motion: the gateway sends what moves as VP9 and what "
-        "is still as PNG, composing an rdp target's graphics pipeline for it, so the page "
-        "states no --rdp-graphics; on an ard target with virtual_display, from its ZRLE",
+        "is still as PNG, on an ard target with virtual_display, from its ZRLE",
     )
     parser.add_argument(
         "--whole",

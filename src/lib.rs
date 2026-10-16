@@ -27,7 +27,6 @@ pub mod protocol;
 pub mod rdp;
 pub mod rdp_camera;
 pub mod rdp_client;
-pub mod rdp_composer;
 pub mod rdp_clipboard;
 pub mod rdp_mic;
 pub mod regions;

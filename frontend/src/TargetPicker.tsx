@@ -312,22 +312,16 @@ export default function TargetPicker({
                         target={t.name}
                         row={options.pipelineRow}
                         chosen={options.choices.pipeline}
-                        motion={options.choices.motion}
                         locked={pendingTarget !== null}
                         choose={(pipeline) =>
                           setRemembered((was) =>
                             rememberChoice(was, t.name, "pipeline", pipeline),
                           )
                         }
-                        chooseMotion={(motion) =>
-                          setRemembered((was) =>
-                            rememberChoice(was, t.name, "motion", motion),
-                          )
-                        }
                       />
                     )}
-                    {/* Motion on a target with no pipeline to tick it
-                        under. */}
+                    {/* Motion, where the target offers it: a Mac's virtual
+                        display. */}
                     <MotionChoice
                       row={options.motionRow}
                       chosen={options.choices.motion}
@@ -458,8 +452,7 @@ function PictureChoice({
   );
 }
 
-// Motion as a tick of its own, on a target with no pipeline to tick it under.
-// Nothing elsewhere.
+// Motion as a tick of its own, on a target that offers it. Nothing elsewhere.
 function MotionChoice({
   row,
   chosen,
@@ -593,27 +586,22 @@ function SoundChoice({
 }
 
 /**
- * How the host draws the pipeline: high quality or adaptive, under a chosen
- * adaptive one its H.264 over the full screen or by region, and under high
- * quality whether the gateway composes it for motion. Choosing adaptive takes
- * the full screen.
+ * How the host draws the pipeline: high quality or adaptive, and under a chosen
+ * adaptive one its H.264 over the full screen or by region. Choosing adaptive
+ * takes the full screen.
  */
 function PipelineChoice({
   target,
   row,
   chosen,
-  motion,
   locked,
   choose,
-  chooseMotion,
 }: {
   target: string;
   row: PipelineRow;
   chosen: Pipeline;
-  motion: boolean;
   locked: boolean;
   choose: (pipeline: Pipeline) => void;
-  chooseMotion: (motion: boolean) => void;
 }) {
   const adaptive = chosen !== "high-quality";
   return (
@@ -641,22 +629,6 @@ function PipelineChoice({
           </span>
         </label>
       ))}
-      {!adaptive && row.motion && (
-        <div className="picker-suboptions">
-          <label className="picker-option">
-            <input
-              type="checkbox"
-              checked={motion}
-              disabled={locked}
-              onChange={(e) => chooseMotion(e.target.checked)}
-            />
-            <span className="picker-option-text">
-              <span>{row.motion.label}</span>
-              <span className="picker-option-note">{row.motion.note}</span>
-            </span>
-          </label>
-        </div>
-      )}
       {adaptive && (
         <div className="picker-suboptions" role="radiogroup" aria-label="H.264">
           {row.h264.map((option) => (
