@@ -67,7 +67,6 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
-| `publish-full-image.sh` | add the pinned software HEVC decoder's archive to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -150,8 +149,11 @@ name in `share/remotex`, beside the `share/doc/remotex` it installs, unless
 `/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
 the `.pkg`, `share\remotex` under the `.msi`'s install directory, and
 `/opt/remotex/versions/<version>/share/remotex` in the
-container image. No package owns or makes that directory: the operator does. The
-private image `publish-full-image.sh` builds carries it there. The gateway
+container image. No package owns or makes that directory: the operator does. A
+container can be given it from outside the image, as the private image
+`ghcr.io/andrewtheguy/hevc-wasm-archives` that hevc-wasm's `publish-image.sh`
+pushes under hevc-wasm's version, holding that archive and every one before it,
+mounted on that directory as an image volume. The gateway
 decodes none of the Mac's streams: its HEVC and its H.264 are passed, and its
 AAC-ELD sound too, so no artifact needs FFmpeg.
 Do not restore
