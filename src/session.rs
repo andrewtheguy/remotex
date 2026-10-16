@@ -2963,6 +2963,89 @@ mod tests {
         assert!(hook_rx.try_recv().is_err(), "nothing is started in its place");
     }
 
+    /// A page whose display socket went comes back on both sockets, which are not
+    /// ordered against each other. When its new display socket attaches first, it
+    /// is the running Adaptive engine's until the session socket's reattach, which
+    /// still starts the picture over: the engine that went on without the page is
+    /// ended, nothing of it reaches the page after, and the new display socket is
+    /// the fresh engine's.
+    #[tokio::test]
+    async fn a_display_socket_back_before_its_reattach_still_starts_an_adaptive_picture_over() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner = Box::new(
+            move |_target, _choices, plan, _display, input_rx, frame_tx, _audio, _camera, _feedback| {
+                hook_tx.send((plan, input_rx, frame_tx)).unwrap();
+            },
+        );
+        let mac = TargetConfig {
+            protocol: Protocol::Vnc,
+            subtype: Some(crate::config::Subtype::Ard),
+            ..video_target("mac")
+        };
+        let mgr = Arc::new(SessionManager::with_spawner(vec![mac], spawner));
+        let token = mgr.claim(false, None, "login").unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        expect_picker(&mut att.events).await;
+        let adaptive = Choices { passthrough: Some(Passthrough::AppleAdaptive), ..Choices::default() };
+        mgr.connect(att.id, "mac", None, adaptive).await.unwrap();
+        let (plan, mut old_input, old_frames) = hook_rx.try_recv().expect("engine spawned on connect");
+        assert!(plan.apple_adaptive);
+        let display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        let resize = |w| ServerMsg::Resize { w, h: 1, scale: UNSCALED };
+
+        // The display socket goes, and the page closes its session socket with it.
+        mgr.detach_display(display.id);
+        mgr.detach(att.id);
+        // The page comes back, its display socket first. A repaint is asked of the
+        // running engine, which an Adaptive one does not answer, and what it draws
+        // meanwhile reaches the socket: the page holds no picture before an
+        // `adaptiveStart`, and drops it.
+        let mut display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        assert!(matches!(old_input.recv().await, Some(ClientMsg::Refresh)));
+        old_frames.send(resize(1)).await.unwrap();
+        assert!(matches!(
+            recv(&mut display.events).await,
+            AttachEvent::Msg(ServerMsg::Resize { w: 1, .. })
+        ));
+
+        // Then its session socket.
+        let token = mgr.claim(false, Some(&token), "login").unwrap();
+        let reattach = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.attach(&token, None, Decoders::ALL).await.unwrap() }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !old_input.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reattach ends the engine that went on without the page");
+        // Whatever it still sends is dropped, and its exit lets the next start.
+        old_frames.send(resize(2)).await.unwrap();
+        drop(old_frames);
+        let mut att = reattach.await.unwrap();
+        let (plan, _input, frames) = hook_rx.try_recv().expect("the picture is started over");
+        assert!(plan.apple_adaptive);
+        match recv(&mut att.events).await {
+            AttachEvent::Msg(ServerMsg::Connected { passthrough, .. }) => {
+                assert_eq!(passthrough, Some("apple-adaptive"));
+            }
+            other => panic!("expected connected(mac), got {other:?}"),
+        }
+
+        // The display socket that came back first is the fresh engine's.
+        frames.send(resize(3)).await.unwrap();
+        frames.send(ServerMsg::AdaptiveStart).await.unwrap();
+        assert!(matches!(
+            recv(&mut display.events).await,
+            AttachEvent::Msg(ServerMsg::Resize { w: 3, .. })
+        ));
+        assert!(matches!(recv(&mut display.events).await, AttachEvent::Msg(ServerMsg::AdaptiveStart)));
+        assert!(display.events.try_recv().is_err(), "nothing of the engine that was ended");
+        assert!(hook_rx.try_recv().is_err(), "one fresh engine");
+    }
+
     #[tokio::test]
     async fn frames_reach_the_attached_client_and_are_dropped_while_detached() {
         let (mgr, hooks) = manager_with_fake_engine();
