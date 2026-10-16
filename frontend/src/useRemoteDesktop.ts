@@ -323,6 +323,12 @@ export function sizeFollows(): "window" | "screen" | null {
   return mobileGuestSize() ? "screen" : null;
 }
 
+// Whether the picker offers lossless sound, for the picker (targetChoices.ts):
+// not on a touch client. A phone's or a tablet's browser, iOS Safari's foremost,
+// gives a page's WebAssembly less memory than a desktop's does, and FLAC's
+// decoder is a module of its own (flacDecoder.ts), loaded for it alone.
+export const OFFERS_LOSSLESS = !CAN_PINCH_ZOOM;
+
 // The touch view transform: the pinch zoom and pan offset the
 // gestures drive, layered on top of the fit-to-width base scale. One object
 // per hook instance, mutated in place; applyCanvasCss clamps it on every

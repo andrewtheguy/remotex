@@ -227,8 +227,10 @@ gateway.
   web root.
 - The page requires a secure context plus `VideoDecoder` and refuses startup in
   `frontend/src/preflight.ts` without them. A browser without `AudioDecoder`
-  starts and plays FLAC, which the page decodes itself; what needs the decoder
-  is greyed with the reason. Do not add fallback browser paths.
+  starts and plays FLAC, which the page decodes itself, save on a phone or a
+  tablet, which is not offered FLAC ([Lossless sound](#lossless-sound)) and so
+  has no sound there; what needs the decoder is greyed with the reason. Do not
+  add fallback browser paths.
 
 ### Sessions
 
@@ -2319,7 +2321,11 @@ on the same socket and in the same frames: `audioFormat` says `codec` `flac`, an
 empty `head`, the source's own `sampleRate` and a `packetFrames` of twenty
 milliseconds of it, and each packet is one FLAC frame. It is a choice at the picker, on an
 `rdp` or a `wlshare` target, and not a config key; the target's Opus keys do
-nothing in such a session, since there is no rate to set or walk.
+nothing in such a session, since there is no rate to set or walk. A phone or a
+tablet, a touch client as the page tells one, is not offered it: its browser,
+iOS Safari's foremost, gives a page's WebAssembly less memory than a desktop's,
+and the module the page decodes FLAC in is loaded for it alone. There FLAC is
+greyed with the reason, so the module is never fetched.
 
 | Target | What the gateway does | `audioFormat` |
 |---|---|---|

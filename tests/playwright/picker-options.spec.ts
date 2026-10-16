@@ -123,6 +123,7 @@ test.describe("the picker's options", () => {
         passthrough: null,
         placement: "right",
         pipeline: "adaptive-region",
+        vp9: "libvpx",
       },
     ]);
     const connected = seen.statuses.at(-1);
@@ -340,6 +341,13 @@ test.describe("the picker on a phone", () => {
       });
     });
     const seen = watchSession(page);
+    // Every fetch of the FLAC decoder's module, which a phone is never sent.
+    const flacModules: string[] = [];
+    page.on("request", (request) => {
+      if (/remotex_flac/.test(request.url())) {
+        flacModules.push(request.url());
+      }
+    });
     await logIn(page);
 
     // The size the target configures, and the default beside it.
@@ -351,15 +359,26 @@ test.describe("the picker on a phone", () => {
       item.getByRole("radio", { name: FOLLOWS_WINDOW }),
     ).toHaveCount(0);
 
+    // Sound is Opus here: FLAC is greyed, with the reason.
+    await item.getByRole("checkbox", { name: SOUND }).check();
+    await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
+    const flac = item.getByRole("radio", { name: /^FLAC/ });
+    await expect(flac).toBeDisabled();
+    await expect(flac).toHaveAccessibleName(/phone/);
+
     await item.getByRole("radio", { name: /^1440×900/ }).check();
     await item.getByRole("button", { name: "Start", exact: true }).click();
     await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
       timeout: 20_000,
     });
-    expect(seen.connects.at(-1)).toMatchObject({ size: "default" });
+    expect(seen.connects.at(-1)).toMatchObject({
+      size: "default",
+      audio: "opus",
+    });
     expect(seen.statuses.at(-1)).toMatchObject({
       type: "connected",
       resize: false,
     });
+    expect(flacModules, "the FLAC decoder's module, fetched").toEqual([]);
   });
 });

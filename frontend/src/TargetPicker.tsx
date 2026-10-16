@@ -23,7 +23,7 @@ import {
   targetOptions,
   type Vp9Encoder,
 } from "./targetChoices.ts";
-import { sizeFollows } from "./useRemoteDesktop.ts";
+import { OFFERS_LOSSLESS, sizeFollows } from "./useRemoteDesktop.ts";
 
 // The post-login target picker: the state where the user is authenticated and
 // holds the session slot, but no connection has started yet (see
@@ -135,6 +135,7 @@ export default function TargetPicker({
     rdpGraphics: composesRdpGraphics(),
     rdpH264: decodesRdpH264(),
     audio: decodesAudio(),
+    lossless: OFFERS_LOSSLESS,
     runsHevc: runnableDecoders().hevc,
     follows: sizeFollows(),
   };
@@ -500,7 +501,7 @@ function SoundChoice({
         <input
           type="checkbox"
           checked={row.checked}
-          disabled={locked}
+          disabled={row.disabled || locked}
           onChange={(e) => choose(e.target.checked ? row.ticks : "off")}
         />
         <span className="picker-option-text">
