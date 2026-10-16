@@ -154,14 +154,12 @@ export function readRemoteClipboard(): string {
 // or its H.264, the one choice of its picture; without it the picker's own pick
 // stands, the HEVC where this browser can take it. An RDP target with its pipeline
 // on (egfx not false) passes it in every session, which is said and not offered.
-// `pipeline` is how the host draws that pipeline, high quality unless asked, and
-// `motion` whether the gateway composes it instead (alpha), under high quality.
+// `pipeline` is how the host draws that pipeline, high quality unless asked.
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
   passthrough?: "apple-media" | "apple-h264";
   pipeline?: "high-quality" | "adaptive-desktop" | "adaptive-region";
-  motion?: boolean;
 }
 
 // A picker button reads "<name> <protocol> · <host>", so a target is named by what
@@ -269,14 +267,6 @@ export async function startTarget(
         name: pipeline === "high-quality" ? /^High quality/ : /^Adaptive/,
       })
       .check({ timeout: LEAVE_TIMEOUT_MS });
-  }
-  // Motion, under high quality where the target offers it: ticked or not, since
-  // the picker remembers it.
-  const motion = graphics.getByRole("checkbox", { name: /^Motion/ });
-  if (choices.motion || (await motion.count()) > 0) {
-    await motion.setChecked(choices.motion ?? false, {
-      timeout: LEAVE_TIMEOUT_MS,
-    });
   }
   if (pipeline !== "high-quality") {
     await graphics

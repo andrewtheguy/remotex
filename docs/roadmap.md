@@ -118,32 +118,6 @@ end it once they stop. What the Mac does with a gesture it is sent that way, and
 whether the phases alone make the horizontal axis feel right, are still to be
 tested, on a physical Mac.
 
-### Motion's scrolls and drags as copies
-
-A session started with Motion sends what a scroll or a window drag moved as
-damage: PNG, or VP9 once it counts as moving. But a Windows host draws most of
-either as copies between surfaces (`SurfaceToSurface`), not as new pixels.
-Recorded from windows-arm set to Lossless, a scroll moved 724 Mpx by copies and
-drew 42 Mpx, and a window drag moved 147 Mpx and drew 51 Mpx, and replayed they
-cost 1.78 and 2.70 MB/s against 0.38 for a video in a window
-([composed for Motion](architecture.md#rdps-graphics-pipeline-composed-for-motion)).
-
-What is planned is a `COPY` record, op `0x07`, `u16 sx | sy | x | y | w | h`,
-that has the page copy a rectangle of the picture it holds, drawn in wire order
-with `drawImage` from its canvas onto itself:
-
-- The compositor reports each copy within the output, in order with what it
-  painted (`Composed.copied`).
-- A copy whose source was not painted earlier in the same frame, which the page
-  therefore already holds, is sent as a `COPY`, and its destination is not
-  damage.
-- Each tile's state moves with the copy: a tile that receives pixels still owed
-  their PNG, under a live stream or not yet cleaned up, owes one too.
-
-A scroll or a drag of exact content then stays exact and costs a few bytes a
-copy; only what the host newly draws, the strip scrolled into view, goes as PNG
-or VP9. Measured by replaying the same recordings.
-
 ## Under consideration
 
 ### Two streams for Standard's Combined Display
@@ -301,14 +275,24 @@ through is what a `wlshare` target has.
 
 Motion cuts the desktop into 64-pixel tiles from (0,0), in device pixels at
 every density (`TILE` in `src/regions.rs`). That is the size its pictures
-arrive in: a Windows host's bitmaps are 64×64 tiles on the same grid at 1x and
-2x ([Bitmap updates](rdp-client.md#bitmap-updates)), and a Mac's ZRLE tiles are
-64 device pixels at any density
+arrive in: a Mac's ZRLE tiles are 64 device pixels at any density
 ([ZRLE](apple-vnc-889.md#the-record-layer)). A tile that followed the density,
 128 pixels at 2x to stay 64 points, or a smaller one to find motion more finely,
-would split or merge the sources' own tiles, and would retune what is counted in
+would split or merge the Mac's own tiles, and would retune what is counted in
 tiles: the churn that marks a tile moving, the smallest region, and the
 cleanup's batch. Nothing measured asks for it.
+
+### Motion on an RDP target
+
+Motion was offered under an RDP target's High quality (alpha): the gateway
+composed the host's graphics pipeline and sent what moves as VP9 and what is
+still as PNG. It was removed. It encoded twice, decoding what the host had
+already encoded only to encode it again, and it was redundant beside what the
+pipeline already gives: an exact picture under the host's Lossless policy
+([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)),
+and the host's own Adaptive H.264 for a slow link. Every RDP host's pipeline is
+passed to the page
+([RDP's graphics pipeline](architecture.md#rdps-graphics-pipeline)).
 
 ### `THINCLIENT` in the graphics capability advertise
 

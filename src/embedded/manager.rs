@@ -762,7 +762,7 @@ fn describe_offers(target: &TargetConfig) -> String {
         choices.push("high quality or adaptive H.264".to_owned());
     }
     if offers.motion {
-        choices.push("the alpha motion mode, composed here".to_owned());
+        choices.push("the alpha motion mode".to_owned());
     }
     if offers.vp9 {
         choices.push("libvpx or the alpha native VP9 encoder".to_owned());
@@ -1735,7 +1735,7 @@ mod tests {
             "the render plan describes itself: {page}"
         );
         assert!(
-            page.contains(&spec("picker", "offers resize, sound, high quality or adaptive H.264, the alpha motion mode, composed here")),
+            page.contains(&spec("picker", "offers resize, sound, high quality or adaptive H.264")),
             "what a session's starter chooses is the type's to offer, and the pipeline is passed unasked: {page}"
         );
         assert!(

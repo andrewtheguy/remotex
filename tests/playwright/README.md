@@ -47,15 +47,6 @@ a batch whose commands draw with H.264 is acknowledged: the acknowledgment follo
 the decode of every access unit in the batch, and a decoder that gave no picture
 says so in the DOM instead.
 
-`rdp-motion.spec.ts` is a session started with Motion (ALPHA), the pipeline
-composed by the gateway, read from the display socket: that `tilesStart` comes
-ahead of every record, that each `TILE` is an 8-bit RGB PNG of the size its
-record states, read no further than its IHDR, that each region's units follow its
-`regionFormat` and start at a keyframe, that no `TILE` falls inside a live
-region, that the records draw every pixel of the desktop, and that a page that
-reloads is sent all of it again. The Info card names the gateway's encoding and
-the host's picture.
-
 `egfx-two-displays.spec.ts` is the same pipeline passed over two virtual
 displays, read from both displays' sockets of one browser: that each socket
 names the column of the composed picture its display is (`graphicsView`) beside
@@ -259,15 +250,6 @@ video playing:
 ```sh
 REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET='win-h264' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
-```
-
-The Motion spec needs the same kind of host, in a target with the pipeline on
-and one virtual display, named by `REMOTEX_PLAYWRIGHT_MOTION_TARGET`, which it
-starts with Motion ticked:
-
-```sh
-REMOTEX_PLAYWRIGHT_MOTION_TARGET='win' \
-bunx playwright test '/rdp-motion\.spec\.ts$'
 ```
 
 The two-display spec needs the same kind of host, in a target with

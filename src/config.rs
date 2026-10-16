@@ -221,9 +221,8 @@ pub struct RenderPlan {
     /// that has it, or in wlshare, for the stream a `wlshare` target passes.
     pub native_vp9: bool,
     /// ALPHA: the picture is sent as VP9 where it moves and PNG where it is
-    /// still ([`Choices::motion`]): an RDP host's graphics pipeline composed here
-    /// rather than passed, or a Mac's ZRLE on its virtual display. Never set with
-    /// [`Self::rdp_graphics`]. The fields above the passthroughs reach the VP9.
+    /// still ([`Choices::motion`]): a Mac's ZRLE on its virtual display. The
+    /// fields above the passthroughs reach the VP9.
     pub motion: bool,
     /// What the motion path draws, in the pixels themselves, of what it sent
     /// ([`TargetConfig::render_motion_debug`]). [`MotionDebug::None`] unless
@@ -330,9 +329,7 @@ pub struct Offers {
     /// `native-vp9` feature on any target whose picture may be VP9 encoded here.
     pub vp9: bool,
     /// Whether the picture may be sent as VP9 where it moves and PNG where it is
-    /// still ([`Choices::motion`]): on an RDP target with the pipeline on and one
-    /// virtual display, whose pipeline is then composed here, and on `ard` with
-    /// its virtual display.
+    /// still ([`Choices::motion`]): on `ard` with its virtual display.
     pub motion: bool,
 }
 
@@ -376,11 +373,8 @@ pub struct Choices {
     #[serde(default)]
     pub vp9: Vp9Encoder,
     /// ALPHA. Send what moves as VP9 and what is still as PNG: what is still is
-    /// then the host's own picture, exactly where the host draws exactly. An RDP
-    /// host's graphics pipeline is composed here rather than passed for it, and
-    /// is exact when a Windows host's image quality policy is set to Lossless; a
-    /// Mac's ZRLE always is. With [`Pipeline::HighQuality`] alone, on a target
-    /// that offers it ([`Offers::motion`]).
+    /// then the host's own picture, which a Mac's ZRLE always draws exactly. On a
+    /// target that offers it ([`Offers::motion`]).
     #[serde(default)]
     pub motion: bool,
     /// Ask a High Performance Mac whose picture is passed, in either codec, for one tile, each
@@ -1108,13 +1102,9 @@ impl TargetConfig {
                 passthrough: if self.egfx() { &[Passthrough::RdpGraphics] } else { &[] },
                 placement: self.virtual_displays > 1,
                 pipeline: self.egfx(),
-                // The pipeline passes in every session but one composed here for
-                // motion, which libvpx codes: only the bitmap path's VP9 has a
-                // choice of encoder.
+                // The pipeline passes in every session: only the bitmap path is VP9.
                 vp9: !self.egfx() && NATIVE_VP9,
-                // One display: two are one span the host draws through one
-                // pipeline, which is composed once, in the page.
-                motion: self.egfx() && self.virtual_displays <= 1,
+                motion: false,
             },
             // Read as any VNC server, which carries no sound and is shown at its
             // own size.
@@ -1185,12 +1175,8 @@ impl TargetConfig {
             ("sound", choices.audio != Sound::Off && !offers.audio),
             ("a passthrough", choices.passthrough.is_some_and(|named| !offers.passthrough.contains(&named))),
             // A target with a stream to pass has no picture encoded here, so one
-            // whose stream is a choice is refused a session that names none —
-            // but for an RDP host's pipeline composed here for motion.
-            (
-                "a picture encoded here",
-                !offers.passthrough.is_empty() && self.passthrough(choices).is_none() && !choices.motion,
-            ),
+            // whose stream is a choice is refused a session that names none.
+            ("a picture encoded here", !offers.passthrough.is_empty() && self.passthrough(choices).is_none()),
             (
                 "a picture in one tile",
                 choices.whole
@@ -1201,8 +1187,7 @@ impl TargetConfig {
                 choices.placement != Placement::default() && !offers.placement,
             ),
             ("adaptive H.264", choices.pipeline != Pipeline::HighQuality && !offers.pipeline),
-            // High quality alone: the gateway decodes no H.264.
-            ("motion", choices.motion && (!offers.motion || choices.pipeline != Pipeline::HighQuality)),
+            ("motion", choices.motion && !offers.motion),
             (
                 "the native VP9 encoder",
                 choices.vp9 != Vp9Encoder::Libvpx && (!offers.vp9 || self.passthrough(choices).is_some()),
@@ -1215,12 +1200,8 @@ impl TargetConfig {
     }
 
     /// The stream a session started with `choices` passes, if any: one that is
-    /// a choice where it was chosen, and one that is not in every session but one
-    /// that composes the pipeline here for motion ([`Choices::motion`]).
+    /// a choice where it was chosen, and one that is not in every session.
     pub fn passthrough(&self, choices: Choices) -> Option<Passthrough> {
-        if choices.motion && self.offers().motion {
-            return None;
-        }
         self.offers()
             .passthrough
             .iter()
@@ -2007,8 +1988,8 @@ impl ConfigFile {
             anyhow::ensure!(
                 target.render_motion_debug == MotionDebug::None || target.offers().motion,
                 "target {:?} sets render_motion_debug, which draws what a session started \
-                 with Motion sends, and Motion is offered only on an RDP target with egfx on \
-                 and one virtual display and on ard with virtual_display = true. Remove the key.",
+                 with Motion sends, and Motion is offered only on ard with virtual_display = true. \
+                 Remove the key.",
                 target.name
             );
             if let Some(kbps) = target.audio_bitrate {
@@ -4347,7 +4328,7 @@ vnc_password = \"x\"")).unwrap();
                 placement: false,
                 pipeline: true,
                 vp9: false,
-                motion: true,
+                motion: false,
             }
         );
         let composes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false };
@@ -4362,6 +4343,11 @@ vnc_password = \"x\"")).unwrap();
         assert!(win.render_plan(unasked, composes).rdp_graphics, "it is passed unasked");
         assert_eq!(win.beyond(unasked, cannot), Some(Passthrough::RdpGraphics), "and refused to a page that cannot");
         assert_eq!(win.render_summary(), "the host's graphics pipeline, passed through");
+        assert_eq!(
+            win.accepts(Choices { motion: true, ..passed }),
+            Err(NotOffered { target: "win".to_owned(), choice: "motion" }),
+            "nor composed here for motion"
+        );
 
         // H.264 on the pipeline is the session's choice and the browser's answer
         // together, and neither alone.
@@ -4406,56 +4392,14 @@ vnc_password = \"x\"")).unwrap();
         );
     }
 
-    /// Motion composes the pipeline here instead of passing it, so it needs nothing
-    /// of the page's compositor, and it is High quality's alone, on one display.
-    #[test]
-    fn an_rdp_target_composes_its_pipeline_here_for_motion() {
-        let rdp = |extra: &str| {
-            ConfigFile::parse(&format!(
-                "[server]\n{}\n[[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\n\
-                 password = \"p\"\nhost = \"10.0.0.5\"\nvideo_quality = 60\n{extra}\n",
-                site_passwd_line()
-            ))
-            .and_then(ConfigFile::resolve)
-            .unwrap()
-            .targets
-            .remove(0)
-        };
-        let motion = Choices { motion: true, ..Choices::default() };
-        let win = rdp("");
-        assert_eq!(win.accepts(motion), Ok(()));
-        assert_eq!(win.passthrough(motion), None, "nothing is passed");
-        let cannot = Decoders { apple_media: false, rdp_graphics: false, rdp_h264: false };
-        assert_eq!(win.beyond(motion, cannot), None, "so a page that cannot compose is not turned away");
-        let plan = win.render_plan(motion, Decoders::ALL);
-        assert!(plan.motion && !plan.rdp_graphics && !plan.rdp_h264);
-        assert_eq!(
-            plan.describe(),
-            "motion as video q60 · libvpx · adaptive · still as PNG"
-        );
-        assert!(!win.render_plan(Choices::default(), Decoders::ALL).motion, "passed unless chosen");
-
-        let adaptive = Choices { pipeline: Pipeline::AdaptiveRegion, ..motion };
-        assert_eq!(win.accepts(adaptive), Err(NotOffered { target: "win".to_owned(), choice: "motion" }));
-        let two = rdp("virtual_displays = 2");
-        assert!(!two.offers().motion);
-        assert_eq!(two.accepts(motion), Err(NotOffered { target: "win".to_owned(), choice: "motion" }));
-        let bitmap = rdp("egfx = false");
-        assert!(!bitmap.offers().motion);
-        assert_eq!(bitmap.accepts(motion), Err(NotOffered { target: "win".to_owned(), choice: "motion" }));
-        assert!(!bitmap.render_plan(motion, Decoders::ALL).motion);
-    }
-
     /// The motion path's outlines are a QA aid for a session started with Motion:
     /// drawn only in one, and refused on a target that cannot start one.
     #[test]
     fn the_motion_debug_outlines_are_opt_in_and_belong_to_motion() {
         let parse = |extra: &str| {
-            ConfigFile::parse(&format!(
-                "[server]\n{}\n[[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\n\
-                 password = \"p\"\nhost = \"10.0.0.5\"\n{extra}\n",
-                site_passwd_line()
-            ))
+            ConfigFile::parse(&vnc_toml(&format!(
+                "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\nvirtual_display = true\n{extra}"
+            )))
             .and_then(ConfigFile::resolve)
         };
         let motion = Choices { motion: true, ..Choices::default() };
@@ -4484,10 +4428,16 @@ vnc_password = \"x\"")).unwrap();
             assert!(format!("{err:#}").contains("render_motion_debug"), "{err:#}");
         }
 
-        for refused in ["render_motion_debug = \"tiles\"\negfx = false", "render_motion_debug = \"motion\"\nvirtual_displays = 2"] {
-            let err = parse(refused).unwrap_err();
-            assert!(format!("{err:#}").contains("render_motion_debug"), "{err:#}");
-        }
+        // An RDP host's pipeline is passed in every session, so Motion is not
+        // offered there.
+        let err = ConfigFile::parse(&format!(
+            "[server]\n{}\n[[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\n\
+             password = \"p\"\nhost = \"10.0.0.5\"\nrender_motion_debug = \"motion\"\n",
+            site_passwd_line()
+        ))
+        .and_then(ConfigFile::resolve)
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("render_motion_debug"), "{err:#}");
     }
 
     /// Standard mode never touches the Mac's sound, so an `ard` target has none to

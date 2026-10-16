@@ -2,7 +2,7 @@
 //! of its own for each region that moves.
 //!
 //! The picture of a session started with Motion ([`crate::config::Choices::motion`]):
-//! an RDP host's graphics pipeline, composed here. It is the gateway's motion mode
+//! a Mac's ZRLE on its virtual display. It is the gateway's motion mode
 //! of old (`render_motion`, removed with the tile transport in 6c948ad3) brought
 //! back as it was — which tiles are moving, which become regions
 //! ([`crate::regions`]), what is sent at once, when a region ends and what it then
