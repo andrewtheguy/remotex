@@ -24,7 +24,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/flac", "frontend/wasm/adaptive"]
 
 [package]
 name = "remotex"
-version = "0.0.422"
+version = "0.0.423"
 license = "MIT"
 edition = "2024"
 
@@ -87,11 +87,11 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
 #
-# Its `native` feature, the ALPHA encoder it has written in Rust, is left off:
-# on amd64 it refuses to build under x86-64-v3, and this gateway is built for the
-# baseline (packaging/README.md, "x86-64 CPU compatibility"). A session that
-# chooses that encoder asks wlshare for it, on a `wlshare` target alone.
-screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.22" }
+# It is libvpx alone. Its ALPHA encoder written in Rust lives on its
+# `native-encoder` branch, as does wlshare's use of it: a session that chooses
+# that encoder asks wlshare for it (`WLSX`), on a `wlshare` target alone, and a
+# wlshare built from main refuses the ask and ends the connection.
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.25" }
 # Remote audio: resample redirected PCM and encode bare Opus packets, as wlshare
 # codes its own: sound-opus, the one crate that codes a desktop's sound as Opus
 # for this gateway and for wlshare, its own repository pinned at a release tag by
@@ -306,8 +306,8 @@ opt-level = 3
 [profile.dev.package.crypto-primes]
 opt-level = 3
 
-# screen-vp9, its encoder in Rust and the conversion in front of both its
-# coders (the `yuv` crate) optimised in a debug build as in release, so that a
+# screen-vp9 and the conversion in front of its encoder (the `yuv` crate)
+# optimised in a debug build as in release, so that a
 # debug gateway codes a desktop at the speed a released one does. A
 # dependency's own profile is ignored; only this workspace's applies.
 [profile.dev.package.screen-vp9]

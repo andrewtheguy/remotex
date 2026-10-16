@@ -173,7 +173,10 @@ const ENCODING_WLSHARE_VP9_HELD: i32 = 0x574c_5344;
 /// ALPHA. Listed beside [`ENCODING_WLSHARE_VP9`], has wlshare code the
 /// stream with its encoder written in Rust in place of libvpx: `WLSX`, for a
 /// session started with [`crate::config::Vp9Encoder::Native`]. The stream passed
-/// is the same to this gateway and to a decoder either way.
+/// is the same to this gateway and to a decoder either way. That encoder is
+/// in a wlshare built from its `native-encoder` branch; one built from main
+/// refuses the ask and ends the connection rather than code with libvpx a
+/// stream asked of the other.
 const ENCODING_WLSHARE_VP9_NATIVE: i32 = 0x574c_5358;
 /// The largest `WLSV` frame read rather than refused. A 4:4:4 keyframe of the largest
 /// desktop the ceiling admits at the finest quantizer is a few megabytes; a length
