@@ -229,15 +229,17 @@ gateway.
   module for itself alone is greyed there with the reason rather than offered,
   as lossless sound is ([Lossless sound](#lossless-sound)).
 - On every page, what a session's picture alone loaded goes when the session
-  ends, at the gateway's `picker`: a WebAssembly memory grows and never
+  leaves the page: at the gateway's `picker`, a takeover, or a logout. A
+  WebAssembly memory grows and never
   shrinks, so ending the worker that holds a module is the only way to give its
-  memory back (`frontend/src/desktopPainter.ts`). The HEVC's decode worker, a
-  High Performance Mac's alone, ends. The pipeline's compositor and the
-  Adaptive picture's decoder run in the paint worker itself, so a session that
-  loaded either ends that worker, and the page mounts new canvases for the next,
-  since a canvas is transferred to one worker once. The VP9's decode worker is
-  kept with a paint worker that is kept, being what most targets' pictures are
-  decoded with where the browser's own decoder refuses them.
+  memory back (`frontend/src/desktopPainter.ts`). The VP9's and the HEVC's
+  decode workers end. The pipeline's compositor and the Adaptive picture's
+  decoder run in the paint worker itself, so a session that loaded either ends
+  that worker, and the page mounts new canvases for the next, since a canvas is
+  transferred to one worker once. The display socket outlives a session and
+  is not ordered against the session socket, so the ended session's format or
+  picture start arriving late on it starts nothing until this page sends a
+  `connect` or opens another display socket.
   A picture that fails because the browser ran out of memory says so in the video
   banner, with a Reload: the page that comes back reattaches to the session with
   its memory whole (`saysOutOfMemory` in `frontend/src/memoryBudget.ts`).

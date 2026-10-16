@@ -23,8 +23,8 @@
 // it gives it back (`endSession`). The compositor of an RDP host's pipeline and the
 // decoder of a Mac's Adaptive picture are modules of this worker's own, so a
 // session that loaded either ends the worker, and the page mounts new canvases for
-// the next one. Otherwise the worker is kept, with the VP9's decode worker most
-// targets' pictures use, and only the HEVC's goes.
+// the next one. Otherwise the worker is kept, and its decode workers, the VP9's
+// and the HEVC's, go.
 import { decodesAppleMedia } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";

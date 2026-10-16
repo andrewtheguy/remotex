@@ -43,7 +43,8 @@ command rather than the one that was running, and that a session's end ends the
 paint worker that loaded the compositor, the next session composing in a paint
 worker of its own, which Playwright reports starting and closing. A compositor
 whose memory the paint worker could not make says the page ran out of memory and
-offers a reload, which comes back to the session composing. A compositor that refused a command
+offers a reload, which comes back to the session composing, and a page whose
+session another browser takes over ends its paint worker. A compositor that refused a command
 says so in the DOM, which is what stands in for the picture here. Started with
 the picker's Adaptive (ALPHA), H.264 over the full screen, it also asserts
 that the page said it decodes H.264, that the session says it carries it, and that
@@ -70,7 +71,7 @@ Performance pictures, with the browser's own decoder made to refuse the VP9 and
 the HEVC: that each session's picture starts and is acknowledged, that a session
 that loaded the compositor or the Adaptive decoder ends its paint worker and any
 other keeps it, and, by how often each module's file is fetched, that a kept
-worker keeps its VP9 decode worker and ends its HEVC's.
+worker ends its VP9 and HEVC decode workers.
 
 `egfx-two-displays.spec.ts` is the same pipeline passed over two virtual
 displays, read from both displays' sockets of one browser: that each socket

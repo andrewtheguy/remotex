@@ -35,6 +35,7 @@ import { expect, type Page, test, type Worker } from "@playwright/test";
 
 import {
   leaveSession,
+  logIn,
   logInAndConnectTo,
   returnToPicker,
   startTarget,
@@ -478,6 +479,47 @@ test.describe("a target that passes its graphics pipeline", () => {
     await expect(page.locator("canvas.graphics")).toBeVisible();
 
     await returnToPicker(page);
+  });
+
+  test("ends the paint worker of a page whose session another browser takes over", async ({
+    page,
+    browser,
+  }) => {
+    // A page left on "taken over" may stay there for good, so it holds nothing
+    // the session's picture loaded: the compositor's paint worker ends.
+    const painters: Worker[] = [];
+    page.on("worker", (worker) => {
+      if (/desktopPainter\.worker/.test(worker.url())) {
+        painters.push(worker);
+      }
+    });
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, EGFX_TARGET ?? "", "", PASSED);
+    await expect
+      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
+      .toBeGreaterThan(0);
+    expect(painters).toHaveLength(1);
+    const ended = new Promise<void>((resolve) =>
+      painters[0].once("close", () => resolve()),
+    );
+
+    const other = await browser.newContext();
+    try {
+      const taker = await other.newPage();
+      await logIn(taker);
+      await expect(
+        page.getByRole("button", { name: "Take it back" }),
+      ).toBeVisible({ timeout: 20_000 });
+      await ended;
+    } finally {
+      await other.close();
+    }
+    // A takeover ends the session, so the page that takes the slot back lands on
+    // the picker.
+    await page.getByRole("button", { name: "Take it back" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Pick a target" }),
+    ).toBeVisible({ timeout: 20_000 });
   });
 
   test("says a compositor that ran out of memory did, and reloads into the session", async ({

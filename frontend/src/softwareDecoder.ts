@@ -225,10 +225,8 @@ interface Client {
 
 // One decode worker for each module, started by the first stream the module
 // decodes: loading a module compiles it and starts its threads, which a resize
-// should not pay for again. Each stream is a decoder of its own inside it. The
-// VP9's is held for the paint worker's lifetime, since most targets' pictures are
-// that stream; the HEVC's, a High Performance Mac's alone, ends with its session
-// (`endDecodeWorker`).
+// should not pay for again. Each stream is a decoder of its own inside it. Each
+// ends with its session (`endDecodeWorker`): few targets' pictures need either.
 const workers: Record<SoftwareModule, Worker | null> = {
   hevc: null,
   vp9: null,

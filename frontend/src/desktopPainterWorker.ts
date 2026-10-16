@@ -114,7 +114,7 @@ export type PainterCommand =
   | { type: "clear" }
   /**
    * The session is over, after its `clear`: what its picture alone loaded goes,
-   * which in a worker that is kept is the HEVC's decode worker (desktopPainter.ts).
+   * which in a worker that is kept is its decode workers (desktopPainter.ts).
    */
   | { type: "sessionEnded" };
 
@@ -373,8 +373,9 @@ export function createPainterWorker(
           break;
         case "sessionEnded":
           // At once, as the clear ahead of it ran: that clear closed the
-          // decoders, so no unit is left for the worker to answer.
+          // decoders, so no unit is left for either worker to answer.
           endDecodeWorker("hevc");
+          endDecodeWorker("vp9");
           break;
       }
     },

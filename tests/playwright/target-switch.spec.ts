@@ -2,8 +2,8 @@
 // reload, and what each session's end lets go of (frontend/src/desktopPainter.ts):
 // a session that loaded a module of the paint worker's own, the pipeline's
 // compositor or the Adaptive picture's decoder, ends that worker and the next
-// session paints in another; any other session keeps it, and its VP9 decode worker,
-// and ends the HEVC's.
+// session paints in another; any other session keeps it, and ends its VP9 and HEVC
+// decode workers.
 //
 // Everything asserted is decided by the system and not by a machine's timing: that
 // each session's picture starts as its target passes or encodes it and is
@@ -219,13 +219,14 @@ test.describe("a Mac's and an RDP host's targets on one page", () => {
     expect(seen.painters).toHaveLength(2);
     expect(seen.vp9Loads, "the VP9's module, loaded once").toBe(1);
 
-    // A VP9 session's end keeps the worker and its VP9 decode worker: the RDP
-    // host's VP9 is decoded there with nothing loaded again.
+    // A VP9 session's end keeps the worker and ends its VP9 decode worker: the
+    // RDP host's VP9 is decoded in the same paint worker, by a decode worker that
+    // loads the module again.
     await returnToPicker(page);
     await session(page, seen, bitmap, VP9);
     expect(seen.painters).toHaveLength(2);
     expect(open(seen.painters[1])).toBe(true);
-    expect(seen.vp9Loads, "the VP9's module, kept").toBe(1);
+    expect(seen.vp9Loads, "the VP9's module, loaded again").toBe(2);
 
     // The Adaptive picture is decoded in that same worker, whose end it then is.
     await returnToPicker(page);
@@ -252,13 +253,12 @@ test.describe("a Mac's and an RDP host's targets on one page", () => {
       2 * hevcLoads,
     );
 
-    // That paint worker never had the VP9's decode worker, so the Mac's VP9 loads
-    // the module there.
+    // And the Mac's VP9 there loads the VP9's module once more.
     await returnToPicker(page);
     await session(page, seen, mac, VP9);
     expect(seen.painters).toHaveLength(3);
     expect(seen.vp9Loads, "the VP9's module, in the third paint worker").toBe(
-      2,
+      3,
     );
 
     // And the pipeline after it, composed in the same worker, whose end it is.
