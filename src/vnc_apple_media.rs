@@ -2653,6 +2653,26 @@ impl MediaStream {
         };
     }
 
+    /// The Mac moved the session to another user session's agent, at a login at
+    /// the Mac, and the stream stopped. The new agent inherits no offer, so one
+    /// still unanswered is let go with the rest.
+    pub fn handed_over(&mut self) {
+        self.pending = false;
+        self.offered = None;
+        self.owed = Owed::Nothing;
+    }
+
+    /// The Mac has made the session a virtual display again after moving it off
+    /// its own, at a login at the Mac: the new user session's agent took the
+    /// connection over with the stream stopped and names no ports for it, and an
+    /// offer starts its stream on the ports named at the start.
+    pub fn moved_back(&mut self) {
+        self.invited = true;
+        if matches!(self.owed, Owed::Ports(_)) {
+            self.owed = Owed::Nothing;
+        }
+    }
+
     /// A picture of `size` came from the receiver for display `leg`. Each one of
     /// the display the stream was offered for puts the picture's deadline off; one
     /// of another display, the old one's last, does not.
@@ -2709,6 +2729,15 @@ impl MediaStream {
         self.invited = true;
         assert!(matches!(self.offer(sizes), Some(Offer::Configuration(_))), "no offer for {sizes:?}");
         self.pending = false;
+    }
+
+    /// A stream offered for displays of `sizes` and not yet answered.
+    #[cfg(test)]
+    pub(crate) fn test_offered(&mut self, sizes: &[(u16, u16)]) {
+        self.test_answered(sizes);
+        self.stopped();
+        self.invited = true;
+        assert!(matches!(self.offer(sizes), Some(Offer::Configuration(_))), "no offer for {sizes:?}");
     }
 
     /// The Mac's report of RTCP packet type `kind` on display `leg`'s leg, as

@@ -176,6 +176,10 @@ const LAYOUT_RECORD: usize = 0x38;
 /// Bytes of a layout payload before its first record, counted after the `u16`
 /// length prefix. The display count is the header's last field.
 const LAYOUT_HEAD: usize = 0x14;
+/// The bit of a layout's flags word (header `+0x0e`) set while the session is on
+/// a virtual display. High Performance sends `0x5`, and `0x15` at the login
+/// window; a login at the Mac moves the session to the physical display, `0x4`.
+const LAYOUT_ON_VIRTUAL_DISPLAY: u32 = 0x1;
 /// The most displays Apple's viewer accepts in one layout.
 const LAYOUT_MAX_DISPLAYS: usize = 25;
 /// Identify this client to Screen Sharing before enabling its optional control
@@ -600,6 +604,8 @@ pub struct Layout {
     /// all of them (the `0xffffffff` sentinel).
     pub current: Option<u32>,
     pub displays: Vec<Display>,
+    /// The session is on a virtual display, as the header's flags say.
+    pub on_virtual_display: bool,
 }
 
 impl Layout {
@@ -823,10 +829,10 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         u32::MAX => None,
         id => Some(id),
     };
+    let flags = be32(payload, 0x0e);
     debug!(
         "vnc: display layout version {version}, {count} display(s), current {current:?}, \
-         session state {:#x}",
-        be32(payload, 0x0e)
+         flags {flags:#x}"
     );
 
     let mut displays = Vec::new();
@@ -971,7 +977,7 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         backing.0,
         backing.1
     );
-    Ok(Layout { backing, current, displays })
+    Ok(Layout { backing, current, displays, on_virtual_display: flags & LAYOUT_ON_VIRTUAL_DISPLAY != 0 })
 }
 
 /// Apple's cursor shapes, which arrive as a cache rather than as pixels.

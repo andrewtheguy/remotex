@@ -1127,7 +1127,7 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 | vendor keysyms | `0x453` | 1107 | |
 | keyboard source | `0x455` | 1109 | |
 | `DeviceInfo` | `0x456` | 1110 | not advertised |
-| media stream | `0x3f2` | 1010 | in a second `SetEncodings` |
+| media stream | `0x3f2` | 1010 | first in High Performance's list |
 | 1-bit zlib | `0x3e8` | 1000 | not advertised |
 | 4-bit grey zlib | `0x3e9` | 1001 | not advertised |
 | RGB 5-5-5 zlib | `0x3ea` | 1002 | not advertised |
@@ -1173,9 +1173,13 @@ page says the screen is not available, and the stream comes back at an IDR. See
 
 ### Negotiation
 
-After the first layout the viewer sends a second `SetEncodings`, the opening list
-with encoding 1010 (`0x3f2`) appended. The Mac answers it with message 1, below,
-naming its ports, and the viewer makes its offer only then: message `0x1c`
+Apple's viewer lists encoding 1010 (`0x3f2`) first in the `SetEncodings` it
+sends right behind its `SetDisplayConfiguration`, and sends the same list again
+when the session is ready and once more when its media stream is up. Remotex opens without it and sends the list
+naming it after the first layout. The Mac answers the first `SetEncodings`
+naming 1010 with message 1, below, naming its ports, and the viewer makes its
+offer only then. The Mac itself does not wait for message 1: it answers an offer
+sent before it. The offer is message `0x1c`
 (`RFBMediaStreamServerConfiguration`, version 3):
 
 ```text
@@ -1204,8 +1208,9 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
   the Mac having two displays to send; remotex requires video 2 on exactly when the
   session asked for two. The measured ports were always
   5900 and 5901, the RFB port and the next, and 5902 for a second display. The viewer receives on the same
-  numbers. The Mac sends message 1 once for the `SetEncodings` naming 1010, and
-  again after each display change, never in reply to an offer.
+  numbers. The Mac sends message 1 once a stream, for the first `SetEncodings`
+  naming 1010, and a later one brings none. It sends it again after each display
+  change while that stream lasts, and never in reply to an offer.
 - **message 2**, AVConference's answer: the common eight-byte header, `u16`
   lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
   those blobs. Remotex checks that their lengths describe the whole body and
@@ -1225,7 +1230,7 @@ one field, and a second in a session that passes the picture:
 
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
-| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. It sets the frame rate the stream is configured for, 60 with it and 30 without, which is what the encoder spaces four strips by ([Rate control](#rate-control)). |
+| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. It sets the frame rate the stream is configured for, which is 30 or 60 and nothing above: 60 with it, for a display the Mac's encoder can take at 60, judged from its pixel rate over the display's pixels, and 30 without it or for a larger display. The virtual display's refresh rate does not enter it. That rate is what the encoder spaces four strips by ([Rate control](#rate-control)). |
 | `tilesPerFrame` (video stream field 6) | 4 | 4, whatever the display's size; 1 for a session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the page puts together. One tile is one picture of the whole display on the one SSRC. |
 | The video stream's codecs (field 3) | H.264 (123) and HEVC (100) | Both, and H.264 alone for a session started with the H.264 passthrough | Offered both the Mac sends HEVC; offered 123 alone, H.264. |
 
@@ -1312,6 +1317,13 @@ the strip's number, a frame's strips sharing its timestamp.
 - **A PLI brings a keyframe.** One sent as SRTCP was answered at the next frame
   by an IDR of strip 0 and a picture of each other strip, each with its
   description.
+- **Acknowledgements and refresh requests are not the HEVC's alone.** Read from
+  AVConference, the answer enables long-term references from the offer's field
+  7 alone, the Mac's side always having them on: neither the codec, nor `LTR;`
+  in the codec's features, nor the tile count enters it. Neither does any step
+  from an acknowledgement or a refresh request to the encoder. Remotex
+  acknowledges and asks for refreshes on the HEVC alone, so an H.264 loss costs
+  a keyframe.
 
 Seen at 1600×1000 and 2880×1800. Passed through remotex, Chrome on Linux
 decoded it in its software decoder, and Chrome and Safari on a Mac decoded it;
@@ -1355,9 +1367,10 @@ other failures (see [Liveness](#the-stream)).
 ### The stream
 
 - **RTP.** Payload type 100, with a one-word header extension under profile
-  `0x9311` or `0x9301` holding the picture's packet count and a frame counter.
-  The profile is `0x9331` on a refresh picture (below), and that bit is all
-  remotex reads of it. The marker bit ends a picture. RFC 7798 packetization:
+  `0x9301` or `0x9311` holding the picture's packet count and a frame counter.
+  Its second byte is bits: `0x01` when the count and the counter follow, `0x10`
+  on a picture the Mac keeps for an acknowledgement, and `0x20` on a refresh
+  picture (below), as in `0x9331`. The refresh bit is all remotex reads of it. The marker bit ends a picture. RFC 7798 packetization:
   single NAL units, aggregation packets, fragmentation units. A stream of
   four tiles differs: see [In strips](#in-strips).
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
@@ -1368,7 +1381,8 @@ other failures (see [Liveness](#the-stream)).
 - **Rate.** A picture goes out when the screen changes, at most once per refresh
   of the virtual display. Under a full-screen animation, a 60 Hz display sent
   about 57 pictures a second, with the `0x1c` 60 fps flag or without it, and the
-  Mac logged `viewer set refreshRate 60` and `encode frame rate 60` either way.
+  Mac logged `viewer set refreshRate 60` either way, and `encode frame rate 60`,
+  its encoder's capability rather than the stream's setting.
   A 30 Hz mode sent 30.0, across resizes, and logged `viewer set refreshRate 30`.
   Remotex asks for 30 Hz, because the browser is sent 30 frames a second and
   every picture has to be decoded whether it is shown or not. A still screen
@@ -1431,9 +1445,10 @@ other failures (see [Liveness](#the-stream)).
     the Mac's encoder keeps the newest acknowledged picture as a long-term
     reference. After a loss the viewer asks with payload-specific feedback of
     format 2 (PT 206) carrying the stream's width and height as two `u16`s
-    after the two SSRCs. The Mac answers with a refresh picture: an ordinary
-    picture predicted from the acknowledged one, marked by the `0x9331`
-    profile, which a decoder that kept every acknowledged picture goes on
+    after the two SSRCs; the Mac takes its own size in their place, and only a
+    PT 192 request is checked against its size. The Mac answers with a refresh
+    picture: an ordinary picture predicted from the acknowledged one, marked by
+    the header extension's refresh bit, which a decoder that kept every acknowledged picture goes on
     from. The pictures between the loss and it predict from what was lost.
     Without an acknowledged picture the same request brings an IDR, as it did
     3 s into a stream that had been acknowledged throughout; that IDR, and the
@@ -1618,7 +1633,9 @@ The Mac's encoder follows a rate controller on the Mac that works from the
 viewer's reports alone. Its target moves between a floor of 20 Mbit/s and a
 ceiling of the offer's bitrate entries, capped at 60 Mbit/s. The floor and the
 60 Mbit/s ceiling are fixed by the Mac's screen-sharing video profile, and no
-offer field is known to lower the floor. The daemon logs the controller's state every 5 s:
+offer field is known to lower the floor. An entry can only lower the ceiling,
+and nothing the viewer sends raises it. Within it, the controller's highest
+target is 58,448 kbit/s, the top of its table for this mode. The daemon logs the controller's state every 5 s:
 target, cap, measured bitrate, round-trip time, one-way delay and loss.
 
 - **The target is a bound.** It is the most the encoder may spend, not what
@@ -1659,7 +1676,8 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   20.8 Mbit/s in steps over about 10 s, with the encoder following each step.
   Reported loss of up to 44% for 30 s, and the bandwidth estimate, moved nothing,
   though the controller showed both. A TMMBR asking for 2 Mbit/s changed nothing
-  and was not answered.
+  and was not answered. Read from the code, the Mac takes a temporary maximum
+  only between the floor and the ceiling.
 - **Without reports it stands still.** The controller computes a new target
   only when a report arrives; receiver reports do not count. Reports stopped
   mid-session left the target where it was, 58.4 Mbit/s for 30 s, and 27.9
@@ -1859,18 +1877,25 @@ display is 1280×800, with sessions asking for 1600×1000 or 1440×900:
   the next `SetDisplayConfiguration` closed the connection.
 - **Unlocking a locked session and waking the Mac change no user session,** so,
   as read from the daemon, they move nothing. Neither was run.
-- **Apple's viewer does not ask again.** Read from its code, a change of the
-  flags' bit 0 changes only its window's controls; going back to a virtual
-  display is the user's choice.
+- **No message 1 comes after a login,** as read from the daemon: the login
+  leaves the stream neither started nor waiting to start, and a display change
+  sends message 1 only for a started stream.
+- **Apple's viewer asks again.** Read from its code, `MiscStatus` 17 makes a
+  High Performance session send its `SetDisplayConfiguration` again, at its
+  window's current size. A change of the flags' bit 0 changes only its window's
+  controls. It offers only on message 1, which does not come.
 
 A published description saw the same switch on a 5K Mac, after "a login or
-unlock at the Mac, the Mac waking". Remotex takes every High Performance layout
-as its virtual display and offers only after message 1, so after such a login
-it owes ports the Mac never names. Run through a login on the virtual Mac, it
-listed the physical display as its virtual display and resized the page to
-1280×800. It ended the session 10 s later: "the Mac named no ports for its
-media stream within 10s". Read from its code, a physical display past
-3840×2160 ends the session at once.
+unlock at the Mac, the Mac waking". Remotex asks again as Apple's viewer does,
+on the layout rather than the status: a layout with bit 0 clear after one with
+it set is not its desktop, and is not applied. The page is told the screen is
+not available, and remotex asks for its display again at the size it had. The
+virtual display that comes back is a display change like any other, and is
+offered the stream on the ports named at the start, with no message 1. Without
+one within 30 s the session ends. Run through a logout and a login on the
+virtual Mac, the session was moved to the 1280×800 display 2 s after
+`MiscStatus` 17, had a new 1440×900 virtual display 3 s later, and streamed it
+a second after that.
 
 ### Reaching the gateway
 
