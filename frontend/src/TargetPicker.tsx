@@ -4,6 +4,7 @@ import { decodesAppleMedia } from "./appleMedia.ts";
 import { connectionShortLabel } from "./connectionLabel.ts";
 import { gatewayFetch } from "./gateway.ts";
 import { versionMismatch } from "./gatewayVersion.ts";
+import { pageMemoryIsTight } from "./memoryBudget.ts";
 import { decodesAudio } from "./preflight.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { decodesRdpH264 } from "./rdpH264.ts";
@@ -135,6 +136,7 @@ export default function TargetPicker({
     rdpGraphics: composesRdpGraphics(),
     rdpH264: decodesRdpH264(),
     audio: decodesAudio(),
+    lossless: !pageMemoryIsTight(),
     runsHevc: runnableDecoders().hevc,
     follows: sizeFollows(),
   };
@@ -500,7 +502,7 @@ function SoundChoice({
         <input
           type="checkbox"
           checked={row.checked}
-          disabled={locked}
+          disabled={row.disabled || locked}
           onChange={(e) => choose(e.target.checked ? row.ticks : "off")}
         />
         <span className="picker-option-text">

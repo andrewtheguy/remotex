@@ -218,6 +218,16 @@ gateway.
   compositor's do. Keep it a pinned release: do not vendor its files, build it
   here, or take an archive the pin does not name. Do not fold one module into
   another, or add a fifth without a stream that needs it.
+- A page whose browser gives it less memory than a desktop's does loads as
+  little WebAssembly as it can. No browser says how much a page may have, so the
+  page goes by what they do say (`frontend/src/memoryBudget.ts`): an iPhone or
+  an iPad, whatever the browser, since iOS caps the memory each app's
+  processes may use whatever engine runs in them, and a device whose browser
+  reports 4 GB or less of `navigator.deviceMemory`. Do not go by touch: a
+  touchscreen says nothing of memory. Each module is loaded by the session that needs it, never at
+  start-up, and a choice that is an edge case on such a device and would load a
+  module for itself alone is greyed there with the reason rather than offered,
+  as lossless sound is ([Lossless sound](#lossless-sound)).
 - The only versioned client asset read at run time is the software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
@@ -227,8 +237,10 @@ gateway.
   web root.
 - The page requires a secure context plus `VideoDecoder` and refuses startup in
   `frontend/src/preflight.ts` without them. A browser without `AudioDecoder`
-  starts and plays FLAC, which the page decodes itself; what needs the decoder
-  is greyed with the reason. Do not add fallback browser paths.
+  starts and plays FLAC, which the page decodes itself, save on an iPhone or
+  an iPad, which greys FLAC to keep its WebAssembly down (below) and so has no
+  sound there; what needs the decoder is greyed with the reason. Do not
+  add fallback browser paths.
 
 ### Sessions
 
@@ -2319,7 +2331,12 @@ on the same socket and in the same frames: `audioFormat` says `codec` `flac`, an
 empty `head`, the source's own `sampleRate` and a `packetFrames` of twenty
 milliseconds of it, and each packet is one FLAC frame. It is a choice at the picker, on an
 `rdp` or a `wlshare` target, and not a config key; the target's Opus keys do
-nothing in such a session, since there is no rate to set or walk.
+nothing in such a session, since there is no rate to set or walk. A device
+held to little memory greys it, with the reason, to load as little WebAssembly
+as it can
+([The client and its bundle](#the-client-and-its-bundle)): the module the page
+decodes FLAC in would be loaded for lossless alone, an edge case there, so it is
+never fetched.
 
 | Target | What the gateway does | `audioFormat` |
 |---|---|---|

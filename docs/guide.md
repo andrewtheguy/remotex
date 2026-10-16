@@ -18,7 +18,8 @@ It needs:
   `http://` is refused, by name.
 - **WebCodecs**: `VideoDecoder`, with no fallback path for a browser without
   it. `AudioDecoder` plays Opus and a Mac's AAC-ELD; a browser without it
-  (Safari 16.4 to 18) plays FLAC alone, which the page decodes itself.
+  (Safari 16.4 to 18) plays FLAC alone, which the page decodes itself, and on
+  an iPhone or an iPad, which greys FLAC, plays no sound.
 
 For desktop use, install the page as an app in Chrome or Edge. An app window
 hands the page the key chords a normal tab keeps for itself (⌘W, ⌘T, ⌘N and the
@@ -77,7 +78,10 @@ config key.
   sound asks the remote for none, so the host keeps playing where it did. In the
   session, Mute and Unmute change only whether this browser listens. A phone,
   a tablet and Safari start muted. A browser without `AudioDecoder` greys Opus,
-  so ticking Sound there takes FLAC. On a High Performance Mac the menu's Audio
+  so ticking Sound there takes FLAC. An iPhone, an iPad and a device whose
+  browser reports 4 GB of memory or less grey FLAC: the page loads as little
+  WebAssembly as it can there, where the browser gives it less memory, and
+  FLAC's decoder is a module of its own. On a High Performance Mac the menu's Audio
   button reads *Audio not supported* in such a browser, and *AAC-ELD not
   supported* in one that cannot decode the Mac's AAC-ELD.
 - **Passthrough.** Sends the remote's own stream to the browser as it came

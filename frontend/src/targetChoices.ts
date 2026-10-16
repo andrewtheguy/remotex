@@ -161,6 +161,12 @@ export interface Abilities {
    * need. FLAC does not: the page decodes it itself (flacDecoder.ts).
    */
   audio: boolean;
+  /**
+   * Whether it is offered lossless sound: not where the page loads as little
+   * WebAssembly as it can (memoryBudget.ts), since FLAC's decoder is a module of
+   * its own.
+   */
+  lossless: boolean;
   /** Whether this page can run its software HEVC decoder (softwareSupport.ts). */
   runsHevc: boolean;
   /**
@@ -193,6 +199,8 @@ export interface SoundRow {
   label: string;
   note: string;
   checked: boolean;
+  /** Whether it cannot be ticked: no format plays here. */
+  disabled: boolean;
   /** What ticking it takes: the first format this browser plays. */
   ticks: Exclude<Sound, "off">;
   /** Opus first, then lossless. */
@@ -424,12 +432,15 @@ function sizeOptions(
  * otherwise a tick and, under a ticked one, Opus or FLAC. Ticking it takes
  * Opus. A browser with no audio decoder plays FLAC alone, so there Opus is
  * greyed and ticking takes FLAC; an Opus remembered from before is not sent,
- * and stays remembered for a browser that can.
+ * and stays remembered for a browser that can. A browser that loads as little
+ * WebAssembly as it can greys FLAC in the same way, and one of those with no
+ * audio decoder either has nothing to tick.
  */
 function soundRow(
   target: TargetInfo,
   remembered: Sound | undefined,
   plays: boolean,
+  lossless: boolean,
 ): { row: SoundRow | null; audio: Sound } {
   if (!target.audio) {
     return { row: null, audio: "off" };
@@ -446,8 +457,10 @@ function soundRow(
     {
       value: "flac",
       label: "FLAC",
-      note: "Lossless, about a megabit a second of music. For a LAN.",
-      disabled: false,
+      note: lossless
+        ? "Lossless, about a megabit a second of music. For a LAN."
+        : "Not on this device, which loads as little WebAssembly as it can: its decoder is a module of its own.",
+      disabled: !lossless,
     },
   ];
   // What was chosen last time, where it plays here.
@@ -459,8 +472,11 @@ function soundRow(
       label: "Sound",
       note: plays
         ? "Take the remote's sound and play it here."
-        : "Take the remote's sound and play it here, lossless: this browser has no decoder for Opus.",
+        : lossless
+          ? "Take the remote's sound and play it here, lossless: this browser has no decoder for Opus."
+          : "This browser has no decoder for Opus, and this device is not offered lossless.",
       checked: audio !== "off",
+      disabled: !plays && !lossless,
       ticks: plays ? "opus" : "flac",
       formats,
     },
@@ -550,7 +566,12 @@ export function targetOptions(
   const size =
     sizes.find((option) => option.value === remembered?.size)?.value ??
     sizes[0].value;
-  const sound = soundRow(target, remembered?.audio, abilities.audio);
+  const sound = soundRow(
+    target,
+    remembered?.audio,
+    abilities.audio,
+    abilities.lossless,
+  );
   const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
   // An RDP host's pipeline is passed whatever is chosen, and a browser that
   // cannot compose it cannot start the target.
