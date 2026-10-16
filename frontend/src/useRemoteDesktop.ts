@@ -18,7 +18,11 @@ import {
   unownedCursor,
 } from "./cursorCss.ts";
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
-import { desktopPainterFor } from "./desktopPainter.ts";
+import {
+  type DesktopPainter,
+  desktopPainterFor,
+  type PainterHandlers,
+} from "./desktopPainter.ts";
 import {
   gatewayDisplaySocketUrl,
   gatewayFetch,
@@ -633,6 +637,10 @@ export function useRemoteDesktop(
   // Picker vs desktop. `connectError` holds the last engine error to show
   // against the picker after a failed connect.
   const [mode, setMode] = useState<SessionMode>("picker");
+  // The desktop canvases' key: bumped when a session's end takes the paint worker
+  // they were transferred to, so the next session paints on new ones
+  // (desktopPainter.ts).
+  const [canvasGeneration, setCanvasGeneration] = useState(0);
   const [connectError, setConnectError] = useState<string | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
@@ -1075,11 +1083,23 @@ export function useRemoteDesktop(
     // batch neither draws nor reaches the screen through this thread's input and
     // React work (desktopPainterWorker.ts says what that is and is not worth). This
     // effect only posts to it; the worker itself outlives the effect (see
-    // desktopPainter.ts), and `bind` points its callbacks at this run.
-    const painter =
-      canvasRef.current && graphicsRef.current
-        ? desktopPainterFor(canvasRef.current, graphicsRef.current)
-        : null;
+    // desktopPainter.ts), and `bind` points its callbacks at this run. It is
+    // asked for each time, of the canvases mounted then: a session's end may
+    // take the worker and its canvases, and the next session's painter is
+    // another, bound in its turn. `bound` is the one bound last, which a clear
+    // goes to rather than building a worker to clear.
+    let bound: DesktopPainter | null = null;
+    const painter = (): DesktopPainter | null => {
+      const next =
+        canvasRef.current && graphicsRef.current
+          ? desktopPainterFor(canvasRef.current, graphicsRef.current)
+          : null;
+      if (next && next !== bound) {
+        next.bind(handlers);
+        bound = next;
+      }
+      return next;
+    };
     // Resizes in flight to the worker, by sequence number. The state half of a
     // resize — the CSS box, `size`, the cursor — waits for the worker's echo
     // (see `onResized` in desktopPainter.ts for why), and `clearDesktop`
@@ -1095,10 +1115,11 @@ export function useRemoteDesktop(
     let unavailableSeq = 0;
     const screenUnavailableSaid = (active: boolean) => {
       unavailableSeq += 1;
-      if (active || !painter) {
+      const p = painter();
+      if (active || !p) {
         setScreenUnavailable(active);
       } else {
-        painter.mark(unavailableSeq);
+        p.mark(unavailableSeq);
       }
     };
     // Each queued resize with the composition it presents, so the two are
@@ -1120,7 +1141,7 @@ export function useRemoteDesktop(
     // the live socket. Batch sequences alone are insufficient because each new
     // attachment starts them over.
     let paintSocket: WebSocket | null = null;
-    painter?.bind({
+    const handlers: PainterHandlers = {
       onVideoError: setVideoError,
       // A repaint is what re-announces the stream's format and arms a keyframe on
       // it (`reset_render` in src/encode.rs). Logged rather than
@@ -1152,7 +1173,8 @@ export function useRemoteDesktop(
           setScreenUnavailable(false);
         }
       },
-    });
+    };
+    painter();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
 
@@ -1180,7 +1202,7 @@ export function useRemoteDesktop(
       touchCursorRef.current = null;
       // One message: the worker zeroes the canvas bitmap it owns and drops the
       // decoder with it. The next attachment starts its stream from a keyframe.
-      painter?.clear();
+      bound?.clear();
       // The decoder went with it, so what the card says about it goes too. The
       // next attachment re-announces its stream, and what its host drew with.
       setVideoStream(null);
@@ -1521,7 +1543,7 @@ export function useRemoteDesktop(
       } else if (data instanceof ArrayBuffer) {
         // Sound is on its own socket, so this one carries batches and nothing
         // else; the worker still reads the kind byte rather than assuming it.
-        painter?.draw(data, generation);
+        painter()?.draw(data, generation);
       }
     };
 
@@ -1877,7 +1899,8 @@ export function useRemoteDesktop(
       }
       framebufferSize = s;
       const { size, view } = presentation(s);
-      if (!painter) {
+      const p = painter();
+      if (!p) {
         // No canvas, so nothing queues either; the state may as well be true.
         presentResize(size, view);
         return;
@@ -1888,7 +1911,7 @@ export function useRemoteDesktop(
       // canvas is replaced and filled black.
       const seq = ++resizeSeq;
       pendingResizes.set(seq, { size, view });
-      painter.resize(desktopCanvasGeometry(s, s.scale).bitmap, seq, view);
+      p.resize(desktopCanvasGeometry(s, s.scale).bitmap, seq, view);
     };
 
     // A new composition over the framebuffer already on screen: a `mosaic`, or
@@ -1900,13 +1923,14 @@ export function useRemoteDesktop(
         return;
       }
       const { size, view } = presentation(framebufferSize);
-      if (!painter) {
+      const p = painter();
+      if (!p) {
         presentResize(size, view);
         return;
       }
       const seq = ++resizeSeq;
       pendingResizes.set(seq, { size, view });
-      painter.setView(view, seq);
+      p.setView(view, seq);
     };
 
     // A layout for a framebuffer still to come waits for its resize, so it is
@@ -2158,10 +2182,10 @@ export function useRemoteDesktop(
     ) => {
       const part = { x: msg.x, y: msg.y, w: msg.w, h: msg.h };
       if (tabDisplay === null) {
-        painter?.setGraphicsView(part);
+        painter()?.setGraphicsView(part);
         return;
       }
-      painter?.mirrorGraphics(tabDisplay, part);
+      painter()?.mirrorGraphics(tabDisplay, part);
       setVideoStream({ decode: "", passthrough: true, composed: true });
     };
 
@@ -2213,7 +2237,7 @@ export function useRemoteDesktop(
           // string drops a live decoder that queued units still need. A browser
           // that cannot decode what it names finds out from the decoder's own
           // error, which arrives at `onVideoError` naming the configuration.
-          painter?.setVideoFormat({ decode: msg.decode });
+          painter()?.setVideoFormat({ decode: msg.decode });
           // And the same string for the card, which is the only place the exact
           // configuration is written down while the picture is working, with whose
           // stream it is: only the gateway knows whether it encoded it.
@@ -2231,14 +2255,14 @@ export function useRemoteDesktop(
         case "graphicsStart":
           // Queued in the worker like a format, behind the frames already posted:
           // the pipeline's first run must find a compositor with nothing in it.
-          painter?.startGraphics();
+          painter()?.startGraphics();
           setVideoStream({ decode: "", passthrough: true, composed: true });
           setHostPicture({ exact: true, codecs: [] });
           break;
         case "adaptiveStart":
           // Queued the same way: the picture's first rectangle must find a
           // decoder with nothing in it.
-          painter?.startAdaptive();
+          painter()?.startAdaptive();
           setVideoStream({ decode: "", passthrough: true, adaptive: true });
           break;
         case "hostPicture":
@@ -2315,6 +2339,13 @@ export function useRemoteDesktop(
           setMode("picker");
           setConnection("");
           endDesktop();
+          // Its clear posted, what the session's picture alone loaded goes. A
+          // worker that goes takes the canvases, and the next session paints on
+          // new ones.
+          if (bound?.endSession()) {
+            bound = null;
+            setCanvasGeneration((generation) => generation + 1);
+          }
           break;
       }
     };
@@ -2433,8 +2464,8 @@ export function useRemoteDesktop(
       // (see desktopPainter.ts) — but what it holds must not: that includes a
       // `VideoDecoder`, hardware rather than just memory. `clearDesktop` frees it on every path
       // *through* the session; this is the one that leaves.
-      painter?.clear();
-      painter?.unbind();
+      bound?.clear();
+      bound?.unbind();
       releaseAudio();
     };
   }, [
@@ -3303,5 +3334,6 @@ export function useRemoteDesktop(
     requestClipboard,
     sendClipboard,
     setBottomInset,
+    canvasGeneration,
   };
 }

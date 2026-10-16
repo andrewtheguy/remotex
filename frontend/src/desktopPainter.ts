@@ -14,9 +14,17 @@
 // works exactly once per element, and the connection effect that wants a
 // painter runs more than once per element — StrictMode reruns it on the same
 // canvas. So the worker outlives the effect, the effect binds and unbinds its
-// handlers, and only a *new* canvas element (a full remount) replaces the
-// worker — at which point the old one holds the bitmap of an element that is
-// gone, and is terminated rather than left decoding for it.
+// handlers, and only a *new* canvas element replaces the worker — at which point
+// the old one holds the bitmap of an element that is gone, and is terminated
+// rather than left decoding for it.
+//
+// A session's end is where what its picture alone loaded is let go, since a
+// WebAssembly memory grows and never shrinks and only ending the worker that holds
+// it gives it back (`endSession`). The compositor of an RDP host's pipeline and the
+// decoder of a Mac's Adaptive picture are modules of this worker's own, so a
+// session that loaded either ends the worker, and the page mounts new canvases for
+// the next one. Otherwise the worker is kept, with the VP9's decode worker most
+// targets' pictures use, and only the HEVC's goes.
 import { decodesAppleMedia } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
@@ -89,6 +97,13 @@ export interface DesktopPainter {
   mirrorGraphics(display: number, part: PicturePart): void;
   /** The attachment boundary: wipe the bitmap and the decoder. */
   clear(): void;
+  /**
+   * The session is over, after its `clear`: let go of what its picture alone
+   * loaded. True when that was the worker itself, whose canvases go with it: the
+   * page mounts new ones before it paints again, and this painter takes nothing
+   * more.
+   */
+  endSession(): boolean;
 }
 
 let current: {
@@ -97,18 +112,26 @@ let current: {
   painter: DesktopPainter;
 } | null = null;
 
+// Canvases whose worker a session's end took: transferred, so no other worker
+// can draw on them.
+const spent = new WeakSet<HTMLCanvasElement>();
+
 /**
  * The painter for the page's one desktop canvas, built on first ask. `graphics`
  * is the canvas laid over it for what is drawn on the GPU, an RDP host's graphics
  * pipeline and a software decoder's pictures: the worker draws them there,
- * and says when it is to be shown.
+ * and says when it is to be shown. Null for a canvas a session's end has spent,
+ * until the page mounts its replacement.
  */
 export function desktopPainterFor(
   canvas: HTMLCanvasElement,
   graphics: HTMLCanvasElement,
-): DesktopPainter {
+): DesktopPainter | null {
   if (current?.canvas === canvas) {
     return current.painter;
+  }
+  if (spent.has(canvas)) {
+    return null;
   }
   current?.worker.terminate();
   const worker = new Worker(
@@ -159,6 +182,9 @@ export function desktopPainterFor(
   };
   const post = (command: PainterCommand, transfer: Transferable[] = []) =>
     worker.postMessage(command, transfer);
+  // Whether a session has loaded a module of this worker's own: the pipeline's
+  // compositor or the Adaptive picture's decoder.
+  let ownModule = false;
   const offscreen = canvas.transferControlToOffscreen();
   const offscreenGraphics = graphics.transferControlToOffscreen();
   post(
@@ -201,9 +227,11 @@ export function desktopPainterFor(
       post({ type: "videoFormat", format });
     },
     startGraphics() {
+      ownModule = true;
       post({ type: "graphicsStart" });
     },
     startAdaptive() {
+      ownModule = true;
       post({ type: "adaptiveStart" });
     },
     setGraphicsView(part) {
@@ -216,6 +244,22 @@ export function desktopPainterFor(
       clears += 1;
       showGraphics(false);
       post({ type: "clear" });
+    },
+    endSession() {
+      if (!ownModule) {
+        post({ type: "sessionEnded" });
+        return false;
+      }
+      // Its decode workers and the compositor's threads are its own, and end
+      // with it.
+      worker.terminate();
+      handlers = null;
+      spent.add(canvas);
+      spent.add(graphics);
+      if (current?.worker === worker) {
+        current = null;
+      }
+      return true;
     },
   };
   current = { canvas, worker, painter };

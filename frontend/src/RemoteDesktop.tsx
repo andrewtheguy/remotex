@@ -340,6 +340,7 @@ export default function RemoteDesktop({
     requestClipboard,
     sendClipboard,
     setBottomInset,
+    canvasGeneration,
   } = useRemoteDesktop(
     canvasRef,
     graphicsRef,
@@ -379,14 +380,23 @@ export default function RemoteDesktop({
         {/* Starts 0×0 so no ghost block shows before the first resize; the
             resize handler keeps the full pixel bitmap separate from its
             remote-point CSS size. Kept
-            mounted in both modes so the hook's canvas ref stays stable. */}
-        <canvas ref={canvasRef} className="framebuffer" width={0} height={0} />
+            mounted in both modes so the hook's canvas ref stays stable, and
+            replaced, with the one below, only when a session's end takes the
+            paint worker they were transferred to (desktopPainter.ts). */}
+        <canvas
+          key={`picture-${canvasGeneration}`}
+          ref={canvasRef}
+          className="framebuffer"
+          width={0}
+          height={0}
+        />
         {/* What is drawn on the GPU is drawn here and not on the canvas above:
             an RDP host's graphics pipeline, passed through, and a software
             decoder's pictures (glPicture.ts). The paint worker shows it
             while it holds one of them. It takes the canvas above's box, and
             lies under the input overlay like it. */}
         <canvas
+          key={`graphics-${canvasGeneration}`}
           ref={graphicsRef}
           className="framebuffer graphics"
           width={0}

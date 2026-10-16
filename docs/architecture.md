@@ -228,6 +228,16 @@ gateway.
   start-up, and a choice that is an edge case on such a device and would load a
   module for itself alone is greyed there with the reason rather than offered,
   as lossless sound is ([Lossless sound](#lossless-sound)).
+- On every page, what a session's picture alone loaded goes when the session
+  ends, at the gateway's `picker`: a WebAssembly memory grows and never
+  shrinks, so ending the worker that holds a module is the only way to give its
+  memory back (`frontend/src/desktopPainter.ts`). The HEVC's decode worker, a
+  High Performance Mac's alone, ends. The pipeline's compositor and the
+  Adaptive picture's decoder run in the paint worker itself, so a session that
+  loaded either ends that worker, and the page mounts new canvases for the next,
+  since a canvas is transferred to one worker once. The VP9's decode worker is
+  kept with a paint worker that is kept, being what most targets' pictures are
+  decoded with where the browser's own decoder refuses them.
 - The only versioned client asset read at run time is the software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at

@@ -24,9 +24,17 @@
 // The resize case needs a target whose desktop follows the window, an `ard`
 // target with `virtual_display = true`, named by
 // REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET.
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, type Worker } from "@playwright/test";
 
-import { leaveSession, logInAndConnectTo, returnToPicker } from "./support";
+import {
+  leaveSession,
+  logInAndConnectTo,
+  returnToPicker,
+  startTarget,
+} from "./support";
+
+/// What every session here is started with: the Mac's Adaptive picture, passed.
+const ADAPTIVE = { passthrough: "apple-adaptive" } as const;
 
 /// The opt-in, and the target name in one, as the other live specs have it.
 const ADAPTIVE_TARGET = process.env.REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET;
@@ -317,19 +325,88 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     // is a session from its first rectangle: connected, a picture that starts,
     // and the Mac's tables before anything else.
     const before = seen.controlTypes.length;
+    // The list the first page's display socket filled, which stays `seen`'s
+    // until the page that comes back opens a socket of its own.
+    const firstAcknowledged = seen.acknowledged;
     await page.reload();
     await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
       timeout: 20_000,
     });
     await expect
-      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
-      .toBeGreaterThan(0);
+      .poll(
+        () =>
+          seen.acknowledged !== firstAcknowledged &&
+          seen.acknowledged.length > 0,
+        { timeout: 20_000 },
+      )
+      .toBe(true);
     const after = seen.controlTypes.slice(before);
     expect(after).toContain("connected");
     expect(after).toContain("adaptiveStart");
     expect(seen.unannounced).toBe(0);
     expect(seen.batches[0]?.sequence).toBe(1);
     expect(rects(seen)[0]?.kind).toBe("tables");
+    await expect(page.getByRole("alert")).toHaveCount(0);
+
+    await returnToPicker(page);
+  });
+
+  test("ends its paint worker with the session, and decodes the next in another", async ({
+    page,
+  }) => {
+    // The decoder is a module of the paint worker's own, and a WebAssembly memory
+    // gives nothing back short of its worker ending, so the session's end ends
+    // that worker (desktopPainter.ts).
+    const painters: Worker[] = [];
+    page.on("worker", (worker) => {
+      if (/desktopPainter\.worker/.test(worker.url())) {
+        painters.push(worker);
+      }
+    });
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, ADAPTIVE_TARGET ?? "", "", ADAPTIVE);
+    await expect
+      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
+      .toBeGreaterThan(0);
+    expect(painters, "one paint worker for the first session").toHaveLength(1);
+    const first = painters[0];
+    const firstEnded = new Promise<void>((resolve) =>
+      first.once("close", () => resolve()),
+    );
+
+    await returnToPicker(page);
+    await firstEnded;
+    // What was acknowledged so far is the first session's. A display socket the
+    // next session opens starts a list of its own, and one the picker kept goes
+    // on adding to this one.
+    const firstAcknowledged = seen.acknowledged;
+    const firstAcknowledgedCount = firstAcknowledged.length;
+    const firstControl = seen.controlTypes.length;
+
+    await startTarget(page, ADAPTIVE_TARGET ?? "", ADAPTIVE);
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    // Decoded by the paint worker the second session started, on the canvases
+    // mounted for it.
+    await expect
+      .poll(() => painters.length, {
+        message: "a paint worker of the second session's own",
+        timeout: 20_000,
+      })
+      .toBe(2);
+    await expect
+      .poll(
+        () =>
+          seen.controlTypes.slice(firstControl).includes("adaptiveStart") &&
+          seen.acknowledged.length >
+            (seen.acknowledged === firstAcknowledged
+              ? firstAcknowledgedCount
+              : 0),
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+    expect(seen.unannounced).toBe(0);
     await expect(page.getByRole("alert")).toHaveCount(0);
 
     await returnToPicker(page);

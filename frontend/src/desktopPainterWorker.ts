@@ -37,6 +37,7 @@ import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { createPlanesPicture } from "./planesPicture.ts";
 import { binaryFrameKind } from "./protocol.ts";
+import { endDecodeWorker } from "./softwareDecoder.ts";
 import type { PageDecoding } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
@@ -110,7 +111,12 @@ export type PainterCommand =
    */
   | { type: "graphicsMirror"; display: number; part: PicturePart }
   /** The attachment boundary: wipe the bitmap and the decoder. */
-  | { type: "clear" };
+  | { type: "clear" }
+  /**
+   * The session is over, after its `clear`: what its picture alone loaded goes,
+   * which in a worker that is kept is the HEVC's decode worker (desktopPainter.ts).
+   */
+  | { type: "sessionEnded" };
 
 /** What the worker sends back: the painter's callbacks and the resize echo. */
 export type PainterEvent =
@@ -364,6 +370,11 @@ export function createPainterWorker(
             canvas.width = 0;
             canvas.height = 0;
           }
+          break;
+        case "sessionEnded":
+          // At once, as the clear ahead of it ran: that clear closed the
+          // decoders, so no unit is left for the worker to answer.
+          endDecodeWorker("hevc");
           break;
       }
     },

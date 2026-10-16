@@ -38,8 +38,10 @@ says how to decode it.
 to compose, read from the same socket: that `graphicsStart` comes ahead of the
 first `GRAPHICS` record, that every record is whole commands by their own
 headers' lengths, that the page acknowledges each batch once its paint worker has
-composed it, and that a page that reloads is given a pipeline from its first
-command rather than the one that was running. A compositor that refused a command
+composed it, that a page that reloads is given a pipeline from its first
+command rather than the one that was running, and that a session's end ends the
+paint worker that loaded the compositor, the next session composing in a paint
+worker of its own, which Playwright reports starting and closing. A compositor that refused a command
 says so in the DOM, which is what stands in for the picture here. Started with
 the picker's Adaptive (ALPHA), H.264 over the full screen, it also asserts
 that the page said it decodes H.264, that the session says it carries it, and that
@@ -52,8 +54,10 @@ the page to decode, read from the same socket: that `adaptiveStart` follows the
 `resize` and comes ahead of the first `ADAPTIVE` record, that the Mac's
 quantization tables come first, that every record is framed by its own header
 and lies on the framebuffer the last `resize` announced, that the page
-acknowledges each batch once its paint worker has decoded it, and that a page
-that comes back is given the picture from its start. A rectangle that did not
+acknowledges each batch once its paint worker has decoded it, that a page
+that comes back is given the picture from its start, and that a session's end
+ends the paint worker that loaded the decoder, the next session decoding in one
+of its own. A rectangle that did not
 decode says so in the DOM. Against a Mac on a virtual display it also resizes
 the window, and checks that the picture goes on at the new size, decoded,
 without starting again.
