@@ -962,6 +962,14 @@ impl HpResize {
         Some(want)
     }
 
+    /// The Mac moved the session to another agent, which inherits no request:
+    /// whatever was out is let go, and `want` goes out next.
+    fn handed_over(&mut self, want: (u16, u16), now: tokio::time::Instant) {
+        self.phase = HpPhase::Idle;
+        self.since = None;
+        self.report(want, false, now);
+    }
+
     /// A due size turned out to be the desktop already showing: nothing goes out.
     fn drop_due(&mut self) {
         self.phase = HpPhase::Idle;
@@ -1241,12 +1249,13 @@ impl DesktopState {
     }
 
     /// Whether pixel requests and the armed region are held to
-    /// [`HP_HOLD_REQUEST`]: while a High Performance display change is out, and
-    /// from a media-stream offer on. The Mac sends no pixels once the stream is
+    /// [`HP_HOLD_REQUEST`]: while a High Performance display change is out, from a
+    /// media-stream offer on, and while the Mac has the session off its virtual
+    /// display, whose size the desktop no longer is ([`Self::moved_off`]). The Mac sends no pixels once the stream is
     /// its preferred codec, and a request it is left holding is served, at the
     /// size it was made for, when a changed display makes ZRLE preferred again.
     fn holds_region(&self) -> bool {
-        self.hp.holds_pixels() || self.media_live || self.media_preferred
+        self.hp.holds_pixels() || self.media_live || self.media_preferred || self.moved_off
     }
 
     /// The region a pixel request asks for: the framebuffer, or
@@ -6813,10 +6822,10 @@ async fn hp_moved_off(shared: &Shared, layout: &vnc_apple::Layout, sink: &VideoS
             d.moved_off = true;
             stream_stopped(&mut d, &shared.tab);
             if let Some(media) = &shared.media {
-                media.lock().unwrap().stopped();
+                media.lock().unwrap().handed_over();
             }
-            let points = d.hp_first_points();
-            d.hp.report(points, false, tokio::time::Instant::now());
+            let points = d.hp.newest_points().unwrap_or_else(|| d.hp_first_points());
+            d.hp.handed_over(points, tokio::time::Instant::now());
             Some(points)
         }
     };
@@ -12785,9 +12794,11 @@ mod tests {
     }
 
     /// A login at the Mac moves the session to the physical display: its layout
-    /// is not applied, the display the session had is asked for again, and the
-    /// virtual display the Mac makes then is offered the stream on the ports it
-    /// named at the start, since it names none again.
+    /// is not applied and polling holds to a pixel, the newest display the session
+    /// asked for is asked for again in place of one the old agent left unanswered,
+    /// and the virtual display the Mac makes then is offered the stream on the
+    /// ports it named at the start, since it names none again, though an offer
+    /// was out to the old agent.
     #[tokio::test]
     async fn a_session_moved_off_its_virtual_display_asks_for_it_again() {
         let flagged = |size: (u16, u16), flags: u32| {
@@ -12811,8 +12822,13 @@ mod tests {
             ..test_shared(uplink, Arc::clone(&desktop), test_shadow((1600, 1000)))
         };
         read_display_layout(&mut flagged((1600, 1000), 0x5).as_slice(), &shared, true, &sink).await.unwrap();
-        media.lock().unwrap().test_answered(&[(1600, 1000)]);
-        desktop.lock().unwrap().covered = false;
+        media.lock().unwrap().test_offered(&[(1600, 1000)]);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.covered = false;
+            d.hp.phase = HpPhase::InFlight((1500, 900));
+            d.hp.since = Some(tokio::time::Instant::now());
+        }
 
         let physical = flagged((1280, 800), 0x4);
         assert!(!read_display_layout(&mut physical.as_slice(), &shared, true, &sink).await.unwrap());
@@ -12820,7 +12836,9 @@ mod tests {
             let mut d = desktop.lock().unwrap();
             assert_eq!(d.size, (1600, 1000), "the physical display is not the desktop");
             assert!(d.moved_off && d.covered);
-            assert_eq!(d.hp.want, Some((1600, 1000)), "the session's display, asked for again");
+            assert_eq!(d.poll_size(), HP_HOLD_REQUEST, "no request in the old display's size");
+            assert_eq!(d.hp.phase, HpPhase::Idle, "the old agent's request let go");
+            assert_eq!(d.hp.want, Some((1500, 900)), "the newest display asked for, again");
             assert!(!d.hp_noop((1600, 1000)), "though the desktop has its size");
             d.hp.want = None;
         }
