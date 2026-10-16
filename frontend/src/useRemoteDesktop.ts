@@ -324,9 +324,10 @@ export function sizeFollows(): "window" | "screen" | null {
 }
 
 // Whether the picker offers lossless sound, for the picker (targetChoices.ts):
-// not on a touch client. A phone's or a tablet's browser, iOS Safari's foremost,
-// gives a page's WebAssembly less memory than a desktop's does, and FLAC's
-// decoder is a module of its own (flacDecoder.ts), loaded for it alone.
+// not on a touch client, which loads as little WebAssembly as it can, since a
+// phone's or a tablet's browser, iOS Safari's foremost, gives a page less memory
+// than a desktop's does. FLAC's decoder is a module of its own (flacDecoder.ts),
+// loaded for lossless alone, an edge case there.
 export const OFFERS_LOSSLESS = !CAN_PINCH_ZOOM;
 
 // The touch view transform: the pinch zoom and pan offset the

@@ -162,8 +162,9 @@ export interface Abilities {
    */
   audio: boolean;
   /**
-   * Whether it is offered lossless sound: not on a phone or a tablet, whose
-   * browser gives the page less memory for FLAC's decoder (useRemoteDesktop.ts).
+   * Whether it is offered lossless sound: not on a phone or a tablet, which
+   * loads as little WebAssembly as it can, and FLAC's decoder is a module of its
+   * own (useRemoteDesktop.ts).
    */
   lossless: boolean;
   /** Whether this page can run its software HEVC decoder (softwareSupport.ts). */
@@ -431,9 +432,9 @@ function sizeOptions(
  * otherwise a tick and, under a ticked one, Opus or FLAC. Ticking it takes
  * Opus. A browser with no audio decoder plays FLAC alone, so there Opus is
  * greyed and ticking takes FLAC; an Opus remembered from before is not sent,
- * and stays remembered for a browser that can. A phone or a tablet is not
- * offered FLAC, which is greyed there in the same way, and one with no audio
- * decoder either has nothing to tick.
+ * and stays remembered for a browser that can. A phone or a tablet greys FLAC
+ * in the same way, to load as little WebAssembly as it can, and one with no
+ * audio decoder either has nothing to tick.
  */
 function soundRow(
   target: TargetInfo,
@@ -458,7 +459,7 @@ function soundRow(
       label: "FLAC",
       note: lossless
         ? "Lossless, about a megabit a second of music. For a LAN."
-        : "Not offered on a phone or a tablet, whose browser has less memory for its decoder.",
+        : "Not on a phone or a tablet, which loads as little WebAssembly as it can: its decoder is a module of its own.",
       disabled: !lossless,
     },
   ];

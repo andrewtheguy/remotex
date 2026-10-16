@@ -218,6 +218,12 @@ gateway.
   compositor's do. Keep it a pinned release: do not vendor its files, build it
   here, or take an archive the pin does not name. Do not fold one module into
   another, or add a fifth without a stream that needs it.
+- A phone or a tablet, a touch client as the page tells one, loads as little
+  WebAssembly as it can: its browser, iOS Safari's foremost, gives a page less
+  memory than a desktop's does. Each module is loaded by the session that needs
+  it, never at start-up, and a choice that is an edge case on such a client and
+  would load a module for itself alone is greyed there with the reason rather
+  than offered, as lossless sound is ([Lossless sound](#lossless-sound)).
 - The only versioned client asset read at run time is the software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
@@ -228,8 +234,8 @@ gateway.
 - The page requires a secure context plus `VideoDecoder` and refuses startup in
   `frontend/src/preflight.ts` without them. A browser without `AudioDecoder`
   starts and plays FLAC, which the page decodes itself, save on a phone or a
-  tablet, which is not offered FLAC ([Lossless sound](#lossless-sound)) and so
-  has no sound there; what needs the decoder is greyed with the reason. Do not
+  tablet, which greys FLAC to keep its WebAssembly down (below) and so has no
+  sound there; what needs the decoder is greyed with the reason. Do not
   add fallback browser paths.
 
 ### Sessions
@@ -2322,10 +2328,10 @@ empty `head`, the source's own `sampleRate` and a `packetFrames` of twenty
 milliseconds of it, and each packet is one FLAC frame. It is a choice at the picker, on an
 `rdp` or a `wlshare` target, and not a config key; the target's Opus keys do
 nothing in such a session, since there is no rate to set or walk. A phone or a
-tablet, a touch client as the page tells one, is not offered it: its browser,
-iOS Safari's foremost, gives a page's WebAssembly less memory than a desktop's,
-and the module the page decodes FLAC in is loaded for it alone. There FLAC is
-greyed with the reason, so the module is never fetched.
+tablet greys it, with the reason, to load as little WebAssembly as it can
+([The client and its bundle](#the-client-and-its-bundle)): the module the page
+decodes FLAC in would be loaded for lossless alone, an edge case there, so it is
+never fetched.
 
 | Target | What the gateway does | `audioFormat` |
 |---|---|---|
