@@ -257,10 +257,15 @@ connection with the same error as wrong credentials. See
   with the picker's Adaptive (beta), the default, or Full quality (beta), which
   pass the Mac's own Adaptive or Full-quality picture for the page to decode;
   the gateway encodes neither. Both have been tried on a virtual Mac alone.
-  Combined Display past 3840×2400 in the Mac's own pixels shows a notice
-  offering one screen at a time, though the page would draw it smaller: a 2x
-  screen beside a 1x one keeps its backing pixels. It has no resize and
-  no sound; the Mac keeps playing on its own output.
+  It has no resize and no sound; the Mac keeps playing on its own output.
+  - **A Mac with more than one display connected is best given
+    `virtual_display = true`** (below), which sizes one display to the browser
+    window. Combined Display, every screen at once, is a last resort here: it
+    is shown at 100%, so it works well only for two small displays side by side
+    that fit one browser window, and anything larger has to be scrolled
+    constantly. Past 3840×2400 in the Mac's own pixels it shows a notice
+    offering one screen at a time, though the page would draw it smaller: a 2x
+    screen beside a 1x one keeps its backing pixels.
 - Every Apple subtype carries the Mac's native pasteboard.
 - **`subtype = "ard-high-performance"`** is High Performance mode as Apple's
   viewer has it, and is **experimental**. The Mac disables its physical displays
@@ -306,8 +311,10 @@ connection with the same error as wrong credentials. See
     the sound, the session continues without audio and the menu says why.
 - **Unofficial:** `virtual_display = true` on an `ard` target opens Standard
   mode on such a virtual display, with resize and without the media stream or
-  sound. Apple's viewer never offers this combination; it was tested on macOS 26
-  only.
+  sound, the physical displays disabled meanwhile. It is the recommended way to
+  reach a Mac with more than one display connected, whose Combined Display is
+  impractical in a browser. Apple's viewer never offers this combination; it
+  was tested on macOS 26 only.
 
 Apple documents none of this protocol. Both modes are reverse engineered and
 only as correct as the Macs they were measured against, and a macOS update is
