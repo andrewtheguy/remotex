@@ -25,11 +25,14 @@
 //
 // The resize case needs a target whose desktop follows the window, an `ard`
 // target with `virtual_display = true`, named by
-// REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET.
+// REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET. The Combined Display case needs an
+// `ard` target on a Mac with two screens of different densities, a 1x one
+// beside a 2x one, named by REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET.
 import { constants, createInflate, type Inflate } from "node:zlib";
 import { expect, type Page, test, type Worker } from "@playwright/test";
 
 import {
+  chooseDisplay,
   leaveSession,
   logInAndConnectTo,
   returnToPicker,
@@ -44,6 +47,9 @@ const FULL = { passthrough: "apple-full" } as const;
 /// The opt-in, and the target name in one, as the other live specs have it.
 const STANDARD_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_TARGET;
 const RESIZE_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET;
+const COMBINED_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET;
+/// The display list's id for Combined Display, the gateway's own entry.
+const COMBINED = 0xffffffff;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
@@ -121,9 +127,20 @@ function parseBatch(payload: Buffer): Batch {
   };
 }
 
+interface MosaicRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 interface Session {
   /** Every control message's `type`, in arrival order. */
   controlTypes: string[];
+  /** The last display list, and the entry being shared. */
+  displays?: { active: number; displays: { id: number; label: string }[] };
+  /** Every `mosaic`'s regions, in arrival order: empty ends a composition. */
+  mosaics: { pixels: MosaicRect; points: MosaicRect }[][];
   connected?: { render: string; passthrough: string | null };
   /** The last size the display socket announced, in pixels. */
   size?: { w: number; h: number };
@@ -143,20 +160,50 @@ interface Session {
    * come to, what the bodies so far inflated to, and the inflater's error if
    * the stream broke. Each display socket's picture is a stream of its own.
    */
-  zlib?: { want: number; got: number; error?: string; stream: Inflate };
+  zlib?: {
+    want: number;
+    got: number;
+    error?: string;
+    stream: Inflate;
+    /** No more bodies are fed through, so the count can be checked. */
+    closed?: boolean;
+  };
 }
 
-/// Feed every byte the stream holds through, and say once it has.
-const flushed = (stream: Inflate) =>
-  new Promise<void>((resolve) =>
-    stream.flush(constants.Z_SYNC_FLUSH, () => resolve()),
+/// Stop feeding bodies through, as the session goes on sending them, then wait
+/// for all the stream holds to be inflated and counted: the flush answers before
+/// the last of its output has been handed on.
+async function inflated(zlib: NonNullable<Session["zlib"]>): Promise<void> {
+  zlib.closed = true;
+  await new Promise<void>((resolve) =>
+    zlib.stream.flush(constants.Z_SYNC_FLUSH, () => resolve()),
   );
+  await expect
+    .poll(() => zlib.error ?? zlib.got, {
+      message: "every body inflated to its rectangle's pixels",
+      timeout: 5_000,
+    })
+    .toBe(zlib.want);
+}
+
+/// Keep the display list and the compositions, whichever socket brought them.
+function noteDisplays(
+  seen: Session,
+  message: { type: string; [key: string]: unknown },
+): void {
+  if (message.type === "displays") {
+    seen.displays = message as unknown as NonNullable<Session["displays"]>;
+  } else if (message.type === "mosaic") {
+    seen.mosaics.push(message.regions as Session["mosaics"][number]);
+  }
+}
 
 /// Watch the session socket, and the display socket that carries its picture.
 /// Registered before navigation, so nothing is missed.
 function watchSession(page: Page): Session {
   const seen: Session = {
     controlTypes: [],
+    mosaics: [],
     batches: [],
     badKinds: [],
     unannounced: 0,
@@ -175,6 +222,7 @@ function watchSession(page: Page): Session {
           return;
         }
         seen.controlTypes.push(message.type);
+        noteDisplays(seen, message);
         if (message.type === "connected") {
           seen.connected = {
             render: message.render,
@@ -209,6 +257,7 @@ function watchSession(page: Page): Session {
           return;
         }
         seen.controlTypes.push(message.type);
+        noteDisplays(seen, message);
         if (message.type === "standardStart") {
           started = true;
           seen.quality = message.quality;
@@ -239,7 +288,7 @@ function watchSession(page: Page): Session {
         seen.unannounced += batch.rects.length;
       }
       for (const rect of batch.rects) {
-        if (seen.zlib && rect.body) {
+        if (seen.zlib && !seen.zlib.closed && rect.body) {
           seen.zlib.want += rect.w * rect.h * 4;
           seen.zlib.stream.write(rect.body);
         }
@@ -503,10 +552,8 @@ test.describe("a Standard Mac whose Full-quality picture is passed", () => {
     const zlib = seen.zlib;
     expect(zlib, "a Full-quality picture's stream").toBeDefined();
     if (zlib) {
-      await flushed(zlib.stream);
-      expect(zlib.error).toBeUndefined();
       expect(zlib.want).toBeGreaterThan(0);
-      expect(zlib.got).toBe(zlib.want);
+      await inflated(zlib);
     }
 
     await expect(page.getByRole("alert")).toHaveCount(0);
@@ -519,6 +566,100 @@ test.describe("a Standard Mac whose Full-quality picture is passed", () => {
     await page.keyboard.press("Escape");
     await expect(card).toHaveCount(0);
   });
+});
+
+// Ahead of the virtual display's cases: for a while after a session on the
+// virtual display, the Mac lists one screen and no Combined Display.
+test.describe("a Standard Mac on Combined Display over screens of two densities", () => {
+  test.skip(
+    !COMBINED_TARGET,
+    "set REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET=<target> against a gateway with a live Mac of a 1x and a 2x screen",
+  );
+
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
+  for (const [name, choices] of [
+    ["Adaptive", ADAPTIVE],
+    ["Full-quality", FULL],
+  ] as const) {
+    test(`passes its ${name} picture composed of both screens, and through a switch to one screen and back`, async ({
+      page,
+    }) => {
+      test.setTimeout(120_000);
+      const seen = watchSession(page);
+      await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", choices);
+      await expect
+        .poll(() => seen.displays?.displays.length ?? 0, {
+          message: "Combined Display and two screens",
+          timeout: 20_000,
+        })
+        .toBe(3);
+      const label = (id: number) =>
+        seen.displays?.displays.find((display) => display.id === id)?.label ??
+        "";
+      const screen = seen.displays?.displays.find((d) => d.id !== COMBINED);
+      expect(screen).toBeDefined();
+
+      // The view the Mac names, then batches painted after it.
+      const shows = async (id: number) => {
+        await expect
+          .poll(() => seen.displays?.active, { timeout: 20_000 })
+          .toBe(id);
+        const painted = seen.acknowledged.length;
+        await expect
+          .poll(() => seen.acknowledged.length, {
+            message: `a batch of ${label(id)} painted`,
+            timeout: 20_000,
+          })
+          .toBeGreaterThan(painted);
+      };
+      const choose = async (id: number) => {
+        const shown = label(seen.displays?.active ?? COMBINED);
+        await chooseDisplay(page, shown, label(id));
+        await shows(id);
+      };
+
+      if (seen.displays?.active !== COMBINED) {
+        await choose(COMBINED);
+      } else {
+        await shows(COMBINED);
+      }
+      // Two densities: composed of both screens' regions, which tile the
+      // framebuffer the resize announced, and no video ceiling holds it.
+      const regions = seen.mosaics.at(-1) ?? [];
+      expect(regions, "a composition of both screens").toHaveLength(2);
+      const right = Math.max(...regions.map((r) => r.pixels.x + r.pixels.w));
+      const bottom = Math.max(...regions.map((r) => r.pixels.y + r.pixels.h));
+      expect(seen.size).toEqual({ w: right, h: bottom });
+
+      // One screen ends the composition, and Combined Display brings it back.
+      await choose(screen?.id ?? 0);
+      expect(seen.mosaics.at(-1), "a screen presented whole").toEqual([]);
+      await choose(COMBINED);
+      expect(seen.mosaics.at(-1)).toHaveLength(2);
+
+      expect(seen.controlTypes).not.toContain("oversize");
+      expect(seen.controlTypes).not.toContain("videoFormat");
+      expect(seen.outside, "rectangles off the framebuffer").toEqual([]);
+      for (const batch of seen.batches) {
+        expect(batch.badOp).toBe(undefined);
+        expect(batch.exact).toBe(true);
+      }
+      // Full quality's one stream runs on through every view.
+      const zlib = seen.zlib;
+      if (choices === FULL) {
+        expect(zlib, "a Full-quality picture's stream").toBeDefined();
+      }
+      if (zlib) {
+        await inflated(zlib);
+      }
+      await expect(page.getByRole("alert")).toHaveCount(0);
+
+      await returnToPicker(page);
+    });
+  }
 });
 
 test.describe("a Mac's virtual display whose Adaptive picture is passed", () => {
@@ -643,9 +784,7 @@ test.describe("a Mac's virtual display whose Adaptive picture is passed", () => 
     const zlib = seen.zlib;
     expect(zlib).toBeDefined();
     if (zlib) {
-      await flushed(zlib.stream);
-      expect(zlib.error).toBeUndefined();
-      expect(zlib.got).toBe(zlib.want);
+      await inflated(zlib);
     }
     await expect(page.getByRole("alert")).toHaveCount(0);
 

@@ -572,9 +572,10 @@ virtual display and Combined Display alike.
 - **The Mac paced by the page.** The Mac codes for the connection it finds:
   on a slow one its Adaptive refinement waits for a still screen, and its zlib
   goes no faster than the connection. So the gateway reads
-  the Mac's connection only as the page paints: a rectangle waits while 32 KiB
-  of those passed before it are unpainted, behind a small receive buffer on the
-  connection, and the connection backs up instead. Do not let a queue here
+  the Mac's connection only as the page paints: a rectangle waits while twice
+  what the page paints in a round trip, and at least 32 KiB, of those passed
+  before it are unpainted, behind a small receive buffer on the connection, and
+  the connection backs up instead. Do not let a queue here
   hide the browser's link from the Mac.
 - **Pushed back to back.** The Mac is armed to push at interval 0 and asked for
   no update between them, as Apple's viewer arms it: it sends one rectangle of
@@ -1212,10 +1213,16 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   framebuffer's size and its decoder before the picture starts. Any other
   framebuffer encoding in such a session ends it, since nothing here could
   decode it onto the page's picture.
-- **Paced by the page's painting.** Every rectangle takes its size, up to
-  `STANDARD_AHEAD` (32 KiB), from a bound of its own, and gives it back when the
+- **Paced by the page's painting.** Every rectangle takes its size, up to the
+  whole bound, from a bound of its own (`PaintWindow`), and gives it back when the
   page acknowledges the batch it rode in (a `Painted` in the record, as a
-  pipeline's frame has). One that cannot have it waits, and the read loop with
+  pipeline's frame has). The bound is twice what the page paints in the
+  session's shortest round trip of a small rectangle, at the fastest rate it
+  painted within the last second, and never less than `STANDARD_AHEAD` (32 KiB)
+  or more than 16 MiB, so each round on a fast link carries twice the last until
+  the link or the painting holds it. The shortest only falls, so a slow link's
+  queue, which under motion never empties, cannot widen the bound past its floor. One
+  that cannot have it waits, and the read loop with
   it, so the Mac's connection fills; its receive buffer is held at 32 KiB
   (`STANDARD_RECEIVE_BUFFER`) so what the Mac sends next stays at the Mac. The
   queue budget and the paint window alone did not do this: a burst of
@@ -1224,9 +1231,14 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   at worst, with the Mac refining all the while. Paced by the painting it ran
   0.66 s behind, 1.4 s at worst, a rectangle's own time on that link, and the
   Mac sent about one and a half updates a second where an unpaced link took
-  seventy; an unthrottled browser carried as much as before.
+  seventy. A bound of 32 KiB alone held a fast page to one rectangle a round
+  trip, since a Full-quality rectangle is larger: against a page acknowledging at
+  once 40 ms away, Full quality's Combined Display of a 1x and a 2x screen came
+  at 6.8 MB/s held to it, 15.0 MB/s held to the painting, and 17.6 MB/s unpaced,
+  the round trip the same. Below about 260 kbit/s the bound is its floor.
 - **Started over, never repainted.** The plan does not resume
-  (`Passthrough::resumes`): a reattach ends the engine and starts one, which
+  (`Passthrough::resumes`): the engine ends when the page detaches, and a
+  reattach starts one, which
   connects the Mac again, and the page is given the picture from its start
   afresh: Adaptive's tables and first full update, or a new zlib stream. A `refresh` that reaches the engine is not answered, since a
   repaint could not make whole a page that missed a rectangle, and the one
@@ -1472,9 +1484,9 @@ the pipeline.
   It answers even a repaint out of them — measured against Windows 11, a
   compositor that joined with nothing and asked for a repaint was left with most
   of the desktop wrong, after a graphics reset as after a Suppress Output — so a
-  page that comes back cannot be repaired by the engine that is running. Every
-  reattach to an RDP session with the pipeline on therefore ends the engine and
-  starts another ([Session lifecycle](#session-lifecycle)), which is a logon to
+  page that comes back cannot be repaired by the engine that is running. The
+  engine ends when the page detaches, and every reattach to an RDP session with
+  the pipeline on starts another ([Session lifecycle](#session-lifecycle)), which is a logon to
   the session the host kept. A `refresh` from a page that still holds the pipeline's state is
   passed to the host as a repaint.
 - **A host without the pipeline is refused.** With the pipeline on, nothing of
@@ -1795,8 +1807,9 @@ remote is told how the link is doing. Today three of the five passthroughs are:
   wants an `ard` target in Standard mode, whose Adaptive picture the Mac codes
   for the link.
 - **A Mac in Standard mode** passing its own picture is paced by the page's
-  painting: the gateway reads the Mac's connection only while less than 32 KiB of
-  what it passed is unpainted, so the connection backs up as the browser's link
+  painting: the gateway reads the Mac's connection only while less of what it
+  passed is unpainted than twice what the page paints in a round trip, and at
+  least 32 KiB, so the connection backs up as the browser's link
   does, and the Mac codes for that link as it does for a viewer on one. Measured against a 300 kbit/s browser, the Adaptive picture ran 0.66 s behind
   on average and the Mac sent about one and a half updates a second. Full
   quality's zlib has nothing to code coarser: it is paced the same way and
@@ -1931,7 +1944,10 @@ Authentication and desktop ownership are separate:
 4. `connect` starts the selected engine with the choices made at the picker.
    `disconnect` stops it and returns to the picker.
 5. Losing the WebSocket detaches the client. The engine remains available for a
-   60-second reattach grace period while frames are discarded.
+   60-second reattach grace period while frames are discarded. One whose picture
+   is drawn against what the page holds, which a reattach starts over anyway, is
+   ended there, its target kept for the grace, so it does not go on taking a
+   picture nobody paints.
 6. Logging out ends the login and session immediately, closes the engine, and
    releases the claim.
 

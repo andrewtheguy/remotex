@@ -1844,21 +1844,35 @@ impl SessionManager {
     /// The WebSocket for attachment `id` went away. The engine remains
     /// available during [`REATTACH_GRACE_PERIOD`]; frames emitted while
     /// detached are dropped. A reattach invalidates this detach's timer.
+    ///
+    /// An engine whose picture is drawn against what the page holds is ended
+    /// here instead, its target kept for the grace: the reattach would start it
+    /// over anyway ([`Passthrough::resumes`]), and until then it would go on
+    /// taking a picture nobody paints, unpaced, from the remote.
     pub fn detach(self: &Arc<Self>, id: u64) {
-        let expiry = {
+        let (expiry, ended) = {
             let mut st = self.state.lock().unwrap();
             if st.client.as_ref().is_none_or(|c| c.attach_id != id) {
                 return;
             }
             st.client = None;
             st.release_held();
-            st.bump_epoch_for_detach()
+            let ended = st.engine.as_ref().is_some_and(|engine| !engine.plan.resumes()) && st.take_engine();
+            (st.bump_epoch_for_detach(), ended)
         };
         if let Some((generation, attachment_epoch)) = expiry {
-            info!(
-                "session: browser detached; the session is kept for {}s reattach grace",
-                REATTACH_GRACE_PERIOD.as_secs()
-            );
+            if ended {
+                info!(
+                    "session: browser detached; its picture cannot be resumed, so the engine is \
+                     ended and the target kept for {}s reattach grace",
+                    REATTACH_GRACE_PERIOD.as_secs()
+                );
+            } else {
+                info!(
+                    "session: browser detached; the session is kept for {}s reattach grace",
+                    REATTACH_GRACE_PERIOD.as_secs()
+                );
+            }
             self.schedule_detached_engine_expiry(generation, attachment_epoch);
         }
     }
@@ -2973,11 +2987,10 @@ mod tests {
     }
 
     /// A page whose display socket went comes back on both sockets, which are not
-    /// ordered against each other. When its new display socket attaches first, it
-    /// is the running Adaptive engine's until the session socket's reattach, which
-    /// still starts the picture over: the engine that went on without the page is
-    /// ended, nothing of it reaches the page after, and the new display socket is
-    /// the fresh engine's.
+    /// ordered against each other. Its Adaptive engine was ended when the session
+    /// socket went, its target kept, so a display socket that attaches first is
+    /// given nothing of it, and the session socket's reattach starts the picture
+    /// over on a fresh engine whose display socket it is.
     #[tokio::test]
     async fn a_display_socket_back_before_its_reattach_still_starts_a_standard_picture_over() {
         let (hook_tx, hook_rx) = std_mpsc::channel();
@@ -3002,38 +3015,24 @@ mod tests {
         let display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         let resize = |w| ServerMsg::Resize { w, h: 1, scale: UNSCALED };
 
-        // The display socket goes, and the page closes its session socket with it.
+        // The display socket goes, and the page closes its session socket with it,
+        // which ends the engine: nothing asks it for a repaint.
         mgr.detach_display(display.id);
         mgr.detach(att.id);
-        // The page comes back, its display socket first. A repaint is asked of the
-        // running engine, which an Adaptive one does not answer, and what it draws
-        // meanwhile reaches the socket: the page holds no picture before an
-        // `standardStart`, and drops it.
+        while let Some(input) = old_input.recv().await {
+            assert!(!matches!(input, ClientMsg::Refresh), "a repaint asked of an ended engine");
+        }
+        assert!(mgr.state.lock().unwrap().selected.is_some(), "the target is kept for the reattach");
+
+        // The page comes back, its display socket first. Whatever the ended engine
+        // still sends is dropped, and its exit lets the next start.
         let mut display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
-        assert!(matches!(old_input.recv().await, Some(ClientMsg::Refresh)));
         old_frames.send(resize(1)).await.unwrap();
-        assert!(matches!(
-            recv(&mut display.events).await,
-            AttachEvent::Msg(ServerMsg::Resize { w: 1, .. })
-        ));
+        drop(old_frames);
 
         // Then its session socket.
         let token = mgr.claim(false, Some(&token), "login").unwrap();
-        let reattach = tokio::spawn({
-            let mgr = Arc::clone(&mgr);
-            async move { mgr.attach(&token, None, Decoders::ALL).await.unwrap() }
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !old_input.is_closed() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the reattach ends the engine that went on without the page");
-        // Whatever it still sends is dropped, and its exit lets the next start.
-        old_frames.send(resize(2)).await.unwrap();
-        drop(old_frames);
-        let mut att = reattach.await.unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         let (plan, _input, frames) = hook_rx.try_recv().expect("the picture is started over");
         assert_eq!(plan.apple_standard, Some(crate::config::StandardQuality::Adaptive));
         match recv(&mut att.events).await {
@@ -3345,16 +3344,24 @@ mod tests {
             mgr.connect(att.id, target, None, meta.choices()).await.unwrap();
             expect_connected_meta(&mut att.events, target, meta).await;
             let (input_rx, _frame_tx, _audio, _camera) = hooks.try_recv().unwrap();
+            let resumes = mgr.state.lock().unwrap().engine.as_ref().unwrap().plan.resumes();
 
             mgr.detach(att.id);
             tokio::task::yield_now().await;
             tokio::time::advance(REATTACH_GRACE_PERIOD - Duration::from_secs(1)).await;
             tokio::task::yield_now().await;
-            assert!(!input_rx.is_closed(), "{protocol} expired before the grace period");
+            if resumes {
+                assert!(!input_rx.is_closed(), "{protocol} expired before the grace period");
+            } else {
+                // Nothing resumes it, so it is ended at once, and its target kept.
+                assert!(input_rx.is_closed(), "{protocol} went on without the page");
+            }
+            assert!(mgr.state.lock().unwrap().selected.is_some(), "{protocol}'s target lapsed early");
 
             tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(1)).await;
             tokio::task::yield_now().await;
             assert!(input_rx.is_closed(), "{protocol} survived the grace period");
+            assert!(mgr.state.lock().unwrap().selected.is_none(), "{protocol}'s target outlived it");
         }
     }
 
