@@ -1132,6 +1132,17 @@ export function useRemoteDesktop(
       number,
       { size: RemoteSize; view: MosaicView | null }
     >();
+    // The queued resize whose presentation ends a hold: the `oversize` without a
+    // cause comes behind the resize that brought the desktop within, and the
+    // notice stays up until that size is on the canvas, or the held desktop,
+    // which a Mac's own picture goes on painting under it, would show for a
+    // moment with input mapped to it.
+    let releaseAt: number | null = null;
+    const release = () => {
+      releaseAt = null;
+      setOversize(null);
+      setHeldPixels(null);
+    };
     // The regions of the last `mosaic`, and the framebuffer the last `resize`
     // named: what a composition is recomputed from when either changes, or when
     // this window moves to a display of another density.
@@ -1170,6 +1181,9 @@ export function useRemoteDesktop(
         if (applied) {
           pendingResizes.delete(seq);
           presentResize(applied.size, applied.view);
+          if (releaseAt !== null && seq >= releaseAt) {
+            release();
+          }
         }
       },
       onReached: (seq) => {
@@ -1215,6 +1229,7 @@ export function useRemoteDesktop(
       // ending; letting it land later would resurrect that desktop's size
       // under the next one's overlay.
       pendingResizes.clear();
+      releaseAt = null;
       // Pointer ownership is per-engine: the next target may well composite
       // its own cursor, so drop back to the X until it says otherwise. A
       // reattach to the same engine gets the shape replayed.
@@ -2374,8 +2389,15 @@ export function useRemoteDesktop(
           setPictureWithheld(msg.active);
           break;
         case "oversize":
-          setOversize(msg.cause);
-          setHeldPixels(msg.cause ? framebufferSize : null);
+          if (msg.cause) {
+            releaseAt = null;
+            setOversize(msg.cause);
+            setHeldPixels(framebufferSize);
+          } else if (pendingResizes.size > 0) {
+            releaseAt = resizeSeq;
+          } else {
+            release();
+          }
           break;
         case "picker":
           // No target selected (idle attach, switch-target, a takeover, or an
