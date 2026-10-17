@@ -1089,7 +1089,7 @@ pub enum ServerMsg {
     /// decode. A binary record like [`ServerMsg::Video`], ordered the same way.
     Standard(StandardUnit),
     /// A Mac's own picture starts here, from nothing, in `quality`: the picture is
-    /// what the [`ServerMsg::Adaptive`] records after this draw, and whatever a
+    /// what the [`ServerMsg::Standard`] records after this draw, and whatever a
     /// client held of a video stream before it is done with. `engine` is the
     /// engine that sent it ([`ServerMsg::stamped`]).
     StandardStart { engine: u64, quality: StandardQuality },

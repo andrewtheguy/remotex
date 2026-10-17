@@ -12320,7 +12320,8 @@ mod tests {
         }
     }
 
-    /// A Standard session asks the Mac for another update after each one, unless
+    /// A Standard session arms the Mac to push its picture back to back, at no
+    /// interval, while a media-stream session keeps the media interval.
     #[test]
     fn a_standard_picture_is_pushed_back_to_back() {
         assert_eq!(push_interval_us(false), 0);
