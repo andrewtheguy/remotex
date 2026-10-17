@@ -350,9 +350,10 @@ impl Tiles {
             }
         }
         // A round of changed tiles says what a tile costs at its level and no other;
-        // a refresh, their exact picture, says no less than the plan's quality does.
+        // a refresh is of the tiles a JPEG did not make exact, which a changed one
+        // mostly is not, and says what [`Self::exact_bytes`] is alone.
         let tiles: usize = coded.iter().map(|part| part.cols).sum();
-        if tiles > 0 {
+        if !round.exact && tiles > 0 {
             let per_tile = coded.iter().map(|part| part.data.len() as u64).sum::<u64>() / tiles as u64;
             let cost = &mut self.changed_costs[round.level];
             *cost = (*cost * 3 + per_tile) / 4;
