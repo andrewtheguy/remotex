@@ -60,9 +60,8 @@ cargo test --test vnc_e2e --test wlshare_e2e -- --ignored
 ```
 
 `wlshare_e2e` builds wlshare from the `../wlshare` checkout, or the one
-`REMOTEX_TEST_WLSHARE_DIR` names, and asks it for libvpx's VP9 stream, or with
-`REMOTEX_TEST_WLSHARE_VP9=native` for its alpha encoder's (the picker's
-`vp9` choice). `REMOTEX_TEST_CONTAINER_RUNTIME` forces Docker
+`REMOTEX_TEST_WLSHARE_DIR` names, and asks it for its VP9 stream.
+`REMOTEX_TEST_CONTAINER_RUNTIME` forces Docker
 or Podman when both work.
 
 For a remote Podman connection:

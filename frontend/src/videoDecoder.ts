@@ -4,8 +4,9 @@
 // HEVC a High Performance Mac made when that stream is passed through (see
 // `VideoUnit` in src/protocol.rs). The decoder is the browser's `VideoDecoder`,
 // or for a stream the page decodes itself, a decoder of the same shape over a
-// WebAssembly module (softwareDecoder.ts): the gateway's VP9 where the browser's
-// own decoder does not take it, and a Mac's HEVC where the session says so. The units arrive as VIDEO records in the batches
+// WebAssembly module (softwareDecoder.ts): a Mac's HEVC where the browser's own
+// decoder does not take it. The VP9 is always the browser's own decoder's, which
+// the gateway sends 4:4:4 only where it takes it (nativeVp9.ts). The units arrive as VIDEO records in the batches
 // and are painted onto the canvas. What is not ordinary is that the stream is a
 // *chain* — every frame means "what changed since the one before it" — so none of
 // them may be dropped, reordered, or decoded twice.
@@ -58,7 +59,6 @@ export interface VideoFormat {
 /** What the browser's own decoder refused, which each module stands in for. */
 const REFUSED: Record<SoftwareModule, string> = {
   hevc: "the Mac's HEVC",
-  vp9: "the gateway's 4:4:4 VP9",
 };
 
 /** The desktop's decoder, rebuilt as the stream it decodes starts over. */
@@ -108,13 +108,12 @@ export function createDesktopVideo(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
   /**
-   * How this page decodes (softwareSupport.ts, nativeVp9.ts). A stream the page
+   * How this page decodes (softwareSupport.ts, appleMedia.ts). A stream the page
    * decodes itself in a module it cannot run is not decoded: the browser's own
    * decoder has already said it does not take that stream.
    */
   decoding: PageDecoding = {
-    runs: { hevc: false, vp9: false },
-    nativeVp9: true,
+    runs: { hevc: false },
     nativeHevc: true,
   },
 ): DesktopVideo {
@@ -499,8 +498,8 @@ export function createVideoStream(
     optimizeForLatency: true,
     // `hardwareAcceleration` is deliberately left out, so a browser decodes this
     // however it decodes VP9. (The one thing this page asks of its decoder is
-    // whether it takes the 4:4:4 stream at all, once at load, which decides
-    // whether this decoder is built for it — see nativeVp9.ts.) Asking for software here is a
+    // whether it takes a 4:4:4 stream at all, once at load, which decides whether
+    // a wlshare target is sent one — see nativeVp9.ts.) Asking for software here is a
     // hint by specification — WebKit
     // falls back past it, Firefox disregards it — and on iOS and iPadOS it is a hint
     // with nothing behind it at all: WebKit maps `prefer-software` to

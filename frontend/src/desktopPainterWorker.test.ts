@@ -95,8 +95,7 @@ function harness() {
     canvas: canvas as unknown as OffscreenCanvas,
     graphics: {} as OffscreenCanvas,
     decoding: {
-      runs: { hevc: false, vp9: false },
-      nativeVp9: true,
+      runs: { hevc: false },
       nativeHevc: true,
     },
   });

@@ -58,15 +58,15 @@ options show under it, and Start connects with them. They are chosen per
 session, held for its life, and remembered by the browser per target; none is a
 config key.
 
-| Target | Window drives the size | Sound | Passthrough | Graphics | VP9 encoder |
-|---|---|---|---|---|---|
-| `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | high quality or adaptive H.264 | — |
-| `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — | — |
-| `vnc` | no | none | — | — | — |
-| `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
-| `vnc`, `ard` | no | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — | — |
-| `vnc`, `ard` with `virtual_display` | yes | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — | — |
-| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — | — |
+| Target | Window drives the size | Sound | Passthrough | Graphics |
+|---|---|---|---|---|
+| `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | high quality or adaptive H.264 |
+| `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — |
+| `vnc` | no | none | — | — |
+| `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — |
+| `vnc`, `ard` | no | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — |
+| `vnc`, `ard` with `virtual_display` | yes | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — |
+| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — |
 
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
   or 1440×900 where it sets none, or follows the window: the remote is asked to
@@ -113,12 +113,6 @@ config key.
   which keeps text sharp but adapts less. Adaptive is greyed in a browser whose
   `VideoDecoder` cannot decode the host's H.264. See
   [An exact picture](#an-exact-picture) for having the host draw losslessly.
-- **VP9 encoder.** Which encoder wlshare codes a `wlshare` target's VP9 with:
-  *libvpx*, the default, or *Native* (alpha), the encoder in Rust that
-  `screen-vp9` has written. It needs a wlshare that has the encoder: an older
-  one codes with libvpx. The stream is the same to the browser either way, so
-  starting one target with each compares the two. Every other target's VP9 is
-  coded by the gateway with libvpx, so it has no such choice.
 
 One gateway holds one session. A reload or a dropped connection normally
 resumes it; an RDP session with the graphics pipeline on instead reconnects the engine,

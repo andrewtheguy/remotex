@@ -1016,6 +1016,14 @@ impl SessionManager {
             info!("session: a passed stream drawn against the page cannot be resumed; starting it over");
             st.take_engine();
         }
+        // A VP9 at a chroma this browser would not be sent — a `wlshare` target's
+        // 4:4:4 for a page whose decoder takes no profile 1, or its 4:2:0 for one
+        // that would take more ([`RenderPlan::chroma`]) — is started over for it.
+        let chroma = st.selected.as_ref().map(|s| s.target.render_plan(s.choices, decoders).chroma);
+        if st.engine.as_ref().is_some_and(|engine| Some(engine.plan.chroma) != chroma) {
+            info!("session: the session's VP9 is at a chroma this browser is not sent; starting it over");
+            st.take_engine();
+        }
 
         // Tell the freshly attached browser which post-login state it is in. The
         // channel is empty, so try_send always lands.
@@ -2192,7 +2200,7 @@ mod tests {
 
 
     use super::*;
-    use crate::config::{Pipeline, Placement, Sizing, Sound, Vp9Encoder};
+    use crate::config::{Pipeline, Placement, Sizing, Sound};
     use crate::audio::PCM_CD_QUALITY;
     use crate::protocol::UNSCALED;
 
@@ -2207,11 +2215,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, whole: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, whole: false };
     /// A session started with nothing but a Mac's HEVC passed.
-    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false };
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, whole: false };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -2244,7 +2252,7 @@ mod tests {
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
             let size = if self.resize { Sizing::Window } else { Sizing::Target };
-            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false }
+            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, whole: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -2644,7 +2652,7 @@ mod tests {
         assert!(hooks.try_recv().is_ok(), "engine spawned on connect");
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
-                assert_eq!(render, "video q60 · libvpx · adaptive")
+                assert_eq!(render, "video q60 · 4:2:0 · adaptive")
             }
             other => panic!("expected connected, got {other:?}"),
         }
@@ -2656,8 +2664,8 @@ mod tests {
     }
 
     /// A browser that takes the Mac's stream, and one that does not.
-    const TAKES: Decoders = Decoders { apple_media: true, rdp_graphics: true, rdp_h264: false };
-    const DECLINES: Decoders = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false };
+    const TAKES: Decoders = Decoders { apple_media: true, rdp_graphics: true, rdp_h264: false, vp9_444: true };
+    const DECLINES: Decoders = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false, vp9_444: true };
 
     /// Assert the next event is the connected status of a Mac's session that passes
     /// its stream, sound included.
@@ -2736,7 +2744,7 @@ mod tests {
                 },
             );
             let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, vp9: Vp9Encoder::Libvpx, whole: false };
+            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, whole: false };
 
             let token_a = mgr.claim(false, None, "login").unwrap();
             let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();
@@ -2872,10 +2880,48 @@ mod tests {
 
         // A page that cannot compose it is not given one, nor the desktop encoded
         // here instead: the session ends for it to choose again.
-        let cannot = Decoders { apple_media: true, rdp_graphics: false, rdp_h264: false };
+        let cannot = Decoders { apple_media: true, rdp_graphics: false, rdp_h264: false, vp9_444: true };
         let mut ended = mgr.attach(&token, None, cannot).await.unwrap();
         assert!(hook_rx.try_recv().is_err());
         expect_beyond_then_picker(&mut ended.events, "graphics pipeline").await;
+    }
+
+    /// A `wlshare` target's VP9 is at the chroma its browser takes: the same browser
+    /// coming back resumes it, and one whose decoder takes no 4:4:4 is given a
+    /// session that starts over at 4:2:0 rather than a stream it cannot decode.
+    #[tokio::test]
+    async fn a_reattach_at_another_chroma_starts_the_session_over() {
+        use crate::vp9::Chroma;
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner = Box::new(
+            move |_target, _choices, plan, _display, _input_rx, _frame_tx, _audio, _camera, _feedback| {
+                hook_tx.send(plan).unwrap();
+            },
+        );
+        let desk = TargetConfig { protocol: Protocol::Vnc, subtype: Some(Subtype::Wlshare), ..video_target("desk") };
+        let mgr = Arc::new(SessionManager::with_spawner(vec![desk], spawner));
+        let token = mgr.claim(false, None, "login").unwrap();
+        let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "desk", None, Choices::default()).await.unwrap();
+        assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { chroma: Chroma::Yuv444, .. })));
+
+        let _back = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        assert!(hook_rx.try_recv().is_err(), "the same browser coming back resumes the running session");
+
+        let subsampled = Decoders { vp9_444: false, ..Decoders::ALL };
+        let mut other = mgr.attach(&token, None, subsampled).await.unwrap();
+        match recv(&mut other.events).await {
+            AttachEvent::Msg(ServerMsg::Connected { name, render, .. }) => {
+                assert_eq!(name, "desk");
+                assert!(render.contains(" · 4:2:0 · "), "{render}");
+            }
+            other => panic!("expected connected(desk), got {other:?}"),
+        }
+        assert!(
+            matches!(hook_rx.try_recv(), Ok(RenderPlan { chroma: Chroma::Yuv420, .. })),
+            "a page that takes no 4:4:4 is given the session from its start at 4:2:0"
+        );
     }
 
     /// A Mac's passed Adaptive picture is never resumed either: each rectangle is

@@ -2839,7 +2839,8 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-            native_vp9: false,
+
+            chroma: crate::vp9::Chroma::Yuv420,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse);

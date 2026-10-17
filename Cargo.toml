@@ -24,7 +24,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/flac", "frontend/wasm/vnc"]
 
 [package]
 name = "remotex"
-version = "0.0.424"
+version = "0.0.425"
 license = "MIT"
 edition = "2024"
 
@@ -87,11 +87,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
 #
-# It is libvpx alone. Its ALPHA encoder written in Rust lives on its
-# `native-encoder` branch, as does wlshare's use of it: a session that chooses
-# that encoder asks wlshare for it (`WLSX`), on a `wlshare` target alone, and a
-# wlshare built from main refuses the ask and ends the connection.
-screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.25" }
+# It is libvpx alone, here and in wlshare.
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.26" }
 # Remote audio: resample redirected PCM and encode bare Opus packets, as wlshare
 # codes its own: sound-opus, the one crate that codes a desktop's sound as Opus
 # for this gateway and for wlshare, its own repository pinned at a release tag by

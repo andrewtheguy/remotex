@@ -1,6 +1,6 @@
-// What this browser decodes of a High Performance Mac's own media stream: the first
+// What this browser decodes of a High Performance Mac's own media stream: a
 // question about its decoders the gateway is told, asked once, before the client
-// mounts, beside the page's own question about VP9 (nativeVp9.ts).
+// mounts, beside the one about VP9 at 4:4:4 (nativeVp9.ts).
 //
 // The two halves are separate questions with separate consequences:
 // - The picture. A session started with the Mac's picture passed sends its HEVC as
@@ -33,7 +33,7 @@
 // where the page runs it and the gateway serves it (softwareDecoder.ts): the
 // session socket states both answers, and the gateway is not told which decodes.
 //
-// The other way round from VP9's question on a doubt (nativeVp9.ts). VP9 is what
+// A doubt reads as VP9's question reads one (nativeVp9.ts): VP9 at 4:2:0 is what
 // every page here decodes, so only a definite "yes" hands the Mac's picture to the
 // browser's own decoder, and anything that throws reads as "no". The one target it
 // can leave unstartable is a Mac on a gateway whose host lacks the HEVC decoder's

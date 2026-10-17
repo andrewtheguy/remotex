@@ -23,13 +23,12 @@
 // it gives it back (`endSession`). The compositor of an RDP host's pipeline and the
 // decoder of a Mac's own picture are modules of this worker's own, so a
 // session that loaded either ends the worker, and the page mounts new canvases for
-// the next one. Otherwise the worker is kept, and its decode workers, the VP9's
-// and the HEVC's, go.
+// the next one. Otherwise the worker is kept, and its decode worker, the HEVC's,
+// goes.
 import { decodesAppleMedia } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
-import { nativeVp9 } from "./nativeVp9.ts";
 import { batchFrameSequence, type StandardQuality } from "./protocol.ts";
 import { runnableDecoders } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
@@ -194,7 +193,6 @@ export function desktopPainterFor(
       graphics: offscreenGraphics,
       decoding: {
         runs: runnableDecoders(),
-        nativeVp9: nativeVp9(),
         nativeHevc: decodesAppleMedia(),
       },
     },

@@ -15,10 +15,10 @@ const HEVC = "hev1.4.10.L150.BE.8";
 const VP9_444 = "vp09.01.50.08.03.06.06.06.00";
 const VP9_420 = "vp09.00.40.08.01.06.06.06.00";
 
-test("a module decodes its own stream: HEVC, or VP9 profile 1, and profile 0 is neither's", () => {
+test("the module decodes its own stream, HEVC, and no VP9 of either profile", () => {
   assert.equal(softwareModuleFor(HEVC), "hevc");
   assert.equal(softwareModuleFor("hvc1.1.6.L93.B0"), "hevc");
-  assert.equal(softwareModuleFor(VP9_444), "vp9");
+  assert.equal(softwareModuleFor(VP9_444), null);
   assert.equal(softwareModuleFor(VP9_420), null);
   assert.equal(softwareModuleFor("avc1.64002a"), null);
 });
@@ -27,8 +27,7 @@ test("another codec is refused as VideoDecoder refuses one: asynchronously, NotS
   const errors: Error[] = [];
   for (const [module, other] of [
     ["hevc", VP9_444],
-    ["vp9", HEVC],
-    ["vp9", VP9_420],
+    ["hevc", VP9_420],
   ] as [SoftwareModule, string][]) {
     const decoder = createSoftwareDecoder(module, {
       output: () => assert.fail("no output"),
@@ -172,7 +171,7 @@ test("a worker whose module did not load is ended, and the next stream starts an
   }
 });
 
-test("each module has a decode worker of its own, told which module it is", () => {
+test("the module has a decode worker of its own, told which module it is", () => {
   const globals = globalThis as unknown as { Worker: unknown };
   const before = globals.Worker;
   globals.Worker = FakeWorker;
@@ -185,32 +184,30 @@ test("each module has a decode worker of its own, told which module it is", () =
       output: () => assert.fail("no output"),
       error: (e: Error) => assert.fail(e.message),
     };
-    const vp9 = createSoftwareDecoder("vp9", init);
-    vp9.configure({ codec: VP9_444 });
     const ended: string[] = [];
-    const hevc = createSoftwareDecoder("hevc", {
-      ...init,
-      error: (e: Error) => ended.push(e.message),
-    });
+    const ending = { ...init, error: (e: Error) => ended.push(e.message) };
+    const hevc = createSoftwareDecoder("hevc", ending);
     hevc.configure({ codec: HEVC });
-    // A second stream of a module is a decoder in the worker it has.
-    const again = createSoftwareDecoder("vp9", init);
-    again.configure({ codec: VP9_444 });
+    // A second stream of the module is a decoder in the worker it has.
+    const again = createSoftwareDecoder("hevc", ending);
+    again.configure({ codec: HEVC });
     const workers = FakeWorker.made.slice(made);
     assert.deepEqual(
       workers.map((worker) => worker.name),
-      ["vp9-decoder", "hevc-decoder"],
+      ["hevc-decoder"],
     );
     assert.deepEqual(
       workers.map((worker) => worker.posted.map((command) => command.module)),
-      [["vp9", "vp9"], ["hevc"]],
+      [["hevc", "hevc"]],
     );
-    // One module's worker ending takes none of the other's decoders down.
-    workers[1].onmessage?.({ data: { type: "broken", message: "not served" } });
-    assert.deepEqual(ended, ["not served"]);
-    assert.equal(vp9.state, "configured");
-    vp9.close();
-    again.close();
+    // The worker ending takes every decoder in it down, and the next stream
+    // starts another.
+    workers[0].onmessage?.({ data: { type: "broken", message: "not served" } });
+    assert.deepEqual(ended, ["not served", "not served"]);
+    const after = createSoftwareDecoder("hevc", init);
+    after.configure({ codec: HEVC });
+    assert.equal(FakeWorker.made.length, made + 2);
+    after.close();
     resetSoftwareDecodersForTests();
   } finally {
     globals.Worker = before;

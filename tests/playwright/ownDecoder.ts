@@ -1,15 +1,13 @@
 // What a spec makes the browser's own video decoder say and do, so a decision
 // that rests on it can be seen on a machine whose browser would answer otherwise.
-// The page asks its browser once, at load, whether its own decoder takes each
-// stream it may have to decode itself — the gateway's VP9 at profile 1
-// (frontend/src/nativeVp9.ts) and a Mac's HEVC (frontend/src/appleMedia.ts) —
-// and the paint worker builds that decoder where the answer was yes.
+// The page asks its browser once, at load, whether its own decoder takes a
+// Mac's HEVC, which it decodes itself where the answer is no
+// (frontend/src/appleMedia.ts), and the paint worker builds the browser's
+// decoder where the answer was yes.
 import type { Page } from "@playwright/test";
 
 /// The streams a page asks about, as the configuration strings that name them.
 const CODECS = {
-  /// The gateway's 4:4:4 VP9, profile 1 (`codec_string` in src/vp9.rs).
-  vp9: /^vp09\.01\./,
   /// A High Performance Mac's HEVC.
   hevc: /^(hev1|hvc1)\./,
 };

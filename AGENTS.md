@@ -60,12 +60,11 @@ area's section before changing what it covers:
 
 - [The client and its bundle](docs/architecture.md#the-client-and-its-bundle):
   one client, the browser SPA; one frontend build compiled into the gateway; its
-  WebAssembly modules, three built here and the software VP9 decoder a pinned
-  release; the pinned HEVC decoder archive as the one file read at run time; no
-  fallback browser paths.
+  WebAssembly modules, three built here; the pinned HEVC decoder archive as the
+  one file read at run time; no fallback browser paths.
 - [Sessions](docs/architecture.md#sessions): one active session per gateway,
   with takeover, and a fresh engine for every `connect`; size, sound, the Mac's
-  passthrough, how an RDP host draws its pipeline and the VP9's encoder chosen
+  passthrough and how an RDP host draws its pipeline chosen
   at the picker, not in the config, and held for the session's life; an RDP
   host's pipeline passed in every session it is on.
 - [Input and display](docs/architecture.md#input-and-display): the two touch

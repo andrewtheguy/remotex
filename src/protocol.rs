@@ -1347,7 +1347,8 @@ pub enum ServerMsg {
     ///
     /// Which decoder takes the stream is each page's own to say, and the gateway is not told:
     /// the browser's `VideoDecoder` where it takes the stream, and the page's WebAssembly one
-    /// for the gateway's VP9 or a Mac's HEVC where it does not.
+    /// for a Mac's HEVC where it does not. Every VP9 is the browser's own decoder's, at a
+    /// chroma the browser said it takes ([`crate::config::RenderPlan::chroma`]).
     ///
     /// `strips` says how many strips each picture of the stream comes in, a unit
     /// each ([`Strip`]): [`Strip::COUNT`] for a High Performance Mac's passed in
@@ -1818,7 +1819,6 @@ mod tests {
                     passthrough: Some(crate::config::Passthrough::AppleH264),
                     placement: crate::config::Placement::Right,
                     pipeline: crate::config::Pipeline::HighQuality,
-                    vp9: crate::config::Vp9Encoder::Libvpx,
                     whole: false,
                 }
             ),
@@ -2045,13 +2045,13 @@ mod tests {
             passthrough: None,
             camera: false,
             microphone: false,
-            render: "video q90 · libvpx · adaptive".to_owned(),
+            render: "video q90 · 4:2:0 · adaptive".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 · libvpx · adaptive"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 · 4:2:0 · adaptive"}"#
             ),
             None => panic!("connected must be a text frame"),
         }

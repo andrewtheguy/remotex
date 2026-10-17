@@ -15,7 +15,7 @@ const scope = self as unknown as {
 
 scope.onmessage = ({ data }) => {
   (async () => {
-    const { glue } = await decoderGlue(data.decoder);
+    const { glue } = await decoderGlue();
     await glue.default({ module_or_path: data.module, memory: data.memory });
     scope.postMessage(null);
     glue.runPoolThread();

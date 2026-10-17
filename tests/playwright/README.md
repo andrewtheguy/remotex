@@ -69,12 +69,12 @@ it also resizes the window, in each quality, and checks that the picture goes on
 at the new size, decoded, without starting again.
 
 `target-switch.spec.ts` switches one page, without a reload, between an RDP
-host's pipeline and bitmap targets and a Mac's VP9, Adaptive and High
-Performance pictures, with the browser's own decoder made to refuse the VP9 and
-the HEVC: that each session's picture starts and is acknowledged, that a session
-that loaded the compositor or the decoder of a Mac's own picture ends its paint
-worker and any other keeps it, and, by how often each module's file is fetched,
-that a kept worker ends its VP9 and HEVC decode workers.
+host's pipeline and bitmap targets and a Mac's Adaptive and High Performance
+pictures, with the browser's own decoder made to refuse the HEVC: that each
+session's picture starts and is acknowledged, the bitmap target's as 4:2:0 VP9,
+that a session that loaded the compositor or the decoder of a Mac's own picture
+ends its paint worker and any other keeps it, and, by how often the HEVC
+module's file is fetched, that a kept worker ends its HEVC decode worker.
 
 `egfx-two-displays.spec.ts` is the same pipeline passed over two virtual
 displays, read from both displays' sockets of one browser: that each socket
@@ -121,22 +121,7 @@ both on any machine, in the default browser: it fakes the browser's answer to th
 page's one question, once "no", after which everything is real, and once "yes",
 with a stand-in for the browser's decoder put ahead of the paint worker's script,
 which outputs a grey picture for each unit, so a browser with no HEVC decoder
-passes it too. Both fakes are `ownDecoder.ts`'s, which the VP9 spec uses for its
-browser that refuses profile 1.
-
-`software-vp9.spec.ts` is the page's software VP9 decoder, the vp9-wasm module
-in the bundle, which a page uses where the browser's own decoder refuses the
-gateway's 4:4:4 stream. It asserts that the picker offers no choice of VP9
-decoder, and that a browser whose own decoder takes profile 1, which
-Playwright's Chromium does, is announced profile 1 not said to be the page's,
-decodes it itself, never fetches the module and keeps the graphics canvas
-hidden, as the Info card says. A second case makes the browser answer no to
-profile 1, as iOS Safari does, by replacing `isConfigSupported` for that one
-question: the gateway announces the same stream, the decode worker loads the
-module's file once, the first keyframe's batch is acknowledged with no video
-error or repaint request before it, the page shows the canvas the module's
-planes are drawn on, and the Info card names the WebAssembly decoder. The page
-is then reloaded and decodes the repainted stream the same way.
+passes it too. Both fakes are `ownDecoder.ts`'s.
 
 `soft-keyboard.spec.ts` is the soft keyboard, read from the same socket: that a
 key tapped on it is the `key` frames the page sends, down then up; that a tapped
@@ -336,22 +321,6 @@ bun run test:hevc
 ```
 
 Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`.
-
-The software VP9 spec needs a gateway with a live target that sends VP9, named
-by `REMOTEX_PLAYWRIGHT_VP9_TARGET`:
-
-```sh
-cargo run --profile qa -- serve --config tmp/qa_vp9.toml
-```
-
-```sh
-cd tests/playwright
-REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52893/' \
-REMOTEX_PLAYWRIGHT_USERNAME='admin' \
-REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
-REMOTEX_PLAYWRIGHT_VP9_TARGET='desktop' \
-bun run test:vp9
-```
 
 The audio and picker specs use the test-tone gateway instead of a live target:
 

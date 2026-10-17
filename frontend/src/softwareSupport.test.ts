@@ -49,12 +49,12 @@ function page(
 
 test("a page runs the decoders it can present the pictures of", () => {
   const cases = [
-    [true, "whole", { hevc: true, vp9: true }],
-    // No color space to set: sRGB alone, which is the gateway's VP9.
-    [true, "srgb only", { hevc: false, vp9: true }],
-    [true, "none", { hevc: false, vp9: false }],
+    [true, "whole", { hevc: true }],
+    // No color space to set: sRGB alone, which the Mac's HEVC is not.
+    [true, "srgb only", { hevc: false }],
+    [true, "none", { hevc: false }],
     // A proxy that dropped the isolation headers: no shared memory.
-    [false, "whole", { hevc: false, vp9: false }],
+    [false, "whole", { hevc: false }],
   ] as const;
   for (const [isolated, webgl, runs] of cases) {
     const undo = page(isolated, webgl);

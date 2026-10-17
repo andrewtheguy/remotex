@@ -342,17 +342,18 @@ mod tests {
         let qualities = [20u8, 40, 60, 80];
 
         println!(
-            "\n| size      | quality | KB total | KB keyframe | µs/frame encode \
+            "\n| size      | chroma | quality | KB total | KB keyframe | µs/frame encode \
              | µs/frame convert | kbit/s at 30fps |"
         );
         println!(
-            "|-----------|---------|----------|-------------|-----------------\
+            "|-----------|--------|---------|----------|-------------|-----------------\
              |------------------|-----------------|"
         );
-        for (w, h) in sizes {
+        let rows = sizes.into_iter().flat_map(|size| [crate::vp9::Chroma::Yuv420, crate::vp9::Chroma::Yuv444].map(|chroma| (size, chroma)));
+        for ((w, h), chroma) in rows {
             for quality in qualities {
                 let mut mirror = Mirror::new(w, h).expect("a mirror");
-                let mut stream = crate::vp9::Stream::new(mirror.size(), quality).expect("a stream");
+                let mut stream = crate::vp9::Stream::new(mirror.size(), quality, chroma).expect("a stream");
                 let mut total = 0usize;
                 let mut keyframe_bytes = 0usize;
                 let mut encode = std::time::Duration::ZERO;
@@ -374,7 +375,7 @@ mod tests {
 
                 // The conversion on its own, over the same pixels: it is inside the
                 // encode timing above, and this is what says how much of it it was.
-                let mut picture = screen_vp9::Picture::new(mirror.size().0, mirror.size().1, threads()).expect("a picture");
+                let mut picture = screen_vp9::Picture::new(mirror.size().0, mirror.size().1, chroma, threads()).expect("a picture");
                 let crop = mirror.picture().to_vec();
                 let started = std::time::Instant::now();
                 for _ in 0..FRAMES {
@@ -384,8 +385,9 @@ mod tests {
 
                 let bits = total as f64 * 8.0;
                 println!(
-                    "| {:9} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
+                    "| {:9} | {:6} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
                     format!("{w}x{h}"),
+                    crate::stream::chroma_name(chroma),
                     quality,
                     total / 1024,
                     keyframe_bytes / 1024,

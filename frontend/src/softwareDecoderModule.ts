@@ -1,12 +1,7 @@
-// The software decoders' modules (softwareDecoder.ts), as a decode worker
-// and each thread of its pool load one. Both are wasm-bindgen's, with one
-// interface: hevc-wasm's, which vp9-wasm's was written to.
-//
-// Where a module comes from is the difference. The HEVC decoder's glue and
-// module are a release the gateway serves at `/hevc/` where it has the archive,
-// imported from there at run time. The VP9 decoder's are in the bundle
-// (frontend/wasm/vp9), and its glue finds its module beside itself.
-import * as vp9 from "../wasm/vp9/pkg/vp9.js";
+// The software decoder's module (softwareDecoder.ts), as a decode worker and
+// each thread of its pool load it: hevc-wasm's, built by wasm-bindgen. Its glue
+// and module are a release the gateway serves at `/hevc/` where it has the
+// archive, imported from there at run time.
 import { hevcDecoderUrl } from "./gateway.ts";
 import type { SoftwareModule } from "./softwareDecoder.ts";
 
@@ -65,9 +60,9 @@ export interface ModuleDecoder {
 export interface DecoderGlue {
   /**
    * Make this worker's instance: of the module at a URL, or of a compiled one on
-   * the memory another instance has. Given no module, the glue fetches its own.
+   * the memory another instance has.
    */
-  default(options?: {
+  default(options: {
     module_or_path: string | WebAssembly.Module;
     memory?: SharedMemory;
   }): Promise<{ memory: SharedMemory }>;
@@ -83,13 +78,11 @@ export interface DecoderGlue {
   ) => ModuleDecoder;
 }
 
-/** A module's glue, and the URL its module is fetched from where the glue has none. */
-export async function decoderGlue(
-  decoder: SoftwareModule,
-): Promise<{ glue: DecoderGlue; wasm?: string }> {
-  if (decoder === "vp9") {
-    return { glue: vp9 as unknown as DecoderGlue };
-  }
+/** The module's glue, and the URL its module is fetched from. */
+export async function decoderGlue(): Promise<{
+  glue: DecoderGlue;
+  wasm: string;
+}> {
   return {
     glue: (await import(
       /* @vite-ignore */ hevcDecoderUrl("hevc.js")

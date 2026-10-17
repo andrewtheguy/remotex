@@ -685,9 +685,6 @@ struct TargetInfo {
     /// Whether how the host draws the graphics pipeline, high quality or adaptive
     /// H.264, is a choice.
     pipeline: bool,
-    /// Whether which encoder codes the VP9, libvpx or the alpha one in Rust, is a
-    /// choice.
-    vp9: bool,
 }
 
 /// A desktop size in points, as the picker shows it before Start.
@@ -721,7 +718,6 @@ impl TargetInfo {
             passthroughs: offers.passthrough,
             placement: offers.placement,
             pipeline: offers.pipeline,
-            vp9: offers.vp9,
         }
     }
 }
@@ -848,7 +844,7 @@ struct ClaimResponse {
 
 /// Claim the single session slot. Returns the token the WebSocket
 /// must present as
-/// `/ws?session=<token>&apple_media=true|false&page_hevc=true|false&rdp_graphics=true|false&rdp_h264=true|false`;
+/// `/ws?session=<token>&apple_media=true|false&page_hevc=true|false&rdp_graphics=true|false&rdp_h264=true|false&vp9_444=true|false`;
 /// 409 while another browser is attached (retry with `force` to take over). The media sockets
 /// present the token alone — `chroma`, the most colour this browser's video
 /// decoder takes, is the session socket's and is required there
@@ -1460,13 +1456,13 @@ mod tests {
         // and no sound.
         assert_eq!(
             entry("mac"),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":["apple-adaptive","apple-full"],"placement":false,"pipeline":false,"vp9":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":["apple-adaptive","apple-full"],"placement":false,"pipeline":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win"),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"placement":false,"pipeline":true,"vp9":false}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"placement":false,"pipeline":true}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // picture is, in either codec, and is always passed, so it has no VP9 to
@@ -1474,14 +1470,14 @@ mod tests {
         let fast = entry("fast");
         assert!(
             fast.ends_with(
-                r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"placement":false,"pipeline":false,"vp9":false}"#
+                r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"placement":false,"pipeline":false}"#
             ),
             "{fast}"
         );
         // Where the second display sits is offered by a host asked for two.
-        assert!(entry("two").ends_with(r#""placement":true,"pipeline":true,"vp9":false}"#));
-        // wlshare's own encoder is a choice in any build.
-        assert!(entry("sway").ends_with(r#""pipeline":false,"vp9":true}"#));
+        assert!(entry("two").ends_with(r#""placement":true,"pipeline":true}"#));
+        // wlshare's picture is no choice.
+        assert!(entry("sway").ends_with(r#""pipeline":false}"#));
         // The page's HEVC decoder is a choice where the gateway has it and the
         // target has a Mac's picture to pass.
         assert!(entry("fast").contains(r#""software":false,"#));

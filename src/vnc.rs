@@ -153,8 +153,8 @@ const MSG_WLSHARE_SCROLL: u8 = 0xE5;
 const ENCODING_WLSHARE_OUTPUTS: i32 = 0x574c_534f;
 /// wlshare's VP9 encoding, `WLSV`: every update one rectangle over the whole
 /// desktop, a `u32` length and one frame of a single VP9 stream — the stream this
-/// gateway would encode from the same pixels, coded by the same crate at 4:4:4 and
-/// at the dial and walk the plan resolves to, which it then passes through untouched
+/// gateway would encode from the same pixels, coded by the same crate at the
+/// chroma, dial and walk the plan resolves to, which it then passes through untouched
 /// ([`VideoSink::pass`]). Listed for every browser on a `wlshare` target and on
 /// no other. wlshare sends it in place of ZRLE wherever it is listed and announces
 /// nothing; unlisted, as on a plain target, it sends ZRLE as to any VNC client.
@@ -171,14 +171,11 @@ const ENCODING_WLSHARE_VP9_QUALITY_BASE: i32 = 0x574c_5100;
 /// rather than walking it on the browser's lag: `WLSD`, for a plan without
 /// `render_adaptive`.
 const ENCODING_WLSHARE_VP9_HELD: i32 = 0x574c_5344;
-/// ALPHA. Listed beside [`ENCODING_WLSHARE_VP9`], has wlshare code the
-/// stream with its encoder written in Rust in place of libvpx: `WLSX`, for a
-/// session started with [`crate::config::Vp9Encoder::Native`]. The stream passed
-/// is the same to this gateway and to a decoder either way. That encoder is
-/// in a wlshare built from its `native-encoder` branch; one built from main
-/// refuses the ask and ends the connection rather than code with libvpx a
-/// stream asked of the other.
-const ENCODING_WLSHARE_VP9_NATIVE: i32 = 0x574c_5358;
+/// Listed beside [`ENCODING_WLSHARE_VP9`], has wlshare code the stream at 4:2:0,
+/// VP9 profile 0, rather than 4:4:4: `WLSS`, subsampled, for a plan at 4:2:0
+/// ([`crate::config::RenderPlan::chroma`]), which is a browser's whose own decoder
+/// takes no profile 1.
+const ENCODING_WLSHARE_VP9_SUBSAMPLED: i32 = 0x574c_5353;
 /// The largest `WLSV` frame read rather than refused. A 4:4:4 keyframe of the largest
 /// desktop the ceiling admits at the finest quantizer is a few megabytes; a length
 /// past this is a server that has lost its framing.
@@ -2660,15 +2657,15 @@ fn lists_wlshare_vp9((w, h): (u16, u16)) -> bool {
 /// and beside it what the stream is to be, from the plan: the dial as the ceiling
 /// wlshare's walk never goes above, and `WLSD` for a plan that holds the dial rather
 /// than walking it. So the target's keys mean on a passed
-/// stream what they mean on one encoded here, and `WLSX`, wlshare's alpha encoder, for a
-/// plan that asks for it ([`RenderPlan::native_vp9`]).
+/// stream what they mean on one encoded here; and `WLSS` for a plan at 4:2:0
+/// ([`RenderPlan::chroma`]).
 fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
     let mut listed = vec![ENCODING_WLSHARE_VP9, ENCODING_WLSHARE_VP9_QUALITY_BASE + i32::from(plan.quality)];
     if !plan.adaptive {
         listed.push(ENCODING_WLSHARE_VP9_HELD);
     }
-    if plan.native_vp9 {
-        listed.push(ENCODING_WLSHARE_VP9_NATIVE);
+    if plan.chroma == crate::vp9::Chroma::Yuv420 {
+        listed.push(ENCODING_WLSHARE_VP9_SUBSAMPLED);
     }
     listed.extend_from_slice(encodings);
     listed
@@ -8691,27 +8688,26 @@ mod tests {
     }
 
     /// The stream wlshare is asked for is the plan, listed beside its encoding at
-    /// the head of the list: the dial as the ceiling always, and `WLSD` for a plan
+    /// the head of the list: the dial as the ceiling always, `WLSD` for a plan
     /// that holds the dial — not for one that walks, which is what a list without
-    /// it means to wlshare.
+    /// it means to wlshare — and `WLSS` for a plan at 4:2:0, not for one at 4:4:4.
     #[test]
     fn the_vp9_stream_asked_of_wlshare_is_the_plan() {
         use crate::config::RenderPlan;
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(with_wlshare_vp9(&rest, walked), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
-        // The alpha encoder is asked for by name, and only by a session started with it.
-        assert_eq!(ENCODING_WLSHARE_VP9_NATIVE, i32::from_be_bytes(*b"WLSX"));
-        assert_eq!(
-            with_wlshare_vp9(&rest, RenderPlan { native_vp9: true, ..walked }),
-            [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_NATIVE, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
-        );
-        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
+        );
+        assert_eq!(ENCODING_WLSHARE_VP9_SUBSAMPLED, i32::from_be_bytes(*b"WLSS"));
+        assert_eq!(
+            with_wlshare_vp9(&rest, RenderPlan { chroma: crate::vp9::Chroma::Yuv420, ..held }),
+            [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_WLSHARE_VP9_SUBSAMPLED, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
         );
     }
 
@@ -9914,7 +9910,7 @@ mod tests {
     }
 
     /// The lists of a session that may be sent wlshare's VP9, at the plan the test
-    /// sinks are built on.
+    /// sinks are built on: a `wlshare` target's for a browser that decodes 4:4:4.
     fn test_listing() -> Arc<Listing> {
         let plan = crate::config::RenderPlan {
             quality: 60,
@@ -9924,7 +9920,8 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-            native_vp9: false,
+
+            chroma: crate::vp9::Chroma::Yuv444,
         };
         Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
     }
@@ -9961,7 +9958,8 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-            native_vp9: false,
+
+            chroma: crate::vp9::Chroma::Yuv444,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Refuse);
         // Larger than any desktop these tests paint, so a rectangle lands in the
@@ -12598,7 +12596,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -13194,7 +13192,8 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-            native_vp9: false,
+
+            chroma: crate::vp9::Chroma::Yuv420,
         };
         let (frames, mut tab_rx) = mpsc::channel(8);
         let feed = crate::session::DisplayFeed { frames, feedback: Arc::new(crate::feedback::LinkFeedback::new()) };
@@ -13235,7 +13234,8 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-            native_vp9: false,
+
+            chroma: crate::vp9::Chroma::Yuv420,
         };
         let feed = || {
             let (frames, rx) = mpsc::channel(8);
