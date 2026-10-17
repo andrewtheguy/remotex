@@ -56,7 +56,10 @@ belong in the linked documentation.
 ## Design rules
 
 The rules live in [Constraints](docs/architecture.md#constraints). Read an
-area's section before changing what it covers:
+area's section before changing what it covers. A rule is the design as it stands,
+not a reason to rule out a better approach: where one conflicts with a rule,
+propose it as an exception with its trade-off, and once agreed, list it under the
+rule as an exception, rather than refusing it or bending the rule unlisted.
 
 - [The client and its bundle](docs/architecture.md#the-client-and-its-bundle):
   one client, the browser SPA; one frontend build compiled into the gateway; its
