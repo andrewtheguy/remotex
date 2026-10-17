@@ -1364,7 +1364,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv420 };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 };
 
     /// A `wlshare` target's plan for a browser that decodes 4:4:4, whose stream wlshare
     /// passes at that chroma.
@@ -2201,7 +2201,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv420 };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2328,7 +2328,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv420 };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

@@ -171,14 +171,6 @@ const ENCODING_WLSHARE_VP9_QUALITY_BASE: i32 = 0x574c_5100;
 /// rather than walking it on the browser's lag: `WLSD`, for a plan without
 /// `render_adaptive`.
 const ENCODING_WLSHARE_VP9_HELD: i32 = 0x574c_5344;
-/// ALPHA. Listed beside [`ENCODING_WLSHARE_VP9`], has wlshare code the
-/// stream with its encoder written in Rust in place of libvpx: `WLSX`, for a
-/// session started with [`crate::config::Vp9Encoder::Native`]. The stream passed
-/// is the same to this gateway and to a decoder either way. That encoder is
-/// in a wlshare built from its `native-encoder` branch; one built from main
-/// refuses the ask and ends the connection rather than code with libvpx a
-/// stream asked of the other.
-const ENCODING_WLSHARE_VP9_NATIVE: i32 = 0x574c_5358;
 /// Listed beside [`ENCODING_WLSHARE_VP9`], has wlshare code the stream at 4:2:0,
 /// VP9 profile 0, rather than 4:4:4: `WLSS`, subsampled, for a plan at 4:2:0
 /// ([`crate::config::RenderPlan::chroma`]), which is a browser's whose own decoder
@@ -2665,9 +2657,8 @@ fn lists_wlshare_vp9((w, h): (u16, u16)) -> bool {
 /// and beside it what the stream is to be, from the plan: the dial as the ceiling
 /// wlshare's walk never goes above, and `WLSD` for a plan that holds the dial rather
 /// than walking it. So the target's keys mean on a passed
-/// stream what they mean on one encoded here; `WLSS` for a plan at 4:2:0
-/// ([`RenderPlan::chroma`]); and `WLSX`, wlshare's alpha encoder, for a
-/// plan that asks for it ([`RenderPlan::native_vp9`]).
+/// stream what they mean on one encoded here; and `WLSS` for a plan at 4:2:0
+/// ([`RenderPlan::chroma`]).
 fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
     let mut listed = vec![ENCODING_WLSHARE_VP9, ENCODING_WLSHARE_VP9_QUALITY_BASE + i32::from(plan.quality)];
     if !plan.adaptive {
@@ -2675,9 +2666,6 @@ fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
     }
     if plan.chroma == crate::vp9::Chroma::Yuv420 {
         listed.push(ENCODING_WLSHARE_VP9_SUBSAMPLED);
-    }
-    if plan.native_vp9 {
-        listed.push(ENCODING_WLSHARE_VP9_NATIVE);
     }
     listed.extend_from_slice(encodings);
     listed
@@ -8709,15 +8697,9 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv444 };
+        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(with_wlshare_vp9(&rest, walked), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
-        // The alpha encoder is asked for by name, and only by a session started with it.
-        assert_eq!(ENCODING_WLSHARE_VP9_NATIVE, i32::from_be_bytes(*b"WLSX"));
-        assert_eq!(
-            with_wlshare_vp9(&rest, RenderPlan { native_vp9: true, ..walked }),
-            [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_NATIVE, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
-        );
-        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv444 };
+        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -9938,7 +9920,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-            native_vp9: false,
+           
             chroma: crate::vp9::Chroma::Yuv444,
         };
         Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
@@ -9976,7 +9958,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-            native_vp9: false,
+           
             chroma: crate::vp9::Chroma::Yuv444,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Refuse);
@@ -12614,7 +12596,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv420 };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -13210,7 +13192,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-            native_vp9: false,
+           
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let (frames, mut tab_rx) = mpsc::channel(8);
@@ -13252,7 +13234,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-            native_vp9: false,
+           
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let feed = || {

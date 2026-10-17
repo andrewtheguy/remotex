@@ -123,7 +123,6 @@ test.describe("the picker's options", () => {
         passthrough: null,
         placement: "right",
         pipeline: "adaptive-region",
-        vp9: "libvpx",
       },
     ]);
     const connected = seen.statuses.at(-1);

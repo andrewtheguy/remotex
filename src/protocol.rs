@@ -1819,7 +1819,6 @@ mod tests {
                     passthrough: Some(crate::config::Passthrough::AppleH264),
                     placement: crate::config::Placement::Right,
                     pipeline: crate::config::Pipeline::HighQuality,
-                    vp9: crate::config::Vp9Encoder::Libvpx,
                     whole: false,
                 }
             ),
@@ -2046,13 +2045,13 @@ mod tests {
             passthrough: None,
             camera: false,
             microphone: false,
-            render: "video q90 · libvpx · adaptive".to_owned(),
+            render: "video q90 · 4:2:0 · adaptive".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 · libvpx · adaptive"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 · 4:2:0 · adaptive"}"#
             ),
             None => panic!("connected must be a text frame"),
         }

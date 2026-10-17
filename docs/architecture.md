@@ -282,8 +282,8 @@ whose bitmap updates are encoded as VP9 in the gateway.
   socket carries no picture: the tab is painted from the picture the session's
   page composes, handed across the browser
   ([RDP's graphics pipeline](#rdps-graphics-pipeline)).
-- Size, sound, which of the Mac's streams is passed if any, how an RDP
-  host draws its pipeline and which encoder codes the VP9 are
+- Size, sound, which of the Mac's streams is passed if any and how an RDP
+  host draws its pipeline are
   chosen under the target at the picker and carried by `connect`; they are not
   config keys, and the gateway holds the session to them. An RDP host's pipeline
   is not chosen: a target with it on passes it in every session. The size a session will have is shown before Start: a size
@@ -719,7 +719,7 @@ itself. Which passed streams follow the browser's link, and how, is in
 
 The engines never see the config keys. They and the session's choices collapse
 to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `apple_h264`,
-`apple_standard`, `rdp_graphics`, `rdp_h264`, `native_vp9`, `chroma`) at the config boundary in
+`apple_standard`, `rdp_graphics`, `rdp_h264`, `chroma`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
@@ -812,8 +812,10 @@ always decodes in software, and a browser with no software VP9 at all, which is
 iOS and iPadOS, refuses it. So the chroma is the plan's (`RenderPlan::chroma`),
 for the session's life:
 
-- **4:2:0 wherever this gateway encodes the picture**, plain VNC and the RDP
-  bitmap path, for every browser. They are not prioritized, so their stream is
+- **4:2:0 for plain VNC and the RDP bitmap path**, the pictures this gateway
+  encodes, for every browser; a `wlshare` target's server that ignores the
+  listing is encoded here too, but at that target's chroma (below). They are
+  not prioritized, so their stream is
   the one that costs the least to code — a 1080p frame of a moving window in
   about 70% of 4:4:4's time, at well under half the bytes, measured in
   `screen-vp9` — and that every decoder takes, its hardware one included.
@@ -888,10 +890,8 @@ sends.
   `render_adaptive`, which holds the dial there rather than walking it on the
   browser's lag, and `WLSS` for a plan at 4:2:0, a browser's whose own decoder
   takes no profile 1. So the target's keys mean on a passed stream what they
-  mean on one coded here. A session started with the native VP9 encoder lists `WLSX`
-  too, which has wlshare code the stream with its **alpha** encoder
-  written in Rust in place of libvpx; nothing here reads the stream any
-  differently for it.
+  mean on one coded here. wlshare codes it with libvpx, as this gateway codes
+  its own.
   Pseudo-encodings rather than a client message because a server that is not
   wlshare ignores an encoding it does not know where a message it does not know
   ends the connection, and because they ride the list that names the encoding, so
@@ -1993,8 +1993,7 @@ instead of a reconnect.
 These things about a session are chosen by whoever starts it, before it starts:
 how the desktop is sized, whether the remote's sound is taken and as what,
 which of a Mac's own streams is passed through if any, where a second virtual display
-sits, how an RDP host draws its graphics pipeline, which encoder codes the VP9
-(alpha), and whether a Mac's
+sits, how an RDP host draws its graphics pipeline, and whether a Mac's
 passed HEVC is decoded by the page's
 own software decoder ([Decoded in the page](#decoded-in-the-page)), which is the
 gateway's to offer as well as the target's. Picking a target at the picker opens it,
@@ -2006,15 +2005,15 @@ session.
 Which options a target shows is its type's to say, from `TargetConfig::offers`,
 and `GET /api/targets` carries it:
 
-| Target | Window drives the size | Sound | Passthrough | Graphics | VP9 encoder |
-|---|---|---|---|---|---|
-| `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: high quality or adaptive H.264 | hidden |
-| `rdp` with `egfx = false` | no | shown | hidden | hidden | hidden: libvpx |
-| `vnc` | no | hidden | hidden | hidden | hidden: libvpx |
-| `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden | shown: wlshare's own |
-| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive or Full-quality picture, passed (beta) | hidden | hidden: the picture is never VP9 |
-| `vnc`, `ard` with `virtual_display` | yes | hidden | shown, as for `ard` | hidden | hidden: the picture is never VP9 |
-| `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden | hidden: the picture is never VP9 |
+| Target | Window drives the size | Sound | Passthrough | Graphics |
+|---|---|---|---|---|
+| `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: high quality or adaptive H.264 |
+| `rdp` with `egfx = false` | no | shown | hidden | hidden |
+| `vnc` | no | hidden | hidden | hidden |
+| `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden |
+| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive or Full-quality picture, passed (beta) | hidden |
+| `vnc`, `ard` with `virtual_display` | yes | hidden | shown, as for `ard` | hidden |
+| `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden |
 
 - **The size is shown before Start.** A desktop is sized one of three ways
   (`Sizing` in `src/config.rs`): kept at the target's size, which is its
@@ -2088,15 +2087,6 @@ and `GET /api/targets` carries it:
   host's network detection. An adaptive session also claims UDP and answers at
   the page's pace; a high quality one claims none and answers with what the
   gateway's connection measures ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
-- **The VP9 is coded by libvpx unless wlshare is asked for its native encoder.**
-  `choices.vp9` says `libvpx` or `native` (`Vp9Encoder` in `src/config.rs`):
-  the encoder in Rust, alpha, that `screen-vp9` has written, in wlshare for a
-  `wlshare` target's stream, which is asked for it as `WLSX`. The picker's VP9
-  encoder group shows libvpx, the default, and Native (alpha). The stream is
-  the same to the page either way, so two sessions of one target that differ in
-  it alone are the two encoders side by side. No other target offers it: what
-  this gateway encodes is libvpx's, and a `connect` that names it there is
-  refused. A `connect` that names none is coded by libvpx.
 - **The second display is placed once.** `choices.placement` says `right`,
   `left`, `top` or `bottom` (`Placement` in `src/config.rs`): where the second
   of two virtual displays sits against the first, so the remote's arrangement

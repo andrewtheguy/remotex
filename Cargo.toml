@@ -87,10 +87,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
 #
-# It is libvpx alone. Its ALPHA encoder written in Rust lives on its
-# `native-encoder` branch, as does wlshare's use of it: a session that chooses
-# that encoder asks wlshare for it (`WLSX`), on a `wlshare` target alone, and a
-# wlshare built from main refuses the ask and ends the connection.
+# It is libvpx alone, here and in wlshare.
 screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.26" }
 # Remote audio: resample redirected PCM and encode bare Opus packets, as wlshare
 # codes its own: sound-opus, the one crate that codes a desktop's sound as Opus

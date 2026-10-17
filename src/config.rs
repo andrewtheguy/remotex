@@ -220,10 +220,6 @@ pub struct RenderPlan {
     /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
     /// [`Self::rdp_graphics`].
     pub rdp_h264: bool,
-    /// ALPHA: wlshare codes the stream a `wlshare` target passes with
-    /// screen-vp9's encoder in Rust rather than libvpx ([`Vp9Encoder::Native`]),
-    /// chosen at the picker.
-    pub native_vp9: bool,
     /// How the VP9 samples colour, whichever end codes it. 4:2:0, VP9 profile 0,
     /// wherever this gateway encodes the picture — plain VNC and the RDP bitmap
     /// path, which are not prioritized, so their stream is the one cheapest to code
@@ -398,9 +394,6 @@ pub struct Offers {
     /// Whether how the host draws the graphics pipeline is a choice
     /// ([`Pipeline`]): on an RDP target with the pipeline on.
     pub pipeline: bool,
-    /// Whether which encoder codes the VP9 is a choice ([`Vp9Encoder`]): on a
-    /// `wlshare` target alone, whose own encoder codes it.
-    pub vp9: bool,
 }
 
 /// What whoever started a session chose under its target at the picker, carried by
@@ -438,10 +431,6 @@ pub struct Choices {
     /// other is drawn high quality.
     #[serde(default)]
     pub pipeline: Pipeline,
-    /// Which encoder codes the VP9: libvpx unless the alpha one in Rust is
-    /// chosen. Refused where the session's picture is passed rather than VP9.
-    #[serde(default)]
-    pub vp9: Vp9Encoder,
     /// Ask a High Performance Mac whose picture is passed, in either codec, for one tile, each
     /// picture the whole display, and not the four strips such a session is
     /// offered ([`crate::vnc_apple_media::Receive`]). No picker names it:
@@ -533,23 +522,6 @@ impl Pipeline {
     pub fn h264(self) -> bool {
         matches!(self, Self::AdaptiveDesktop | Self::AdaptiveRegion)
     }
-}
-
-/// Which encoder wlshare codes a session's VP9 with: [`Choices::vp9`], on a
-/// `wlshare` target ([`Offers::vp9`]), which asks for it by name (`WLSX`). What
-/// this gateway encodes itself is libvpx's.
-///
-/// The stream is the same to a decoder either way, the plan's chroma at the dial, so nothing
-/// else of a session changes with it: two sessions of one target that differ in it
-/// alone are the two encoders side by side.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Vp9Encoder {
-    /// libvpx.
-    #[default]
-    Libvpx,
-    /// ALPHA. The encoder `screen-vp9` has written in Rust, in wlshare.
-    Native,
 }
 
 /// Whether a session takes the remote's sound, and what that sound is sent to the
@@ -721,9 +693,8 @@ impl RenderPlan {
     /// The resolved plan rather than the config keys: what a target *does* is the
     /// plan its keys collapse to, defaults included, and a description built from
     /// the keys would restate the file while the encoder did something the reader
-    /// has to derive. The VP9's chroma is the target's and the browser's, and which
-    /// encoder codes it is the session's to choose ([`Self::native_vp9`]), so the card
-    /// says both.
+    /// has to derive. The VP9's chroma is the target's and the browser's, so the
+    /// card says it.
     pub fn describe(&self) -> String {
         if let Some(passthrough) = self.passthrough() {
             let h264 = if self.rdp_h264 { " with H.264" } else { "" };
@@ -732,10 +703,7 @@ impl RenderPlan {
         // The walk as a suffix: the quality named before it is a ceiling the link
         // may fall below.
         let adaptive = if self.adaptive { " · adaptive" } else { "" };
-        // The encoder beside the dial: the two do not draw the same picture at one
-        // quality, and nothing else a client sees says which a session was started with.
-        let encoder = if self.native_vp9 { "native VP9" } else { "libvpx" };
-        format!("video q{} · {} · {encoder}{adaptive}", self.quality, crate::stream::chroma_name(self.chroma))
+        format!("video q{} · {}{adaptive}", self.quality, crate::stream::chroma_name(self.chroma))
     }
 }
 
@@ -1108,7 +1076,6 @@ impl TargetConfig {
             apple_standard,
             rdp_graphics,
             rdp_h264,
-            native_vp9: choices.vp9 == Vp9Encoder::Native,
             chroma,
         }
     }
@@ -1137,17 +1104,15 @@ impl TargetConfig {
                 passthrough: if self.egfx() { &[Passthrough::RdpGraphics] } else { &[] },
                 placement: self.virtual_displays > 1,
                 pipeline: self.egfx(),
-                vp9: false,
             },
             // Read as any VNC server, which carries no sound and is shown at its
             // own size.
             (Protocol::Vnc, None) => {
-                Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false, vp9: false }
+                Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false }
             }
-            // Its VP9 is the subtype's picture and not a choice, and wlshare's own
-            // encoder is asked for which codes it.
+            // Its VP9 is the subtype's picture and not a choice.
             (Protocol::Vnc, Some(Subtype::Wlshare)) => {
-                Offers { resize: true, audio: true, passthrough: &[], placement: false, pipeline: false, vp9: true }
+                Offers { resize: true, audio: true, passthrough: &[], placement: false, pipeline: false }
             }
             // Standard mode shares the Mac's physical displays, whose resolution
             // this gateway does not change, and never touches its sound. Its
@@ -1159,7 +1124,6 @@ impl TargetConfig {
                     passthrough: &[Passthrough::AppleAdaptive, Passthrough::AppleFull],
                     placement: false,
                     pipeline: false,
-                    vp9: false,
                 }
             }
             // The sound comes with the picture, so it is not a choice, and the
@@ -1171,7 +1135,6 @@ impl TargetConfig {
                 passthrough: &[Passthrough::AppleMedia, Passthrough::AppleH264],
                 placement: false,
                 pipeline: false,
-                vp9: false,
             },
         }
     }
@@ -1202,10 +1165,6 @@ impl TargetConfig {
                 choices.placement != Placement::default() && !offers.placement,
             ),
             ("adaptive H.264", choices.pipeline != Pipeline::HighQuality && !offers.pipeline),
-            (
-                "the native VP9 encoder",
-                choices.vp9 != Vp9Encoder::Libvpx && !offers.vp9,
-            ),
         ];
         match refused.into_iter().find(|(_, refused)| *refused) {
             Some((choice, _)) => Err(NotOffered { target: self.name.clone(), choice }),
@@ -3302,7 +3261,7 @@ mod tests {
                 apple_standard: None,
                 rdp_graphics: false,
                 rdp_h264: false,
-                native_vp9: false,
+               
                 chroma: crate::vp9::Chroma::Yuv420,
             }
         );
@@ -3321,7 +3280,7 @@ mod tests {
                 apple_standard: None,
                 rdp_graphics: false,
                 rdp_h264: false,
-                native_vp9: false,
+               
                 chroma: crate::vp9::Chroma::Yuv420,
             }
         );
@@ -3342,16 +3301,13 @@ mod tests {
         let summary = |extra: &str| {
             parse_target(&format!("video_quality = 60\n{extra}")).unwrap().targets[0].render_summary()
         };
-        assert_eq!(summary(""), "video q60 · 4:2:0 · libvpx · adaptive");
-        assert_eq!(summary("render_adaptive = false"), "video q60 · 4:2:0 · libvpx");
+        assert_eq!(summary(""), "video q60 · 4:2:0 · adaptive");
+        assert_eq!(summary("render_adaptive = false"), "video q60 · 4:2:0");
         let describe = |keys: &str| {
             parse_target(keys).unwrap().targets[0].render_plan(Choices::default(), Decoders::ALL).describe()
         };
-        assert_eq!(describe("video_quality = 60"), "video q60 · 4:2:0 · libvpx · adaptive");
-        assert_eq!(describe("video_quality = 60\nrender_adaptive = false"), "video q60 · 4:2:0 · libvpx");
-        let plan = parse_target("video_quality = 60").unwrap().targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(RenderPlan { native_vp9: true, ..plan }.describe(), "video q60 · 4:2:0 · native VP9 · adaptive");
-        assert_eq!(RenderPlan { native_vp9: true, adaptive: false, ..plan }.describe(), "video q60 · 4:2:0 · native VP9");
+        assert_eq!(describe("video_quality = 60"), "video q60 · 4:2:0 · adaptive");
+        assert_eq!(describe("video_quality = 60\nrender_adaptive = false"), "video q60 · 4:2:0");
     }
 
     /// The VP9 is 4:2:0 wherever the gateway encodes the picture, for every browser,
@@ -3536,8 +3492,7 @@ mod tests {
                 audio: false,
                 passthrough: &[Passthrough::AppleAdaptive, Passthrough::AppleFull],
                 placement: false,
-                pipeline: false,
-                vp9: false
+                pipeline: false
             }
         );
 
@@ -3590,8 +3545,7 @@ mod tests {
                 audio: false,
                 passthrough: &[Passthrough::AppleAdaptive, Passthrough::AppleFull],
                 placement: false,
-                pipeline: false,
-                vp9: false
+                pipeline: false
             },
             "a display to resize, and no sound on Standard's virtual display either"
         );
@@ -3675,11 +3629,6 @@ mod tests {
         assert!(!plan.resumes(), "drawn against what the page holds");
         assert_eq!(plan.describe(), "the Mac's Adaptive picture, passed through");
         assert_eq!(Passthrough::AppleAdaptive.name(), "apple-adaptive");
-        assert_eq!(
-            standard.accepts(Choices { vp9: Vp9Encoder::Native, ..adaptive }),
-            Err(NotOffered { target: standard.name.clone(), choice: "the native VP9 encoder" }),
-            "there is no VP9 to encode"
-        );
 
         let full = Choices { passthrough: Some(Passthrough::AppleFull), ..Choices::default() };
         assert_eq!(standard.accepts(full), Ok(()));
@@ -3730,7 +3679,6 @@ mod tests {
             Err(NotOffered { target: "mac".to_owned(), choice: "a picture encoded here" }),
             "neither stream named"
         );
-        assert!(!hp.offers().vp9, "no VP9 to choose an encoder for");
         assert_eq!(hp.beyond(passed, takes), None);
         assert_eq!(hp.beyond(passed, declines), Some(Passthrough::AppleMedia));
 
@@ -4221,62 +4169,6 @@ vnc_password = \"x\"")).unwrap();
         assert!(!config.targets[2].camera, "the camera is opt-in");
     }
 
-    /// The alpha VP9 encoder is chosen at the picker, libvpx unless chosen, and
-    /// is wlshare's: offered on a `wlshare` target alone, refused on every other,
-    /// and the key it once was is no key.
-    #[test]
-    fn the_alpha_vp9_encoder_is_chosen_at_the_picker() {
-        let parse = |target: &str| {
-            ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
-                .and_then(|file| file.resolve())
-        };
-        let native = Choices { vp9: Vp9Encoder::Native, ..Choices::default() };
-        let refused = |name: &str| Err(NotOffered { target: name.to_owned(), choice: "the native VP9 encoder" });
-
-        let wlshare = parse("name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"").unwrap();
-        let wlshare = &wlshare.targets[0];
-        assert!(wlshare.offers().vp9, "wlshare's own encoder, in any build");
-        assert_eq!(wlshare.accepts(native), Ok(()));
-        assert!(wlshare.render_plan(native, Decoders::ALL).native_vp9);
-        assert!(!wlshare.render_plan(Choices::default(), Decoders::ALL).native_vp9, "libvpx unless chosen");
-
-        let plain = parse("name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"").unwrap();
-        let bitmap = parse(
-            "name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"\negfx = false",
-        )
-        .unwrap();
-        for target in [&plain.targets[0], &bitmap.targets[0]] {
-            assert!(!target.offers().vp9, "{} codes its VP9 here, with libvpx", target.name);
-            assert_eq!(target.accepts(native), refused(&target.name));
-        }
-
-        // An RDP host's pipeline passes in every session, so no VP9 is chosen for it.
-        let pipeline =
-            parse("name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"").unwrap();
-        assert!(!pipeline.targets[0].offers().vp9);
-        assert_eq!(pipeline.targets[0].accepts(native), refused("win"));
-
-        // A Mac's passed picture is no VP9 either.
-        let hp = parse(
-            "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\nhost = \"10.0.0.9\"\nusername = \"u\"\npassword = \"p\"",
-        )
-        .unwrap();
-        let hp = &hp.targets[0];
-        assert!(!hp.offers().vp9);
-        assert_eq!(
-            hp.accepts(Choices { passthrough: Some(Passthrough::AppleMedia), ..native }),
-            refused("mac"),
-            "a passed picture"
-        );
-
-        let rendered = format!(
-            "{:#}",
-            parse("name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"\nexperimental_native_vp9 = true")
-                .unwrap_err()
-        );
-        assert!(rendered.contains("experimental_native_vp9"), "{rendered}");
-    }
-
     /// The microphone rides MS-RDPEAI on RDP and wlshare's microphone extension on a
     /// `wlshare` target, and is refused on both Apple subtypes and on a plain `vnc`
     /// target. On either it stands on its own: a remote records with or without
@@ -4395,7 +4287,7 @@ vnc_password = \"x\"")).unwrap();
         let win = rdp("");
         assert_eq!(
             win.offers(),
-            Offers { resize: true, audio: true, passthrough: &[Passthrough::RdpGraphics], placement: false, pipeline: true, vp9: false }
+            Offers { resize: true, audio: true, passthrough: &[Passthrough::RdpGraphics], placement: false, pipeline: true }
         );
         let composes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false, vp9_444: true };
         let plan = win.render_plan(passed, composes);
@@ -4427,7 +4319,7 @@ vnc_password = \"x\"")).unwrap();
         assert!(!win.render_plan(unasked, decodes).rdp_h264, "high quality unless chosen");
 
         let bitmap = rdp("egfx = false");
-        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false, vp9: false });
+        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false });
         assert_eq!(
             bitmap.accepts(passed),
             Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })
@@ -4605,8 +4497,8 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv420 });
-        assert_eq!(plan.describe(), "video q80 · 4:2:0 · libvpx · adaptive");
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 });
+        assert_eq!(plan.describe(), "video q80 · 4:2:0 · adaptive");
     }
 
     /// A target that turned the walk off stays exactly on its dial: the
@@ -4617,8 +4509,8 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv420 });
-        assert_eq!(plan.describe(), "video q80 · 4:2:0 · libvpx");
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 });
+        assert_eq!(plan.describe(), "video q80 · 4:2:0");
     }
 
     /// The floor key is gone: a settle sharpens a quiet desktop at the dial, which

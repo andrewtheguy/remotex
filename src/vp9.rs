@@ -74,8 +74,7 @@ impl Stream {
     /// A stream over a mirror of a `size` desktop, at `quality` (1–100) and `chroma`.
     ///
     /// The refusal of a picture too large is [`check_picture`]'s. The encoder is
-    /// libvpx: screen-vp9's in Rust is wlshare's alone
-    /// ([`crate::config::Vp9Encoder::Native`]).
+    /// libvpx, as wlshare's is.
     pub fn new(size: (u16, u16), quality: u8, chroma: Chroma) -> anyhow::Result<Self> {
         check_picture(size)?;
         // Every core but one for the one stream, which has nothing to overlap with. See
