@@ -767,12 +767,17 @@ RDP host's bitmap updates.
   means and headers are still 34 KiB at 1. What the link carries is read from the
   paint acks (`PaintWindow::carries`): what the browser painted from a rectangle's
   sending to its painting, over that time less the shortest round trip, the
-  distance, counted only where it spans 16 KiB (`CARRY_BYTES`), since a smaller
-  one's time is an animation frame on any link, and a slow link's paint window
-  holds no more than 32 KiB in flight, so a larger floor never measured one; the
-  most of the last 10 s, or the latest before that. A link not yet seen to carry
-  anything is a slow one for a round past 32 KiB, which goes at 20, so a session's
-  first picture comes coarse and settles. A coarse tile is lossy like any
+  distance, but never less than half of it, since an attachment's first rectangles
+  wait behind its repaint and their shortest trip is the queue's; counted only
+  where it spans 16 KiB (`CARRY_BYTES`), since a smaller one's time is an
+  animation frame on any link, and a slow link's paint window holds no more than
+  32 KiB in flight, so a larger floor never measured one; the most of the last
+  10 s, or the latest before that. Every measure is of one attachment's link: a
+  browser that attaches, a reload among them, starts unmeasured
+  (`PaintWindow::attach`, keyed by the session's `LinkFeedback::attachment`), and
+  a rectangle sent to the one before gives its room back and measures nothing. A
+  link not yet seen to carry anything is a slow one for a round past 32 KiB, which
+  goes at 20, so a session's first picture comes coarse and settles. A coarse tile is lossy like any
   JPEG tile, and the next bullet makes it exact once it is still; a refresh is never
   coarse, so coarse is only ever the first picture of a change.
 - **A still JPEG tile is sent again exactly.** Every 50 ms (`SETTLE_TICK`) the order

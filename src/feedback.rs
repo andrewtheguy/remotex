@@ -75,6 +75,9 @@ pub struct LinkFeedback {
     /// Microseconds since [`epoch`] (offset by one) when the last passed frame
     /// was handed to the browser's queue. `0` before any was.
     handed_us: AtomicU64,
+    /// Bumped by every [`Self::reset`]: which attachment's link a measure is of, for
+    /// a measurer that keeps its own ([`Self::attachment`]).
+    attachment: AtomicU64,
 }
 
 impl LinkFeedback {
@@ -83,7 +86,15 @@ impl LinkFeedback {
             oldest_sent_us: AtomicU64::new(0),
             baseline_ms: AtomicU32::new(BASELINE_UNKNOWN),
             handed_us: AtomicU64::new(0),
+            attachment: AtomicU64::new(0),
         }
+    }
+
+    /// Which attachment the link is now: it changes with every [`Self::reset`], so a
+    /// measurer that keeps its own measures of the link, as the paint window does,
+    /// knows to forget them.
+    pub fn attachment(&self) -> u64 {
+        self.attachment.load(Ordering::Relaxed)
     }
 
     /// How long the oldest owed batch has waited *beyond* the link's own floor.
@@ -163,6 +174,7 @@ impl LinkFeedback {
         self.oldest_sent_us.store(0, Ordering::Relaxed);
         self.baseline_ms.store(BASELINE_UNKNOWN, Ordering::Relaxed);
         self.handed_us.store(0, Ordering::Relaxed);
+        self.attachment.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -226,10 +238,12 @@ mod tests {
         feedback.owed_since(None);
         assert_eq!(feedback.lag(later), Duration::ZERO);
 
-        // A new attachment starts unmeasured.
+        // A new attachment starts unmeasured, and says it is a new one.
+        let attachment = feedback.attachment();
         feedback.owed_since(Some(sent));
         feedback.reset();
         assert_eq!(feedback.lag(later), Duration::ZERO);
+        assert_ne!(feedback.attachment(), attachment);
     }
 
     /// The hold is the queue ahead of the frame handed over: the lag, once the

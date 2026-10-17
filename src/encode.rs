@@ -166,11 +166,11 @@ struct Video {
 
 /// How many bytes of a picture's rectangles may be sent and not yet painted by the
 /// browser: [`AHEAD_GAIN`] times what it paints in the shortest round trip of the
-/// session, at the fastest rate it painted them within [`RATE_SPAN`], and never fewer
+/// attachment, at the fastest rate it painted them within [`RATE_SPAN`], and never fewer
 /// than [`AHEAD`] or more than [`AHEAD_MOST`]. A rectangle larger than the bound waits
 /// for every one before it and holds the next until it is painted itself.
 ///
-/// The shortest round trip is the session's, of a rectangle no larger than
+/// The shortest round trip is the attachment's, of a rectangle no larger than
 /// [`TRIP_BYTES`], not a recent one's: under motion a slow link's queue never
 /// empties, and a recent shortest would come to the queue's own length and double the
 /// bound at each, the lag the floor keeps out. One that only falls can at worst hold
@@ -182,9 +182,14 @@ struct Video {
 /// from its sending, so the rectangles of a batch painted together do not each read as
 /// all of it painted in the trip of the last.
 ///
+/// Every measure is of one attachment's link ([`Self::attach`]): a browser that
+/// attaches, as a reload does, starts unmeasured, whatever the last one's link was.
+///
 /// Pure state with the clock passed in.
 #[derive(Debug, Default)]
 struct PaintWindow {
+    /// The attachment its measures are of: [`LinkFeedback::attachment`].
+    attachment: u64,
     /// Bytes of the bound taken by rectangles sent and not yet painted.
     ahead: u64,
     /// Bytes painted so far, which a rectangle's sample counts from.
@@ -209,6 +214,9 @@ struct PaintTicket {
     taken: u64,
     /// Its own size.
     bytes: u64,
+    /// The attachment it was sent to: one sent to an earlier one gives its room back
+    /// and measures nothing.
+    attachment: u64,
     passed: Instant,
     /// [`PaintWindow::painted`] when it was sent, and when that was painted: its
     /// sending, where nothing had been.
@@ -216,6 +224,15 @@ struct PaintTicket {
 }
 
 impl PaintWindow {
+    /// The link is `attachment`'s from here: where it was another's, everything
+    /// measured of that one is forgotten, and only the room its rectangles still
+    /// hold is kept, for their paintings to give back.
+    fn attach(&mut self, attachment: u64) {
+        if attachment != self.attachment {
+            *self = Self { attachment, ahead: self.ahead, ..Self::default() };
+        }
+    }
+
     /// The bound at `now`.
     fn bound(&mut self, now: Instant) -> u64 {
         while self.rates.front().is_some_and(|(at, _)| now.duration_since(*at) > RATE_SPAN) {
@@ -240,8 +257,9 @@ impl PaintWindow {
     /// seen at all.
     ///
     /// A sample is what the browser painted from a rectangle's sending to its
-    /// painting, over that time less the shortest round trip, the distance, which
-    /// is close to what the link carried once it spans [`CARRY_BYTES`].
+    /// painting, over that time less the shortest round trip, the distance, but never
+    /// less than half of it, which is close to what the link carried once it spans
+    /// [`CARRY_BYTES`].
     fn carries(&mut self, now: Instant) -> Option<f64> {
         while self.carried.front().is_some_and(|(at, _)| now.duration_since(*at) > CARRY_SPAN) {
             self.carried.pop_front();
@@ -278,12 +296,16 @@ impl PaintWindow {
 
     fn ticket(&mut self, taken: u64, bytes: u64, now: Instant) -> PaintTicket {
         self.ahead += taken;
-        PaintTicket { taken, bytes, passed: now, painted_before: (self.painted, self.painted_at.unwrap_or(now)) }
+        PaintTicket { taken, bytes, attachment: self.attachment, passed: now, painted_before: (self.painted, self.painted_at.unwrap_or(now)) }
     }
 
     /// The rectangle `ticket` was given for is painted.
     fn painted(&mut self, ticket: PaintTicket, now: Instant) {
         self.ahead -= ticket.taken;
+        if ticket.attachment != self.attachment {
+            // Painted, or let go with its socket, by a browser that is gone.
+            return;
+        }
         self.painted += ticket.bytes;
         self.painted_at = Some(now);
         let trip = now.duration_since(ticket.passed).max(Duration::from_millis(1));
@@ -295,7 +317,10 @@ impl PaintWindow {
         }
         let carried = self.painted - before;
         if carried >= CARRY_BYTES {
-            let distance = self.shortest.unwrap_or_default();
+            // At most half the trip: a shortest trip measured behind a queue, as an
+            // attachment's first rectangles are, would otherwise leave next to no
+            // time and read any link as a fast one.
+            let distance = self.shortest.unwrap_or_default().min(trip / 2);
             let rate = carried as f64 / trip.saturating_sub(distance).max(Duration::from_millis(1)).as_secs_f64();
             self.carried.push_back((now, rate));
             self.last_carried = Some(rate);
@@ -303,41 +328,60 @@ impl PaintWindow {
     }
 }
 
-/// A [`PaintWindow`] the sink waits on and a painting gives room back to.
-#[derive(Debug, Default)]
+/// A [`PaintWindow`] the sink waits on and a painting gives room back to, of the
+/// attachment `link` says the link is now.
+#[derive(Debug)]
 struct PaintAhead {
     window: Mutex<PaintWindow>,
     room: Notify,
+    link: Arc<LinkFeedback>,
 }
 
 impl PaintAhead {
+    fn new(link: Arc<LinkFeedback>) -> Self {
+        Self { window: Mutex::default(), room: Notify::new(), link }
+    }
+
+    /// The window, of the attachment the link is now.
+    fn window(&self) -> std::sync::MutexGuard<'_, PaintWindow> {
+        let mut window = self.window.lock().unwrap();
+        window.attach(self.link.attachment());
+        window
+    }
+
     async fn acquire(&self, bytes: u64) -> PaintTicket {
         loop {
             // Enabled before the look, so a painting between the two is not missed.
             let room = self.room.notified();
             tokio::pin!(room);
             room.as_mut().enable();
-            if let Some(ticket) = self.window.lock().unwrap().take(bytes, Instant::now()) {
+            if let Some(ticket) = self.window().take(bytes, Instant::now()) {
                 return ticket;
             }
             room.await;
         }
     }
 
+    /// A ticket for a rectangle of a round already taken: see
+    /// [`PaintWindow::take_over`].
+    fn take_over(&self, bytes: u64) -> PaintTicket {
+        self.window().take_over(bytes, Instant::now())
+    }
+
     /// The room for a round of tiles now: see [`PaintWindow::room`].
     fn room(&self) -> Option<u64> {
-        self.window.lock().unwrap().room(Instant::now())
+        self.window().room(Instant::now())
     }
 
     /// The level a round of changed tiles of `bytes` at each level goes at now: see
     /// [`PaintWindow::level`].
     fn level(&self, bytes: [u64; LEVELS]) -> usize {
-        self.window.lock().unwrap().level(bytes, Instant::now())
+        self.window().level(bytes, Instant::now())
     }
 
     /// Never waits: a [`Painted`] runs it wherever it is dropped.
     fn release(&self, ticket: PaintTicket) {
-        self.window.lock().unwrap().painted(ticket, Instant::now());
+        self.window().painted(ticket, Instant::now());
         self.room.notify_waiters();
     }
 }
@@ -479,7 +523,7 @@ impl Shared {
             pass_announced: Mutex::default(),
             uncover_owed: AtomicBool::new(false),
             restart_owed: AtomicBool::new(false),
-            feedback,
+            feedback: Arc::clone(&feedback),
             chroma,
             units: AtomicU64::new(0),
             passed_bytes: AtomicU64::new(0),
@@ -498,7 +542,7 @@ impl Shared {
             waited_micros: AtomicU64::new(0),
             stalled_micros: AtomicU64::new(0),
             budget: Arc::new(Semaphore::new(QUEUE_BUDGET as usize)),
-            ahead: Arc::new(PaintAhead::default()),
+            ahead: Arc::new(PaintAhead::new(feedback)),
             round_bytes: AtomicU64::new(0),
         }
     }
@@ -1190,7 +1234,7 @@ async fn send_round(
         };
         count.fetch_add(1, Ordering::Relaxed);
         total.fetch_add(len as u64, Ordering::Relaxed);
-        let ticket = shared.ahead.window.lock().unwrap().take_over(len as u64, Instant::now());
+        let ticket = shared.ahead.take_over(len as u64);
         let (ahead, wake) = (Arc::clone(&shared.ahead), Arc::clone(&shared.round_returned));
         // A painting that brings the window back under its bound is what lets the
         // next round be taken, so it wakes the engine too.
@@ -1628,6 +1672,43 @@ mod tests {
         assert_eq!(window.level(screen, at(815)), 3);
     }
 
+    /// A browser that attaches starts unmeasured, whatever the last one's link was: a
+    /// LAN's measures are forgotten, and a rectangle sent to the last one gives its
+    /// room back when it is let go and measures nothing of the new one.
+    #[test]
+    fn a_new_attachment_forgets_the_last_ones_link() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let screen = [2_000_000, 400_000, 240_000, 166_000];
+        let mut window = PaintWindow::default();
+        let ticket = window.take(300, at(0)).unwrap();
+        window.painted(ticket, at(5));
+        let ticket = window.take_over(256 * 1024, at(10));
+        window.painted(ticket, at(26));
+        assert_eq!(window.level(screen, at(26)), 0, "a LAN");
+        let gone = window.take_over(512 * 1024, at(30));
+
+        window.attach(1);
+        assert!(window.carries(at(40)).is_none() && window.shortest.is_none(), "the LAN's measures outlived it");
+        assert_eq!(window.level(screen, at(40)), 1, "a reattached browser went at the last one's link");
+        window.painted(gone, at(41));
+        assert_eq!(window.ahead, 0, "a rectangle of the last attachment kept its room");
+        assert!(window.carries(at(41)).is_none(), "a rectangle of the last attachment measured the new one");
+        window.attach(1);
+        assert_eq!(window.attachment, 1);
+
+        // The new attachment's first rectangle waits behind the repaint the old one
+        // was owed, 450 ms on its 1 Mbit/s link, and is its shortest trip: a sample of
+        // as long reads the link at twice what it painted in it, not as a LAN.
+        let first = window.take(300, at(100)).unwrap();
+        let queued = window.take(24 * 1024, at(100)).unwrap();
+        window.painted(first, at(550));
+        window.painted(queued, at(550));
+        let carried = window.carries(at(550)).expect("measured");
+        assert!(carried < 2.0 * (24 * 1024 + 300) as f64 / 0.45 + 1.0, "{carried}");
+        assert_eq!(window.level(screen, at(550)), 3, "a queued start read a slow link as a fast one");
+    }
+
     /// A 300 kbit/s link kept full for a minute: its queue never empties, every
     /// trip after the first is the queue's length, and the bound stays at its
     /// floor throughout.
@@ -1997,6 +2078,24 @@ mod tests {
         let first = round(&sink, &mut frame_rx, whole, &flat).await;
         assert!(first.iter().all(|unit| unit.format == Format::Png));
         assert_eq!(sink.shared.coarse.load(Ordering::Relaxed), 0);
+    }
+
+    /// A reattach, which resets the session's link feedback, takes the sink's paint
+    /// window back to unmeasured: a whole picture on a link measured fast comes exact,
+    /// and after a reattach comes coarse again, until the new link has been seen.
+    #[tokio::test]
+    async fn a_reattached_browser_is_not_taken_at_the_last_ones_link() {
+        let (sink, mut frame_rx) = video_sink(256, 128).await;
+        on_a_fast_link(&sink);
+        let whole = rect(0, 0, 256, 128);
+        let first = round(&sink, &mut frame_rx, whole, &noise(256, 128, 5)).await;
+        assert_eq!(sink.shared.coarse.load(Ordering::Relaxed), 0, "a fast link's picture went coarse");
+        drop(first);
+
+        sink.shared.feedback.reset();
+        let again = round(&sink, &mut frame_rx, whole, &noise(256, 128, 6)).await;
+        assert!(again.iter().all(|unit| unit.format == Format::Jpeg));
+        assert_eq!(sink.shared.coarse.load(Ordering::Relaxed), 1, "a reattached browser went at the last one's link");
     }
 
     /// The wake-up contract both engines rely on now that a round is coded on a
