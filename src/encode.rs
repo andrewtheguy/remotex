@@ -619,6 +619,11 @@ impl VideoSink {
         *self.shared.counted.lock().unwrap() = pixels;
     }
 
+    /// What [`Self::counts`] last said, which the next `Resize` is held by.
+    pub fn counted(&self) -> Option<u64> {
+        *self.shared.counted.lock().unwrap()
+    }
+
     /// Whether the desktop's picture is held ([`Oversize::Hold`]): past the picture
     /// ceiling. Then [`Self::damage`] and [`Self::frame`] do nothing, and a frame the
     /// remote coded itself is not to be passed either. Changes only with a `Resize`

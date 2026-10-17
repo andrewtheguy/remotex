@@ -572,7 +572,9 @@ A session of one screen at a time that names neither is refused, since nothing o
 it is coded here: do not add tiles of it, for a screen or a link. It is one
 picture on one screen and on the virtual display alike. Such a session starts on
 the main screen, asked for over the combined view the Mac opens on, which is
-never shown, and its display menu lists the screens alone: Combined Display is a
+never shown: until the main screen's layout, the session's first repaint and
+its armed region are of one pixel, and the screen is asked for whole once it is
+the Mac's. Its display menu lists the screens alone: Combined Display is a
 session of its own ([A Standard Mac's Combined Display](#a-standard-macs-combined-display)),
 never switched to or from mid-session.
 
@@ -650,11 +652,15 @@ the Mac's pictures, as it passes neither.
   [the tiles](#the-tiles) at `video_quality`, unchanged: paced by the page's
   painting, coarse first on a slow link, made exact once still. The session
   resumes for a browser that comes back, the `mosaic` resent ahead of its resize.
-- **Kept on every screen.** A layout of one screen is answered with the
-  combined view again, and the display menu offers no screen.
+- **Kept on every screen.** A layout of one screen, which a login or a lock at
+  the Mac makes, is answered with the combined view again and not shown: the
+  browser keeps every screen meanwhile. The display menu offers no screen.
 - **Counted by its screens.** The ceiling counts the sum of the pixels the page
   is sent of each screen, against its area
-  ([A desktop past the ceiling](#a-desktop-past-the-ceiling)).
+  ([A desktop past the ceiling](#a-desktop-past-the-ceiling)), and until the
+  first layout by the framebuffer's. A layout counted otherwise decides the hold
+  again, by a resize of the same framebuffer where it stayed the same, with the
+  picture asked for whole.
 
 #### RDP's graphics pipeline
 

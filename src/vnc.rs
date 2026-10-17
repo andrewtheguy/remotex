@@ -745,6 +745,16 @@ struct DesktopState {
     /// is, while `size` stays the Mac's framebuffer that rectangles and requests
     /// are addressed in. `None` wherever the framebuffer is the browser's desktop.
     composed: Option<Composition>,
+    /// What the picture ceiling counted the last `Resize` by
+    /// ([`VideoSink::counts`]): a layout that counts it otherwise is a resize of
+    /// its own, even of a framebuffer that stayed the same, since the hold is
+    /// decided only at one.
+    counted: Option<u64>,
+    /// A Standard session of one screen at a time has had no layout yet, and the
+    /// Mac may still be on the combined view it opens on, which the session is
+    /// not shown: its first repaint is asked for a pixel, and the whole of it once
+    /// the screen it shows is known.
+    opening: bool,
     /// The browser has been told the screen is not available
     /// ([`ServerMsg::ScreenUnavailable`]) and waits for the stream's first picture
     /// of the display. Raised at connect, by every display change, by a stream
@@ -1295,9 +1305,10 @@ impl DesktopState {
     }
 
     /// The region a pixel request asks for: the framebuffer, or
-    /// [`HP_HOLD_REQUEST`] while [`Self::holds_region`].
+    /// [`HP_HOLD_REQUEST`] while [`Self::holds_region`] and while a Standard session
+    /// is [opening](Self::opening).
     fn poll_size(&self) -> (u16, u16) {
-        if self.holds_region() { HP_HOLD_REQUEST } else { self.framebuffer() }
+        if self.holds_region() || self.opening { HP_HOLD_REQUEST } else { self.framebuffer() }
     }
 
     /// Whether the media stream may be offered for the current display: one
@@ -3113,6 +3124,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         standard,
         combined: plan.apple_combined,
         composed: None,
+        counted: sink.counted(),
+        opening: standard.is_some() && !plan.apple_combined && !virtual_display,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
@@ -3178,8 +3191,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
 
     // Kick off the update cycle with one full (non-incremental) request. On the
     // 003.889 wire this is also the second half of the arming pair the preface
-    // began, which is why it is unconditional.
-    send(&uplink, &update_request(false, size)).await?;
+    // began, which is why it is unconditional; for a session still opening, of a
+    // pixel ([`DesktopState::opening`]).
+    let first = if desktop.lock().unwrap().opening { HP_HOLD_REQUEST } else { size };
+    send(&uplink, &update_request(false, first)).await?;
     // The input side's own handle on what the two loops share, for what a
     // display's tab and the picker's choice need of it.
     let shared_here = shared.clone();
@@ -6461,13 +6476,15 @@ async fn resize_desktop(
     );
     let (was, resize_msg) = {
         let mut d = desktop.lock().unwrap();
-        if d.size == new && d.scale == scale && d.composed == composed {
+        let counted = sink.counted();
+        if d.size == new && d.scale == scale && d.composed == composed && d.counted == counted {
             return Ok(false);
         }
         let was = (d.size, d.scale);
         d.size = new;
         d.scale = scale;
         d.composed = composed;
+        d.counted = counted;
         (was, d.resize_msg())
     };
     // The old pixels describe a framebuffer that no longer exists, and the
@@ -6776,14 +6793,24 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         return Ok(false);
     }
 
-    // A session of one screen at a time is not shown the combined view the Mac
-    // opens on: the main screen is asked for at once, and its layout is the
-    // session's first.
-    if !virtual_display && !desktop.lock().unwrap().combined && layout.current.is_none() && layout.displays.len() > 1 {
-        let main = layout.displays.iter().find(|display| display.info.main).unwrap_or(&layout.displays[0]);
-        let pick = Some(main.info.id);
-        debug!("vnc: asking the Mac for display {pick:?}, the main one, over the combined view it opened on");
-        let host_density = desktop.lock().unwrap().host_density;
+    // A layout of a view the session does not show is not presented, and the
+    // view it shows is asked for again, whose layout comes next. A session of one
+    // screen at a time is not shown the combined view the Mac opens on, and is
+    // given the main screen; Combined Display stays on every screen, and a layout
+    // of one, which a login or a lock at the Mac makes, is answered with the
+    // combined view again rather than collapsing the browser's desktop to it.
+    let (combined, host_density) = {
+        let d = desktop.lock().unwrap();
+        (d.combined, d.host_density)
+    };
+    if !virtual_display && layout.displays.len() > 1 && combined == layout.current.is_some() {
+        let pick = if combined {
+            None
+        } else {
+            let main = layout.displays.iter().find(|display| display.info.main).unwrap_or(&layout.displays[0]);
+            Some(main.info.id)
+        };
+        debug!("vnc: asking the Mac for display {pick:?}, the view this session shows, over {:?}", layout.current);
         let mut out = uplink.lock().await;
         let scaling = {
             let mut state = display.lock().unwrap();
@@ -6796,19 +6823,22 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             out.send(&vnc_apple::set_server_scaling(scale)).await?;
         }
         // The repaint queued behind the switch, as a display chosen from the menu
-        // asks for it: see the input loop's `SelectDisplay`.
-        let size = desktop.lock().unwrap().size;
-        out.send(&update_request(false, size)).await?;
+        // asks for it: see the input loop's `SelectDisplay`. A session still
+        // opening asks for it at the answering layout instead.
+        let (size, opening) = {
+            let d = desktop.lock().unwrap();
+            (d.size, d.opening)
+        };
+        if !opening {
+            out.send(&update_request(false, size)).await?;
+        }
         drop(out);
         rearm_after_layout(uplink, desktop, false).await?;
         return Ok(false);
     }
 
     let composed = present(shared, &layout, virtual_display, sink).await?;
-    let (combined, host_density) = {
-        let d = desktop.lock().unwrap();
-        (d.combined, d.host_density)
-    };
+    let was = desktop.lock().unwrap().size;
     // A session that asked for two virtual displays is sent a framebuffer spanning
     // both, and shows one of them: the desktop is that display, not the span.
     let virtuals = hp_virtuals(desktop, &layout, virtual_display);
@@ -6885,10 +6915,13 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // view of all of them — which is what a session starts on, and which
     // [`DisplayState::COMBINED`] is the client-facing name for.
     //
-    // Combined Display stays on every screen: a layout of one is answered with the
-    // combined view again.
-    let switch: Option<Option<u32>> =
-        (combined && !virtual_display && layout.displays.len() > 1 && layout.current.is_some()).then_some(None);
+    // The whole picture is asked for where nothing else asks for it: by a session
+    // whose first repaint was of a pixel, and after a resize the Mac made no
+    // repaint for, of a framebuffer that stayed the same and was counted again.
+    let repaint = {
+        let mut d = desktop.lock().unwrap();
+        std::mem::take(&mut d.opening) || (resized && d.size == was && !virtual_display)
+    };
     // Held from the decision to the send, as every scale request is, so the Mac
     // receives them in the order they were decided in.
     let mut out = uplink.lock().await;
@@ -6912,9 +6945,6 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         // switching to.
         let server_scaling = if virtual_display {
             None
-        } else if let Some(pick) = switch {
-            state.apple_layout = Some(layout.clone());
-            state.request_apple_scale(pick, host_density)
         } else {
             state.accept_apple_layout(&layout, host_density)
         };
@@ -6937,17 +6967,11 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             (changed.then(|| state.displays_msg()).flatten(), server_scaling)
         }
     };
-    if let Some(pick) = switch {
-        debug!("vnc: asking the Mac for display {pick:?}, the view this session shows");
-        out.send(&vnc_apple::set_display_message(pick)).await?;
-    }
     if let Some(scale) = server_scaling {
         debug!("vnc: asking the Mac for {scale}x server scaling");
         out.send(&vnc_apple::set_server_scaling(scale)).await?;
     }
-    if switch.is_some() {
-        // The repaint queued behind the switch, as a display chosen from the menu
-        // asks for it: see the input loop's `SelectDisplay`.
+    if repaint {
         let size = desktop.lock().unwrap().size;
         out.send(&update_request(false, size)).await?;
     }
@@ -7002,7 +7026,7 @@ async fn present(
     // browser holds it until then rather than laying it over the old pixels.
     let resize = {
         let d = desktop.lock().unwrap();
-        d.size != layout.backing || d.scale != layout.scale() || d.composed != composed
+        d.size != layout.backing || d.scale != layout.scale() || d.composed != composed || d.counted != counted
     };
     let mosaic_msg = {
         let mut state = display.lock().unwrap();
@@ -10091,6 +10115,8 @@ mod tests {
             standard: None,
             combined: false,
             composed: None,
+            counted: None,
+            opening: false,
         }))
     }
 
@@ -13585,13 +13611,16 @@ mod tests {
     }
 
     /// A session of one screen at a time starts on the main one: a layout of the
-    /// combined view, which is what the Mac opens on, asks for it with the repaint
-    /// behind, and the menu lists the screens alone.
+    /// combined view, which is what the Mac opens on, asks for it and holds the
+    /// Mac to a pixel of the combined view meanwhile, the answering layout asks
+    /// for the screen whole, and the menu lists the screens alone.
     #[tokio::test]
     async fn a_session_of_one_screen_asks_for_the_main_one() {
         let (uplink, sent) = test_uplink();
         let (sink, mut rx) = test_sink();
-        let shared = test_shared(uplink, shared_desktop((1600, 1000), None, None), test_shadow((1600, 1000)));
+        let desktop = shared_desktop((3520, 1080), None, None);
+        desktop.lock().unwrap().opening = true;
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((3520, 1080)));
         let screens: [TestScreen; 2] = [(22, (1600, 1000), (1600, 1000), 0x00), (11, (1920, 1080), (1920, 1080), 0x01)];
         let resized = read_display_layout(&mut layout_payload(None, &screens).as_slice(), &shared, false, &sink)
             .await
@@ -13600,11 +13629,15 @@ mod tests {
         sink.flush().await;
         assert!(rx.try_recv().is_err(), "nothing said of the combined view");
         let mut expected = vnc_apple::set_display_message(Some(11));
-        expected.extend_from_slice(&update_request(false, (1600, 1000)));
-        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_STANDARD_US, (1600, 1000)));
-        assert_eq!(written(&sent), expected);
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_STANDARD_US, HP_HOLD_REQUEST));
+        assert_eq!(written(&sent), expected, "no pixel of the combined view past one");
 
+        let before = written(&sent).len();
         read_display_layout(&mut layout_payload(Some(11), &screens).as_slice(), &shared, false, &sink).await.unwrap();
+        let mut expected = update_request(false, (1920, 1080)).to_vec();
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_STANDARD_US, (1920, 1080)));
+        assert_eq!(written(&sent)[before..], expected, "the screen it shows, whole");
+        assert!(!desktop.lock().unwrap().opening);
         sink.flush().await;
         let listed = std::iter::from_fn(|| rx.try_recv().ok())
             .find_map(|msg| match msg {
@@ -13653,9 +13686,60 @@ mod tests {
         );
         assert_eq!(written(&sent)[before..], update_request(false, (4160, 1800)));
 
+        // A screen the Mac sends alone, as at a login, is not shown: the browser
+        // keeps every screen until the Mac answers with them again.
         let before = written(&sent).len();
-        read_display_layout(&mut layout_payload(Some(22), &screens).as_slice(), &shared, false, &sink).await.unwrap();
+        let resized = read_display_layout(&mut layout_payload(Some(22), &screens).as_slice(), &shared, false, &sink)
+            .await
+            .unwrap();
+        assert!(!resized);
+        sink.flush().await;
+        assert!(rx.try_recv().is_err(), "nothing said of the one screen");
+        assert_eq!(desktop.lock().unwrap().size, (4160, 1800));
         assert!(written(&sent)[before..].starts_with(&vnc_apple::set_display_message(None)));
+    }
+
+    /// Combined Display over screens of one density is counted by their pixels, not
+    /// by the framebuffer spanning them, which the session was counted by at
+    /// connect: a picture held then is let go at the first layout, though the
+    /// framebuffer stayed the same, and asked for whole.
+    #[tokio::test]
+    async fn combined_display_held_by_its_span_is_let_go_by_its_screens() {
+        let span = (4000, 2560);
+        let (uplink, sent) = test_uplink();
+        let (frame_tx, mut rx) = mpsc::channel(64);
+        let plan = crate::config::RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: true, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
+        let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), Oversize::Hold);
+        sink.counts(Some(u64::from(span.0) * u64::from(span.1)));
+        sink.msg(ServerMsg::Resize { w: span.0, h: span.1, scale: UNSCALED }).await.unwrap();
+        assert!(sink.oversized(), "past the ceiling's area by its span");
+        sink.flush().await;
+        while rx.try_recv().is_ok() {}
+
+        let desktop = shared_desktop(span, None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.combined = true;
+            d.counted = sink.counted();
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow(span));
+        let screens: [TestScreen; 2] = [(11, (2560, 1440), (2560, 1440), 0x01), (22, (1440, 2560), (1440, 2560), 0x00)];
+        let resized = read_display_layout(&mut layout_payload(None, &screens).as_slice(), &shared, false, &sink)
+            .await
+            .unwrap();
+        assert!(resized && !sink.oversized(), "within the ceiling by its screens");
+        sink.flush().await;
+        let told: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(
+                told.as_slice(),
+                [ServerMsg::Resize { w: 4000, h: 2560, .. }, ServerMsg::Oversize { cause: None }]
+            ),
+            "{told:?}"
+        );
+        let mut expected = update_request(false, span).to_vec();
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_STANDARD_US, span));
+        assert_eq!(written(&sent), expected);
     }
 
     /// The checkmark follows the Mac and nothing else. It is placed from the
