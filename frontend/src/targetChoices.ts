@@ -21,10 +21,9 @@
 //   HEVC, or its H.264, in that order: see `pictureOptions`. The first this
 //   browser can take is taken until another is chosen. The H.264 is never
 //   greyed: no browser is asked whether it decodes it.
-// - A Standard Mac's picture is VP9 encoded by the gateway, or one of the Mac's
-//   own passed through (alpha), as Apple's viewer's quality menu has them,
-//   Adaptive or Full, which this page decodes: the VP9 until another is chosen,
-//   and none greyed.
+// - A Standard Mac's picture is one of the Mac's own, passed through (alpha), as
+//   Apple's viewer's quality menu has them, Adaptive or Full, which this page
+//   decodes: the Adaptive one until another is chosen, and neither greyed.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
 //   or lossless: see `soundRow`. In a browser with no audio decoder only the
 //   lossless one plays, which the page decodes itself, so ticking takes it.
@@ -82,8 +81,7 @@ export interface TargetInfo {
   /**
    * The streams this target can pass, in the picker's order: none, an RDP host's
    * graphics pipeline, a High Performance Mac's HEVC and its H.264, or a
-   * Standard Mac's Adaptive and Full-quality pictures, beside the VP9 the
-   * gateway encodes.
+   * Standard Mac's Adaptive and Full-quality pictures.
    */
   passthroughs: Passthrough[];
   /** Whether where the second virtual display sits is a choice. */
@@ -139,10 +137,9 @@ export interface Choices {
   audio: Sound;
   /**
    * The stream of the target's to pass, where which is a choice: a Mac's HEVC,
-   * its H.264 or its own picture, Adaptive or Full. Null for a picture encoded
-   * by the gateway, and on a target with no such choice: one whose picture the
-   * gateway encodes, or that passes a stream in every session, which is not
-   * named.
+   * its H.264 or its own picture, Adaptive or Full. Null on a target with no
+   * such choice: one whose picture the gateway encodes, or that passes a stream
+   * in every session, which is not named.
    */
   passthrough: Passthrough | null;
   placement: Placement;
@@ -252,8 +249,8 @@ export interface PassedNote {
 
 /** One way a Mac's picture can reach this browser. */
 export interface PictureOption {
-  /** What `connect` names: the stream passed, or null for VP9 the gateway encodes. */
-  value: Exclude<Passthrough, "rdp-graphics"> | null;
+  /** What `connect` names: the stream passed. */
+  value: Exclude<Passthrough, "rdp-graphics">;
   label: string;
   /** What choosing it does, or why it cannot be chosen here. */
   note: string;
@@ -305,8 +302,7 @@ const RDP_GRAPHICS: PassedNote & { blocked: string } = {
 /**
  * The ways a Mac's picture can reach this browser, in the order the picker shows
  * them: a High Performance Mac's HEVC passed through, and its H.264; a Standard
- * Mac's VP9 from the gateway, then its Adaptive and its Full-quality pictures
- * passed through.
+ * Mac's Adaptive and Full-quality pictures passed through.
  *
  * - The HEVC is greyed in a browser whose own decoder does not take it, unless
  *   the page decodes it itself, which it then does (softwareDecoder.ts). The
@@ -349,22 +345,9 @@ function pictureOptions(
       disabled: false,
     },
   };
-  // The picture the gateway encodes, ahead of the Mac's own pictures beside it.
-  const vp9: PictureOption = {
-    value: null,
-    label: "VP9",
-    note: "The Mac's lossless picture, coded by the gateway as VP9 that follows the link.",
-    disabled: false,
-  };
-  const standard = (passthrough: Passthrough) =>
-    passthrough === "apple-adaptive" || passthrough === "apple-full";
-  return target.passthroughs.flatMap((passthrough, at, all) => {
-    if (passthrough === "rdp-graphics") {
-      return [];
-    }
-    const first = standard(passthrough) && !all.slice(0, at).some(standard);
-    return first ? [vp9, options[passthrough]] : [options[passthrough]];
-  });
+  return target.passthroughs.flatMap((passthrough) =>
+    passthrough === "rdp-graphics" ? [] : [options[passthrough]],
+  );
 }
 
 /**
@@ -599,7 +582,7 @@ export function targetOptions(
     ? pictureOptions(target, abilities)
     : null;
   // What was chosen last time, where it can be had here, and otherwise the
-  // first that can: the H.264 always can.
+  // first that can: the H.264 and a Standard Mac's pictures always can.
   const able = pictures?.filter((option) => !option.disabled) ?? [];
   const passthrough =
     (able.find((option) => option.value === remembered?.passthrough) ?? able[0])

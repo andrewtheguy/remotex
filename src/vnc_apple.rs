@@ -10,10 +10,10 @@
 //!
 //! ## What the extension is for, here
 //!
-//! **Compression**: standard ZRLE (`ENCODING_ZRLE`, decoded in
-//! [`crate::vnc_encodings`]) instead of raw pixels. Apple's private framebuffer codecs would do
-//! better still, but their payload formats are unresolved in the reference this
-//! was written from, and a client must not advertise an encoding it cannot decode.
+//! **Compression**: Standard's picture is the Mac's own, Apple's 8×8 tiles or
+//! zlib, passed for the page to decode ([`encodings`]). High Performance opens
+//! with ZRLE (`ENCODING_ZRLE`) and steps its rectangles over: its picture is the
+//! media stream.
 //!
 //! **Picking a physical screen in Standard mode**:
 //! [`ENCODING_DISPLAY_LAYOUT`] carries the Mac's displays and
@@ -95,12 +95,6 @@ pub const ENCODING_CURSOR_POS: i32 = 0x44c;
 /// also listed, the layout is what it sends.
 pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 
-/// The most screens Combined Display is shown over, which is two. Past that the
-/// view is held with a notice offering each screen on its own, whatever its size:
-/// more than two is an edge case on Standard, and composing them is too much for a
-/// browser to draw.
-pub const MAX_COMBINED_SCREENS: usize = 2;
-
 /// The smallest virtual display a Mac is asked for, in points: the smallest
 /// window Apple's own client allows, at 1x and at 2x alike. A Mac asked for
 /// less sends no picture of some displays: one too low for the strips its High
@@ -132,8 +126,8 @@ pub fn under_minimum(points: (u16, u16)) -> bool {
 ///
 /// Every entry is decoded or deliberately stepped over, which is a requirement and
 /// not a courtesy: a server takes the list as a promise and will send what it finds
-/// here. Apple's own framebuffer codecs, and zlib, are listed only by a session that
-/// passes the Mac's own picture, whose page decodes them ([`encodings`]). Media-stream encoding 1010 is
+/// here. Apple's own framebuffer codecs, and zlib, are listed only by a Standard
+/// session, whose page decodes them ([`encodings`]). Media-stream encoding 1010 is
 /// absent from the opening list: High Performance puts it first in a second
 /// `SetEncodings` once the display it offers the stream for exists
 /// ([`crate::vnc_apple_media::encodings_preferring_media_stream`]).
@@ -203,8 +197,9 @@ pub const FULL_ENCODINGS: &[i32] = &[
     ENCODING_ZRLE,
 ];
 
-/// What a Standard session asks the Mac for: [`ENCODINGS`] for the VP9 encoded
-/// here from its ZRLE, or the list that brings the Mac's own picture in `quality`.
+/// What an Apple session asks the Mac for: on Standard, the list that brings the
+/// Mac's own picture in `quality`, and [`ENCODINGS`] to open High Performance,
+/// whose rectangles are stepped over.
 pub fn encodings(quality: Option<StandardQuality>) -> &'static [i32] {
     match quality {
         None => ENCODINGS,
@@ -307,23 +302,9 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
     vec![0x12, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00]
 }
 
-/// The shortest interval [`auto_framebuffer_update`] arms, in microseconds: the
-/// least time between two updates the Mac pushes unasked, and one video frame of
-/// this gateway's, which shows no more than that however often the Mac pushes.
-///
-/// The Mac counts the interval from the end of its last update, so anything above
-/// zero leaves its sender idle that long after each one, and that gap is when it
-/// reads this client's input. At zero, which is what Apple's viewer arms, a
-/// changing screen is pushed back to back, and a gateway that drains more slowly
-/// than the Mac captures has its clicks and keys left unread for as long as the
-/// screen moves. A long interval costs the picture instead: Standard mode on a
-/// physical display answers an incremental request late, as seldom as the next
-/// push comes, and at a second a scroll arrives a frame a second.
-pub const PUSH_INTERVAL_US: u32 = 33_333;
-
-/// The interval a Standard session that passes the Mac's own picture arms
-/// ([`StandardQuality`]), in microseconds: zero, what Apple's viewer arms, with
-/// no request after each update either, as Apple's viewer sends none.
+/// The interval a Standard session arms, in microseconds: zero, what Apple's
+/// viewer arms, with no request after each update either, as Apple's viewer sends
+/// none.
 ///
 /// The Mac sends one rectangle of the changes it holds per update and reads that
 /// rectangle off the screen as it sends it, and a moving window comes in strips.
@@ -343,69 +324,6 @@ pub const PUSH_INTERVAL_STANDARD_US: u32 = 0;
 /// and the cursor shapes that depend on it, at the least the Mac can be made to
 /// push before the stream is up and across a display change.
 pub const PUSH_INTERVAL_MEDIA_US: u32 = 1_000_000;
-
-/// The longest interval [`PushPace`] arms: the second that starves a physical
-/// display's picture, which a gateway that far behind is not showing anyway.
-const PUSH_INTERVAL_CEILING_US: u32 = 1_000_000;
-
-/// How far the interval a session wants must be from the one armed before it is
-/// armed again, as a ratio either way, so a cost that wavers does not re-arm the
-/// Mac at every update.
-const PUSH_REARM_RATIO: f64 = 1.5;
-
-/// The least time between two re-armings.
-const PUSH_REARM_GAP: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// The interval a Standard session arms the Mac's pushes with, following what
-/// each update costs this gateway to take: the time to read it off the
-/// connection, decode it and hand it to the video stream, the browser's link
-/// included where that holds the stream.
-///
-/// Apple's viewer arms zero and leaves the pacing to the Mac, which throttles
-/// itself by how fast the connection drains, and that holds its sender, and the
-/// input behind it, for as long as the connection is full. This keeps the gap
-/// after each update at least as long as the update took to take, so the
-/// connection is empty and the Mac is reading input before the next one starts:
-/// [`PUSH_INTERVAL_US`] while the gateway keeps up, and wider as it falls behind.
-///
-/// Pure state with the clock passed in.
-#[derive(Debug)]
-pub struct PushPace {
-    armed: u32,
-    /// The smoothed cost of an update, in microseconds.
-    cost: f64,
-    changed: Option<std::time::Instant>,
-}
-
-impl Default for PushPace {
-    fn default() -> Self {
-        Self { armed: PUSH_INTERVAL_US, cost: 0.0, changed: None }
-    }
-}
-
-impl PushPace {
-    /// One update carrying pixels took `cost` to take. Returns the interval to
-    /// arm when it has moved far enough from the one armed.
-    ///
-    /// The cost is smoothed over a handful of updates, so one whole-screen repaint
-    /// in a quick run widens the gap little and briefly.
-    pub fn observe(&mut self, cost: std::time::Duration, now: std::time::Instant) -> Option<u32> {
-        let cost = cost.as_secs_f64() * 1e6;
-        self.cost += (cost - self.cost) * 0.2;
-        let wanted = self.cost.clamp(f64::from(PUSH_INTERVAL_US), f64::from(PUSH_INTERVAL_CEILING_US));
-        let armed = f64::from(self.armed);
-        let moved = wanted >= armed * PUSH_REARM_RATIO
-            || wanted <= armed / PUSH_REARM_RATIO
-            || (wanted <= f64::from(PUSH_INTERVAL_US) && self.armed != PUSH_INTERVAL_US);
-        if !moved || self.changed.is_some_and(|at| now.duration_since(at) < PUSH_REARM_GAP) {
-            return None;
-        }
-        // In range by the clamp above.
-        self.armed = wanted as u32;
-        self.changed = Some(now);
-        Some(self.armed)
-    }
-}
 
 /// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates, at most
 /// one each `interval_us`.
@@ -779,12 +697,6 @@ impl Layout {
     /// points in its own arrangement. Both spaces are moved to start at zero:
     /// the framebuffer already does, and the arrangement's origin is wherever the
     /// main screen puts it.
-    /// Whether this is Combined Display over more than [`MAX_COMBINED_SCREENS`], which
-    /// has no picture ([`crate::encode::VideoSink::hold_screens`]).
-    pub fn too_many_screens(&self) -> bool {
-        self.current.is_none() && self.displays.len() > MAX_COMBINED_SCREENS
-    }
-
     pub fn mosaic(&self) -> Option<Vec<MosaicRegion>> {
         if self.current.is_some() || !self.mixed_density() {
             return None;
@@ -1395,51 +1307,12 @@ mod tests {
     }
 
     #[test]
-    fn the_push_interval_follows_what_an_update_costs() {
-        use std::time::{Duration, Instant};
-        let start = Instant::now();
-        let at = |ms: u64| start + Duration::from_millis(ms);
-        let mut pace = PushPace::default();
-
-        // A gateway that keeps up stays at one frame and re-arms nothing.
-        for ms in 0..20 {
-            assert_eq!(pace.observe(Duration::from_millis(10), at(ms * 40)), None);
-        }
-
-        // One slow update among quick ones is not enough to move it.
-        assert_eq!(pace.observe(Duration::from_millis(100), at(900)), None);
-
-        // A run of them widens the gap towards what they cost, and a run of very
-        // slow ones no further than the ceiling.
-        let mut widened = Vec::new();
-        for step in 0..40 {
-            widened.extend(pace.observe(Duration::from_millis(200), at(1000 + step * 200)));
-        }
-        assert!(widened.windows(2).all(|pair| pair[1] > pair[0]), "{widened:?}");
-        assert!((150_000..=200_000).contains(widened.last().expect("a wider gap")), "{widened:?}");
-        let mut slowest = None;
-        for step in 0..40 {
-            slowest = pace.observe(Duration::from_secs(30), at(10_000 + step * 600)).or(slowest);
-        }
-        assert_eq!(slowest, Some(PUSH_INTERVAL_CEILING_US));
-
-        // Quick updates narrow it again, in steps, and it ends at one frame exactly.
-        let mut narrowed = Vec::new();
-        for step in 0..200 {
-            narrowed.extend(pace.observe(Duration::from_millis(5), at(40_000 + step * 100)));
-        }
-        assert!(narrowed.len() > 1, "in steps: {narrowed:?}");
-        assert!(narrowed.windows(2).all(|pair| pair[1] < pair[0]), "{narrowed:?}");
-        assert_eq!(narrowed.last(), Some(&PUSH_INTERVAL_US));
-    }
-
-    #[test]
     fn arming_display_selection_and_server_scaling_are_fixed_shapes() {
-        let arm = auto_framebuffer_update(PUSH_INTERVAL_US, (3840, 2160));
+        let arm = auto_framebuffer_update(PUSH_INTERVAL_MEDIA_US, (3840, 2160));
         assert_eq!(arm.len(), 16);
         assert_eq!(arm[0], 0x09);
         assert_eq!(be16(&arm, 2), 1);
-        assert_eq!(be32(&arm, 4), 33_333, "one push a video frame at most");
+        assert_eq!(be32(&arm, 4), 1_000_000);
         assert_eq!(be16(&arm, 12), 3840);
         assert_eq!(be16(&arm, 14), 2160);
 
@@ -1650,20 +1523,6 @@ mod tests {
         assert_eq!(parsed.displays.len(), 1);
         assert_eq!(parsed.viewer_scale(), 1.0);
         assert_eq!(parsed.scale(), 2.0);
-    }
-
-    /// Combined Display is held over three screens and not over two, and a selected
-    /// screen never is, however many there are.
-    #[test]
-    fn all_displays_over_three_screens_is_too_many() {
-        let screens = [
-            (1, (1280, 800), (1280, 800), 0x01),
-            (2, (1280, 800), (1280, 800), 0x00),
-            (3, (1280, 800), (1280, 800), 0x00),
-        ];
-        assert!(!parse_layout(&layout(None, &screens[..2])).unwrap().too_many_screens());
-        assert!(parse_layout(&layout(None, &screens)).unwrap().too_many_screens());
-        assert!(!parse_layout(&layout(Some(3), &screens)).unwrap().too_many_screens());
     }
 
     #[test]

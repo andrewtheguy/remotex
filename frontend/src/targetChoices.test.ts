@@ -82,8 +82,8 @@ const SIZED = { w: 1920, h: 1080 };
 
 /** A target's picture options as value and whether it is greyed, in the order shown. */
 function pictures(options: {
-  pictures: { value: string | null; disabled: boolean }[] | null;
-}): [string | null, boolean][] | null {
+  pictures: { value: string; disabled: boolean }[] | null;
+}): [string, boolean][] | null {
   return (
     options.pictures?.map((picture) => [picture.value, picture.disabled]) ??
     null
@@ -191,10 +191,9 @@ test("only what the target's type offers has a row", () => {
   assert.equal(wlshare.pictures, null);
   assert.deepEqual(formats(wlshare), ["opus", "flac"]);
   // Standard Screen Sharing on the Mac's physical displays offers its picture
-  // alone, which is VP9 until the Mac's own is chosen.
+  // alone, the Adaptive one until the Full quality is chosen.
   const standard = targetOptions(STANDARD, undefined, ABLE);
   assert.deepEqual(pictures(standard), [
-    [null, false],
     ["apple-adaptive", false],
     ["apple-full", false],
   ]);
@@ -202,7 +201,7 @@ test("only what the target's type offers has a row", () => {
   assert.deepEqual(standard.choices, {
     size: "target",
     audio: "off",
-    passthrough: null,
+    passthrough: "apple-adaptive",
     placement: "right",
     pipeline: "high-quality",
     vp9: "libvpx",
@@ -210,21 +209,25 @@ test("only what the target's type offers has a row", () => {
   assert.equal(standard.blocked, null);
 });
 
-test("a Standard Mac's picture is VP9 or its Adaptive or Full-quality picture passed", () => {
-  const vp9 = targetOptions(STANDARD, undefined, UNABLE);
+test("a Standard Mac's picture is its Adaptive or Full-quality picture passed", () => {
+  const first = targetOptions(STANDARD, undefined, UNABLE);
   assert.deepEqual(
-    pictures(vp9),
+    pictures(first),
     [
-      [null, false],
       ["apple-adaptive", false],
       ["apple-full", false],
     ],
     "a browser that takes no other passthrough takes these",
   );
-  assert.equal(vp9.choices.passthrough, null, "VP9 until another is chosen");
-  assert.equal(vp9.encoders, null, "the gateway codes it with libvpx alone");
-  assert.match(vp9.pictures?.[1].label ?? "", /alpha/);
-  assert.match(vp9.pictures?.[2].label ?? "", /^Full quality \(alpha\)/);
+  assert.equal(first.choices.passthrough, "apple-adaptive", "the first");
+  assert.equal(first.encoders, null, "no VP9 to choose an encoder for");
+  assert.match(first.pictures?.[0].label ?? "", /alpha/);
+  assert.match(first.pictures?.[1].label ?? "", /^Full quality \(alpha\)/);
+  // A remembered VP9 from before is not a choice any more.
+  assert.equal(
+    targetOptions(STANDARD, { passthrough: null }, ABLE).choices.passthrough,
+    "apple-adaptive",
+  );
 
   const adaptive = targetOptions(
     STANDARD,

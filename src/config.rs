@@ -270,8 +270,8 @@ pub enum Passthrough {
     /// ALPHA. A Standard Mac's picture as Apple's viewer's Adaptive quality has it:
     /// the Mac's 8×8 tiles (`0x3f3`), which it codes coarsely first and refines
     /// as the connection lets it, for the page to decode
-    /// (`frontend/wasm/vnc`). Offered by `ard` beside the VP9 encoded here
-    /// from the Mac's ZRLE, which a session that names neither is.
+    /// (`frontend/wasm/vnc`). Offered by `ard` ahead of its Full quality, one of
+    /// the two in every session: a Standard Mac's picture is never encoded here.
     ///
     /// Every rectangle is drawn against what the ones before it left, the page's
     /// tile cache among it, so a browser that comes back has nothing a running
@@ -282,7 +282,7 @@ pub enum Passthrough {
     /// ALPHA. A Standard Mac's picture as Apple's viewer's Full quality has it:
     /// RFB's zlib (encoding 6), the Mac's pixels deflated as one stream across the
     /// session, lossless, for the page to inflate (`frontend/wasm/vnc`).
-    /// Offered by `ard` beside the VP9 and the Adaptive picture.
+    /// Offered by `ard` beside the Adaptive picture.
     ///
     /// Every rectangle continues the stream the ones before it deflated, so a
     /// browser that comes back has nothing a running session can be resumed onto:
@@ -335,26 +335,15 @@ impl Passthrough {
         }
     }
 
-    /// Whether a session passes it only where it was chosen at the picker. The
-    /// Mac's HEVC and its H.264 are a choice of one from two, either passed in
-    /// every session; a Standard Mac's Adaptive and Full-quality pictures are a
-    /// choice beside the VP9 encoded here; an RDP host's pipeline is the only one,
-    /// as the gateway composes none.
+    /// Whether a session passes it only where it was chosen at the picker. A High
+    /// Performance Mac's HEVC and its H.264 are a choice of one from two, either
+    /// passed in every session, and so are a Standard Mac's Adaptive and
+    /// Full-quality pictures; an RDP host's pipeline is the only one, as the
+    /// gateway composes none.
     pub fn chosen(self) -> bool {
         match self {
             Self::RdpGraphics => false,
             Self::AppleMedia | Self::AppleH264 | Self::AppleAdaptive | Self::AppleFull => true,
-        }
-    }
-
-    /// Whether a session that names none of its target's streams is encoded here
-    /// as VP9 instead: on `ard`, beside the Mac's own pictures. A High
-    /// Performance Mac's picture is its media stream, so a session there names
-    /// one of its two.
-    pub fn beside_vp9(self) -> bool {
-        match self {
-            Self::AppleAdaptive | Self::AppleFull => true,
-            Self::RdpGraphics | Self::AppleMedia | Self::AppleH264 => false,
         }
     }
 
@@ -821,7 +810,7 @@ pub struct TargetConfig {
     pub size: Option<(u16, u16)>,
     /// UNOFFICIAL. Open Standard mode (`subtype = "ard"`) on one virtual display
     /// instead of the Mac's physical displays: the `SetDisplayConfiguration` High
-    /// Performance sends, with Standard's ZRLE picture and no media stream. The
+    /// Performance sends, with Standard's own picture and no media stream. The
     /// display and its resizing are High Performance's, everything else — the
     /// picture, the absence of sound, the pasteboard — is `ard`'s. It is a
     /// combination Apple's viewer never offers, so no Apple client exercises the
@@ -830,8 +819,7 @@ pub struct TargetConfig {
     /// the display, and on every target that is not a Mac.
     ///
     /// What it is for: a resizable Mac session, at the window's size and density,
-    /// on a Mac whose media stream cannot reach the gateway, or for a browser
-    /// whose picture is the gateway's VP9.
+    /// on a Mac whose media stream cannot reach the gateway.
     #[serde(default)]
     pub virtual_display: bool,
     /// Whether to offer RDP's graphics pipeline (MS-RDPEGFX); on unless set to
@@ -1146,8 +1134,7 @@ impl TargetConfig {
             }
             // Standard mode shares the Mac's physical displays, whose resolution
             // this gateway does not change, and never touches its sound. Its
-            // picture is VP9 encoded here, or the Mac's Adaptive or Full-quality
-            // picture passed.
+            // picture is the Mac's own, Adaptive or Full quality, passed.
             (Protocol::Vnc, Some(Subtype::Ard)) => {
                 Offers {
                     resize: self.virtual_display,
@@ -1186,13 +1173,8 @@ impl TargetConfig {
             ("sound", choices.audio != Sound::Off && !offers.audio),
             ("a passthrough", choices.passthrough.is_some_and(|named| !offers.passthrough.contains(&named))),
             // A target with a stream to pass has no picture encoded here, so one
-            // whose stream is a choice is refused a session that names none,
-            // unless the choice is beside a picture encoded here.
-            (
-                "a picture encoded here",
-                self.passthrough(choices).is_none()
-                    && offers.passthrough.iter().any(|passthrough| !passthrough.beside_vp9()),
-            ),
+            // whose stream is a choice is refused a session that names none.
+            ("a picture encoded here", self.passthrough(choices).is_none() && !offers.passthrough.is_empty()),
             (
                 "a picture in one tile",
                 choices.whole
@@ -1241,8 +1223,7 @@ impl TargetConfig {
     /// target card, which describes a config file rather than a session.
     ///
     /// Which passthrough is passed, where that is a choice, is a session's and not
-    /// the file's, so such a target's card names each it may pass, after the VP9 a
-    /// Standard Mac's sessions have unless they pass one of its own. The encoder is
+    /// the file's, so such a target's card names each it may pass. The encoder is
     /// a session's choice too, so a VP9 card is libvpx's. An RDP target with its
     /// pipeline on passes it in every session, so its card says so; whether with
     /// H.264 is a session's choice, so the card is the lossless one.
@@ -1254,9 +1235,7 @@ impl TargetConfig {
             return plan;
         }
         let streams: Vec<&str> = offered.iter().map(|passthrough| passthrough.stream()).collect();
-        let streams = format!("{}, passed through", streams.join(" or "));
-        // A Standard Mac's VP9 is its default beside the pictures of its own it may pass.
-        if offered.iter().any(|passthrough| passthrough.beside_vp9()) { format!("{plan}, or {streams}") } else { streams }
+        format!("{}, passed through", streams.join(" or "))
     }
 
     /// Whether a session started with `choices` is sent this target's sound
@@ -1997,10 +1976,10 @@ impl ConfigFile {
                  encoder's bitrate, and no session there has sound to encode. Remove the key.",
                 target.name
             );
-            // The video keys tune the VP9 encoded here, and wlshare's. A High
-            // Performance Mac's picture is always passed as it came, the Mac's own
-            // rate controller behind it, so they could not do anything there.
-            let video = !target.media_stream();
+            // The video keys tune the VP9 encoded here, and wlshare's. A Mac's
+            // picture is always passed as it came, in either mode, the Mac's own
+            // rate control behind it, so they could not do anything there.
+            let video = !target.apple();
             anyhow::ensure!(
                 target.video_quality.is_none() || video,
                 "target {:?} is {kind} and sets video_quality — it is the VP9's dial, and \
@@ -3628,10 +3607,10 @@ mod tests {
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
     }
 
-    /// A Standard Mac's picture is VP9 encoded here unless the session names one of
-    /// the Mac's own, its Adaptive or its Full-quality picture, which is then passed
-    /// to any browser and is no VP9, and a session passing it is started over
-    /// rather than resumed.
+    /// A Standard Mac's picture is its own, the Adaptive or the Full-quality one the
+    /// session names, passed to any browser, and a session passing it is started
+    /// over rather than resumed. One that names neither is refused: no picture of
+    /// the Mac's is encoded here.
     #[test]
     fn a_standard_session_passes_the_macs_own_picture_where_it_was_chosen() {
         let standard = ConfigFile::parse(&vnc_toml("subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\n"))
@@ -3641,10 +3620,11 @@ mod tests {
         let adaptive = Choices { passthrough: Some(Passthrough::AppleAdaptive), ..Choices::default() };
         let none = Decoders { apple_media: false, rdp_graphics: false, rdp_h264: false };
 
-        assert_eq!(standard.accepts(Choices::default()), Ok(()), "naming none is the VP9");
+        assert_eq!(
+            standard.accepts(Choices::default()),
+            Err(NotOffered { target: standard.name.clone(), choice: "a picture encoded here" }),
+        );
         assert_eq!(standard.passthrough(Choices::default()), None);
-        let vp9 = standard.render_plan(Choices::default(), none);
-        assert!(vp9.apple_standard.is_none() && vp9.resumes());
 
         assert_eq!(standard.accepts(adaptive), Ok(()));
         assert_eq!(standard.beyond(adaptive, none), None, "every browser takes it");
@@ -3670,12 +3650,10 @@ mod tests {
         assert_eq!(plan.describe(), "the Mac's Full-quality picture, passed through");
         assert_eq!(Passthrough::AppleFull.name(), "apple-full");
 
-        assert!(
-            standard
-                .render_summary()
-                .ends_with(", or the Mac's Adaptive picture or the Mac's Full-quality picture, passed through")
+        assert_eq!(
+            standard.render_summary(),
+            "the Mac's Adaptive picture or the Mac's Full-quality picture, passed through"
         );
-        assert!(standard.render_summary().starts_with("video q"));
     }
 
     /// The Mac's stream is passed in the codec the session was started with,
@@ -3749,7 +3727,7 @@ mod tests {
 
         let standard = mac("ard");
         assert_eq!(
-            standard.accepts(Choices { whole: true, ..Choices::default() }),
+            standard.accepts(Choices { whole: true, passthrough: Some(Passthrough::AppleAdaptive), ..Choices::default() }),
             Err(NotOffered { target: "mac".to_owned(), choice: "a picture in one tile" })
         );
         assert_eq!(standard.offers().passthrough, [Passthrough::AppleAdaptive, Passthrough::AppleFull]);
@@ -4424,7 +4402,8 @@ vnc_password = \"x\"")).unwrap();
     }
 
     /// Standard mode never touches the Mac's sound, so an `ard` target has none to
-    /// offer and no use for the keys that tune it.
+    /// offer and no use for the keys that tune it, and its picture is the Mac's
+    /// own, so nor have the VP9's.
     #[test]
     fn a_standard_mac_carries_no_sound() {
         let target = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\n\
@@ -4436,7 +4415,7 @@ vnc_password = \"x\"")).unwrap();
         assert!(!config.targets[0].offers().audio);
         assert!(!config.targets[0].sound(Choices { audio: Sound::Opus, ..Choices::default() }));
 
-        for key in ["audio_bitrate = 96", "audio_adaptive = false"] {
+        for key in ["audio_bitrate = 96", "audio_adaptive = false", "video_quality = 60", "render_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");

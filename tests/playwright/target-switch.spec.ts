@@ -37,7 +37,6 @@ import {
   returnToPicker,
   type StartChoices,
   startTarget,
-  targetNamePattern,
 } from "./support";
 
 const RDP_TARGET = process.env.REMOTEX_PLAYWRIGHT_SWITCH_RDP_TARGET;
@@ -149,9 +148,7 @@ async function expectPainted(
     .toBe(true);
 }
 
-/// Start `target` from the picker, and wait for its picture. A Mac's picture is
-/// one the picker remembers, so the gateway's VP9 is chosen by name where the
-/// target offers a choice of picture, rather than left to the last session's.
+/// Start `target` from the picker, and wait for its picture.
 async function session(
   page: Page,
   seen: Watched,
@@ -160,19 +157,6 @@ async function session(
   choices: StartChoices = {},
 ): Promise<void> {
   const from = seen.events.length;
-  if (start === VP9) {
-    const row = page.getByRole("button", { name: targetNamePattern(target) });
-    if ((await row.getAttribute("aria-expanded")) !== "true") {
-      await row.click();
-    }
-    const picture = page
-      .getByRole("listitem")
-      .filter({ has: row })
-      .getByRole("group", { name: "Picture" });
-    if ((await picture.count()) > 0) {
-      await picture.getByRole("radio", { name: /^VP9/ }).check();
-    }
-  }
   await startTarget(page, target, choices);
   await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
     timeout: 30_000,
@@ -211,17 +195,17 @@ test.describe("a Mac's and an RDP host's targets on one page", () => {
     await expectPainted(seen, 0, PIPELINE);
     expect(seen.painters).toHaveLength(1);
 
-    // Its end ends that worker; the Mac's VP9 is decoded in the next, which loads
-    // the VP9's module.
+    // Its end ends that worker; the RDP host's VP9 is decoded in the next, which
+    // loads the VP9's module.
     await returnToPicker(page);
     await expect.poll(() => open(seen.painters[0])).toBe(false);
-    await session(page, seen, mac, VP9);
+    await session(page, seen, bitmap, VP9);
     expect(seen.painters).toHaveLength(2);
     expect(seen.vp9Loads, "the VP9's module, loaded once").toBe(1);
 
     // A VP9 session's end keeps the worker and ends its VP9 decode worker: the
-    // RDP host's VP9 is decoded in the same paint worker, by a decode worker that
-    // loads the module again.
+    // next VP9 is decoded in the same paint worker, by a decode worker that loads
+    // the module again.
     await returnToPicker(page);
     await session(page, seen, bitmap, VP9);
     expect(seen.painters).toHaveLength(2);
@@ -253,9 +237,9 @@ test.describe("a Mac's and an RDP host's targets on one page", () => {
       2 * hevcLoads,
     );
 
-    // And the Mac's VP9 there loads the VP9's module once more.
+    // And the RDP host's VP9 there loads the VP9's module once more.
     await returnToPicker(page);
-    await session(page, seen, mac, VP9);
+    await session(page, seen, bitmap, VP9);
     expect(seen.painters).toHaveLength(3);
     expect(seen.vp9Loads, "the VP9's module, in the third paint worker").toBe(
       3,

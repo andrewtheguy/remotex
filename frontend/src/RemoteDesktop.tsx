@@ -26,17 +26,14 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 };
 
 // The notice over a desktop with no picture, offering every display but the one
-// being sent, which is the one held: past what video carries, or Combined Display over
-// more than two screens. A click sends a `selectDisplay` and nothing else: the
+// being sent, which is the one held: past what video carries. A click sends a `selectDisplay` and nothing else: the
 // notice comes down when the gateway says the desktop has a picture again.
 function OversizeNotice({
-  cause,
   size,
   displays,
   activeDisplayId,
   onSelectDisplay,
 }: {
-  cause: HoldCause;
   size: RemoteSize;
   displays: DisplayInfo[];
   activeDisplayId: number | null;
@@ -45,23 +42,11 @@ function OversizeNotice({
   const others = displays.filter((display) => display.id !== activeDisplayId);
   return (
     <div className="oversize-overlay" role="alert">
-      {cause === "screens" ? (
-        <>
-          <span className="status">Too many screens to show</span>
-          <span className="status-hint">
-            Combined Display spans more than two screens, which is more than one
-            view shows.
-          </span>
-        </>
-      ) : (
-        <>
-          <span className="status">Too large to show</span>
-          <span className="status-hint">
-            The remote desktop is {size.w}×{size.h} pixels, past the largest
-            picture a video stream carries.
-          </span>
-        </>
-      )}
+      <span className="status">Too large to show</span>
+      <span className="status-hint">
+        The remote desktop is {size.w}×{size.h} pixels, past the largest picture
+        a video stream carries.
+      </span>
       {others.length > 0 ? (
         <>
           <span className="status-hint">
@@ -156,12 +141,11 @@ function SessionCovers({
 
       {/* A desktop past what video carries: no picture comes, and the session stays
           up for the one way out, a smaller desktop from the remote. Choosing one of
-          its displays is that way for a Mac on Combined Display, so they are offered
-          here and not only in the menu. It takes the pointer, since the remote
+          its displays is that way where it lists them, so they are offered here and
+          not only in the menu. It takes the pointer, since the remote
           under it is not on screen. */}
       {oversize && size && (
         <OversizeNotice
-          cause={oversize}
           size={size}
           displays={displays}
           activeDisplayId={activeDisplayId}

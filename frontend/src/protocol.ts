@@ -359,12 +359,11 @@ export type ControlMsg =
   // page never infers it.
   | { type: "pictureWithheld"; active: boolean }
   // Why the desktop the `resize` before this describes has no picture, or null
-  // when it has one: past what a video stream encodes, or a Mac's Combined Display
-  // over more than two screens. No picture follows until a `resize` without a
-  // cause. Sent after every `resize` of a source that holds the session open for
-  // that, and never by one that ends the session instead. The page says so over
-  // the desktop and offers the remote's displays, since choosing one is how a
-  // Mac on Combined Display gets back.
+  // when it has one: past what a video stream encodes. No picture follows until a
+  // `resize` without a cause. Sent after every `resize` of a source that holds the
+  // session open for that, and never by one that ends the session instead. The
+  // page says so over the desktop and offers the remote's displays, since
+  // choosing a smaller one is how such a desktop gets back.
   | { type: "oversize"; cause: HoldCause | null }
   // The remote's displays and which one is being shared, pushed whenever either
   // changes. The browser holds no display state of its own: the checkmark
@@ -476,7 +475,7 @@ export interface StandardMsg {
 export type BatchRecord = VideoMsg | GraphicsMsg | StandardMsg;
 
 // Why a desktop has no picture: see `oversize`.
-export type HoldCause = "size" | "screens";
+export type HoldCause = "size";
 
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;

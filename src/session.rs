@@ -2930,14 +2930,14 @@ mod tests {
             subtype: Some(crate::config::Subtype::Ard),
             ..video_target("mac")
         };
-        let mgr = Arc::new(SessionManager::with_spawner(vec![mac], spawner));
+        let mgr = Arc::new(SessionManager::with_spawner(vec![video_target("desk"), mac], spawner));
         let token = mgr.claim(false, None, "login").unwrap();
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
 
         // Encoded here: the frame is dropped and the session goes on.
-        mgr.connect(att.id, "mac", None, Choices::default()).await.unwrap();
-        expect_connected(&mut att.events, "mac").await;
+        mgr.connect(att.id, "desk", None, Choices::default()).await.unwrap();
+        expect_connected(&mut att.events, "desk").await;
         let (input_rx, frame_tx) = hook_rx.try_recv().expect("engine spawned on connect");
         drop(mgr.attach_display("login", FIRST_DISPLAY, None).unwrap());
         frame_tx.send(ServerMsg::Resize { w: 10, h: 20, scale: UNSCALED }).await.unwrap();

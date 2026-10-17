@@ -153,8 +153,8 @@ export function readRemoteClipboard(): string {
 // `passthrough` is which of a High Performance Mac's streams is passed, its HEVC
 // or its H.264, the one choice of its picture; without it the picker's own pick
 // stands, the HEVC where this browser can take it. On a Standard Mac it is one of
-// the Mac's own pictures, Adaptive or Full quality, beside the VP9 the picker
-// starts on. An RDP target with its pipeline
+// the Mac's own pictures, Adaptive or Full quality, the picker's own pick the
+// Adaptive one. An RDP target with its pipeline
 // on (egfx not false) passes it in every session, which is said and not offered.
 // `pipeline` is how the host draws that pipeline, high quality unless asked.
 export interface StartChoices {

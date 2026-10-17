@@ -157,8 +157,7 @@ pub enum Oversize {
     /// The picture stops until a `Resize` brings the desktop within the ceiling,
     /// which only the remote can do: [`VideoSink::damage`] drops what it is handed
     /// while [`VideoSink::oversized`] says so, and the browser is told
-    /// ([`ServerMsg::Oversize`]). A source that holds is also held over too many
-    /// screens when its engine says so ([`VideoSink::hold_screens`]).
+    /// ([`ServerMsg::Oversize`]).
     Hold,
 }
 
@@ -189,10 +188,6 @@ struct Shared {
     /// Whether the desktop's picture is held — see [`Oversize`]. Decided by each
     /// `Resize` ([`VideoSink::msg`]).
     oversized: AtomicBool,
-    /// Whether the desktop spans more screens than one view shows, which holds its
-    /// picture whatever its size. Set by the engine ahead of the `Resize` it comes
-    /// with ([`VideoSink::hold_screens`]).
-    too_many_screens: AtomicBool,
     /// Why the order task gave up, so the engine's next push can report it rather
     /// than a bare closed channel. The error itself, so the cause chain survives
     /// the hop from the task to the push. See [`VideoSink::closed`].
@@ -275,7 +270,6 @@ impl Shared {
         Self {
             oversize,
             oversized: AtomicBool::new(false),
-            too_many_screens: AtomicBool::new(false),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
                 stream: DesktopStream::new(quality),
@@ -368,20 +362,11 @@ impl VideoSink {
     }
 
     /// Whether the desktop's picture is held ([`Oversize::Hold`]): past the video
-    /// ceiling, or over too many screens. Then [`Self::damage`] and [`Self::frame`]
+    /// ceiling. Then [`Self::damage`] and [`Self::frame`]
     /// do nothing, and a frame the remote coded itself is not to be passed either.
     /// Changes only with a `Resize` through [`Self::msg`].
     pub fn oversized(&self) -> bool {
         self.shared.oversized.load(Ordering::Relaxed)
-    }
-
-    /// Say whether the desktop the next `Resize` describes spans more screens than
-    /// one view shows: a Mac's Combined Display over more than
-    /// [`crate::vnc_apple::MAX_COMBINED_SCREENS`]. Read at that `Resize` and every
-    /// one after it, a reattach's included, on a source that holds; a count that
-    /// changes always changes the combined desktop's size with it.
-    pub fn hold_screens(&self, too_many: bool) {
-        self.shared.too_many_screens.store(too_many, Ordering::Relaxed);
     }
 
     /// One remote frame has ended: encode everything [`Self::damage`] has blitted
@@ -828,8 +813,8 @@ impl VideoSink {
     /// session with the message attached.
     ///
     /// A resize is also where the picture is held or resumed, for a source that holds
-    /// it ([`Oversize::Hold`]): past the ceiling or over too many screens there is
-    /// none, and otherwise video. Back from a hold, the remote repaints the resized
+    /// it ([`Oversize::Hold`]): past the ceiling there is none, and otherwise
+    /// video. Back from a hold, the remote repaints the resized
     /// desktop in full as after any resize, and the stream starts over from a
     /// keyframe as a browser that attached would.
     pub async fn msg(&self, msg: ServerMsg) -> anyhow::Result<()> {
@@ -837,9 +822,6 @@ impl VideoSink {
             let (w, h) = (*w, *h);
             let cause = match self.shared.oversize {
                 Oversize::Refuse => None,
-                Oversize::Hold if self.shared.too_many_screens.load(Ordering::Relaxed) => {
-                    Some(HoldCause::Screens)
-                }
                 Oversize::Hold if !video::within_ceiling((u32::from(w), u32::from(h))) => {
                     Some(HoldCause::Size)
                 }
@@ -847,15 +829,11 @@ impl VideoSink {
             };
             let oversized = cause.is_some();
             if self.shared.oversized.swap(oversized, Ordering::Relaxed) != oversized {
-                if let Some(cause) = cause {
+                if oversized {
                     self.shared.passing.store(false, Ordering::Relaxed);
-                    let why = match cause {
-                        HoldCause::Size => "is past what a video stream encodes",
-                        HoldCause::Screens => "spans more screens than one view shows",
-                    };
                     info!(
-                        "{}: a {w}x{h} desktop {why}; the picture is held until the \
-                         remote sends another",
+                        "{}: a {w}x{h} desktop is past what a video stream encodes; the \
+                         picture is held until the remote sends another",
                         self.engine
                     );
                 } else {
@@ -1593,32 +1571,6 @@ mod tests {
         assert!(matches!(out[2], ServerMsg::Resize { w: 1280, .. }), "a held desktop sent a picture");
         assert!(matches!(out[3], ServerMsg::Oversize { cause: None }));
         assert!(matches!(out[4], ServerMsg::VideoFormat { .. }), "video came back unannounced");
-        assert!(matches!(&out[5], ServerMsg::Video(unit) if unit.keyframe));
-    }
-
-    /// Too many screens hold a desktop well within the ceiling, and say so as their
-    /// own cause; a desktop the engine says is back to few enough is video again.
-    #[tokio::test]
-    async fn too_many_screens_hold_a_desktop_of_any_size() {
-        let (sink, mut frame_rx) = holding_sink(1280, 800).await;
-        sink.hold_screens(true);
-        sink.msg(ServerMsg::Resize { w: 3840, h: 800, scale: UNSCALED }).await.unwrap();
-        assert!(sink.oversized());
-        let area = rect(0, 0, 64, 64);
-        sink.damage(area, &rgb(64, 64, 1)).await.unwrap();
-        sink.frame().await.unwrap();
-        sink.hold_screens(false);
-        sink.msg(ServerMsg::Resize { w: 1280, h: 800, scale: UNSCALED }).await.unwrap();
-        sink.damage(area, &rgb(64, 64, 2)).await.unwrap();
-        sink.frame().await.unwrap();
-        sink.flush().await;
-
-        let out = drain(&mut frame_rx, 6).await;
-        assert!(matches!(out[0], ServerMsg::Resize { w: 3840, .. }));
-        assert!(matches!(out[1], ServerMsg::Oversize { cause: Some(HoldCause::Screens) }));
-        assert!(matches!(out[2], ServerMsg::Resize { w: 1280, .. }), "a held desktop sent a picture");
-        assert!(matches!(out[3], ServerMsg::Oversize { cause: None }));
-        assert!(matches!(out[4], ServerMsg::VideoFormat { .. }));
         assert!(matches!(&out[5], ServerMsg::Video(unit) if unit.keyframe));
     }
 

@@ -138,26 +138,6 @@ tested, on a physical Mac.
 
 ## Under consideration
 
-### Two streams for Standard's Combined Display
-
-Standard's Combined Display over two screens is one framebuffer of both, which is
-often past the video ceiling at factor 1.0 (5376×2287 over a 2x screen beside a
-1x one), and then has no picture: the page offers one screen instead
-([past the ceiling](architecture.md#past-the-ceiling)). The plan is to carry that
-view as two streams, one per screen, each its own VP9 stream within the ceiling,
-for the page to lay out by the mosaic's regions as it composes one framebuffer
-today. How the Mac's rectangles split between the two, how the queue and the
-paint window order two chains, and how each stream starts over are the work.
-
-Two screens is the limit, as it is today: All Displays over three or more is held
-with the notice whatever its size. A session that passes the Mac's Adaptive or
-Full-quality picture is no video and has neither limit
-([A Standard Mac's own picture](architecture.md#a-standard-macs-own-picture)).
-
-High Performance is not part of this. Its All Displays is not one framebuffer:
-each of its virtual displays is a stream of its own already, the second shown in
-a browser tab ([two virtual displays](apple-vnc-889.md#two-virtual-displays)).
-
 ### Verifying an RDP host's certificate
 
 The TLS handshake accepts any certificate, for the session only, and verifies the

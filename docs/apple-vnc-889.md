@@ -25,7 +25,7 @@ layer.
 
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
-| `ard` | Standard, the physical displays | ZRLE, or in a session started with Adaptive (alpha) the Mac's 8×8 tiles, or with Full quality (alpha) its zlib, passed | none; the Mac's own output is left alone |
+| `ard` | Standard, the physical displays | the Mac's own, passed (alpha): its 8×8 tiles in a session started with Adaptive, or its zlib with Full quality | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC, or H.264, over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | as `ard` | none; the Mac's own output is left alone |
 
@@ -34,7 +34,7 @@ and its sound are always passed, for the browser to decode: the picture as the
 Mac's HEVC, or as the H.264 it sends where it is asked for that.
 
 **Unofficial:** `virtual_display = true` on an `ard` target keeps that row's
-picture and sound — ZRLE, none — and takes the display from the other: the same
+picture and sound — the Mac's own, none — and takes the display from the other: the same
 `SetDisplayConfiguration` at setup and on every resize, with no media stream
 offered. Apple's viewer never offers a virtual display without the stream, so
 nothing but remotex exercises the Mac's side of this combination. It was tested
@@ -49,7 +49,7 @@ official modes alone.
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density Combined Display view is composed in the browser, as Apple's viewer does. |
-| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Its ZRLE rectangles are stepped over unread and never shown, so a session that passes the stream builds no video encoder: until the stream is up and across display changes the page says the screen is not available and sends the Mac no input. |
+| Picture and sound | `ard` passes the Mac's own picture, Adaptive or Full quality, on every view, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Its ZRLE rectangles are stepped over unread and never shown, so a session that passes the stream builds no video encoder: until the stream is up and across display changes the page says the screen is not available and sends the Mac no input. |
 | Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
@@ -122,19 +122,19 @@ displays, offers no resize and never creates a virtual display, and
 never selects a physical screen or sends `SetServerScaling`. It departs in two
 places, and a third unofficially — `ard` with `virtual_display = true` creates
 the one virtual display the way High Performance does and then runs Standard's
-ZRLE session on it, a combination the viewer never offers (above):
+session on it, a combination the viewer never offers (above):
 - **Encryption.** Apple's viewer asks for the record layer only when its
   `encryptionLevel` preference is 2. The default is 0, which leaves the whole
   session in cleartext after authentication, keystrokes and the media stream's
   keys included. Remotex always asks, in both modes.
-- **Standard's picture.** `ard` asks for ZRLE alone, where Full quality asks for
-  zlib first. A session started with the picker's Adaptive (alpha) asks as
-  Adaptive quality does, for the 8×8 tiles first
+- **Standard's picture.** A session started with the picker's Adaptive (alpha),
+  the first it offers, asks as Adaptive quality does, for the 8×8 tiles first
   ([private codecs](#apples-own-framebuffer-encodings)), and leaves out `0x3ea`
   and zlib, which the Mac would not send after them; its page decodes the tiles.
   One started with Full quality (alpha) asks as Full quality does, zlib then
   ZRLE, and the Mac sends zlib alone, which its page inflates
-  ([Full quality's zlib](#full-qualitys-zlib)).
+  ([Full quality's zlib](#full-qualitys-zlib)). The gateway decodes neither and
+  encodes no picture of a Standard Mac's.
 
 ## Connecting
 
@@ -162,10 +162,10 @@ Both modes connect the same way until the record layer is up.
    and 2. The Mac answers with the rekey, and everything after it travels in
    records.
 6. **The mode.** High Performance sends `SetDisplayConfiguration`, both modes send
-   `SetPixelFormat` and the same `SetEncodings`, and High Performance then arms
-   `AutoFrameBufferUpdate`. Standard arms it when the first layout names the
-   screen being sent. Both arm it for one push a video frame at most (see
-   [Other messages](#other-messages)).
+   `SetPixelFormat` and `SetEncodings`, Standard's naming its quality's codec, and
+   High Performance then arms `AutoFrameBufferUpdate`. Standard arms it when the
+   first layout names the screen being sent: at 0, as Apple's viewer does, where
+   High Performance arms one push a second (see [Other messages](#other-messages)).
 
 ### Other login types
 
@@ -501,15 +501,11 @@ framebuffer, not over the one on screen). The browser then:
 This is the one place the browser rescales remote pixels (see
 [Input and display](architecture.md#input-and-display)).
 
-At factor 1.0 the combined framebuffer is the screens' native pixels side by side,
-and it is often past what a video stream encodes: a 2x screen beside a 1x one
-measured 5376×2287. Standard never resizes, so the gateway
-cannot ask for less. Such a view has no picture: the session stays up, and the
-page offers the Mac's screens instead, since one screen is a smaller desktop.
-Choosing one within the ceiling returns the session to video at the next layout.
-Combined Display over more than two screens is held the same way whatever its size or
-densities, since composing them is too much for a browser to draw. See
-[past the ceiling](architecture.md#past-the-ceiling).
+At factor 1.0 the combined framebuffer is the screens' native pixels side by side:
+a 2x screen beside a 1x one measured 5376×2287, past what a video stream encodes.
+Standard never resizes, so the gateway cannot ask for less. The picture is the
+Mac's own, passed, which is no video and has no ceiling: the page composes it at
+whatever size the screens come to, over any number of them.
 
 ### The High Performance virtual display
 
@@ -785,22 +781,13 @@ rectangle.
   band every 17 ms, and the minimising window was a stack of bands from
   different moments of the genie. There is no frame boundary on the wire for a
   client to put them back together.
-- **A Standard session that passes the Mac's own picture is armed as Apple's
-  viewer arms one.** Adaptive and Full quality arm 0 and send no request after
-  an update, so the page paints the strips as the Mac reads them. The Mac's own
-  throttle paces them, held by the page's paint acknowledgments while it falls
-  behind.
-- **Remotex arms the VP9 it encodes with 33,333 or more.** 33,333 is one frame of its video stream:
-  it shows no more than a frame in that time however often the Mac pushes, and
-  the gap after each update is when the Mac reads its input (below). A Standard
-  session encoded here widens the gap as it falls behind. It arms again with what an update
-  costs it to take — the time to read it, decode it and hand it to the video
-  stream, the browser's link included where that holds the stream — smoothed over
-  a few updates, up to 1,000,000, and comes back to 33,333 as the cost falls. It
-  arms again only when the interval moves by half, and at most twice a second.
-  High Performance arms 1,000,000 and keeps it: its picture is the media stream,
-  and the Mac's pixel updates are stepped over unread, so one a second is the
-  least it can be made to push while still arming the cursor shapes.
+- **A Standard session is armed as Apple's viewer arms one.** Adaptive and Full
+  quality arm 0 and send no request after an update, so the page paints the
+  strips as the Mac reads them. The Mac's own throttle paces them, held by the
+  page's paint acknowledgments while it falls behind.
+- **High Performance arms 1,000,000 and keeps it.** Its picture is the media
+  stream, and the Mac's pixel updates are stepped over unread, so one a second
+  is the least it can be made to push while still arming the cursor shapes.
 - **`0xffffffff` turns the pushes off.** The daemon records whether the word is
   the all-ones value and pushes nothing while it is. A published description reads
   the word as a screen id, with all-ones meaning all displays. It is not one:
@@ -818,19 +805,22 @@ from the media stream (encoding `0x3f2`), and the daemon's framebuffer sender
 skips such a viewer. Remotex does too once the stream is up, and then arms and
 polls one pixel — see [RFB while the stream runs](#rfb-while-the-stream-runs).
 
-The interval is what keeps the input moving everywhere else. With the gateway
-held to 15% of a core, Standard mode on a display of the Mac's own, an animation and a
-scrolling window on the Mac and the pointer sweeping, sampled once a second:
+A client that decodes each update meets it at 0. A gateway that decoded
+Standard's ZRLE into VP9, held to 15% of a core, on a display of the Mac's own,
+with an animation and a scrolling window on the Mac and the pointer sweeping,
+sampled once a second:
 
 | Interval | Seconds with input unread, of about 53 | Most unread | Picture |
 |---|---|---|---|
 | 0 | 47 | 41,616 bytes | 4.8 Mpx/s |
 | 33,333 | 4 | 1,190 bytes | 4.7 Mpx/s |
 | 1,000,000 | 2 | 2,856 bytes | 1.4 Mpx/s |
-| following the cost | 3 | 3,230 bytes | 4.1 Mpx/s |
 
-Following the cost, that gateway armed between 50,000 and 240,000. Unheld, it
-never left 33,333.
+A Standard session passes the Mac's picture and decodes none of it, so the
+gateway only forwards, and the page's link is what holds the connection. At 0,
+behind a page held to 1 Mbit/s with Full quality and to 300 kbit/s with
+Adaptive, a full-window animation on the Mac and the pointer sweeping, no sample
+of 44 had input unread, while the Mac's send queue stayed full.
 
 Arming the full framebuffer at setup and after every layout is still required,
 because it keeps cursor updates alive across logins and locks. Its rectangle is

@@ -175,9 +175,8 @@ export interface VideoStreamInfo {
  * stream it decodes, in how many strips where its pictures come in strips, and
  * which decoder that is, the browser's own or one of the
  * page's in WebAssembly, or what the row is waiting for before the stream's format has
- * arrived. While the desktop is held — past what a video stream encodes, or All
- * Displays over too many screens — there is no picture, whatever decoder was
- * built before.
+ * arrived. While the desktop is held, past what a video stream encodes, there is
+ * no picture, whatever decoder was built before.
  */
 export function videoLabel(
   stream: VideoStreamInfo | null,
@@ -185,9 +184,6 @@ export function videoLabel(
 ): string {
   if (held === "size") {
     return "Not in use: the desktop is past what video carries";
-  }
-  if (held === "screens") {
-    return "Not in use: Combined Display spans more than two screens";
   }
   if (!stream) {
     return "Waiting for the video format";

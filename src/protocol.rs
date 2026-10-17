@@ -1045,9 +1045,6 @@ pub struct DisplayInfo {
 pub enum HoldCause {
     /// Past what a video stream encodes ([`crate::video::within_ceiling`]).
     Size,
-    /// A Mac's Combined Display over more than
-    /// [`crate::vnc_apple::MAX_COMBINED_SCREENS`] screens, whatever its size.
-    Screens,
 }
 
 /// A rectangle in whole pixels or points, origin at the top left.
@@ -1194,7 +1191,7 @@ pub enum ServerMsg {
     /// remote pixels, and only here, because the Mac cannot render one
     /// framebuffer at two densities.
     ///
-    /// Sent ahead of the [`ServerMsg::Resize`] it describes, and replayed with it.
+    /// Sent ahead of the [`ServerMsg::Resize`] it describes.
     /// `resize` says one follows: the browser then holds the regions and adopts
     /// them with that framebuffer, never over the one still on screen. Without it
     /// the layout changed around the same framebuffer, which is recomposed at
@@ -1265,13 +1262,12 @@ pub enum ServerMsg {
     /// on reattach while it holds.
     PictureWithheld { active: bool },
     /// Why the desktop the `Resize` before this describes has no picture, or `None`
-    /// when it has one: past what a video stream encodes, or a Mac's Combined Display
-    /// over more screens than one view shows. No picture follows until a `Resize`
-    /// without a cause. Sent after every `Resize` of a source that holds the
-    /// session open for that — see [`crate::encode::Oversize`] — and never by one
-    /// that refuses it. The browser says so over the desktop, and offers the
-    /// remote's displays where it lists them, since choosing one is how a Mac on
-    /// Combined Display gets back.
+    /// when it has one: past what a video stream encodes. No picture follows until
+    /// a `Resize` without a cause. Sent after every `Resize` of a source that holds
+    /// the session open for that — see [`crate::encode::Oversize`] — and never by
+    /// one that refuses it. The browser says so over the desktop, and offers the
+    /// remote's displays where it lists them, since choosing a smaller one is how
+    /// such a desktop gets back.
     Oversize { cause: Option<HoldCause> },
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
@@ -2204,7 +2200,7 @@ mod tests {
                 None => panic!("pictureWithheld must be a text frame"),
             }
         }
-        for (cause, wire) in [(None, "null"), (Some(HoldCause::Size), r#""size""#), (Some(HoldCause::Screens), r#""screens""#)] {
+        for (cause, wire) in [(None, "null"), (Some(HoldCause::Size), r#""size""#)] {
             match (ServerMsg::Oversize { cause }).text_frame() {
                 Some(json) => assert_eq!(json, format!(r#"{{"type":"oversize","cause":{wire}}}"#)),
                 None => panic!("oversize must be a text frame"),
