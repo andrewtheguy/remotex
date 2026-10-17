@@ -29,7 +29,7 @@ use crate::config::{RenderPlan, StandardQuality};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, StandardUnit, TileUnit, VideoUnit};
 use crate::shadow::Rect;
-use crate::tiles::{Coded, Format, Round, Tiles};
+use crate::tiles::{Coded, Format, LEVELS, Round, Tiles};
 use crate::video;
 
 /// Maximum queued items ahead of the one currently collected: rounds, which are
@@ -116,17 +116,19 @@ const RATE_SPAN: Duration = Duration::from_secs(1);
 const TRIP_BYTES: u64 = 4 * 1024;
 
 /// How long a round of changed tiles may take the link at the plan's quality before
-/// it goes coarse ([`crate::tiles::Round::coarse`]), at what the link has been seen to
-/// carry ([`PaintWindow::carries`]). A few tiles of typing stay sharp on any link a
-/// desktop is usable over, and a whole new screen goes coarse below about 50 Mbit/s,
-/// where it would otherwise arrive row by row for a quarter of a second or more.
+/// it goes coarse ([`crate::tiles::Round::coarse`]), and at each coarse level before
+/// it goes coarser, at what the link has been seen to carry
+/// ([`PaintWindow::carries`]). A few tiles of typing stay sharp on any link a desktop
+/// is usable over, and a whole new screen goes coarse below about 50 Mbit/s, where it
+/// would otherwise arrive row by row for a quarter of a second or more.
 const COARSE_SPAN: Duration = Duration::from_millis(250);
 
 /// The fewest bytes a painting's sample of what the link carries must span to count
-/// ([`PaintWindow::carries`]). A smaller one's time is the browser's painting and the
-/// distance, not the link: a tile of a few hundred bytes takes a whole animation
-/// frame on any link, and would read a LAN as a slow one.
-const CARRY_BYTES: u64 = 64 * 1024;
+/// ([`PaintWindow::carries`]). A smaller one's time is the browser's painting, not
+/// the link: a tile of a few hundred bytes takes a whole animation frame on any
+/// link, and would read a LAN as a slow one. Half [`AHEAD`], because a slow link's
+/// window holds no more than that in flight, so a larger floor never sees one.
+const CARRY_BYTES: u64 = AHEAD / 2;
 
 /// How long a sample of what the link carries counts: the most within it is the
 /// rate. Longer than [`RATE_SPAN`], because only large paintings sample it, and a
@@ -238,8 +240,8 @@ impl PaintWindow {
     /// seen at all.
     ///
     /// A sample is what the browser painted from a rectangle's sending to its
-    /// painting, over that time, so it is never more than the link carried, and is
-    /// close to it once it spans [`CARRY_BYTES`].
+    /// painting, over that time less the shortest round trip, the distance, which
+    /// is close to what the link carried once it spans [`CARRY_BYTES`].
     fn carries(&mut self, now: Instant) -> Option<f64> {
         while self.carried.front().is_some_and(|(at, _)| now.duration_since(*at) > CARRY_SPAN) {
             self.carried.pop_front();
@@ -247,15 +249,16 @@ impl PaintWindow {
         self.carried.iter().map(|(_, rate)| *rate).reduce(f64::max).or(self.last_carried)
     }
 
-    /// Whether a round of changed tiles that would come to `bytes` at the plan's
-    /// quality is to go coarse: where the link would take longer than [`COARSE_SPAN`]
-    /// to carry it. A link not yet seen to carry anything is taken as a slow one for
-    /// a round larger than [`AHEAD`], so a session's first picture on a slow link
-    /// comes coarse and settles, rather than taking seconds to arrive.
-    fn coarse(&mut self, bytes: u64, now: Instant) -> bool {
+    /// The level a round of changed tiles that would come to `bytes` at each of the
+    /// [`LEVELS`] goes at: the finest the link carries within [`COARSE_SPAN`], or the
+    /// coarsest where it carries none in time. A link not yet seen to carry anything
+    /// is taken as a slow one for a round larger than [`AHEAD`] at the plan's quality,
+    /// which goes at the first coarse level, so a session's first picture on a slow
+    /// link comes coarse and settles, rather than taking seconds to arrive.
+    fn level(&mut self, bytes: [u64; LEVELS], now: Instant) -> usize {
         match self.carries(now) {
-            Some(rate) => bytes as f64 > rate * COARSE_SPAN.as_secs_f64(),
-            None => bytes > AHEAD,
+            Some(rate) => bytes.iter().position(|&bytes| bytes as f64 <= rate * COARSE_SPAN.as_secs_f64()).unwrap_or(LEVELS - 1),
+            None => usize::from(bytes[0] > AHEAD),
         }
     }
 
@@ -292,7 +295,8 @@ impl PaintWindow {
         }
         let carried = self.painted - before;
         if carried >= CARRY_BYTES {
-            let rate = carried as f64 / now.duration_since(ticket.passed).max(Duration::from_millis(1)).as_secs_f64();
+            let distance = self.shortest.unwrap_or_default();
+            let rate = carried as f64 / trip.saturating_sub(distance).max(Duration::from_millis(1)).as_secs_f64();
             self.carried.push_back((now, rate));
             self.last_carried = Some(rate);
         }
@@ -325,10 +329,10 @@ impl PaintAhead {
         self.window.lock().unwrap().room(Instant::now())
     }
 
-    /// Whether a round of changed tiles of `bytes` goes coarse now: see
-    /// [`PaintWindow::coarse`].
-    fn coarse(&self, bytes: u64) -> bool {
-        self.window.lock().unwrap().coarse(bytes, Instant::now())
+    /// The level a round of changed tiles of `bytes` at each level goes at now: see
+    /// [`PaintWindow::level`].
+    fn level(&self, bytes: [u64; LEVELS]) -> usize {
+        self.window.lock().unwrap().level(bytes, Instant::now())
     }
 
     /// Never waits: a [`Painted`] runs it wherever it is dropped.
@@ -623,8 +627,8 @@ impl VideoSink {
             return Ok(());
         };
         // A round the link would take too long to carry goes coarse, and settles.
-        let coarse = self.shared.ahead.coarse(video.tiles.changed_bytes());
-        let Some(round) = video.tiles.take_round(room, coarse) else {
+        let level = self.shared.ahead.level(video.tiles.changed_bytes());
+        let Some(round) = video.tiles.take_round(room, level) else {
             return Ok(());
         };
         video.due_at = Some(now + ROUND_INTERVAL);
@@ -1169,11 +1173,11 @@ async fn send_round(
     debug!(
         "{engine}: {} {} tile(s) in {} rectangle(s), {bytes} bytes",
         if round.exact() {
-            "refreshed"
+            "refreshed".to_owned()
         } else if round.coarse() {
-            "sent coarse"
+            format!("sent coarse at q{}", round.quality())
         } else {
-            "sent"
+            "sent".to_owned()
         },
         round.tiles(),
         coded.len()
@@ -1563,16 +1567,21 @@ mod tests {
     }
 
     /// What the link carries is read from paintings that span enough of it, the most
-    /// of them lately or the latest before that; a round goes coarse where the link
-    /// would take longer than the span to carry it, and on a link not yet seen to
-    /// carry anything where it is larger than the floor.
+    /// of them lately or the latest before that; a round goes at the finest level the
+    /// link carries within the span, and the coarsest where it carries none, and on a
+    /// link not yet seen to carry anything at the first coarse level where it is
+    /// larger than the floor.
     #[test]
-    fn a_round_goes_coarse_where_the_link_would_take_too_long_to_carry_it() {
+    fn a_round_goes_as_coarse_as_the_link_needs_to_carry_it_in_time() {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
+        // A round of `fine` bytes at the plan's quality, at the levels' guessed ratios.
+        let round = |fine: u64| [fine, fine / 5, fine * 12 / 100, fine / 12];
         let mut window = PaintWindow::default();
         assert!(window.carries(at(0)).is_none());
-        assert!(!window.coarse(AHEAD, at(0)) && window.coarse(AHEAD + 1, at(0)), "an unmeasured link is a slow one");
+        assert_eq!(window.level(round(AHEAD), at(0)), 0);
+        assert_eq!(window.level(round(AHEAD + 1), at(0)), 1, "an unmeasured link is a slow one");
+        assert_eq!(window.level(round(16 * 1024 * 1024), at(0)), 1, "an unmeasured link went past the baseline");
 
         // A tile of a few hundred bytes taking a whole animation frame says nothing.
         let ticket = window.take(300, at(0)).unwrap();
@@ -1584,17 +1593,39 @@ mod tests {
         window.painted(ticket, at(1150));
         let slow = window.carries(at(1150)).expect("measured");
         assert!((120_000.0..130_000.0).contains(&slow), "{slow}");
-        assert!(!window.coarse(24 * 1024, at(1150)), "a few tiles of typing went coarse");
-        assert!(window.coarse(256 * 1024, at(1150)), "a new screen on a slow link stayed fine");
+        assert_eq!(window.level(round(24 * 1024), at(1150)), 0, "a few tiles of typing went coarse");
+        assert_eq!(window.level(round(128 * 1024), at(1150)), 1, "a new screen on a slow link stayed fine");
+        assert_eq!(window.level(round(256 * 1024), at(1150)), 2, "a large one stayed at the baseline");
+        assert_eq!(window.level(round(2 * 1024 * 1024), at(1150)), 3, "a whole desktop stayed short of the coarsest");
 
         // A LAN: 256 KiB in a frame, which the slow sample does not outweigh.
         let ticket = window.take_over(256 * 1024, at(2000));
         window.painted(ticket, at(2016));
-        assert!(!window.coarse(2 * 1024 * 1024, at(2016)), "a whole screen went coarse on a LAN");
+        assert_eq!(window.level(round(2 * 1024 * 1024), at(2016)), 0, "a whole screen went coarse on a LAN");
 
         // Long past both, the latest still stands.
         assert_eq!(window.carries(at(60_000)), window.last_carried);
-        assert!(!window.coarse(2 * 1024 * 1024, at(60_000)));
+        assert_eq!(window.level(round(2 * 1024 * 1024), at(60_000)), 0);
+    }
+
+    /// A slow link's window holds no more than its floor in flight, and a painting of
+    /// that much, less the distance, still reads the link: a whole screen goes past
+    /// the baseline on it, where an unmeasured link holds it there.
+    #[test]
+    fn a_slow_links_window_still_reads_what_it_carries() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let screen = [2_000_000, 400_000, 240_000, 166_000];
+        let mut window = PaintWindow::default();
+        let ticket = window.take(300, at(0)).unwrap();
+        window.painted(ticket, at(60));
+        assert_eq!(window.level(screen, at(60)), 1);
+        // 300 kbit/s: 24 KiB in about 0.65 s, and the 60 ms of distance.
+        let ticket = window.take(24 * 1024, at(100)).expect("room under the floor");
+        window.painted(ticket, at(815));
+        let slow = window.carries(at(815)).expect("measured");
+        assert!((36_000.0..40_000.0).contains(&slow), "{slow}");
+        assert_eq!(window.level(screen, at(815)), 3);
     }
 
     /// A 300 kbit/s link kept full for a minute: its queue never empties, every
@@ -1981,7 +2012,7 @@ mod tests {
     async fn a_round_in_flight_defers_frame_and_its_return_wakes_the_engine() {
         let (sink, mut frame_rx) = video_sink(64, 64).await;
         sink.damage(rect(0, 0, 64, 64), &rgb(64, 64, 1)).await.unwrap();
-        let round = sink.shared.video.lock().await.tiles.take_round(u64::MAX, false).expect("owed tiles");
+        let round = sink.shared.video.lock().await.tiles.take_round(u64::MAX, 0).expect("owed tiles");
 
         // frame() while the round is out: early return, with the restart left for a
         // call that has the tiles' marks home.

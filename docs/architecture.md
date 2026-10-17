@@ -755,18 +755,24 @@ RDP host's bitmap updates.
   `video_quality`, its colour sampled once per 2×2 pixels. Each tile is drawn on its
   own, replacing what the browser held there whatever it held, and depends on no
   other, so nothing is a keyframe and nothing predicts from what came before.
-- **A slow link gets a coarse picture first.** A round of changed tiles the link
-  would take longer than 250 ms (`COARSE_SPAN`) to carry at the target's quality,
-  weighed at what a tile has lately cost there, goes coarse: every changed tile a
-  JPEG at quality 20 (`COARSE_QUALITY`), text and panels included, and only a tile
-  of one colour a PNG, exact and smaller. The 1440×900 photograph a 1 Mbit/s link
-  took four seconds to carry at 90 is a second at 20. What the link carries is read
-  from the paint acks (`PaintWindow::carries`): what the browser painted from a
-  rectangle's sending to its painting, over that time, counted only where it spans
-  64 KiB (`CARRY_BYTES`), since a smaller one's time is an animation frame and the
-  distance on any link; the most of the last 10 s, or the latest before that. A
-  link not yet seen to carry anything is a slow one for a round past 32 KiB, so a
-  session's first picture comes coarse and settles. A coarse tile is lossy like any
+- **A slow link gets a coarse picture first, coarser on a slower one.** A round of
+  changed tiles the link would take longer than 250 ms (`COARSE_SPAN`) to carry at
+  the target's quality, weighed at what a tile has lately cost there, goes coarse:
+  every changed tile a JPEG at quality 20, text and panels included, and only a
+  tile of one colour a PNG, exact and smaller. Where the link would take longer
+  than the span to carry the round even at 20, weighed at what a tile has lately
+  cost at 20, it goes at 10, and past that at 5 (`COARSE_QUALITIES`), below which a
+  JPEG saves little more. The 1440×900 photograph a 1 Mbit/s link took four
+  seconds to carry at 90 is 98 KiB at 20, 59 at 10 and 41 at 5, and its blocks'
+  means and headers are still 34 KiB at 1. What the link carries is read from the
+  paint acks (`PaintWindow::carries`): what the browser painted from a rectangle's
+  sending to its painting, over that time less the shortest round trip, the
+  distance, counted only where it spans 16 KiB (`CARRY_BYTES`), since a smaller
+  one's time is an animation frame on any link, and a slow link's paint window
+  holds no more than 32 KiB in flight, so a larger floor never measured one; the
+  most of the last 10 s, or the latest before that. A link not yet seen to carry
+  anything is a slow one for a round past 32 KiB, which goes at 20, so a session's
+  first picture comes coarse and settles. A coarse tile is lossy like any
   JPEG tile, and the next bullet makes it exact once it is still; a refresh is never
   coarse, so coarse is only ever the first picture of a change.
 - **A still JPEG tile is sent again exactly.** Every 50 ms (`SETTLE_TICK`) the order
