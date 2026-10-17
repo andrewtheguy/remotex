@@ -267,7 +267,7 @@ pub enum Passthrough {
     /// any browser: none is asked whether it decodes it, so one that does not
     /// finds out from its decoder.
     AppleH264,
-    /// ALPHA. A Standard Mac's picture as Apple's viewer's Adaptive quality has it:
+    /// BETA. A Standard Mac's picture as Apple's viewer's Adaptive quality has it:
     /// the Mac's 8×8 tiles (`0x3f3`), which it codes coarsely first and refines
     /// as the connection lets it, for the page to decode
     /// (`frontend/wasm/vnc`). Offered by `ard` ahead of its Full quality, one of
@@ -279,7 +279,7 @@ pub enum Passthrough {
     ///
     /// Tested against a virtual Mac alone.
     AppleAdaptive,
-    /// ALPHA. A Standard Mac's picture as Apple's viewer's Full quality has it:
+    /// BETA. A Standard Mac's picture as Apple's viewer's Full quality has it:
     /// RFB's zlib (encoding 6), the Mac's pixels deflated as one stream across the
     /// session, lossless, for the page to inflate (`frontend/wasm/vnc`).
     /// Offered by `ard` beside the Adaptive picture.

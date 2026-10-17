@@ -62,7 +62,7 @@ https://github.com/user-attachments/assets/596640b5-9b35-45c3-a875-87934d1c0c0f
   HEVC or its H.264 is always passed unchanged, and neither adapts to the
   browser link: a still screen sends little, motion much. The H.264 needs no
   HEVC decoder in the page, so every build serves a High Performance Mac to any
-  browser. A Standard Mac's own picture is passed (alpha), decoded in the page:
+  browser. A Standard Mac's own picture is passed (beta), decoded in the page:
   its Adaptive quality, paced by the browser link, whose precision stays the
   same while a slower link gets fewer updates and later refinement, or its Full
   quality, lossless zlib for a LAN.
@@ -111,7 +111,7 @@ seamlessly of the three, since what RFB lacks is added to it.
   page's software decoder.
 - **A Mac's Standard Screen Sharing** (`vnc`, `subtype = "ard"`). The Mac's
   physical displays, one or all, at their own size and density, as the Mac's
-  own Adaptive or Full-quality picture passed through (alpha), with no sound,
+  own Adaptive or Full-quality picture passed through (beta), with no sound,
   camera or microphone.
 - **wlshare on Linux** (`vnc`, `subtype = "wlshare"`). Because the server is
   ours, what RFB lacks is added to it: it switches outputs, follows the window

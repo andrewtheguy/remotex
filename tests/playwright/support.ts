@@ -285,8 +285,8 @@ export async function startTarget(
     const names = {
       "apple-media": /^HEVC, passed through/,
       "apple-h264": /^H\.264, passed through/,
-      "apple-adaptive": /^Adaptive \(alpha\), passed through/,
-      "apple-full": /^Full quality \(alpha\), passed through/,
+      "apple-adaptive": /^Adaptive \(beta\), passed through/,
+      "apple-full": /^Full quality \(beta\), passed through/,
     };
     await item
       .getByRole("group", { name: "Picture" })

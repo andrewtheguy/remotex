@@ -79,7 +79,7 @@ camera and microphone, and how its picture reaches the browser.
 |---|---|---|---|---|---|
 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; VP9 from the gateway on the bitmap path |
 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | the Mac's HEVC or its H.264, passed through |
-| macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | the Mac's Adaptive or Full-quality picture, passed through (alpha) |
+| macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | the Mac's Adaptive or Full-quality picture, passed through (beta) |
 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
 | any other VNC server, not prioritized | `vnc` | one framebuffer at the size the server says, at 1x, never resized from the browser | none | no | VP9 from the gateway |
 
@@ -145,8 +145,8 @@ host that does not draw one ends the session
 
 Screen Sharing's Standard mode (`ard`, including the unofficial
 `virtual_display = true`) passes the Mac's own picture, in the quality the
-session was started with at the picker, Adaptive (alpha) or Full quality
-(alpha): the Mac is asked for its quality of that name, as Apple's viewer asks
+session was started with at the picker, Adaptive (beta) or Full quality
+(beta): the Mac is asked for its quality of that name, as Apple's viewer asks
 for it, and its rectangles are passed for the page to decode, on one screen, on
 the virtual display and on Combined Display alike. Nothing of it is encoded
 here. The Adaptive picture is a coarse pass of each changed area and its
@@ -540,8 +540,8 @@ that selects the stream. See
 #### A Standard Mac's own picture
 
 An `ard` target's picture is the Mac's own, chosen at the picker of two, in
-this order: its Adaptive picture passed (alpha) and its Full-quality picture
-passed (alpha), the two qualities of Apple's viewer's menu. The Adaptive one is
+this order: its Adaptive picture passed (beta) and its Full-quality picture
+passed (beta), the two qualities of Apple's viewer's menu. The Adaptive one is
 taken until the other is chosen, and neither is greyed: the page decodes them in
 WebAssembly, which every page that starts has. A session that names neither is
 refused, since nothing of a Standard Mac's is encoded here: do not add a VP9 of
@@ -1196,7 +1196,7 @@ Safari on a Mac.
 
 #### A Standard Mac's own picture, passed through
 
-ALPHA. An `ard` session, started with the picker's Adaptive or Full quality, is
+BETA. An `ard` session, started with the picker's Adaptive or Full quality, is
 asked for what Apple's viewer's quality of that name asks for, and the Mac's
 rectangles go to the page as the Mac sent them. The gateway decodes none of
 them: the rules are in
@@ -2003,7 +2003,7 @@ and `GET /api/targets` carries it:
 | `rdp` with `egfx = false` | no | shown | hidden | hidden | hidden: libvpx |
 | `vnc` | no | hidden | hidden | hidden | hidden: libvpx |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden | shown: wlshare's own |
-| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive or Full-quality picture, passed (alpha) | hidden | hidden: the picture is never VP9 |
+| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive or Full-quality picture, passed (beta) | hidden | hidden: the picture is never VP9 |
 | `vnc`, `ard` with `virtual_display` | yes | hidden | shown, as for `ard` | hidden | hidden: the picture is never VP9 |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden | hidden: the picture is never VP9 |
 
@@ -2049,7 +2049,7 @@ and `GET /api/targets` carries it:
   the first that is not greyed until somebody chooses another (`pictureOptions`
   in `frontend/src/targetChoices.ts`). A `connect` that names neither is
   refused: no picture of a High Performance Mac's is encoded here. A Standard
-  Mac's Picture group is Adaptive (alpha) and Full quality (alpha) passed
+  Mac's Picture group is Adaptive (beta) and Full quality (beta) passed
   through, which `connect` names as `apple-adaptive` and `apple-full`, the
   Adaptive one taken first; one that names neither is refused the same way.
 - **Offered but unavailable is greyed, with the reason.** The Mac's HEVC

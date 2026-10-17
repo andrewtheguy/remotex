@@ -64,8 +64,8 @@ config key.
 | `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — | — |
 | `vnc` | no | none | — | — | — |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
-| `vnc`, `ard` | no | none | VP9, or the Mac's Adaptive or Full-quality picture passed (alpha) | — | — |
-| `vnc`, `ard` with `virtual_display` | yes | none | VP9, or the Mac's Adaptive or Full-quality picture passed (alpha) | — | — |
+| `vnc`, `ard` | no | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — | — |
+| `vnc`, `ard` with `virtual_display` | yes | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — | — |
 | `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — | — |
 
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
@@ -95,8 +95,8 @@ config key.
   follows the browser's link: the Windows host draws fewer and smaller frames
   for a browser that falls behind. A Mac's passed stream does not: the Mac sends
   at its own rate, little on a still screen and much with motion. On an `ard`
-  target the Picture group is *Adaptive (alpha)*, the default, or *Full quality
-  (alpha)*, the two qualities of Apple's viewer's menu, which this page decodes.
+  target the Picture group is *Adaptive (beta)*, the default, or *Full quality
+  (beta)*, the two qualities of Apple's viewer's menu, which this page decodes.
   Adaptive is the Mac's 8×8 tiles, each changed area a coarse pass and its
   refinement after it, at the same precision on any link: a slower link gets
   fewer updates, and their refinement once the screen is still. Full is the Mac's
@@ -253,11 +253,10 @@ connection with the same error as wrong credentials. See
 [Remote Management access](apple-vnc-889.md#remote-management-access).
 
 - **`subtype = "ard"`** is Screen Sharing's Standard mode: the Mac's physical
-  displays, one or all of them, at their own density. Its lossless ZRLE source
-  is decoded by the gateway and encoded as VP9, adaptive by default, unless the
-  session is started with the picker's Adaptive (alpha) or Full quality (alpha),
-  which pass the Mac's own Adaptive or Full-quality picture for the page to
-  decode; those have been tried on a virtual Mac alone, and show Combined Display
+  displays, one or all of them, at their own density. A session is started
+  with the picker's Adaptive (beta), the default, or Full quality (beta), which
+  pass the Mac's own Adaptive or Full-quality picture for the page to decode;
+  the gateway encodes neither. Both have been tried on a virtual Mac alone, and show Combined Display
   whole at any size. It has no resize and
   no sound; the Mac keeps playing on its own output.
 - Every Apple subtype carries the Mac's native pasteboard.

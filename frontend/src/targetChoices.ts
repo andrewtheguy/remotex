@@ -21,7 +21,7 @@
 //   HEVC, or its H.264, in that order: see `pictureOptions`. The first this
 //   browser can take is taken until another is chosen. The H.264 is never
 //   greyed: no browser is asked whether it decodes it.
-// - A Standard Mac's picture is one of the Mac's own, passed through (alpha), as
+// - A Standard Mac's picture is one of the Mac's own, passed through (beta), as
 //   Apple's viewer's quality menu has them, Adaptive or Full, which this page
 //   decodes: the Adaptive one until another is chosen, and neither greyed.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
@@ -334,13 +334,13 @@ function pictureOptions(
     },
     "apple-adaptive": {
       value: "apple-adaptive",
-      label: "Adaptive (alpha), passed through",
+      label: "Adaptive (beta), passed through",
       note: "The Mac's own Adaptive quality, as Apple's viewer has it: a coarse pass and its refinement, the same on any link, where a slower link gets fewer updates. Decoded by this page.",
       disabled: false,
     },
     "apple-full": {
       value: "apple-full",
-      label: "Full quality (alpha), passed through",
+      label: "Full quality (beta), passed through",
       note: "The Mac's own Full quality, as Apple's viewer has it: every pixel exact, in zlib, decoded by this page. For a LAN.",
       disabled: false,
     },

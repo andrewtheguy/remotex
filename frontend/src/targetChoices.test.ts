@@ -221,8 +221,8 @@ test("a Standard Mac's picture is its Adaptive or Full-quality picture passed", 
   );
   assert.equal(first.choices.passthrough, "apple-adaptive", "the first");
   assert.equal(first.encoders, null, "no VP9 to choose an encoder for");
-  assert.match(first.pictures?.[0].label ?? "", /alpha/);
-  assert.match(first.pictures?.[1].label ?? "", /^Full quality \(alpha\)/);
+  assert.match(first.pictures?.[0].label ?? "", /^Adaptive \(beta\)/);
+  assert.match(first.pictures?.[1].label ?? "", /^Full quality \(beta\)/);
   // A remembered VP9 from before is not a choice any more.
   assert.equal(
     targetOptions(STANDARD, { passthrough: null }, ABLE).choices.passthrough,

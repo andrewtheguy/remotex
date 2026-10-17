@@ -25,7 +25,7 @@ layer.
 
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
-| `ard` | Standard, the physical displays | the Mac's own, passed (alpha): its 8×8 tiles in a session started with Adaptive, or its zlib with Full quality | none; the Mac's own output is left alone |
+| `ard` | Standard, the physical displays | the Mac's own, passed (beta): its 8×8 tiles in a session started with Adaptive, or its zlib with Full quality | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC, or H.264, over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | as `ard` | none; the Mac's own output is left alone |
 
@@ -127,11 +127,11 @@ session on it, a combination the viewer never offers (above):
   `encryptionLevel` preference is 2. The default is 0, which leaves the whole
   session in cleartext after authentication, keystrokes and the media stream's
   keys included. Remotex always asks, in both modes.
-- **Standard's picture.** A session started with the picker's Adaptive (alpha),
+- **Standard's picture.** A session started with the picker's Adaptive (beta),
   the first it offers, asks as Adaptive quality does, for the 8×8 tiles first
   ([private codecs](#apples-own-framebuffer-encodings)), and leaves out `0x3ea`
   and zlib, which the Mac would not send after them; its page decodes the tiles.
-  One started with Full quality (alpha) asks as Full quality does, zlib then
+  One started with Full quality (beta) asks as Full quality does, zlib then
   ZRLE, and the Mac sends zlib alone, which its page inflates
   ([Full quality's zlib](#full-qualitys-zlib)). The gateway decodes neither and
   encodes no picture of a Standard Mac's.

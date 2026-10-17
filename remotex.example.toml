@@ -482,7 +482,7 @@ password = "change-me"
 #
 # `subtype = "ard"` is Standard screen sharing: the Mac's physical display list and
 # native pasteboard, with one framebuffer holding every attached display at once.
-# The picker must choose Adaptive or Full quality (both ALPHA), and the gateway
+# The picker must choose Adaptive or Full quality (both BETA), and the gateway
 # encodes neither. Adaptive asks for Apple's Adaptive quality, the Mac's own 8x8
 # tiles, which are passed for the page to decode, paced by the browser's link.
 # Full quality asks for Apple's Full quality, the Mac's lossless zlib, passed for
