@@ -887,7 +887,7 @@ impl VideoSink {
     /// as much of the ones before it as the browser paints in
     /// twice its shortest round trip is passed and not yet painted ([`PaintWindow`]),
     /// and while it waits the engine reads nothing more of the Mac's connection,
-    /// which backs up, so the Mac codes for the link the browser is on.
+    /// which backs up, so the Mac sends as few updates as the browser's link takes.
     pub async fn pass_standard(&self, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
         let bytes = data.len();

@@ -271,7 +271,8 @@ only to encode it again, beside a pipeline that already gives an exact picture
 under the host's Lossless policy
 ([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy))
 and the host's own Adaptive H.264 for a slow link. On a Mac, Standard mode's
-Adaptive quality, the Mac's own codecs, covers the same ground
+Adaptive quality, the Mac's own codecs, covers a slow link with fewer updates
+rather than coarser ones
 ([Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)).
 
 ### `THINCLIENT` in the graphics capability advertise

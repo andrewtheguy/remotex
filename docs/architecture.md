@@ -149,9 +149,10 @@ session was started with at the picker, Adaptive (alpha) or Full quality
 (alpha): the Mac is asked for its quality of that name, as Apple's viewer asks
 for it, and its rectangles are passed for the page to decode, on one screen, on
 the virtual display and on Combined Display alike. Nothing of it is encoded
-here. The Mac codes the Adaptive picture for the link it finds, coarse first
-and sharpened as the link allows, and the page's painting is what it finds; the
-Full-quality picture is lossless zlib, which only goes slower on a slow link,
+here. The Adaptive picture is a coarse pass of each changed area and its
+refinement after it, at the same precision on any link: the Mac sends fewer
+updates on a slower link, and refines them once the screen is still, and the
+page's painting is the link it finds; the Full-quality picture is lossless zlib, which only goes slower on a slow link,
 for a LAN. Both are tested against a virtual Mac alone, from a desktop browser. See
 [A Standard Mac's own picture](#a-standard-macs-own-picture).
 
@@ -569,8 +570,9 @@ virtual display and Combined Display alike.
   browser that comes back is given a session that starts, with the Mac connected
   again, as a passed graphics pipeline is. A picture the gateway could not get to
   a page still attached ends the session.
-- **The Mac paced by the page.** The Mac codes for the connection it finds:
-  on a slow one its Adaptive refinement waits for a still screen, and its zlib
+- **The Mac paced by the page.** The Mac paces itself by the connection it
+  finds: on a slow one it sends fewer Adaptive updates at the same precision,
+  their refinement waits for a still screen, and its zlib
   goes no faster than the connection. So the gateway reads
   the Mac's connection only as the page paints: a rectangle waits while twice
   what the page paints in a round trip, and at least 32 KiB, of those passed
@@ -1803,14 +1805,15 @@ remote is told how the link is doing. Today three of the five passthroughs are:
 - **A Mac** walks its HEVC or H.264 by the one-way delay to the gateway, which on
   a LAN is never behind. A browser that falls behind fills the gateway's queue,
   which drops to the next IDR and asks the Mac for one. A still screen comes far
-  under the Mac's target, so a slow link carries it; a slow link with much motion
-  wants an `ard` target in Standard mode, whose Adaptive picture the Mac codes
-  for the link.
+  under the Mac's target, so a slow link carries it, and falls behind one with
+  much motion. An `ard` target in Standard mode does not fall behind there, but
+  its Adaptive picture is no coarser for it: it comes as fewer updates.
 - **A Mac in Standard mode** passing its own picture is paced by the page's
   painting: the gateway reads the Mac's connection only while less of what it
   passed is unpainted than twice what the page paints in a round trip, and at
   least 32 KiB, so the connection backs up as the browser's link
-  does, and the Mac codes for that link as it does for a viewer on one. Measured against a 300 kbit/s browser, the Adaptive picture ran 0.66 s behind
+  does, and the Mac sends fewer updates on it, at the same precision, as it
+  does for a viewer on one. Measured against a 300 kbit/s browser, the Adaptive picture ran 0.66 s behind
   on average and the Mac sent about one and a half updates a second. Full
   quality's zlib has nothing to code coarser: it is paced the same way and
   only comes slower. See

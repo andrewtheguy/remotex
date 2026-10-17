@@ -335,7 +335,7 @@ function pictureOptions(
     "apple-adaptive": {
       value: "apple-adaptive",
       label: "Adaptive (alpha), passed through",
-      note: "The Mac's own Adaptive quality, as Apple's viewer has it: coarse first and sharpened as the link allows, decoded by this page.",
+      note: "The Mac's own Adaptive quality, as Apple's viewer has it: a coarse pass and its refinement, the same on any link, where a slower link gets fewer updates. Decoded by this page.",
       disabled: false,
     },
     "apple-full": {

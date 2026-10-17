@@ -94,12 +94,12 @@ config key.
   cannot compose the pipeline cannot start the target. A passed RDP pipeline
   follows the browser's link: the Windows host draws fewer and smaller frames
   for a browser that falls behind. A Mac's passed stream does not: the Mac sends
-  at its own rate, little on a still screen and much with motion. For a slow
-  link with much motion, an `ard` target follows the link, with its VP9 or with
-  the Mac's Adaptive picture. On an `ard` target the Picture group is *VP9*,
-  the default, *Adaptive (alpha)* or *Full quality (alpha)*, the two qualities
-  of Apple's viewer's menu, which this page decodes. Adaptive is the Mac's 8×8
-  tiles, coded coarse first and sharpened as the link allows. Full is the Mac's
+  at its own rate, little on a still screen and much with motion. On an `ard`
+  target the Picture group is *Adaptive (alpha)*, the default, or *Full quality
+  (alpha)*, the two qualities of Apple's viewer's menu, which this page decodes.
+  Adaptive is the Mac's 8×8 tiles, each changed area a coarse pass and its
+  refinement after it, at the same precision on any link: a slower link gets
+  fewer updates, and their refinement once the screen is still. Full is the Mac's
   lossless zlib, every pixel exact, which the Mac sends no faster than the link
   takes, for a LAN. A session started with either is started over, not resumed,
   when the browser comes back, as a passed RDP pipeline is.
