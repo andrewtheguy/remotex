@@ -24,7 +24,8 @@ axum server ── single session slot ── protocol engine
 Ordinary RDP and VNC source frames are decoded in the gateway and sent as tiles:
 the desktop in 64×64 tiles, each changed tile an image the browser decodes on its
 own, PNG where it holds few enough colours to be exact and JPEG at the target's
-quality where it does not, and a JPEG tile sent again as PNG once it is still —
+quality where it does not, every changed tile a coarse JPEG where the link would
+take too long to carry them, and a JPEG tile sent again as PNG once it is still —
 see [The tiles](#the-tiles). wlshare, reached as `subtype = "wlshare"`, instead
 codes its own VP9 stream, at the quality and walk the target's render plan
 resolves to, for the gateway to pass through unchanged, at 4:4:4 for a browser
@@ -356,8 +357,9 @@ whose bitmap updates are sent as tiles by the gateway.
 A session's picture reaches the browser one of two ways, both ordinary:
 - **Coded here** as tiles ([The tiles](#the-tiles)): the desktop in 64×64 tiles,
   a changed tile a PNG where it holds few enough colours to be exact and a JPEG at
-  the target's quality where it does not, a JPEG tile sent again as PNG once it is
-  still, and every tile sent as fast as the browser paints them. The coders are
+  the target's quality where it does not, a coarse JPEG first where the link is
+  slow, a JPEG tile sent again as PNG once it is still, and every tile sent as fast
+  as the browser paints them. The coders are
   the `jpeg-encoder` and `png` crates, both pure Rust, and the browser decodes both
   images itself.
 - **Passed untouched**, as the remote made it, for the browser to decode or
@@ -708,7 +710,8 @@ A target's picture keys are per target, and every one has a default:
 - `render_adaptive` (on unless a target writes `false`), a `wlshare` target's
   alone, lets wlshare's VP9 walk its quality on the browser's link — see
   [wlshare's stream, passed through](#wlshares-stream-passed-through). The tiles
-  have no walk: they follow the browser's painting at the one quality
+  have no walk: they follow the browser's painting at the one quality, with a
+  coarse first pass on a slow link
   ([what the link will bear](#colour-and-what-the-link-will-bear)).
 
 There is no chroma key: wlshare's chroma follows the browser
@@ -752,6 +755,20 @@ RDP host's bitmap updates.
   `video_quality`, its colour sampled once per 2×2 pixels. Each tile is drawn on its
   own, replacing what the browser held there whatever it held, and depends on no
   other, so nothing is a keyframe and nothing predicts from what came before.
+- **A slow link gets a coarse picture first.** A round of changed tiles the link
+  would take longer than 250 ms (`COARSE_SPAN`) to carry at the target's quality,
+  weighed at what a tile has lately cost there, goes coarse: every changed tile a
+  JPEG at quality 20 (`COARSE_QUALITY`), text and panels included, and only a tile
+  of one colour a PNG, exact and smaller. The 1440×900 photograph a 1 Mbit/s link
+  took four seconds to carry at 90 is a second at 20. What the link carries is read
+  from the paint acks (`PaintWindow::carries`): what the browser painted from a
+  rectangle's sending to its painting, over that time, counted only where it spans
+  64 KiB (`CARRY_BYTES`), since a smaller one's time is an animation frame and the
+  distance on any link; the most of the last 10 s, or the latest before that. A
+  link not yet seen to carry anything is a slow one for a round past 32 KiB, so a
+  session's first picture comes coarse and settles. A coarse tile is lossy like any
+  JPEG tile, and the next bullet makes it exact once it is still; a refresh is never
+  coarse, so coarse is only ever the first picture of a change.
 - **A still JPEG tile is sent again exactly.** Every 50 ms (`SETTLE_TICK`) the order
   task marks still each tile last sent as JPEG that has not changed since the tick
   before, and a round taken while no tile has changed sends those as PNG of the
@@ -1570,7 +1587,9 @@ anything HD.
 
 **The tiles follow the browser's painting, at one quality.** They have no quality
 walk: a changed tile of many colours goes at the target's `video_quality` on any
-link. What a slow link changes is how often a round goes. A round is taken only
+link, or coarse where the link would take too long to carry the round
+([The tiles](#the-tiles)), and settles exact either way. What a slow link changes
+besides is how often a round goes. A round is taken only
 while what the browser was sent is painted back under the paint window
 (`PaintWindow` in `src/encode.rs`), the bound a Standard Mac's rectangles are held
 to: twice what the browser paints in its shortest round trip, at the fastest rate
@@ -1579,10 +1598,10 @@ taken, is sent whole whatever it came to, and holds the next until the browser h
 painted it back under the bound. While the window is full the engine goes on
 reading its remote into the mirror, so the damage merges there, and the round the
 painting lets go carries the newest pixels of every tile that changed meanwhile,
-each once. A slower link gets fewer updates of the current picture rather than
-coarser ones, as a Mac's Adaptive picture does for a viewer on one
-([A Standard Mac's own picture](#a-standard-macs-own-picture)), and what is queued
-is never more than the window holds. The painting that brings the window back
+each once. A slower link gets fewer updates of the current picture, each a coarse
+pass that sharpens where it stays, as a Mac's Adaptive picture does for a viewer on
+one ([A Standard Mac's own picture](#a-standard-macs-own-picture)), and what is
+queued is never more than the window holds. The painting that brings the window back
 under its bound wakes the engine (`VideoSink::round_returned`), so a round is never
 left waiting for the next frame boundary. A still JPEG tile's exact picture goes
 in the room the window leaves, once nothing changed is waiting

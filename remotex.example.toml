@@ -588,8 +588,8 @@ password = "change-me"
 # plain VNC, and RDP's bitmap path — it is tiles: the desktop in 64×64 tiles, a
 # changed tile of few colours sent exactly as PNG and any other as JPEG, sent again
 # exactly as PNG once it has stopped changing. Tiles go as fast as the browser
-# paints them, so a slow link gets fewer updates of the current picture rather than
-# coarser ones. A `wlshare` target's picture is wlshare's own VP9, passed through.
+# paints them, and a change the link would take too long to carry comes first as a
+# coarse JPEG that sharpens to the exact picture once it is still. A `wlshare` target's picture is wlshare's own VP9, passed through.
 # A passed Mac media stream or RDP graphics pipeline keeps the remote's own quality,
 # so the keys are refused on both Mac subtypes, and on RDP apply only to the bitmap
 # path. Every key below is per target, so it belongs *inside* a [[targets]] table

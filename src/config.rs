@@ -195,7 +195,8 @@ pub struct RenderPlan {
     pub quality: u8,
     /// Whether wlshare's VP9 walks its dial on the browser's lag
     /// ([`TargetConfig::render_adaptive`]), on a `wlshare` target and nowhere else:
-    /// the tiles coded here follow the browser's painting at the one quality.
+    /// the tiles coded here follow the browser's painting at the one quality, with a
+    /// coarse first pass on a slow link.
     pub adaptive: bool,
     /// The picture is wlshare's own VP9 ([`Self::chroma`]), asked of a `wlshare`
     /// target's server and passed as it comes; otherwise, where no passthrough below

@@ -17,8 +17,13 @@
 //! again for the next. Runs are coded on every core ([`Round::code`]), and each run
 //! is cut where its tiles change format, so a row is as few images as it can be.
 //! What paces the rounds is [`crate::encode`]'s: the browser's painting, which a
-//! slow link holds back, so damage merges in the mirror and the link gets fewer
-//! updates of the current picture rather than coarser ones.
+//! slow link holds back, so damage merges in the mirror.
+//!
+//! A round the link would take too long to carry at the plan's quality goes coarse
+//! instead ([`Round::coarse`]): every changed tile a JPEG at [`COARSE_QUALITY`], text
+//! and panels included, which the settle tick makes exact once they are still. So a
+//! slow link shows a whole new picture soon, blurred, and it sharpens where it stays,
+//! as a Mac's Adaptive picture does, rather than a sharp one arriving row by row.
 
 use anyhow::Context as _;
 use rayon::prelude::*;
@@ -42,14 +47,21 @@ const PALETTE: usize = 256;
 const JPEG_SAMPLING: jpeg_encoder::SamplingFactor = jpeg_encoder::SamplingFactor::R_4_2_0;
 
 /// What a tile's exact picture is taken to cost before one has been coded: what a
-/// refresh is budgeted by until [`Tiles::exact_bytes`] has a measure.
+/// refresh is budgeted by until [`Tiles::exact_bytes`] has a measure, and a round of
+/// changed tiles weighed by until [`Tiles::fine_bytes`] has one.
 const EXACT_GUESS: u64 = 8 * 1024;
+
+/// The JPEG quality of a coarse round ([`Round::coarse`]): a whole desktop in a
+/// fifth of what it is at 90, about 100 KiB for a 1440×900 photograph, so a second
+/// on a 1 Mbit/s link where 90 took four. Never finer than the plan's.
+const COARSE_QUALITY: u8 = 20;
 
 /// The image a coded rectangle is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// A JPEG at the plan's quality, its colour at [`JPEG_SAMPLING`]: lossy, and so
-    /// owed its exact picture once its tiles are still.
+    /// A JPEG at the plan's quality, or at [`COARSE_QUALITY`] in a coarse round, its
+    /// colour at [`JPEG_SAMPLING`]: lossy, and so owed its exact picture once its
+    /// tiles are still.
     Jpeg,
     /// A PNG, the exact pixels.
     Png,
@@ -107,6 +119,9 @@ pub struct Tiles {
     /// What a tile's exact picture has come to lately, in bytes: what a refresh
     /// round is budgeted by.
     exact_bytes: u64,
+    /// What a tile has come to lately sent at the plan's quality or exactly, in
+    /// bytes: what the changed tiles owed are weighed by ([`Self::changed_bytes`]).
+    fine_bytes: u64,
 }
 
 impl Tiles {
@@ -124,6 +139,7 @@ impl Tiles {
             epoch: 0,
             start_owed: true,
             exact_bytes: EXACT_GUESS,
+            fine_bytes: EXACT_GUESS,
         }
     }
 
@@ -232,13 +248,20 @@ impl Tiles {
         self.refresh > 0 && self.dirty == 0
     }
 
+    /// What the changed tiles owed would come to at the plan's quality, at what a tile
+    /// has lately cost there: what decides whether their round goes coarse.
+    pub fn changed_bytes(&self) -> u64 {
+        self.dirty as u64 * self.fine_bytes
+    }
+
     /// Take the tiles owed, for a round coded on a blocking worker.
     ///
-    /// Every changed tile, when there are any: a refresh waits for the picture to be
-    /// current. Otherwise the tiles owed their exact picture, top row first, as many
-    /// as `budget` bytes come to at what a tile's exact picture has lately cost, and at
-    /// least one. `None` when nothing is owed, and while a round is out.
-    pub fn take_round(&mut self, budget: u64) -> Option<Round> {
+    /// Every changed tile, when there are any, coded coarse where `coarse` says to
+    /// ([`Round::coarse`]): a refresh waits for the picture to be current. Otherwise
+    /// the tiles owed their exact picture, top row first, as many as `budget` bytes
+    /// come to at what a tile's exact picture has lately cost, and at least one.
+    /// `None` when nothing is owed, and while a round is out.
+    pub fn take_round(&mut self, budget: u64, coarse: bool) -> Option<Round> {
         if !self.owes() {
             return None;
         }
@@ -282,7 +305,9 @@ impl Tiles {
         }
         self.round_out = true;
         let start = std::mem::take(&mut self.start_owed);
-        Some(Round { runs, exact, quality: self.quality, epoch: self.epoch, start })
+        let coarse = coarse && !exact;
+        let quality = if coarse { COARSE_QUALITY.min(self.quality) } else { self.quality };
+        Some(Round { runs, exact, coarse, quality, epoch: self.epoch, start })
     }
 
     /// Bring back what a round took, with what it was coded as: a tile sent as JPEG is
@@ -309,6 +334,13 @@ impl Tiles {
                 self.exact_bytes = (self.exact_bytes * 3 + per_tile) / 4;
             }
         }
+        // A coarse round says nothing of what its tiles cost at the plan's quality;
+        // a refresh, their exact picture, says no less.
+        let tiles: usize = coded.iter().map(|part| part.cols).sum();
+        if !round.coarse && tiles > 0 {
+            let per_tile = coded.iter().map(|part| part.data.len() as u64).sum::<u64>() / tiles as u64;
+            self.fine_bytes = (self.fine_bytes * 3 + per_tile) / 4;
+        }
     }
 }
 
@@ -328,6 +360,9 @@ pub struct Round {
     runs: Vec<Run>,
     /// A refresh round: tiles owed their exact picture, every one coded as PNG.
     exact: bool,
+    /// See [`Self::coarse`].
+    coarse: bool,
+    /// The JPEG quality its tiles are coded at.
     quality: u8,
     /// The [`Tiles::epoch`] it was taken under.
     epoch: u64,
@@ -342,6 +377,14 @@ impl Round {
         self.exact
     }
 
+    /// Whether this round sends its changed tiles coarse: every one a JPEG at
+    /// [`COARSE_QUALITY`] but a tile of one colour, whose PNG is exact and smaller,
+    /// because the link would take too long to carry them at the plan's quality. Each
+    /// is owed its exact picture once it is still, as any JPEG tile is.
+    pub fn coarse(&self) -> bool {
+        self.coarse
+    }
+
     /// How many tiles the round took.
     pub fn tiles(&self) -> usize {
         self.runs.iter().map(|run| run.cols).sum()
@@ -350,7 +393,7 @@ impl Round {
     /// Code every run, on every core, in the order the browser draws them: rows top
     /// to bottom, each left to right. Blocking: call it on a worker.
     pub fn code(&self) -> anyhow::Result<Vec<Coded>> {
-        let coded: Vec<Vec<Coded>> = self.runs.par_iter().map(|run| code_run(run, self.exact, self.quality)).collect::<anyhow::Result<_>>()?;
+        let coded: Vec<Vec<Coded>> = self.runs.par_iter().map(|run| code_run(run, self.exact, self.coarse, self.quality)).collect::<anyhow::Result<_>>()?;
         Ok(coded.into_iter().flatten().collect())
     }
 }
@@ -370,15 +413,18 @@ pub struct Coded {
 }
 
 /// Code `run`, cut where its tiles change format: a tile of few colours, and every
-/// tile of an `exact` round, as PNG, and any other as JPEG at `quality`.
-fn code_run(run: &Run, exact: bool, quality: u8) -> anyhow::Result<Vec<Coded>> {
+/// tile of an `exact` round, as PNG, and any other as JPEG at `quality`. In a
+/// `coarse` round only a tile of one colour is a PNG.
+fn code_run(run: &Run, exact: bool, coarse: bool, quality: u8) -> anyhow::Result<Vec<Coded>> {
     let (width, height) = (usize::from(run.rect.w()), usize::from(run.rect.h()));
     let tile = usize::from(TILE);
     let formats: Vec<Format> = (0..run.cols)
         .map(|i| {
             let left = i * tile;
             let right = (left + tile).min(width);
-            if exact || palette(rows(&run.rgb, width, left, right, height)).is_some() { Format::Png } else { Format::Jpeg }
+            let colours = || palette(rows(&run.rgb, width, left, right, height)).map(|(colours, _)| colours.len() / 3);
+            let exactly = exact || if coarse { colours() == Some(1) } else { colours().is_some() };
+            if exactly { Format::Png } else { Format::Jpeg }
         })
         .collect();
     let mut coded = Vec::new();
@@ -529,7 +575,7 @@ mod tests {
 
     /// A round, coded and brought back.
     fn sent(tiles: &mut Tiles, budget: u64) -> (Round, Vec<Coded>) {
-        let round = tiles.take_round(budget).expect("something owed");
+        let round = tiles.take_round(budget, false).expect("something owed");
         let coded = round.code().expect("a round codes");
         tiles.put_back(&round, &coded);
         (round, coded)
@@ -568,7 +614,7 @@ mod tests {
         let rects: Vec<_> = coded.iter().map(|part| (part.x, part.y, part.w, part.h, part.format)).collect();
         assert_eq!(rects, [(0, 0, 192, 64, Format::Png), (0, 64, 192, 64, Format::Png)]);
         assert!(!tiles.owes(), "a round taken leaves nothing owed");
-        assert!(tiles.take_round(0).is_none());
+        assert!(tiles.take_round(0, false).is_none());
     }
 
     /// A tile of few colours is sent exactly, and one of many as JPEG, a run cut where
@@ -630,13 +676,44 @@ mod tests {
         tiles.tick();
         assert!(tiles.tick());
         tiles.blit(placed(0, 0, 1, 1), &[1, 2, 3]).expect("a blit");
-        assert!(!tiles.take_round(u64::MAX).expect("owed").exact(), "a refresh went ahead of a change");
+        assert!(!tiles.take_round(u64::MAX, false).expect("owed").exact(), "a refresh went ahead of a change");
         tiles.round_out = false;
-        let one = tiles.take_round(0).expect("owed");
+        let one = tiles.take_round(0, false).expect("owed");
         assert_eq!((one.exact(), one.tiles()), (true, 1), "a refresh of no budget is one tile");
         tiles.round_out = false;
-        let two = tiles.take_round(2 * EXACT_GUESS).expect("owed");
+        let two = tiles.take_round(2 * EXACT_GUESS, false).expect("owed");
         assert_eq!(two.tiles(), 2);
+    }
+
+    /// A coarse round sends a tile of text as a JPEG at the coarse quality, smaller
+    /// than its PNG, and keeps a tile of one colour exact; the JPEG is made exact once
+    /// it is still, and a round of no change is never coarse.
+    #[test]
+    fn a_coarse_round_sends_text_as_jpeg_and_makes_it_exact_once_still() {
+        let mut tiles = tiles(128, 64);
+        // Two colours in stripes: a palette's, which a fine round sends as PNG.
+        let text: Vec<u8> = (0..64 * 64).flat_map(|i| if (i * 7 / 3) % 5 < 2 { [0, 0, 0] } else { [250, 250, 250] }).collect();
+        let mut picture = flat(128, 64, [40, 40, 40]);
+        for row in 0..64 {
+            picture[row * 384..row * 384 + 192].copy_from_slice(&text[row * 192..(row + 1) * 192]);
+        }
+        tiles.blit(placed(0, 0, 128, 64), &picture).expect("a blit");
+        assert_eq!(tiles.changed_bytes(), 2 * EXACT_GUESS);
+        let round = tiles.take_round(0, true).expect("owed");
+        assert!(round.coarse() && round.quality == COARSE_QUALITY);
+        let coded = round.code().expect("a round codes");
+        tiles.put_back(&round, &coded);
+        let parts: Vec<_> = coded.iter().map(|part| (part.x, part.format)).collect();
+        assert_eq!(parts, [(0, Format::Jpeg), (64, Format::Png)], "text coarse, the flat tile exact");
+        assert_eq!(tiles.fine_bytes, EXACT_GUESS, "a coarse round weighed what a fine tile costs");
+
+        tiles.tick();
+        assert!(tiles.tick(), "the coarse tile is owed its exact picture");
+        let refresh = tiles.take_round(u64::MAX, true).expect("owed");
+        assert!(refresh.exact() && !refresh.coarse(), "a refresh went coarse");
+        let coded = refresh.code().expect("a round codes");
+        assert_eq!(coded.iter().map(|part| (part.x, part.format)).collect::<Vec<_>>(), [(0, Format::Png)]);
+        assert_eq!(unpng(&coded[0].data).2, text);
     }
 
     /// The whole picture again, for a client starting over: every tile, behind a start.
@@ -661,7 +738,7 @@ mod tests {
     fn a_round_that_outlives_its_desktop_marks_nothing() {
         let mut tiles = tiles(128, 128);
         tiles.blit(placed(0, 0, 128, 128), &noise(128, 128, 1)).expect("a blit");
-        let stale = tiles.take_round(0).expect("owed");
+        let stale = tiles.take_round(0, false).expect("owed");
         let coded = stale.code().expect("a round codes");
         tiles.want(64, 64);
         tiles.blit(placed(0, 0, 64, 64), &flat(64, 64, [5, 5, 5])).expect("a blit at the new size");

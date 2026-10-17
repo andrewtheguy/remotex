@@ -115,6 +115,24 @@ const RATE_SPAN: Duration = Duration::from_secs(1);
 /// link taking seconds, would widen it by as much.
 const TRIP_BYTES: u64 = 4 * 1024;
 
+/// How long a round of changed tiles may take the link at the plan's quality before
+/// it goes coarse ([`crate::tiles::Round::coarse`]), at what the link has been seen to
+/// carry ([`PaintWindow::carries`]). A few tiles of typing stay sharp on any link a
+/// desktop is usable over, and a whole new screen goes coarse below about 50 Mbit/s,
+/// where it would otherwise arrive row by row for a quarter of a second or more.
+const COARSE_SPAN: Duration = Duration::from_millis(250);
+
+/// The fewest bytes a painting's sample of what the link carries must span to count
+/// ([`PaintWindow::carries`]). A smaller one's time is the browser's painting and the
+/// distance, not the link: a tile of a few hundred bytes takes a whole animation
+/// frame on any link, and would read a LAN as a slow one.
+const CARRY_BYTES: u64 = 64 * 1024;
+
+/// How long a sample of what the link carries counts: the most within it is the
+/// rate. Longer than [`RATE_SPAN`], because only large paintings sample it, and a
+/// second of typing would otherwise forget a LAN.
+const CARRY_SPAN: Duration = Duration::from_secs(10);
+
 /// How often the order task looks for tiles sent as JPEG that have gone still, to be
 /// owed their exact picture ([`Tiles::tick`]): a tile is still once a whole tick has
 /// gone by without it changing, so it is sent exactly 50–100 ms after it stopped.
@@ -175,6 +193,11 @@ struct PaintWindow {
     rates: std::collections::VecDeque<(Instant, f64)>,
     /// The shortest round trip so far of a rectangle no larger than [`TRIP_BYTES`].
     shortest: Option<Duration>,
+    /// What the link has been seen to carry, in bytes a second, with when each was
+    /// sampled, and the latest of them, which outlives [`CARRY_SPAN`]: see
+    /// [`Self::carries`].
+    carried: std::collections::VecDeque<(Instant, f64)>,
+    last_carried: Option<f64>,
 }
 
 /// One rectangle's place in a [`PaintWindow`], given back when it is painted.
@@ -210,6 +233,32 @@ impl PaintWindow {
         (self.ahead + taken <= bound).then(|| self.ticket(taken, bytes, now))
     }
 
+    /// What the link carries, in bytes a second: the most it was seen to within
+    /// [`CARRY_SPAN`], or the latest it was before that, and `None` before it has been
+    /// seen at all.
+    ///
+    /// A sample is what the browser painted from a rectangle's sending to its
+    /// painting, over that time, so it is never more than the link carried, and is
+    /// close to it once it spans [`CARRY_BYTES`].
+    fn carries(&mut self, now: Instant) -> Option<f64> {
+        while self.carried.front().is_some_and(|(at, _)| now.duration_since(*at) > CARRY_SPAN) {
+            self.carried.pop_front();
+        }
+        self.carried.iter().map(|(_, rate)| *rate).reduce(f64::max).or(self.last_carried)
+    }
+
+    /// Whether a round of changed tiles that would come to `bytes` at the plan's
+    /// quality is to go coarse: where the link would take longer than [`COARSE_SPAN`]
+    /// to carry it. A link not yet seen to carry anything is taken as a slow one for
+    /// a round larger than [`AHEAD`], so a session's first picture on a slow link
+    /// comes coarse and settles, rather than taking seconds to arrive.
+    fn coarse(&mut self, bytes: u64, now: Instant) -> bool {
+        match self.carries(now) {
+            Some(rate) => bytes as f64 > rate * COARSE_SPAN.as_secs_f64(),
+            None => bytes > AHEAD,
+        }
+    }
+
     /// The room left under the bound at `now`, or `None` where there is none: what a
     /// round of tiles may be taken in, a round being taken only while there is some.
     fn room(&mut self, now: Instant) -> Option<u64> {
@@ -241,6 +290,12 @@ impl PaintWindow {
         if ticket.bytes <= TRIP_BYTES {
             self.shortest = Some(self.shortest.map_or(trip, |shortest| shortest.min(trip)));
         }
+        let carried = self.painted - before;
+        if carried >= CARRY_BYTES {
+            let rate = carried as f64 / now.duration_since(ticket.passed).max(Duration::from_millis(1)).as_secs_f64();
+            self.carried.push_back((now, rate));
+            self.last_carried = Some(rate);
+        }
     }
 }
 
@@ -268,6 +323,12 @@ impl PaintAhead {
     /// The room for a round of tiles now: see [`PaintWindow::room`].
     fn room(&self) -> Option<u64> {
         self.window.lock().unwrap().room(Instant::now())
+    }
+
+    /// Whether a round of changed tiles of `bytes` goes coarse now: see
+    /// [`PaintWindow::coarse`].
+    fn coarse(&self, bytes: u64) -> bool {
+        self.window.lock().unwrap().coarse(bytes, Instant::now())
     }
 
     /// Never waits: a [`Painted`] runs it wherever it is dropped.
@@ -376,9 +437,11 @@ struct Shared {
     /// bytes.
     graphics: AtomicU64,
     graphics_bytes: AtomicU64,
-    /// Rounds of tiles sent, and of them the refreshes: tiles owed their exact picture.
+    /// Rounds of tiles sent, and of them the refreshes: tiles owed their exact picture,
+    /// and the coarse ones ([`crate::tiles::Round::coarse`]).
     rounds: AtomicU64,
     refreshes: AtomicU64,
+    coarse: AtomicU64,
     /// Rectangles of tiles sent as JPEG and as PNG, and their bytes.
     jpeg: AtomicU64,
     jpeg_bytes: AtomicU64,
@@ -422,6 +485,7 @@ impl Shared {
             graphics_bytes: AtomicU64::new(0),
             rounds: AtomicU64::new(0),
             refreshes: AtomicU64::new(0),
+            coarse: AtomicU64::new(0),
             jpeg: AtomicU64::new(0),
             jpeg_bytes: AtomicU64::new(0),
             png: AtomicU64::new(0),
@@ -558,7 +622,9 @@ impl VideoSink {
         let Some(room) = self.shared.ahead.room() else {
             return Ok(());
         };
-        let Some(round) = video.tiles.take_round(room) else {
+        // A round the link would take too long to carry goes coarse, and settles.
+        let coarse = self.shared.ahead.coarse(video.tiles.changed_bytes());
+        let Some(round) = video.tiles.take_round(room, coarse) else {
             return Ok(());
         };
         video.due_at = Some(now + ROUND_INTERVAL);
@@ -1097,9 +1163,18 @@ async fn send_round(
     if round.exact() {
         shared.refreshes.fetch_add(1, Ordering::Relaxed);
     }
+    if round.coarse() {
+        shared.coarse.fetch_add(1, Ordering::Relaxed);
+    }
     debug!(
         "{engine}: {} {} tile(s) in {} rectangle(s), {bytes} bytes",
-        if round.exact() { "refreshed" } else { "sent" },
+        if round.exact() {
+            "refreshed"
+        } else if round.coarse() {
+            "sent coarse"
+        } else {
+            "sent"
+        },
         round.tiles(),
         coded.len()
     );
@@ -1149,9 +1224,9 @@ fn micros(since: Instant) -> u64 {
 ///
 /// - `passed` and `keyframe` are read together for a passed stream: keyframe bytes
 ///   against all of them say how much of the stream the remote spent starting over.
-/// - `rounds`, `refreshes`, `jpeg` and `png` are the tiles: how many rounds went, how
-///   many of them sent still tiles exactly, and what the rectangles came to in each
-///   format.
+/// - `rounds`, `refreshes`, `coarse`, `jpeg` and `png` are the tiles: how many rounds
+///   went, how many of them sent still tiles exactly and how many changed tiles
+///   coarse, and what the rectangles came to in each format.
 /// - `coding` against `waiting` says whether the rounds overlapped the read loop:
 ///   `waiting` accrues only while the order task finds a round *unfinished*.
 /// - `stalled` is what the read loop still pays, waiting on the queue or the budget.
@@ -1165,6 +1240,7 @@ struct Totals {
     graphics_bytes: u64,
     rounds: u64,
     refreshes: u64,
+    coarse: u64,
     jpeg: u64,
     jpeg_bytes: u64,
     png: u64,
@@ -1188,6 +1264,7 @@ impl Totals {
             graphics_bytes: load(&shared.graphics_bytes),
             rounds: load(&shared.rounds),
             refreshes: load(&shared.refreshes),
+            coarse: load(&shared.coarse),
             jpeg: load(&shared.jpeg),
             jpeg_bytes: load(&shared.jpeg_bytes),
             png: load(&shared.png),
@@ -1205,7 +1282,7 @@ impl fmt::Display for Totals {
             f,
             "{} passed unit(s) / {} bytes, {} keyframe(s) / {} bytes, \
              {} graphics run(s) / {} bytes passed, \
-             {} round(s) of tiles, {} of them refreshes: {} JPEG / {} bytes and {} PNG / {} bytes, \
+             {} round(s) of tiles, {} of them refreshes and {} coarse: {} JPEG / {} bytes and {} PNG / {} bytes, \
              {}µs coding in {}µs of waiting, engine stalled {}µs",
             self.units,
             self.passed_bytes,
@@ -1215,6 +1292,7 @@ impl fmt::Display for Totals {
             self.graphics_bytes,
             self.rounds,
             self.refreshes,
+            self.coarse,
             self.jpeg,
             self.jpeg_bytes,
             self.png,
@@ -1307,6 +1385,12 @@ mod tests {
         // The resize itself, so a test can count what follows.
         assert!(matches!(frame_rx.recv().await, Some(ServerMsg::Resize { .. })));
         (sink, frame_rx)
+    }
+
+    /// Have `sink`'s browser seen to paint as fast as a link carries anything, so no
+    /// round goes coarse: for a test of something else.
+    fn on_a_fast_link(sink: &VideoSink) {
+        sink.shared.ahead.window.lock().unwrap().last_carried = Some(f64::MAX);
     }
 
     /// A sink for a source that holds an oversize desktop, told the desktop is
@@ -1476,6 +1560,41 @@ mod tests {
         assert_eq!(window.room(start), None, "a round past the bound leaves no room");
         window.painted(over, start + Duration::from_millis(5));
         assert!(window.room(start + Duration::from_millis(5)).is_some());
+    }
+
+    /// What the link carries is read from paintings that span enough of it, the most
+    /// of them lately or the latest before that; a round goes coarse where the link
+    /// would take longer than the span to carry it, and on a link not yet seen to
+    /// carry anything where it is larger than the floor.
+    #[test]
+    fn a_round_goes_coarse_where_the_link_would_take_too_long_to_carry_it() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut window = PaintWindow::default();
+        assert!(window.carries(at(0)).is_none());
+        assert!(!window.coarse(AHEAD, at(0)) && window.coarse(AHEAD + 1, at(0)), "an unmeasured link is a slow one");
+
+        // A tile of a few hundred bytes taking a whole animation frame says nothing.
+        let ticket = window.take(300, at(0)).unwrap();
+        window.painted(ticket, at(16));
+        assert!(window.carries(at(16)).is_none());
+
+        // 1 Mbit/s: 128 KiB in about a second.
+        let ticket = window.take_over(128 * 1024, at(100));
+        window.painted(ticket, at(1150));
+        let slow = window.carries(at(1150)).expect("measured");
+        assert!((120_000.0..130_000.0).contains(&slow), "{slow}");
+        assert!(!window.coarse(24 * 1024, at(1150)), "a few tiles of typing went coarse");
+        assert!(window.coarse(256 * 1024, at(1150)), "a new screen on a slow link stayed fine");
+
+        // A LAN: 256 KiB in a frame, which the slow sample does not outweigh.
+        let ticket = window.take_over(256 * 1024, at(2000));
+        window.painted(ticket, at(2016));
+        assert!(!window.coarse(2 * 1024 * 1024, at(2016)), "a whole screen went coarse on a LAN");
+
+        // Long past both, the latest still stands.
+        assert_eq!(window.carries(at(60_000)), window.last_carried);
+        assert!(!window.coarse(2 * 1024 * 1024, at(60_000)));
     }
 
     /// A 300 kbit/s link kept full for a minute: its queue never empties, every
@@ -1775,6 +1894,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_picture_starts_behind_its_start_and_a_repaint_starts_it_again() {
         let (sink, mut frame_rx) = video_sink(640, 480).await;
+        on_a_fast_link(&sink);
         let area = rect(0, 0, 320, 64);
 
         sink.damage(area, &rgb(area.w(), area.h(), 1)).await.unwrap();
@@ -1809,6 +1929,45 @@ mod tests {
         assert_eq!(rows, (0..8).map(|row| (row * 64, 640)).collect::<Vec<_>>(), "not the whole picture, a row at a time");
     }
 
+    /// A session's first picture on a link not yet measured comes coarse, every tile
+    /// of many colours a JPEG, and settles to the exact picture once it is still;
+    /// on a link measured fast it comes exact at once.
+    #[tokio::test]
+    async fn a_first_picture_on_an_unmeasured_link_comes_coarse_and_settles() {
+        let (sink, mut frame_rx) = video_sink(256, 128).await;
+        let whole = rect(0, 0, 256, 128);
+        let pixels = noise(256, 128, 3);
+        let first = round(&sink, &mut frame_rx, whole, &pixels).await;
+        assert!(first.iter().all(|unit| unit.format == Format::Jpeg));
+        assert_eq!(sink.shared.coarse.load(Ordering::Relaxed), 1);
+        drop(first);
+        // The settle ticks make it exact, nothing coarse among them: as an engine
+        // does, every wake-up a frame.
+        let mut exact = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while exact < 8 {
+                sink.round_returned().await;
+                sink.frame().await.unwrap();
+                sink.flush().await;
+                while let Ok(msg) = frame_rx.try_recv() {
+                    let ServerMsg::Tile(unit) = msg else { panic!("expected tiles, got {msg:?}") };
+                    assert_eq!(unit.format, Format::Png, "a refresh was not exact");
+                    exact += usize::from(unit.w / 64);
+                }
+            }
+        })
+        .await
+        .expect("the coarse picture never settled");
+        assert_eq!(sink.shared.coarse.load(Ordering::Relaxed), 1, "a refresh went coarse");
+
+        let (sink, mut frame_rx) = video_sink(256, 128).await;
+        on_a_fast_link(&sink);
+        let flat = vec![200; 256 * 128 * 3];
+        let first = round(&sink, &mut frame_rx, whole, &flat).await;
+        assert!(first.iter().all(|unit| unit.format == Format::Png));
+        assert_eq!(sink.shared.coarse.load(Ordering::Relaxed), 0);
+    }
+
     /// The wake-up contract both engines rely on now that a round is coded on a
     /// worker: while a round is away, `frame()` is a no-op that consumes nothing — not
     /// even a restart — and the order task signals [`VideoSink::round_returned`] when
@@ -1822,7 +1981,7 @@ mod tests {
     async fn a_round_in_flight_defers_frame_and_its_return_wakes_the_engine() {
         let (sink, mut frame_rx) = video_sink(64, 64).await;
         sink.damage(rect(0, 0, 64, 64), &rgb(64, 64, 1)).await.unwrap();
-        let round = sink.shared.video.lock().await.tiles.take_round(u64::MAX).expect("owed tiles");
+        let round = sink.shared.video.lock().await.tiles.take_round(u64::MAX, false).expect("owed tiles");
 
         // frame() while the round is out: early return, with the restart left for a
         // call that has the tiles' marks home.
@@ -1964,6 +2123,7 @@ mod tests {
     #[tokio::test]
     async fn a_round_waits_for_the_tiles_before_it_to_be_painted() {
         let (sink, mut frame_rx) = video_sink(640, 192).await;
+        on_a_fast_link(&sink);
         let whole = rect(0, 0, 640, 192);
         let first = round(&sink, &mut frame_rx, whole, &noise(640, 192, 1)).await;
         assert!(first.iter().map(|unit| unit.data.len() as u64).sum::<u64>() > AHEAD, "a round smaller than the window's floor");
