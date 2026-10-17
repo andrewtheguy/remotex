@@ -29,7 +29,7 @@ use screen_vp9::walk::{LAG_CLEAR, QualityWalk};
 #[cfg(test)]
 use screen_vp9::walk::SETTLE_IDLE;
 
-use crate::config::RenderPlan;
+use crate::config::{RenderPlan, StandardQuality};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{AdaptiveUnit, GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
@@ -76,12 +76,13 @@ const ENCODE_DEPTH: usize = 16;
 /// behind at 4 Mbit/s; an unthrottled link 100 ms away carried what it did before.
 const QUEUE_BUDGET: u32 = 512 * 1024;
 
-/// How many bytes of a Mac's Adaptive rectangles may be passed and not yet
-/// painted by the browser ([`VideoSink::pass_adaptive`]).
+/// How many bytes of a Mac's own rectangles, Adaptive or Full, may be passed
+/// and not yet painted by the browser ([`VideoSink::pass_adaptive`]).
 ///
 /// The Mac decides what to send by its own connection: the refinement after a
 /// full update waits for the motion when the connection is slow ("What a Mac
-/// sends a viewer that lists them" in docs/apple-vnc-889.md). The queue budget
+/// sends a viewer that lists them" in docs/apple-vnc-889.md), and its zlib is
+/// sent no faster than the connection takes it. The queue budget
 /// cannot show it a slow browser: a burst of rectangles passes the paint window
 /// together and waits in the kernel's send buffer, and against a 300 kbit/s
 /// browser the picture ran 5.7 s behind, the Mac refining throughout. Held to
@@ -735,14 +736,15 @@ impl VideoSink {
         self.push(Pending::Msg(ServerMsg::Graphics(GraphicsUnit { data: wrapped, frame, held }))).await
     }
 
-    /// A Mac's Adaptive picture starts here, from nothing, and is the picture from
-    /// now on ([`Self::pass_adaptive`]): said ahead of the Mac's first rectangle.
-    pub async fn adaptive_start(&self) -> anyhow::Result<()> {
+    /// A Mac's own picture starts here, from nothing, in `quality`, and is the
+    /// picture from now on ([`Self::pass_adaptive`]): said ahead of the Mac's first
+    /// rectangle.
+    pub async fn adaptive_start(&self, quality: StandardQuality) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
-        self.push(Pending::Msg(ServerMsg::AdaptiveStart { engine: 0 })).await
+        self.push(Pending::Msg(ServerMsg::AdaptiveStart { engine: 0, quality })).await
     }
 
-    /// Queue one of a Mac's rectangles in its Adaptive picture as the next record,
+    /// Queue one of a Mac's rectangles in its own picture as the next record,
     /// untouched: where it is and its body as the Mac sent it, for the page to
     /// decode.
     ///
@@ -1237,7 +1239,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1315,7 +1317,7 @@ mod tests {
     #[tokio::test]
     async fn adaptive_rectangles_wait_for_the_ones_before_them_to_be_painted() {
         let (sink, mut rx) = video_sink(64, 32).await;
-        sink.adaptive_start().await.unwrap();
+        sink.adaptive_start(StandardQuality::Adaptive).await.unwrap();
         sink.pass_adaptive(0, 0, 64, 16, vec![1; 16 * 1024]).await.unwrap();
         sink.pass_adaptive(0, 16, 64, 16, vec![2; 16 * 1024]).await.unwrap();
         assert!(sink.passing());
@@ -2002,7 +2004,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2129,7 +2131,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

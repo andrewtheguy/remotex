@@ -2297,8 +2297,12 @@ export function useRemoteDesktop(
         case "adaptiveStart":
           // Queued the same way: the picture's first rectangle must find a
           // decoder with nothing in it.
-          painter()?.startAdaptive();
-          setVideoStream({ decode: "", passthrough: true, adaptive: true });
+          painter()?.startAdaptive(msg.quality);
+          setVideoStream({
+            decode: "",
+            passthrough: true,
+            standard: msg.quality,
+          });
           break;
         case "hostPicture":
           setHostPicture({ exact: msg.exact, codecs: msg.codecs });

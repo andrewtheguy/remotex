@@ -1,10 +1,11 @@
-# The page's decoder for a Mac's Adaptive picture, as a WebAssembly module of
-# its own: one of the Mac's rectangles in, the framebuffer it paints out.
+# The page's decoder for a Mac's own picture, as a WebAssembly module of its own:
+# one of the Mac's rectangles in, the framebuffer it paints out.
 #
-# It is the page's alone. A session started with Standard's Adaptive quality
-# passes the Mac's rectangles as they came, and the gateway decodes none of them,
-# so no crate is shared with it: the decoder is src/decoder.rs, written here, and
-# this is the binding around it.
+# It is the page's alone. A session started with Standard's Adaptive or Full
+# quality passes the Mac's rectangles as they came, and the gateway decodes none
+# of them, so no crate of the gateway's is shared with it: the decoders are
+# src/decoder.rs, written here, for the Adaptive tiles, and src/zlib.rs, on
+# miniz_oxide's inflater, for Full's zlib, and this is the binding around them.
 #
 # Built by `bun run build:wasm` in frontend/, into pkg/, beside the compositor's
 # module (../egfx) and the lossless sound's (../flac), and sharing nothing with
@@ -23,6 +24,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 wasm-bindgen = "0.2"
 
 [profile.release]

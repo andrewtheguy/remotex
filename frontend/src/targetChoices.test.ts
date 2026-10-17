@@ -75,7 +75,7 @@ const HIGH_PERFORMANCE = target({
 
 const STANDARD = target({
   subtype: "ard",
-  passthroughs: ["apple-adaptive"],
+  passthroughs: ["apple-adaptive", "apple-full"],
 });
 
 const SIZED = { w: 1920, h: 1080 };
@@ -196,6 +196,7 @@ test("only what the target's type offers has a row", () => {
   assert.deepEqual(pictures(standard), [
     [null, false],
     ["apple-adaptive", false],
+    ["apple-full", false],
   ]);
   assert.equal(standard.soundRow, null);
   assert.deepEqual(standard.choices, {
@@ -209,19 +210,21 @@ test("only what the target's type offers has a row", () => {
   assert.equal(standard.blocked, null);
 });
 
-test("a Standard Mac's picture is VP9 or its Adaptive picture passed", () => {
+test("a Standard Mac's picture is VP9 or its Adaptive or Full-quality picture passed", () => {
   const vp9 = targetOptions(STANDARD, undefined, UNABLE);
   assert.deepEqual(
     pictures(vp9),
     [
       [null, false],
       ["apple-adaptive", false],
+      ["apple-full", false],
     ],
-    "a browser that takes no other passthrough takes this one",
+    "a browser that takes no other passthrough takes these",
   );
-  assert.equal(vp9.choices.passthrough, null, "VP9 until the other is chosen");
+  assert.equal(vp9.choices.passthrough, null, "VP9 until another is chosen");
   assert.equal(vp9.encoders, null, "the gateway codes it with libvpx alone");
   assert.match(vp9.pictures?.[1].label ?? "", /alpha/);
+  assert.match(vp9.pictures?.[2].label ?? "", /^Full quality \(alpha\)/);
 
   const adaptive = targetOptions(
     STANDARD,
@@ -232,6 +235,10 @@ test("a Standard Mac's picture is VP9 or its Adaptive picture passed", () => {
   assert.equal(adaptive.choices.vp9, "libvpx");
   assert.equal(adaptive.blocked, null);
   assert.equal(adaptive.sound, false);
+
+  const full = targetOptions(STANDARD, { passthrough: "apple-full" }, UNABLE);
+  assert.equal(full.choices.passthrough, "apple-full");
+  assert.equal(full.blocked, null);
 });
 
 test("a Mac's picture is its HEVC passed or its H.264 passed", () => {

@@ -2887,7 +2887,7 @@ mod tests {
         let adaptive = Choices { passthrough: Some(Passthrough::AppleAdaptive), ..Choices::default() };
         mgr.connect(att.id, "mac", None, adaptive).await.unwrap();
         let (plan, _input, _frames) = hook_rx.try_recv().expect("engine spawned on connect");
-        assert!(plan.apple_adaptive);
+        assert_eq!(plan.apple_standard, Some(crate::config::StandardQuality::Adaptive));
         let expect_passed_mac = async |events: &mut mpsc::Receiver<AttachEvent>| match recv(events).await {
             AttachEvent::Msg(ServerMsg::Connected { name, passthrough, .. }) => {
                 assert_eq!(name, "mac");
@@ -2899,11 +2899,11 @@ mod tests {
 
         let mut back = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         let (plan, _input, frame_tx) = hook_rx.try_recv().expect("the same browser is given a session that starts");
-        assert!(plan.apple_adaptive);
+        assert_eq!(plan.apple_standard, Some(crate::config::StandardQuality::Adaptive));
         expect_passed_mac(&mut back.events).await;
 
         // No display socket comes for the picture.
-        frame_tx.send(ServerMsg::AdaptiveStart { engine: 0 }).await.unwrap();
+        frame_tx.send(ServerMsg::AdaptiveStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
         tokio::time::sleep(DISPLAY_ATTACH_GRACE * 2).await;
         match recv(&mut back.events).await {
             AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
@@ -2961,7 +2961,7 @@ mod tests {
         }
         let (input_rx, frame_tx) = hook_rx.try_recv().expect("engine spawned on connect");
         drop(mgr.attach_display("login", FIRST_DISPLAY, None).unwrap());
-        frame_tx.send(ServerMsg::AdaptiveStart { engine: 0 }).await.unwrap();
+        frame_tx.send(ServerMsg::AdaptiveStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
             other => panic!("expected the error, got {other:?}"),
@@ -2998,7 +2998,7 @@ mod tests {
         let adaptive = Choices { passthrough: Some(Passthrough::AppleAdaptive), ..Choices::default() };
         mgr.connect(att.id, "mac", None, adaptive).await.unwrap();
         let (plan, mut old_input, old_frames) = hook_rx.try_recv().expect("engine spawned on connect");
-        assert!(plan.apple_adaptive);
+        assert_eq!(plan.apple_standard, Some(crate::config::StandardQuality::Adaptive));
         let display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         let resize = |w| ServerMsg::Resize { w, h: 1, scale: UNSCALED };
 
@@ -3035,7 +3035,7 @@ mod tests {
         drop(old_frames);
         let mut att = reattach.await.unwrap();
         let (plan, _input, frames) = hook_rx.try_recv().expect("the picture is started over");
-        assert!(plan.apple_adaptive);
+        assert_eq!(plan.apple_standard, Some(crate::config::StandardQuality::Adaptive));
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { passthrough, .. }) => {
                 assert_eq!(passthrough, Some("apple-adaptive"));
@@ -3045,7 +3045,7 @@ mod tests {
 
         // The display socket that came back first is the fresh engine's.
         frames.send(resize(3)).await.unwrap();
-        frames.send(ServerMsg::AdaptiveStart { engine: 0 }).await.unwrap();
+        frames.send(ServerMsg::AdaptiveStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
         assert!(matches!(
             recv(&mut display.events).await,
             AttachEvent::Msg(ServerMsg::Resize { w: 3, .. })

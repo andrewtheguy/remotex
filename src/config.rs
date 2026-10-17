@@ -205,10 +205,10 @@ pub struct RenderPlan {
     /// [`Passthrough::AppleH264`], chosen at the picker. Never set with
     /// [`Self::apple_media`], and none of the fields above reach it either.
     pub apple_h264: bool,
-    /// A Standard Mac's Adaptive picture passes as it came, for the browser to
-    /// decode: [`Passthrough::AppleAdaptive`], chosen at the picker. None of the
-    /// fields above reach it.
-    pub apple_adaptive: bool,
+    /// A Standard Mac's own picture passes as it came, for the browser to
+    /// decode, in the quality chosen at the picker: [`Passthrough::AppleAdaptive`]
+    /// or [`Passthrough::AppleFull`]. None of the fields above reach it.
+    pub apple_standard: Option<StandardQuality>,
     /// An RDP host's graphics pipeline passes as it came, for the browser to
     /// compose: [`Passthrough::RdpGraphics`], in every session of a target with the
     /// pipeline on, which is never composed here. None of the fields above reach
@@ -279,6 +279,47 @@ pub enum Passthrough {
     ///
     /// Tested against a virtual Mac alone.
     AppleAdaptive,
+    /// ALPHA. A Standard Mac's picture as Apple's viewer's Full quality has it:
+    /// RFB's zlib (encoding 6), the Mac's pixels deflated as one stream across the
+    /// session, lossless, for the page to inflate (`frontend/wasm/adaptive`).
+    /// Offered by `ard` beside the VP9 and the Adaptive picture.
+    ///
+    /// Every rectangle continues the stream the ones before it deflated, so a
+    /// browser that comes back has nothing a running session can be resumed onto:
+    /// a reattach reconnects the Mac instead.
+    ///
+    /// Tested against a virtual Mac alone.
+    AppleFull,
+}
+
+/// A Standard Mac's own picture, in the quality Apple's viewer's menu names, which
+/// is the framebuffer encoding the Mac is asked for: a session that passes one is
+/// sent it alone ([`crate::vnc_apple::encodings`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StandardQuality {
+    /// The Mac's 8×8 tiles (`0x3f3`): [`Passthrough::AppleAdaptive`].
+    Adaptive,
+    /// zlib (encoding 6): [`Passthrough::AppleFull`].
+    Full,
+}
+
+impl StandardQuality {
+    /// The quality a passthrough is, where it is a Standard Mac's own picture.
+    pub fn of(passthrough: Passthrough) -> Option<Self> {
+        match passthrough {
+            Passthrough::AppleAdaptive => Some(Self::Adaptive),
+            Passthrough::AppleFull => Some(Self::Full),
+            Passthrough::RdpGraphics | Passthrough::AppleMedia | Passthrough::AppleH264 => None,
+        }
+    }
+
+    pub fn passthrough(self) -> Passthrough {
+        match self {
+            Self::Adaptive => Passthrough::AppleAdaptive,
+            Self::Full => Passthrough::AppleFull,
+        }
+    }
 }
 
 impl Passthrough {
@@ -290,28 +331,29 @@ impl Passthrough {
             Self::AppleMedia => "apple-media",
             Self::AppleH264 => "apple-h264",
             Self::AppleAdaptive => "apple-adaptive",
+            Self::AppleFull => "apple-full",
         }
     }
 
     /// Whether a session passes it only where it was chosen at the picker. The
     /// Mac's HEVC and its H.264 are a choice of one from two, either passed in
-    /// every session; a Standard Mac's Adaptive picture is a choice beside the VP9
-    /// encoded here; an RDP host's pipeline is the only one, as the gateway
-    /// composes none.
+    /// every session; a Standard Mac's Adaptive and Full-quality pictures are a
+    /// choice beside the VP9 encoded here; an RDP host's pipeline is the only one,
+    /// as the gateway composes none.
     pub fn chosen(self) -> bool {
         match self {
             Self::RdpGraphics => false,
-            Self::AppleMedia | Self::AppleH264 | Self::AppleAdaptive => true,
+            Self::AppleMedia | Self::AppleH264 | Self::AppleAdaptive | Self::AppleFull => true,
         }
     }
 
     /// Whether a session that names none of its target's streams is encoded here
-    /// as VP9 instead: on `ard`, beside the Mac's Adaptive picture. A High
+    /// as VP9 instead: on `ard`, beside the Mac's own pictures. A High
     /// Performance Mac's picture is its media stream, so a session there names
     /// one of its two.
     pub fn beside_vp9(self) -> bool {
         match self {
-            Self::AppleAdaptive => true,
+            Self::AppleAdaptive | Self::AppleFull => true,
             Self::RdpGraphics | Self::AppleMedia | Self::AppleH264 => false,
         }
     }
@@ -322,7 +364,7 @@ impl Passthrough {
     /// starts ([`crate::session::SessionManager::attach`]).
     pub fn resumes(self) -> bool {
         match self {
-            Self::RdpGraphics | Self::AppleAdaptive => false,
+            Self::RdpGraphics | Self::AppleAdaptive | Self::AppleFull => false,
             Self::AppleMedia | Self::AppleH264 => true,
         }
     }
@@ -334,6 +376,7 @@ impl Passthrough {
             Self::AppleMedia => "the Mac's HEVC",
             Self::AppleH264 => "the Mac's H.264",
             Self::AppleAdaptive => "the Mac's Adaptive picture",
+            Self::AppleFull => "the Mac's Full-quality picture",
         }
     }
 }
@@ -635,8 +678,8 @@ impl Decoders {
             Passthrough::AppleMedia => self.apple_media,
             // No browser is asked: one that does not decode it says so itself.
             Passthrough::AppleH264 => true,
-            // The page decodes it in WebAssembly, which every page that starts has.
-            Passthrough::AppleAdaptive => true,
+            // The page decodes them in WebAssembly, which every page that starts has.
+            Passthrough::AppleAdaptive | Passthrough::AppleFull => true,
             Passthrough::RdpGraphics => self.rdp_graphics,
         }
     }
@@ -661,8 +704,8 @@ impl RenderPlan {
             Some(Passthrough::AppleMedia)
         } else if self.apple_h264 {
             Some(Passthrough::AppleH264)
-        } else if self.apple_adaptive {
-            Some(Passthrough::AppleAdaptive)
+        } else if let Some(quality) = self.apple_standard {
+            Some(quality.passthrough())
         } else if self.rdp_graphics {
             Some(Passthrough::RdpGraphics)
         } else {
@@ -1050,7 +1093,7 @@ impl TargetConfig {
         let passthrough = self.passthrough(choices);
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let apple_h264 = passthrough == Some(Passthrough::AppleH264);
-        let apple_adaptive = passthrough == Some(Passthrough::AppleAdaptive);
+        let apple_standard = passthrough.and_then(StandardQuality::of);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
         let rdp_h264 = rdp_graphics && choices.pipeline.h264() && decoders.rdp_h264;
         RenderPlan {
@@ -1058,7 +1101,7 @@ impl TargetConfig {
             adaptive,
             apple_media,
             apple_h264,
-            apple_adaptive,
+            apple_standard,
             rdp_graphics,
             rdp_h264,
             native_vp9: choices.vp9 == Vp9Encoder::Native,
@@ -1103,12 +1146,13 @@ impl TargetConfig {
             }
             // Standard mode shares the Mac's physical displays, whose resolution
             // this gateway does not change, and never touches its sound. Its
-            // picture is VP9 encoded here, or the Mac's Adaptive picture passed.
+            // picture is VP9 encoded here, or the Mac's Adaptive or Full-quality
+            // picture passed.
             (Protocol::Vnc, Some(Subtype::Ard)) => {
                 Offers {
                     resize: self.virtual_display,
                     audio: false,
-                    passthrough: &[Passthrough::AppleAdaptive],
+                    passthrough: &[Passthrough::AppleAdaptive, Passthrough::AppleFull],
                     placement: false,
                     pipeline: false,
                     vp9: false,
@@ -1198,7 +1242,7 @@ impl TargetConfig {
     ///
     /// Which passthrough is passed, where that is a choice, is a session's and not
     /// the file's, so such a target's card names each it may pass, after the VP9 a
-    /// Standard Mac's sessions have unless they pass its Adaptive picture. The encoder is
+    /// Standard Mac's sessions have unless they pass one of its own. The encoder is
     /// a session's choice too, so a VP9 card is libvpx's. An RDP target with its
     /// pipeline on passes it in every session, so its card says so; whether with
     /// H.264 is a session's choice, so the card is the lossless one.
@@ -1211,7 +1255,7 @@ impl TargetConfig {
         }
         let streams: Vec<&str> = offered.iter().map(|passthrough| passthrough.stream()).collect();
         let streams = format!("{}, passed through", streams.join(" or "));
-        // A Standard Mac's VP9 is its default beside the Adaptive picture it may pass.
+        // A Standard Mac's VP9 is its default beside the pictures of its own it may pass.
         if offered.iter().any(|passthrough| passthrough.beside_vp9()) { format!("{plan}, or {streams}") } else { streams }
     }
 
@@ -3258,7 +3302,7 @@ mod tests {
                 adaptive: true,
                 apple_media: false,
                 apple_h264: false,
-                apple_adaptive: false,
+                apple_standard: None,
                 rdp_graphics: false,
                 rdp_h264: false,
                 native_vp9: false,
@@ -3276,7 +3320,7 @@ mod tests {
                 adaptive: true,
                 apple_media: false,
                 apple_h264: false,
-                apple_adaptive: false,
+                apple_standard: None,
                 rdp_graphics: false,
                 rdp_h264: false,
                 native_vp9: false,
@@ -3470,7 +3514,7 @@ mod tests {
             Offers {
                 resize: false,
                 audio: false,
-                passthrough: &[Passthrough::AppleAdaptive],
+                passthrough: &[Passthrough::AppleAdaptive, Passthrough::AppleFull],
                 placement: false,
                 pipeline: false,
                 vp9: false
@@ -3524,7 +3568,7 @@ mod tests {
             Offers {
                 resize: true,
                 audio: false,
-                passthrough: &[Passthrough::AppleAdaptive],
+                passthrough: &[Passthrough::AppleAdaptive, Passthrough::AppleFull],
                 placement: false,
                 pipeline: false,
                 vp9: false
@@ -3584,11 +3628,12 @@ mod tests {
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
     }
 
-    /// A Standard Mac's picture is VP9 encoded here unless the session names the
-    /// Mac's Adaptive picture, which is then passed to any browser and is no VP9,
-    /// and a session passing it is started over rather than resumed.
+    /// A Standard Mac's picture is VP9 encoded here unless the session names one of
+    /// the Mac's own, its Adaptive or its Full-quality picture, which is then passed
+    /// to any browser and is no VP9, and a session passing it is started over
+    /// rather than resumed.
     #[test]
-    fn a_standard_session_passes_the_macs_adaptive_picture_where_it_was_chosen() {
+    fn a_standard_session_passes_the_macs_own_picture_where_it_was_chosen() {
         let standard = ConfigFile::parse(&vnc_toml("subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\n"))
             .unwrap()
             .targets
@@ -3599,12 +3644,12 @@ mod tests {
         assert_eq!(standard.accepts(Choices::default()), Ok(()), "naming none is the VP9");
         assert_eq!(standard.passthrough(Choices::default()), None);
         let vp9 = standard.render_plan(Choices::default(), none);
-        assert!(!vp9.apple_adaptive && vp9.resumes());
+        assert!(vp9.apple_standard.is_none() && vp9.resumes());
 
         assert_eq!(standard.accepts(adaptive), Ok(()));
         assert_eq!(standard.beyond(adaptive, none), None, "every browser takes it");
         let plan = standard.render_plan(adaptive, none);
-        assert!(plan.apple_adaptive);
+        assert_eq!(plan.apple_standard, Some(StandardQuality::Adaptive));
         assert_eq!(plan.passthrough(), Some(Passthrough::AppleAdaptive));
         assert!(!plan.resumes(), "drawn against what the page holds");
         assert_eq!(plan.describe(), "the Mac's Adaptive picture, passed through");
@@ -3614,7 +3659,22 @@ mod tests {
             Err(NotOffered { target: standard.name.clone(), choice: "the native VP9 encoder" }),
             "there is no VP9 to encode"
         );
-        assert!(standard.render_summary().ends_with(", or the Mac's Adaptive picture, passed through"));
+
+        let full = Choices { passthrough: Some(Passthrough::AppleFull), ..Choices::default() };
+        assert_eq!(standard.accepts(full), Ok(()));
+        assert_eq!(standard.beyond(full, none), None, "every browser takes it");
+        let plan = standard.render_plan(full, none);
+        assert_eq!(plan.apple_standard, Some(StandardQuality::Full));
+        assert_eq!(plan.passthrough(), Some(Passthrough::AppleFull));
+        assert!(!plan.resumes(), "one deflate stream from the session's start");
+        assert_eq!(plan.describe(), "the Mac's Full-quality picture, passed through");
+        assert_eq!(Passthrough::AppleFull.name(), "apple-full");
+
+        assert!(
+            standard
+                .render_summary()
+                .ends_with(", or the Mac's Adaptive picture or the Mac's Full-quality picture, passed through")
+        );
         assert!(standard.render_summary().starts_with("video q"));
     }
 
@@ -3692,7 +3752,7 @@ mod tests {
             standard.accepts(Choices { whole: true, ..Choices::default() }),
             Err(NotOffered { target: "mac".to_owned(), choice: "a picture in one tile" })
         );
-        assert_eq!(standard.offers().passthrough, [Passthrough::AppleAdaptive]);
+        assert_eq!(standard.offers().passthrough, [Passthrough::AppleAdaptive, Passthrough::AppleFull]);
         assert_eq!(
             standard.accepts(passed),
             Err(NotOffered { target: "mac".to_owned(), choice: "a passthrough" })
@@ -4525,7 +4585,7 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80 · libvpx · adaptive");
     }
 
@@ -4537,7 +4597,7 @@ vnc_password = \"x\"")).unwrap();
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false });
         assert_eq!(plan.describe(), "video q80 · libvpx");
     }
 

@@ -24,6 +24,7 @@ import {
   type BatchRecord,
   decodeBatchFrame,
   type GraphicsMsg,
+  type StandardQuality,
   stripRows,
   type VideoMsg,
 } from "./protocol.ts";
@@ -73,12 +74,12 @@ export interface FramePainter {
    */
   startGraphics(): void;
   /**
-   * Adopt an `adaptiveStart`: a Mac's Adaptive picture begins, from nothing, and
-   * the ADAPTIVE records after it are the picture, decoded here and painted on
-   * the desktop's canvas. Whatever decoder or compositor stood before is done
-   * with.
+   * Adopt an `adaptiveStart`: a Mac's own picture begins, from nothing, in
+   * `quality`, and the ADAPTIVE records after it are the picture, decoded here
+   * and painted on the desktop's canvas. Whatever decoder or compositor stood
+   * before is done with.
    */
-  startAdaptive(): void;
+  startAdaptive(quality: StandardQuality): void;
   /**
    * Adopt a `graphicsView` on the page that composes the pipeline: the part of
    * its picture this display is, shown from now, by this pipeline and the next.
@@ -126,7 +127,7 @@ export function createFramePainter(options: {
    */
   loadCompositor?: () => Promise<EgfxFactory>;
   /**
-   * Where a Mac's Adaptive pictures come from: their WebAssembly module, loaded
+   * Where a Mac's own pictures come from: their WebAssembly module, loaded
    * once. Injectable for a test, as the compositor's is.
    */
   loadAdaptive?: () => Promise<AdaptiveFactory>;
@@ -195,7 +196,7 @@ export function createFramePainter(options: {
     });
   const makeRelay = options.makeRelay ?? openRelayPort;
 
-  // A Mac's Adaptive picture, from its `adaptiveStart`: `picture` is null until
+  // A Mac's own picture, from its `adaptiveStart`: `picture` is null until
   // the module has loaded, and for good once `broken`, as a pipeline's
   // compositor is: a rectangle it could not draw, or one it was never given,
   // leaves a framebuffer the Mac's next rectangles are not drawn against.
@@ -206,7 +207,7 @@ export function createFramePainter(options: {
   }
   let adaptive: Adaptive | null = null;
   const loadAdaptivePicture = options.loadAdaptive ?? (() => loadAdaptive());
-  // The desktop's size in pixels, from the last resize: what an Adaptive
+  // The desktop's size in pixels, from the last resize: what a Mac's own
   // picture's framebuffer is, the resize coming ahead of the picture's start.
   let framebuffer: { w: number; h: number } | null = null;
 
@@ -392,7 +393,7 @@ export function createFramePainter(options: {
     );
   };
 
-  // The end of an Adaptive picture this page can no longer follow, said once: a
+  // The end of a Mac's own picture this page can no longer follow, said once: a
   // rectangle that did not decode, or a batch that never arrived whole, leaves a
   // framebuffer the Mac's next rectangles are not drawn against, and no repaint
   // brings a running session back to it. What it last drew stays on the canvas.
@@ -409,7 +410,7 @@ export function createFramePainter(options: {
     );
   };
 
-  // One of a Mac's Adaptive rectangles, decoded onto the picture's framebuffer and
+  // One of a Mac's own rectangles, decoded onto the picture's framebuffer and
   // painted where it drew, when its turn comes. As a pipeline's run, it needs what
   // the rectangles before it left, so the module's load is waited for in place,
   // and one for a picture that has been replaced, broken or never started is
@@ -810,7 +811,7 @@ export function createFramePainter(options: {
         });
       pipeline = starting;
     },
-    startAdaptive() {
+    startAdaptive(quality) {
       releaseVideo();
       const starting: Adaptive = {
         picture: null,
@@ -821,7 +822,7 @@ export function createFramePainter(options: {
         .then((make) => {
           // Replaced or cleared while the module loaded: nothing to make one for.
           if (!starting.broken) {
-            starting.picture = make();
+            starting.picture = make(quality);
             if (framebuffer) {
               starting.picture.resize(framebuffer.w, framebuffer.h);
             }
@@ -894,7 +895,7 @@ export function createFramePainter(options: {
     },
     blank(w, h) {
       hidePlanes();
-      // An Adaptive picture's framebuffer starts over at the new size, black as
+      // A Mac's own picture's framebuffer starts over at the new size, black as
       // the canvas is, and the Mac repaints it.
       framebuffer = { w, h };
       if (adaptive?.picture && !adaptive.broken) {

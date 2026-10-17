@@ -60,6 +60,7 @@ use std::collections::HashMap;
 
 use log::{debug, warn};
 
+use crate::config::StandardQuality;
 use crate::protocol::{
     CursorShape, CursorUnit, DisplayInfo, MAX_CURSOR_DIM, MosaicRect, MosaicRegion,
 };
@@ -131,8 +132,8 @@ pub fn under_minimum(points: (u16, u16)) -> bool {
 ///
 /// Every entry is decoded or deliberately stepped over, which is a requirement and
 /// not a courtesy: a server takes the list as a promise and will send what it finds
-/// here. Apple's own framebuffer codecs are listed only by a session that passes the
-/// Mac's Adaptive picture, whose page decodes them ([`ADAPTIVE_ENCODINGS`]). Media-stream encoding 1010 is
+/// here. Apple's own framebuffer codecs, and zlib, are listed only by a session that
+/// passes the Mac's own picture, whose page decodes them ([`encodings`]). Media-stream encoding 1010 is
 /// absent from the opening list: High Performance puts it first in a second
 /// `SetEncodings` once the display it offers the stream for exists
 /// ([`crate::vnc_apple_media::encodings_preferring_media_stream`]).
@@ -176,6 +177,50 @@ pub const ADAPTIVE_ENCODINGS: &[i32] = &[
     ENCODING_ADAPTIVE,
     ENCODING_ZRLE,
 ];
+
+/// RFB's zlib, the framebuffer encoding of Standard's Full quality: a `u32`
+/// length, then that many bytes of one deflate stream the session's rectangles
+/// share, inflating to the rectangle's pixels in the format the client set.
+pub const ENCODING_ZLIB: i32 = 6;
+
+/// What a session that passes the Mac's Full-quality picture advertises:
+/// [`ENCODINGS`] with zlib ahead of ZRLE, as Apple's viewer's Full list has them,
+/// so the Mac sends zlib alone, which the page inflates. ZRLE is the one it keeps
+/// as the lossless codec, and arriving all the same ends the session, as in
+/// [`ADAPTIVE_ENCODINGS`].
+pub const FULL_ENCODINGS: &[i32] = &[
+    ENCODING_RAW,
+    ENCODING_CURSOR_POS,
+    ENCODING_DISPLAY_INFO,
+    ENCODING_REKEY,
+    ENCODING_CURSOR_IMAGE,
+    ENCODING_DISPLAY_LAYOUT,
+    ENCODING_VENDOR_KEYSYMS,
+    ENCODING_KEYBOARD_SOURCE,
+    ENCODING_DESKTOP_SIZE,
+    ENCODING_LAST_RECT,
+    ENCODING_ZLIB,
+    ENCODING_ZRLE,
+];
+
+/// What a Standard session asks the Mac for: [`ENCODINGS`] for the VP9 encoded
+/// here from its ZRLE, or the list that brings the Mac's own picture in `quality`.
+pub fn encodings(quality: Option<StandardQuality>) -> &'static [i32] {
+    match quality {
+        None => ENCODINGS,
+        Some(StandardQuality::Adaptive) => ADAPTIVE_ENCODINGS,
+        Some(StandardQuality::Full) => FULL_ENCODINGS,
+    }
+}
+
+/// The one framebuffer encoding the Mac sends a session that passes its picture in
+/// `quality`: the first codec of [`encodings`]'s list.
+pub fn encoding(quality: StandardQuality) -> i32 {
+    match quality {
+        StandardQuality::Adaptive => ENCODING_ADAPTIVE,
+        StandardQuality::Full => ENCODING_ZLIB,
+    }
+}
 
 /// Bytes of one entry in a display configuration's mode table.
 const MODE_ENTRY: usize = 0x1c;
@@ -1414,6 +1459,24 @@ mod tests {
         assert!(tiles < zrle);
         let others: Vec<i32> = ADAPTIVE_ENCODINGS.iter().copied().filter(|&e| e != ENCODING_ADAPTIVE).collect();
         assert_eq!(others, ENCODINGS);
+    }
+
+    /// Full quality lists zlib ahead of ZRLE, as Apple's viewer's Full list does,
+    /// the list otherwise every Apple session's; each quality's list brings the
+    /// encoding its session expects first.
+    #[test]
+    fn a_full_session_lists_zlib_ahead_of_zrle() {
+        let zlib = FULL_ENCODINGS.iter().position(|&e| e == ENCODING_ZLIB).unwrap();
+        let zrle = FULL_ENCODINGS.iter().position(|&e| e == ENCODING_ZRLE).unwrap();
+        assert!(zlib < zrle);
+        let others: Vec<i32> = FULL_ENCODINGS.iter().copied().filter(|&e| e != ENCODING_ZLIB).collect();
+        assert_eq!(others, ENCODINGS);
+        assert_eq!(encodings(None), ENCODINGS);
+        for quality in [StandardQuality::Adaptive, StandardQuality::Full] {
+            let list = encodings(Some(quality));
+            let codecs = [ENCODING_ZLIB, ENCODING_ZRLE, ENCODING_ADAPTIVE];
+            assert_eq!(list.iter().find(|e| codecs.contains(e)), Some(&encoding(quality)), "{quality:?}");
+        }
     }
 
     /// The `AppleDisplayLayout` a macOS 26 VM sent for its two real screens, off

@@ -61,9 +61,12 @@ acknowledges each batch once its paint worker has decoded it, that a page
 that comes back is given the picture from its start, and that a session's end
 ends the paint worker that loaded the decoder, the next session decoding in one
 of its own. A rectangle that did not
-decode says so in the DOM. Against a Mac on a virtual display it also resizes
-the window, and checks that the picture goes on at the new size, decoded,
-without starting again.
+decode says so in the DOM. A session started with the Mac's Full-quality
+picture instead is read the same way, with its `adaptiveStart` naming `full`,
+and every record's body inflated in the spec on one zlib stream for the session,
+which must come to each rectangle's pixels. Against a Mac on a virtual display
+it also resizes the window, in each quality, and checks that the picture goes on
+at the new size, decoded, without starting again.
 
 `target-switch.spec.ts` switches one page, without a reload, between an RDP
 host's pipeline and bitmap targets and a Mac's VP9, Adaptive and High

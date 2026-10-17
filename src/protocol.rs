@@ -9,6 +9,8 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::config::StandardQuality;
+
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
 /// Text over this is refused, not truncated: a truncated paste looks exactly
@@ -846,22 +848,29 @@ impl GraphicsUnit {
     }
 }
 
-/// One of a Mac's rectangles in its Adaptive picture (Standard mode's Adaptive
+/// One of a Mac's rectangles in its own picture (Standard mode's Adaptive or Full
 /// quality), carried as an `ADAPTIVE` record inside a [`batch`] frame: where the
 /// Mac said it is, and its body as the Mac sent it, the bytes after its `u32`
-/// length — Apple's 8×8 tiles (`0x3f3`), which docs/apple-vnc-889.md describes.
+/// length. Which encoding the bodies are is the quality
+/// [`ServerMsg::AdaptiveStart`] names: Apple's 8×8 tiles (`0x3f3`) for Adaptive,
+/// which docs/apple-vnc-889.md describes, and RFB's zlib for Full.
 ///
 /// The contract every client implements:
 ///
 /// - [`ServerMsg::AdaptiveStart`] arrives first, and says the picture starts from
-///   nothing: no quantization tables, no tile coded and no cache entry. A
-///   rectangle is drawn on what the rectangles before it left, by copies, by
-///   cached tiles and by refining the last full update's coefficients, so a
-///   client decodes every record, in order, from that message on, and one that
-///   has missed any cannot go on.
+///   nothing: for Adaptive, no quantization tables, no tile coded and no cache
+///   entry, and for Full, a deflate stream not yet begun. A rectangle is drawn on
+///   what the rectangles before it left: an Adaptive one by copies, by cached
+///   tiles and by refining the last full update's coefficients, a Full one by
+///   continuing the one deflate stream they share. So a client decodes every
+///   record, in order, from that message on, and one that has missed any cannot
+///   go on.
 /// - The framebuffer is the size [`ServerMsg::Resize`] last said, in pixels, and
-///   a resize leaves it black with no tile coded, the tables and the cache kept.
-/// - A record of zero area at 0,0 carries the quantization tables.
+///   a resize leaves it black: for Adaptive with no tile coded, the tables and
+///   the cache kept, and for Full with the deflate stream kept.
+/// - An Adaptive record of zero area at 0,0 carries the quantization tables.
+/// - A Full record's body inflates to its rectangle's pixels, row after row, each
+///   four bytes of the pixel format the gateway set: blue, green, red, unused.
 /// - A client acknowledges a batch when it has drawn it and not before: the
 ///   gateway reads the Mac's next rectangles as the client paints, which is what
 ///   the Mac sees of the client's link.
@@ -1079,14 +1088,14 @@ pub enum ServerMsg {
     /// held of a pipeline or a video stream before it is done with. `engine` is the
     /// engine that sent it ([`ServerMsg::stamped`]).
     GraphicsStart { engine: u64 },
-    /// One of a Mac's rectangles in its Adaptive picture, passed for the browser to
+    /// One of a Mac's rectangles in its own picture, passed for the browser to
     /// decode. A binary record like [`ServerMsg::Video`], ordered the same way.
     Adaptive(AdaptiveUnit),
-    /// A Mac's Adaptive picture starts here, from nothing: the picture is what the
-    /// [`ServerMsg::Adaptive`] records after this draw, and whatever a client held
-    /// of a video stream before it is done with. `engine` is the engine that sent it
-    /// ([`ServerMsg::stamped`]).
-    AdaptiveStart { engine: u64 },
+    /// A Mac's own picture starts here, from nothing, in `quality`: the picture is
+    /// what the [`ServerMsg::Adaptive`] records after this draw, and whatever a
+    /// client held of a video stream before it is done with. `engine` is the
+    /// engine that sent it ([`ServerMsg::stamped`]).
+    AdaptiveStart { engine: u64, quality: StandardQuality },
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1421,7 +1430,7 @@ enum ControlMsg<'a> {
     Picker { engines: u64 },
     GraphicsStart { engine: u64 },
     GraphicsView { x: u16, y: u16, w: u16, h: u16 },
-    AdaptiveStart { engine: u64 },
+    AdaptiveStart { engine: u64, quality: StandardQuality },
     Connected {
         name: &'a str,
         protocol: &'a str,
@@ -1505,13 +1514,13 @@ struct WireDisplay<'a> {
 
 impl ServerMsg {
     /// This message with `engine`, the engine that sent it, written into a picture
-    /// start: a format, or a pipeline's or an Adaptive picture's start. An engine
+    /// start: a format, or a pipeline's or a Mac's own picture's start. An engine
     /// does not know which it is, so it sends 0 there, and the session layer's
     /// pump, which does, writes it in on the way to the display socket. The page
     /// drops a start whose engine a `Picker` has since numbered ended.
     pub fn stamped(mut self, engine: u64) -> Self {
         if let ServerMsg::GraphicsStart { engine: slot }
-        | ServerMsg::AdaptiveStart { engine: slot }
+        | ServerMsg::AdaptiveStart { engine: slot, .. }
         | ServerMsg::VideoFormat { engine: slot, .. } = &mut self
         {
             *slot = engine;
@@ -1562,7 +1571,9 @@ impl ServerMsg {
                 return None;
             }
             ServerMsg::GraphicsStart { engine } => control(&ControlMsg::GraphicsStart { engine: *engine }),
-            ServerMsg::AdaptiveStart { engine } => control(&ControlMsg::AdaptiveStart { engine: *engine }),
+            ServerMsg::AdaptiveStart { engine, quality } => {
+                control(&ControlMsg::AdaptiveStart { engine: *engine, quality: *quality })
+            }
             ServerMsg::GraphicsView { x, y, w, h } => {
                 control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
             }

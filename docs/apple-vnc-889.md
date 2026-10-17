@@ -25,7 +25,7 @@ layer.
 
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
-| `ard` | Standard, the physical displays | ZRLE, or in a session started with Adaptive (alpha) the Mac's 8×8 tiles, passed | none; the Mac's own output is left alone |
+| `ard` | Standard, the physical displays | ZRLE, or in a session started with Adaptive (alpha) the Mac's 8×8 tiles, or with Full quality (alpha) its zlib, passed | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC, or H.264, over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | as `ard` | none; the Mac's own output is left alone |
 
@@ -132,6 +132,9 @@ ZRLE session on it, a combination the viewer never offers (above):
   Adaptive quality does, for the 8×8 tiles first
   ([private codecs](#apples-own-framebuffer-encodings)), and leaves out `0x3ea`
   and zlib, which the Mac would not send after them; its page decodes the tiles.
+  One started with Full quality (alpha) asks as Full quality does, zlib then
+  ZRLE, and the Mac sends zlib alone, which its page inflates
+  ([Full quality's zlib](#full-qualitys-zlib)).
 
 ## Connecting
 
@@ -1126,7 +1129,27 @@ socket no faster than a set rate. The same was run listing ZRLE alone.
   300 kbit/s browser, a screen in constant motion came as about one and a half
   updates a second, full ones with their refinement among them, where the same
   screen read freely came as seventy
-  ([A Mac's Adaptive picture, passed through](architecture.md#a-macs-adaptive-picture-passed-through)).
+  ([A Standard Mac's own picture, passed through](architecture.md#a-standard-macs-own-picture-passed-through)).
+
+### Full quality's zlib
+
+Full quality is RFB's zlib, which the Mac codes the way the standard has it, so
+nothing about it is Apple's own. Listed as Apple's viewer lists it, zlib then
+ZRLE, the Mac logs `preferred codec 6` and keeps both as lossless codecs, and
+sends zlib alone. That was read from `screensharingd`'s log, and with a probe
+and a headless browser that inflated every rectangle a virtual Mac sent, on its
+physical display and on a virtual one across a resize.
+- **One stream for the session.** A rectangle is a `u32` length and that many
+  bytes of one deflate stream, the zlib header at the first, flushed at each
+  rectangle's end and never finished. Each rectangle is inflated on the window
+  the ones before it left, so a viewer that missed one cannot go on.
+- **It inflates to the client's pixel format.** Row after row of the rectangle,
+  four bytes a pixel in the format the session set: blue, green, red and an
+  unused byte, for remotex's little-endian 32-bit one.
+- **A resize does not restart it.** On the virtual display, the rectangles of the
+  new size went on inflating where the old size's left the stream.
+- **Nothing in it adapts to the link.** zlib is lossless, so the Mac has nothing
+  to make coarser: a slow connection takes the same bytes later.
 
 ### The numbers, in both forms
 
@@ -1150,7 +1173,7 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 | RGB 5-5-5 zlib | `0x3ea` | 1002 | not advertised |
 | 8×8 tiles | `0x3f3` | 1011 | advertised in a session started with Adaptive |
 | ZRLE | `0x10` | 16 | standard RFB |
-| zlib | `0x06` | 6 | standard RFB, not advertised |
+| zlib | `0x06` | 6 | standard RFB, advertised in a session started with Full quality |
 | Raw | `0x00` | 0 | standard RFB |
 | `DesktopSize` | — | −223 | pseudo-encoding |
 | `LastRect` | — | −224 | pseudo-encoding |

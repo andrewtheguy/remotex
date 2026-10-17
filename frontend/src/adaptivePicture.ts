@@ -2,21 +2,23 @@ import init, {
   Adaptive,
   type InitInput,
 } from "../wasm/adaptive/pkg/remotex_adaptive.js";
+import type { StandardQuality } from "./protocol.ts";
 
-// A Mac's Adaptive picture, decoded in the page: the rectangles of a session
-// started with Standard's Adaptive quality, which the gateway passes as the Mac
-// sent them, drawn onto a framebuffer of the module's own (wasm/adaptive). Each
-// rectangle is drawn on what the ones before it left, so one picture is fed every
-// record of its session, in order, and the canvas is painted from its
-// framebuffer where each rectangle drew.
+// A Mac's own picture, decoded in the page: the rectangles of a session started
+// with Standard's Adaptive or Full quality, which the gateway passes as the Mac
+// sent them, the Adaptive quality's 8x8 tiles or the Full quality's zlib, drawn
+// onto a framebuffer of the module's own (wasm/adaptive). Each rectangle is drawn
+// on what the ones before it left, so one picture is fed every record of its
+// session, in order, and the canvas is painted from its framebuffer where each
+// rectangle drew.
 
 /** One session's picture. */
 export interface AdaptivePicture {
   /** A black framebuffer of the desktop's new size, in pixels. */
   resize(w: number, h: number): void;
   /**
-   * Decode one rectangle onto the framebuffer: true when it drew, false for the
-   * quantization tables, which draw nothing. Throws for one that does not decode,
+   * Decode one rectangle onto the framebuffer: true when it drew, false for one
+   * that draws nothing, such as the Adaptive quality's quantization tables. Throws for one that does not decode,
    * whose pixels the framebuffer keeps as far as they were drawn.
    */
   decode(x: number, y: number, w: number, h: number, body: Uint8Array): boolean;
@@ -30,7 +32,7 @@ export interface AdaptivePicture {
   close(): void;
 }
 
-export type AdaptiveFactory = () => AdaptivePicture;
+export type AdaptiveFactory = (quality: StandardQuality) => AdaptivePicture;
 
 let loaded: Promise<AdaptiveFactory> | null = null;
 
@@ -41,8 +43,8 @@ let loaded: Promise<AdaptiveFactory> | null = null;
  */
 export function loadAdaptive(source?: InitInput): Promise<AdaptiveFactory> {
   loaded ??= init(source === undefined ? undefined : { module_or_path: source })
-    .then(({ memory }) => (): AdaptivePicture => {
-      const adaptive = new Adaptive();
+    .then(({ memory }) => (quality: StandardQuality): AdaptivePicture => {
+      const adaptive = new Adaptive(quality === "full");
       let width = 0;
       let height = 0;
       // A view goes with the memory it was made of, which a growth replaces.

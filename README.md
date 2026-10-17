@@ -62,8 +62,9 @@ https://github.com/user-attachments/assets/596640b5-9b35-45c3-a875-87934d1c0c0f
   HEVC or its H.264 is always passed unchanged, and neither adapts to the
   browser link: a still screen sends little, motion much. The H.264 needs no
   HEVC decoder in the page, so every build serves a High Performance Mac to any
-  browser. A Standard Mac's own Adaptive picture can be passed instead of its
-  VP9 (alpha), decoded in the page, and the Mac fits it to the browser link.
+  browser. A Standard Mac's own picture can be passed instead of its VP9
+  (alpha), decoded in the page: its Adaptive quality, which the Mac fits to the
+  browser link, or its Full quality, lossless zlib for a LAN.
 - **Remote sound in the browser, as adaptive Opus or lossless FLAC.** An RDP
   or wlshare session plays the remote's sound here, as Opus at a bitrate that
   follows the browser link or as FLAC, lossless for a LAN, which an iPhone, an

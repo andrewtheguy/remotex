@@ -485,7 +485,9 @@ password = "change-me"
 # sent as ZRLE rectangles and encoded here as VP9. A session started with the
 # picker's Adaptive (ALPHA) asks for Apple's Adaptive quality instead, the Mac's
 # own 8x8 tiles, which are passed for the page to decode and which the Mac fits to
-# the browser's link; no key selects it, and the video keys do not reach it.
+# the browser's link. Full quality (ALPHA) asks for Apple's Full quality, the
+# Mac's lossless zlib, passed for the page to inflate, for a LAN. No key selects
+# either, and the video keys do not reach them.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"

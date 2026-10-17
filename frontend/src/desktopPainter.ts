@@ -30,7 +30,7 @@ import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { nativeVp9 } from "./nativeVp9.ts";
-import { batchFrameSequence } from "./protocol.ts";
+import { batchFrameSequence, type StandardQuality } from "./protocol.ts";
 import { runnableDecoders } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
@@ -86,8 +86,8 @@ export interface DesktopPainter {
   setVideoFormat(format: VideoFormat): void;
   /** An RDP host's graphics pipeline starts, for the worker to compose. */
   startGraphics(): void;
-  /** A Mac's Adaptive picture starts, for the worker to decode. */
-  startAdaptive(): void;
+  /** A Mac's own picture starts, in `quality`, for the worker to decode. */
+  startAdaptive(quality: StandardQuality): void;
   /** The part of the pipeline's picture this page's display is (`graphicsView`). */
   setGraphicsView(part: PicturePart): void;
   /**
@@ -230,9 +230,9 @@ export function desktopPainterFor(
       ownModule = true;
       post({ type: "graphicsStart" });
     },
-    startAdaptive() {
+    startAdaptive(quality) {
       ownModule = true;
-      post({ type: "adaptiveStart" });
+      post({ type: "adaptiveStart", quality });
     },
     setGraphicsView(part) {
       post({ type: "graphicsView", part });

@@ -21,9 +21,10 @@
 //   HEVC, or its H.264, in that order: see `pictureOptions`. The first this
 //   browser can take is taken until another is chosen. The H.264 is never
 //   greyed: no browser is asked whether it decodes it.
-// - A Standard Mac's picture is VP9 encoded by the gateway, or the Mac's
-//   Adaptive picture passed through (alpha), which this page decodes: the VP9
-//   until the other is chosen, and neither greyed.
+// - A Standard Mac's picture is VP9 encoded by the gateway, or one of the Mac's
+//   own passed through (alpha), as Apple's viewer's quality menu has them,
+//   Adaptive or Full, which this page decodes: the VP9 until another is chosen,
+//   and none greyed.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
 //   or lossless: see `soundRow`. In a browser with no audio decoder only the
 //   lossless one plays, which the page decodes itself, so ticking takes it.
@@ -47,7 +48,8 @@ export type Passthrough =
   | "rdp-graphics"
   | "apple-media"
   | "apple-h264"
-  | "apple-adaptive";
+  | "apple-adaptive"
+  | "apple-full";
 
 /** One entry of GET /api/targets. */
 export interface TargetInfo {
@@ -80,7 +82,8 @@ export interface TargetInfo {
   /**
    * The streams this target can pass, in the picker's order: none, an RDP host's
    * graphics pipeline, a High Performance Mac's HEVC and its H.264, or a
-   * Standard Mac's Adaptive picture, beside the VP9 the gateway encodes.
+   * Standard Mac's Adaptive and Full-quality pictures, beside the VP9 the
+   * gateway encodes.
    */
   passthroughs: Passthrough[];
   /** Whether where the second virtual display sits is a choice. */
@@ -301,15 +304,16 @@ const RDP_GRAPHICS: PassedNote & { blocked: string } = {
 /**
  * The ways a Mac's picture can reach this browser, in the order the picker shows
  * them: a High Performance Mac's HEVC passed through, and its H.264; a Standard
- * Mac's VP9 from the gateway, and its Adaptive picture passed through.
+ * Mac's VP9 from the gateway, then its Adaptive and its Full-quality pictures
+ * passed through.
  *
  * - The HEVC is greyed in a browser whose own decoder does not take it, unless
  *   the page decodes it itself, which it then does (softwareDecoder.ts). The
  *   socket states both answers, and the gateway passes the picture to a page that
  *   has either.
  * - The H.264 is never greyed: no browser is asked whether it decodes it.
- * - Nor is the Adaptive picture, which every page decodes in WebAssembly
- *   (adaptivePicture.ts).
+ * - Nor are the Mac's Standard pictures, which every page decodes in
+ *   WebAssembly (adaptivePicture.ts).
  */
 function pictureOptions(
   target: TargetInfo,
@@ -337,21 +341,28 @@ function pictureOptions(
       note: "The Mac's own Adaptive quality, as Apple's viewer has it: coarse first and sharpened as the link allows, decoded by this page.",
       disabled: false,
     },
+    "apple-full": {
+      value: "apple-full",
+      label: "Full quality (alpha), passed through",
+      note: "The Mac's own Full quality, as Apple's viewer has it: every pixel exact, in zlib, decoded by this page. For a LAN.",
+      disabled: false,
+    },
   };
-  // The picture the gateway encodes, ahead of the Mac's own beside it.
+  // The picture the gateway encodes, ahead of the Mac's own pictures beside it.
   const vp9: PictureOption = {
     value: null,
     label: "VP9",
     note: "The Mac's lossless picture, coded by the gateway as VP9 that follows the link.",
     disabled: false,
   };
-  return target.passthroughs.flatMap((passthrough) => {
+  const standard = (passthrough: Passthrough) =>
+    passthrough === "apple-adaptive" || passthrough === "apple-full";
+  return target.passthroughs.flatMap((passthrough, at, all) => {
     if (passthrough === "rdp-graphics") {
       return [];
     }
-    return passthrough === "apple-adaptive"
-      ? [vp9, options[passthrough]]
-      : [options[passthrough]];
+    const first = standard(passthrough) && !all.slice(0, at).some(standard);
+    return first ? [vp9, options[passthrough]] : [options[passthrough]];
   });
 }
 

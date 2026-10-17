@@ -15,6 +15,7 @@ import type { PicturePart } from "./egfxPicture.ts";
 import type { EgfxVideo } from "./egfxVideo.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import { placedAfter } from "./planesPicture.ts";
+import type { StandardQuality } from "./protocol.ts";
 
 const OP_VIDEO = 0x03;
 
@@ -1490,7 +1491,7 @@ test("the attachment's end gives the software decoder's picture back", async () 
   assert.deepEqual([planes.made, planes.closed], [1, 1]);
 });
 
-/** A batch of a Mac's Adaptive rectangles: op 0x05, x, y, w, h, a length, the body. */
+/** A batch of a Mac's own rectangles: op 0x05, x, y, w, h, a length, the body. */
 function adaptiveFrame(rects: { at: number[]; body: number[] }[]): ArrayBuffer {
   const bytes: number[] = [0x02, 0x00];
   const u16 = (n: number) => bytes.push(n & 0xff, (n >> 8) & 0xff);
@@ -1510,15 +1511,21 @@ function adaptiveFrame(rects: { at: number[]; body: number[] }[]): ArrayBuffer {
 }
 
 /**
- * Decoders of a Mac's Adaptive picture that record what they are fed: a body
- * whose first byte is 2 draws nothing, as the tables do, and one whose first
- * byte is 9 does not decode.
+ * Decoders of a Mac's own picture that record their quality and what they are
+ * fed: a body whose first byte is 2 draws nothing, as the tables do, and one
+ * whose first byte is 9 does not decode.
  */
 function fakeAdaptive() {
-  const made: { resized: number[][]; fed: number[][]; closed: boolean }[] = [];
+  const made: {
+    quality: StandardQuality;
+    resized: number[][];
+    fed: number[][];
+    closed: boolean;
+  }[] = [];
   const load = () =>
-    Promise.resolve(() => {
+    Promise.resolve((quality: StandardQuality) => {
       const picture = {
+        quality,
         resized: [] as number[][],
         fed: [] as number[][],
         closed: false,
@@ -1575,7 +1582,7 @@ test("a Mac's Adaptive rectangles are decoded in order and painted where they dr
   const { p, put } = adaptivePainter(load);
   // The resize comes ahead of the picture's start, and is its framebuffer.
   p.blank(64, 32);
-  p.startAdaptive();
+  p.startAdaptive("adaptive");
   await p.draw(
     adaptiveFrame([
       { at: [0, 0, 0, 0], body: [2] },
@@ -1584,6 +1591,7 @@ test("a Mac's Adaptive rectangles are decoded in order and painted where they dr
   );
   await p.draw(adaptiveFrame([{ at: [0, 8, 64, 24], body: [1] }]));
   assert.equal(made.length, 1, "one picture follows the whole session");
+  assert.equal(made[0].quality, "adaptive");
   assert.deepEqual(made[0].resized, [[64, 32]]);
   assert.deepEqual(made[0].fed, [
     [0, 0, 0, 0, 2],
@@ -1611,7 +1619,7 @@ test("a rectangle that does not decode ends the picture, said once", async () =>
   const { made, load } = fakeAdaptive();
   const { p, put } = adaptivePainter(load);
   p.blank(16, 8);
-  p.startAdaptive();
+  p.startAdaptive("adaptive");
   await p.draw(
     adaptiveFrame([
       { at: [0, 0, 8, 8], body: [9] },
@@ -1638,11 +1646,24 @@ test("a rectangle that does not decode ends the picture, said once", async () =>
   );
 });
 
-test("a malformed batch ends an Adaptive picture", async () => {
+test("a Full-quality picture is made in its quality and fed the same way", async () => {
+  const { made, load } = fakeAdaptive();
+  const { p, put } = adaptivePainter(load);
+  p.blank(16, 8);
+  p.startAdaptive("full");
+  await p.draw(adaptiveFrame([{ at: [0, 0, 16, 8], body: [0x78] }]));
+  assert.equal(made.length, 1);
+  assert.equal(made[0].quality, "full");
+  assert.deepEqual(made[0].fed, [[0, 0, 16, 8, 0x78]]);
+  assert.deepEqual(put, [[0, 0, 16, 8]]);
+  assert.equal(decoders, 0, "no video decoder was built");
+});
+
+test("a malformed batch ends a Mac's own picture", async () => {
   const { made, load } = fakeAdaptive();
   const { p } = adaptivePainter(load);
   p.blank(16, 8);
-  p.startAdaptive();
+  p.startAdaptive("adaptive");
   await p.draw(
     new Uint8Array([0x02, 0x00, 0x01, 0x00, 0x01, 0, 0, 0, 0x05]).buffer,
   );

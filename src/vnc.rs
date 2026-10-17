@@ -40,7 +40,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::{Choices, Passthrough, RenderPlan, Sizing, Subtype, TargetConfig};
+use crate::config::{Choices, Passthrough, RenderPlan, Sizing, StandardQuality, Subtype, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
@@ -183,12 +183,12 @@ const ENCODING_WLSHARE_VP9_NATIVE: i32 = 0x574c_5358;
 /// past this is a server that has lost its framing.
 const MAX_WLSHARE_VP9_FRAME: u32 = 64 << 20;
 
-/// The most a rectangle of a Mac's Adaptive picture is read as, past which it is
-/// refused: the ceiling wlshare's frames have, under the 100,000,000 bytes Apple's
+/// The most a rectangle of a Mac's own picture, Adaptive or Full, is read as, past
+/// which it is refused: the ceiling wlshare's frames have, under the 100,000,000 bytes Apple's
 /// viewer allows one.
 const MAX_ADAPTIVE_BODY: u32 = 64 << 20;
 
-/// The receive buffer of the connection to a Mac whose Adaptive picture is passed,
+/// The receive buffer of the connection to a Mac whose own picture is passed,
 /// in bytes: small, so a browser that takes the picture more slowly than the Mac
 /// sends it backs the Mac's socket up rather than a buffer here. The Mac codes
 /// for the connection it finds: its refinement waits for a still screen when
@@ -731,10 +731,11 @@ struct DesktopState {
     /// and across a display change — so a session that passes the stream builds no
     /// video encoder at all.
     media_stream: bool,
-    /// The picture is the Mac's Adaptive picture, passed for the page to decode
-    /// ([`Passthrough::AppleAdaptive`]): its rectangles are its 8×8 tiles, and no
+    /// The picture is the Mac's own, passed for the page to decode
+    /// ([`Passthrough::AppleAdaptive`], [`Passthrough::AppleFull`]): its rectangles
+    /// are in the one encoding of that quality ([`vnc_apple::encoding`]), and no
     /// video encoder is built.
-    adaptive: bool,
+    standard: Option<StandardQuality>,
     /// The browser has been told the screen is not available
     /// ([`ServerMsg::ScreenUnavailable`]) and waits for the stream's first picture
     /// of the display. Raised at connect, by every display change, by a stream
@@ -2068,9 +2069,9 @@ pub async fn run(
     // the window, the gateway asks for every size and holds each under the
     // ceiling, and a remote that answers past it is refused. So is High
     // Performance's, whose virtual display is held under the ceiling too. A Mac's
-    // passed Adaptive picture is no video, so it has no ceiling to be held at: it is
+    // own picture passed is no video, so it has no ceiling to be held at: it is
     // painted at whatever size the Mac's screens come to.
-    let oversize = if choices.resize() || config.media_stream() || plan.apple_adaptive {
+    let oversize = if choices.resize() || config.media_stream() || plan.apple_standard.is_some() {
         Oversize::Refuse
     } else {
         Oversize::Hold
@@ -2131,7 +2132,9 @@ async fn session(
         return; // browser already gone
     }
     // Ahead of the Mac's first rectangle, which nothing has been asked for yet.
-    if plan.apple_adaptive && sink.adaptive_start().await.is_err() {
+    if let Some(quality) = plan.apple_standard
+        && sink.adaptive_start(quality).await.is_err()
+    {
         return; // browser already gone
     }
 
@@ -2315,7 +2318,7 @@ async fn connect(
     stream: tokio::net::TcpStream,
 ) -> anyhow::Result<Connected> {
     let dialect = Dialect::of(config.subtype);
-    if plan.apple_adaptive {
+    if plan.apple_standard.is_some() {
         socket2::SockRef::from(&stream)
             .set_recv_buffer_size(ADAPTIVE_RECEIVE_BUFFER)
             .map_err(|e| anyhow::Error::new(e).context("setting the receive buffer of the connection to the Mac"))?;
@@ -2396,12 +2399,12 @@ async fn connect(
                  and only such a session has the Mac's media stream"
             );
             anyhow::ensure!(
-                !plan.apple_adaptive || !config.media_stream(),
-                "a Mac's Adaptive picture is Standard mode's, and a High Performance session's \
-                 picture is its media stream"
+                plan.apple_standard.is_none() || !config.media_stream(),
+                "a Mac's Adaptive and Full-quality pictures are Standard mode's, and a High \
+                 Performance session's picture is its media stream"
             );
             let opening = opening_mode(config, choices.size, display);
-            let encodings = if plan.apple_adaptive { vnc_apple::ADAPTIVE_ENCODINGS } else { vnc_apple::ENCODINGS };
+            let encodings = vnc_apple::encodings(plan.apple_standard);
             apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, receive, encodings)
                 .await
         }
@@ -2818,8 +2821,8 @@ async fn apple_preface(
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
     // How the Mac's picture is passed, on a session with its media stream.
     receive: Option<vnc_apple_media::Receive>,
-    // What the Mac is asked for: [`vnc_apple::ENCODINGS`], or with its 8×8 tiles
-    // ahead of ZRLE for a session that passes its Adaptive picture.
+    // What the Mac is asked for: [`vnc_apple::ENCODINGS`], or with its 8×8 tiles or
+    // zlib ahead of ZRLE for a session that passes its own picture.
     encodings: &[i32],
 ) -> anyhow::Result<Connected> {
     let virtual_display = config.has_virtual_display();
@@ -2896,8 +2899,8 @@ async fn apple_preface(
     }
     uplink.send(&set_pixel_format()).await?;
     // The same list in both modes: the display layout that names the Mac's screens,
-    // or the one virtual display, and ZRLE for their pixels, or the tiles of its
-    // Adaptive picture.
+    // or the one virtual display, and ZRLE for their pixels, or the tiles or zlib
+    // of its own picture.
     uplink.send(&set_encodings(encodings)).await?;
     if virtual_display {
         // Arm the server's sender. Cursor shapes above all depend on it across a
@@ -3036,7 +3039,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
     let hp = if virtual_display && resize { HpResize::opening() } else { HpResize::default() };
     let media_stream = media.is_some();
-    let adaptive = plan.apple_adaptive;
+    let standard = plan.apple_standard;
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
         scale: UNSCALED,
@@ -3073,7 +3076,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         media_preferred: false,
         in_update: false,
         media_stream,
-        adaptive,
+        standard,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
@@ -3493,13 +3496,13 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     } else {
                         Ok(())
                     }
-                } else if matches!(input, ClientMsg::Refresh) && adaptive {
+                } else if matches!(input, ClientMsg::Refresh) && standard.is_some() {
                     // A browser that came back is given a session that starts
                     // ([`Passthrough::resumes`]), so this is one whose socket was
                     // replaced beside a reattach that is replacing this engine
                     // too. A repaint could not make a page whole that missed a
                     // rectangle: each is drawn on what the ones before it left.
-                    debug!("vnc: a repaint is no answer for a passed Adaptive picture; not asked");
+                    debug!("vnc: a repaint is no answer for the Mac's own picture passed; not asked");
                     Ok(())
                 } else if matches!(input, ClientMsg::Refresh) {
                     // A (re)attached browser needs the desktop size and a full
@@ -5810,11 +5813,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
             send(uplink, &vnc_apple::auto_framebuffer_update(interval, armed)).await?;
             return Ok(RectEffect::FULL_REPAINT);
         }
-        // A rectangle of the Mac's Adaptive picture: a `u32` saying how much follows,
-        // then its body, passed to the browser as it came, for the page to decode
-        // on what the rectangles before it drew. Never dropped: the next is drawn
-        // on this one.
-        vnc_apple::ENCODING_ADAPTIVE if desktop.lock().unwrap().adaptive => {
+        // A rectangle of the Mac's own picture, its 8×8 tiles or its zlib: a `u32`
+        // saying how much follows, then its body, passed to the browser as it came,
+        // for the page to decode on what the rectangles before it drew. Never
+        // dropped: the next is drawn on this one.
+        passed if desktop.lock().unwrap().standard.map(vnc_apple::encoding) == Some(passed) => {
             let len = reader.read_u32().await?;
             anyhow::ensure!(
                 len <= MAX_ADAPTIVE_BODY,
@@ -5864,13 +5867,16 @@ async fn read_rect<R: AsyncRead + Unpin>(
         }
     }
 
-    // The Mac sends one codec of the list, which in a session passing its Adaptive
-    // picture is the tiles: there is nothing here to decode ZRLE or Raw into.
-    anyhow::ensure!(
-        !desktop.lock().unwrap().adaptive,
-        "the Mac sent {}, where a session that passes its Adaptive picture is sent its 8x8 tiles alone",
-        encoding_label(encoding)
-    );
+    // The Mac sends one codec of the list, which in a session passing its own
+    // picture is that quality's: there is nothing here to decode ZRLE or Raw into.
+    if let Some(quality) = desktop.lock().unwrap().standard {
+        anyhow::bail!(
+            "the Mac sent {}, where a session that passes {} is sent {} alone",
+            encoding_label(encoding),
+            quality.passthrough().stream(),
+            encoding_label(vnc_apple::encoding(quality))
+        );
+    }
     let size = desktop.lock().unwrap().framebuffer();
     // Bounds-check before allocating: a rect outside the announced desktop is
     // a protocol violation (and would let a bad length drive the allocation).
@@ -8592,7 +8598,7 @@ mod tests {
         let (uplink, _sent) = test_uplink();
         let (sink, mut rx) = test_sink();
         let desktop = shared_desktop((64, 32), None, None);
-        desktop.lock().unwrap().adaptive = true;
+        desktop.lock().unwrap().standard = Some(StandardQuality::Adaptive);
         let shared = test_shared(uplink, desktop, test_shadow((64, 32)));
         let mut apple = Some(Apple::default());
         let mut decoders = Decoders::default();
@@ -8621,6 +8627,50 @@ mod tests {
         let wire = rect((0, 0, 8, 8), ENCODING_ZRLE, &[0; 4]);
         let err = read_rect(&mut wire.as_slice(), &shared, &mut apple, &mut decoders, &sink).await.unwrap_err();
         assert!(format!("{err:#}").contains("Adaptive picture"), "{err:#}");
+        assert!(forwarded(&sink, &mut rx).await.is_none(), "nothing was encoded here");
+    }
+
+    /// A rectangle of a Mac's Full-quality picture, its zlib, reaches the browser as
+    /// it came, deflated: the page inflates it on the stream the ones before it
+    /// began. ZRLE, the lossless codec the Mac keeps behind it, ends the session,
+    /// and so do the Adaptive tiles, which such a session does not list.
+    #[tokio::test]
+    async fn a_full_quality_rectangle_is_passed_as_it_came() {
+        let rect = |(x, y, w, h): (u16, u16, u16, u16), encoding: i32, body: &[u8]| {
+            let mut wire = Vec::new();
+            for value in [x, y, w, h] {
+                wire.extend_from_slice(&value.to_be_bytes());
+            }
+            wire.extend_from_slice(&encoding.to_be_bytes());
+            wire.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            wire.extend_from_slice(body);
+            wire
+        };
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((64, 32), None, None);
+        desktop.lock().unwrap().standard = Some(StandardQuality::Full);
+        let shared = test_shared(uplink, desktop, test_shadow((64, 32)));
+        let mut apple = Some(Apple::default());
+        let mut decoders = Decoders::default();
+
+        let wire = rect((8, 4, 16, 8), vnc_apple::ENCODING_ZLIB, &[0x78, 0x9c, 1, 2]);
+        let effect = read_rect(&mut wire.as_slice(), &shared, &mut apple, &mut decoders, &sink).await.unwrap();
+        assert_eq!(effect.pixels, Rect::from_size(8, 4, 16, 8));
+        match forwarded(&sink, &mut rx).await {
+            Some(ServerMsg::Adaptive(unit)) => {
+                assert_eq!((unit.x, unit.y, unit.w, unit.h), (8, 4, 16, 8));
+                assert_eq!(unit.data, [0x78, 0x9c, 1, 2], "deflated still");
+            }
+            other => panic!("expected the rectangle, got {other:?}"),
+        }
+
+        let wire = rect((0, 0, 8, 8), ENCODING_ZRLE, &[0; 4]);
+        let err = read_rect(&mut wire.as_slice(), &shared, &mut apple, &mut decoders, &sink).await.unwrap_err();
+        assert!(format!("{err:#}").contains("Full-quality picture"), "{err:#}");
+        let wire = rect((0, 0, 8, 8), vnc_apple::ENCODING_ADAPTIVE, &[0; 4]);
+        let err = read_rect(&mut wire.as_slice(), &shared, &mut apple, &mut decoders, &sink).await.unwrap_err();
+        assert!(format!("{err:#}").contains("not advertised"), "{err:#}");
         assert!(forwarded(&sink, &mut rx).await.is_none(), "nothing was encoded here");
     }
 
@@ -8685,7 +8735,7 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         assert_eq!(with_wlshare_vp9(&rest, walked), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
         // The alpha encoder is asked for by name, and only by a session started with it.
         assert_eq!(ENCODING_WLSHARE_VP9_NATIVE, i32::from_be_bytes(*b"WLSX"));
@@ -8693,7 +8743,7 @@ mod tests {
             with_wlshare_vp9(&rest, RenderPlan { native_vp9: true, ..walked }),
             [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_NATIVE, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
         );
-        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -9871,7 +9921,7 @@ mod tests {
             media_preferred: false,
             in_update: false,
             media_stream: false,
-            adaptive: false,
+            standard: None,
         }))
     }
 
@@ -9906,7 +9956,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
-            apple_adaptive: false,
+            apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
             native_vp9: false,
@@ -9943,7 +9993,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
-            apple_adaptive: false,
+            apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
             native_vp9: false,
@@ -12574,7 +12624,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -13167,7 +13217,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
-            apple_adaptive: false,
+            apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
             native_vp9: false,
@@ -13208,7 +13258,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
-            apple_adaptive: false,
+            apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
             native_vp9: false,
@@ -13362,7 +13412,7 @@ mod tests {
     async fn all_displays_over_three_screens_is_held() {
         let (uplink, _sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), Oversize::Hold);
         let shared = test_shared(uplink, shared_desktop((1280, 800), None, None), test_shadow((1280, 800)));
         let screens: [TestScreen; 3] = [

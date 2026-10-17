@@ -150,9 +150,9 @@ today. How the Mac's rectangles split between the two, how the queue and the
 paint window order two chains, and how each stream starts over are the work.
 
 Two screens is the limit, as it is today: All Displays over three or more is held
-with the notice whatever its size. A session that passes the Mac's Adaptive
-picture is no video and has neither limit
-([A Mac's Adaptive picture](architecture.md#a-macs-adaptive-picture)).
+with the notice whatever its size. A session that passes the Mac's Adaptive or
+Full-quality picture is no video and has neither limit
+([A Standard Mac's own picture](architecture.md#a-standard-macs-own-picture)).
 
 High Performance is not part of this. Its All Displays is not one framebuffer:
 each of its virtual displays is a stream of its own already, the second shown in
