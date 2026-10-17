@@ -947,7 +947,7 @@ page has gone on decoding it under the notice.
 
 wlshare has a VP9 encoding of its own, `WLSV` (`0x574c5356`), made for its desktop
 clients and for this gateway: every update one rectangle over the whole desktop, a
-`u32` length and one frame of a single stream, coded by wlshare's `screen-vp9`
+`u32` length and one frame of a single stream, coded by wlshare's `wlshare-vp9`
 crate with libvpx, 8-bit, BT.601 at studio swing declared in its keyframes. On a
 `wlshare` target the gateway lists it for every browser, tells wlshare what the
 plan resolved to, and each frame goes to the browser as it came: no ZRLE on either
