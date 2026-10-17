@@ -57,6 +57,9 @@ function harness() {
     startStandard(quality) {
       calls.push(`standard:${quality}`);
     },
+    startTiles() {
+      calls.push("tiles");
+    },
     setGraphicsView(part) {
       calls.push(`view:${part.x},${part.y} ${part.w}x${part.h}`);
     },

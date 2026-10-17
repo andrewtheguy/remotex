@@ -8,21 +8,6 @@ is the only place they can be read in context.
 
 ## Planned
 
-### The first keyframe on a slow link
-
-Every VP9 stream governed by the target's dial starts there, and its first
-keyframe is the whole desktop at that quality: 400 KB for a 1080p desktop at 90,
-two seconds on a 2 Mbit/s link before the first paint, and the largest lag any
-session on such a link ever shows.
-The walk cannot know the link before the first frame has crossed it, so the
-keyframe holds the verdicts for two seconds instead of misreading its own queue
-as the link ([the codec](architecture.md#the-codec)); a stream that started below
-the dial and climbed, as the walk climbs from a settle, would paint sooner on a
-slow link at the cost of a coarser first second on a fast one, which the settle
-sharpens within half a second of the desktop going quiet. Measured before it is
-chosen: the cost on the LAN, where most sessions run, against the gain on the link
-it is for.
-
 ### An official way to have Windows rate-control its H.264 over TCP
 
 An adaptive session has the host rate-control its H.264 by taking the network
@@ -261,7 +246,8 @@ judged, are in [the benchmark](../frontend/wasm/flac/bench/README.md).
 The gateway composes no graphics pipeline: every pipeline is passed to the
 page, and a High quality session refuses H.264 with `AVC_DISABLED`
 ([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
-Decoding H.264 here only to encode VP9 would be a second lossy pass.
+Decoding H.264 here only to send it as tiles would be a second lossy pass, of a
+stream the page already decodes.
 
 ### Encodings other than ZRLE on a plain VNC target
 
@@ -281,8 +267,8 @@ through is what a `wlshare` target has.
 Motion (alpha) sent what is still as exact PNG and each region that moves as a
 VP9 stream of its own, first under an RDP target's High quality, from the
 pipeline composed at the gateway, then on a Mac's virtual display under `ard`,
-from its ZRLE. It was removed from both, and the gateway again sends a picture it
-decodes one way, as one VP9 stream ([Media paths](architecture.md#media-paths)).
+from its ZRLE. It was removed from both, and the gateway sends a picture it
+decodes one way, as tiles, with no video encoder ([Media paths](architecture.md#media-paths)).
 On an RDP target it encoded twice, decoding what the host had already encoded
 only to encode it again, beside a pipeline that already gives an exact picture
 under the host's Lossless policy

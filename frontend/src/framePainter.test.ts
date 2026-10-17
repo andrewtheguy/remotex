@@ -182,7 +182,43 @@ class FakeVideoDecoder {
 const globals = globalThis as unknown as {
   VideoDecoder: unknown;
   EncodedVideoChunk: unknown;
+  createImageBitmap: unknown;
 };
+
+// The browser's image decoder, which this runtime has none of: a tile's image is
+// told apart by its first byte, which also says how long it takes to decode and
+// whether it decodes at all.
+interface FakeBitmap {
+  tag: number;
+  type: string;
+  closed: boolean;
+  close(): void;
+}
+let bitmaps: FakeBitmap[] = [];
+/** How long an image takes to decode, by its first byte, in ms. */
+let decodeDelay = new Map<number, number>();
+/** An image whose first byte is this does not decode. */
+let undecodable: number | null = null;
+
+async function fakeCreateImageBitmap(blob: Blob): Promise<FakeBitmap> {
+  const tag = new Uint8Array(await blob.arrayBuffer())[0];
+  await new Promise((resolve) =>
+    setTimeout(resolve, decodeDelay.get(tag) ?? 0),
+  );
+  if (tag === undecodable) {
+    throw new Error("not an image");
+  }
+  const bitmap: FakeBitmap = {
+    tag,
+    type: blob.type,
+    closed: false,
+    close() {
+      this.closed = true;
+    },
+  };
+  bitmaps.push(bitmap);
+  return bitmap;
+}
 
 beforeEach(() => {
   uploaded = [];
@@ -204,6 +240,10 @@ beforeEach(() => {
   configured = [];
   planar = false;
   planes = { made: 0, closed: 0, placed: [], drawn: [] };
+  bitmaps = [];
+  decodeDelay = new Map();
+  undecodable = null;
+  globals.createImageBitmap = fakeCreateImageBitmap;
   globals.VideoDecoder = FakeVideoDecoder;
   globals.EncodedVideoChunk = class {
     type: string;
@@ -218,6 +258,7 @@ beforeEach(() => {
 afterEach(() => {
   globals.VideoDecoder = undefined;
   globals.EncodedVideoChunk = undefined;
+  globals.createImageBitmap = undefined;
 });
 
 function painter(ctx: CanvasRenderingContext2D | null = context) {
@@ -1674,4 +1715,108 @@ test("a malformed batch ends a Mac's own picture", async () => {
     /arrived malformed/,
   );
   assert.deepEqual(videoKeyframeAsks, []);
+});
+
+// A batch of TILE records, transcribed from `TileUnit::write_record` in
+// src/protocol.rs: op 0x06, the format (1 JPEG, 2 PNG), x, y, w and h as u16, a u32
+// length, the image, little-endian.
+function tileFrame(
+  tiles: {
+    format: 1 | 2;
+    at: [number, number, number, number];
+    image: number[];
+  }[],
+): ArrayBuffer {
+  const bytes: number[] = [];
+  const u16 = (n: number) => bytes.push(n & 0xff, (n >> 8) & 0xff);
+  const u32 = (n: number) =>
+    bytes.push(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff);
+  bytes.push(0x02, 0x00);
+  u16(tiles.length);
+  u32(1);
+  for (const tile of tiles) {
+    bytes.push(0x06, tile.format);
+    for (const value of tile.at) {
+      u16(value);
+    }
+    u32(tile.image.length);
+    bytes.push(...tile.image);
+  }
+  return new Uint8Array(bytes).buffer;
+}
+
+test("the gateway's tiles are drawn in wire order where they say, behind their start", async () => {
+  const p = painter();
+  p.startTiles();
+  // The first decodes last, and is still drawn first: a later tile may cover it.
+  decodeDelay.set(1, 20);
+  await p.draw(
+    tileFrame([
+      { format: 1, at: [0, 0, 64, 64], image: [1, 0xff] },
+      { format: 2, at: [64, 0, 128, 64], image: [2, 0x89] },
+    ]),
+  );
+  assert.deepEqual(
+    cropped.map(({ dx, dy }) => [dx, dy]),
+    [
+      [0, 0],
+      [64, 0],
+    ],
+  );
+  assert.deepEqual(bitmaps.map(({ type }) => type).sort(), [
+    "image/jpeg",
+    "image/png",
+  ]);
+  assert.ok(
+    bitmaps.every((bitmap) => bitmap.closed),
+    "a drawn image is let go",
+  );
+  assert.equal(decoders, 0, "no video decoder was built");
+  assert.deepEqual(videoKeyframeAsks, []);
+});
+
+test("a tile is drawn only while the picture is tiles", async () => {
+  const p = painter();
+  const tile = () => tileFrame([{ format: 2, at: [0, 0, 8, 8], image: [5] }]);
+  await p.draw(tile());
+  assert.deepEqual(cropped, [], "a tile before its start");
+  p.startTiles();
+  await p.draw(tile());
+  assert.equal(cropped.length, 1);
+  // A passed stream takes the picture, and a tile late behind it is not drawn.
+  p.setVideoFormat({ decode: "vp09.00.40.08.01.06.06.06.00" });
+  await p.draw(tile());
+  assert.equal(cropped.length, 1, "a tile drawn under a stream");
+  p.startTiles();
+  p.clear();
+  await p.draw(tile());
+  assert.equal(cropped.length, 1, "a tile drawn after the attachment ended");
+});
+
+test("a tile that does not decode asks for the whole picture, and the rest are drawn", async () => {
+  const p = painter();
+  p.startTiles();
+  undecodable = 3;
+  await p.draw(
+    tileFrame([
+      { format: 1, at: [0, 0, 64, 64], image: [3] },
+      { format: 2, at: [64, 0, 64, 64], image: [4] },
+    ]),
+  );
+  assert.deepEqual(
+    cropped.map(({ dx }) => dx),
+    [64],
+  );
+  assert.equal(videoKeyframeAsks.length, 1);
+  assert.match(videoKeyframeAsks[0], /a tile did not decode/);
+});
+
+test("a malformed batch of tiles asks for the whole picture", async () => {
+  const p = painter();
+  p.startTiles();
+  await p.draw(
+    new Uint8Array([0x02, 0x00, 0x01, 0x00, 0x01, 0, 0, 0, 0x06, 0x01]).buffer,
+  );
+  assert.deepEqual(cropped, []);
+  assert.match(videoKeyframeAsks[0] ?? "", /malformed/);
 });

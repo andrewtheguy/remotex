@@ -103,6 +103,8 @@ export type PainterCommand =
   | { type: "graphicsStart" }
   /** A Mac's own picture starts, in `quality`, and this worker decodes it. */
   | { type: "standardStart"; quality: StandardQuality }
+  /** The gateway's tiles start, and this worker draws them. */
+  | { type: "tilesStart" }
   /** The part of the pipeline's picture this page's display is, to show. */
   | { type: "graphicsView"; part: PicturePart }
   /**
@@ -349,6 +351,9 @@ export function createPainterWorker(
           break;
         case "standardStart":
           queued(() => painter?.startStandard(command.quality));
+          break;
+        case "tilesStart":
+          queued(() => painter?.startTiles());
           break;
         case "graphicsView":
           queued(() => painter?.setGraphicsView(command.part));

@@ -132,10 +132,12 @@ struct View {
     displays: Option<(u64, Vec<(u64, String)>)>,
     /// The last `videoFormat` announcement: the decoder configuration string.
     decode: Option<String>,
-    /// Whether that announcement said the stream is the remote's own, passed
-    /// through, rather than one encoded here.
-    passed: Option<bool>,
-    /// Whether a keyframe of the last announced size has arrived.
+    /// Whether the gateway said its tiles are the picture (`tilesStart`).
+    tiles: bool,
+    /// The tiles of the last announced size sent so far.
+    coverage: Option<common::Coverage>,
+    /// Whether a keyframe of the last announced size, or every tile of it, has
+    /// arrived.
     painted: bool,
 }
 
@@ -146,7 +148,8 @@ impl View {
             sizes: Vec::new(),
             displays: None,
             decode: None,
-            passed: None,
+            tiles: false,
+            coverage: None,
             painted: false,
         }
     }
@@ -189,6 +192,7 @@ impl View {
                 };
                 self.size = Some(size);
                 self.sizes.push(size);
+                self.coverage = Some(common::Coverage::new(size.w as u16, size.h as u16));
                 self.painted = false;
             }
             Some("displays") => {
@@ -202,23 +206,32 @@ impl View {
             }
             Some("videoFormat") => {
                 self.decode = Some(msg["decode"].as_str().unwrap().to_owned());
-                self.passed = Some(msg["passthrough"].as_bool().unwrap());
             }
+            Some("tilesStart") => self.tiles = true,
             _ => {}
         }
     }
 
     fn units(&mut self, frame: &[u8]) {
         let size = self.size.expect("a frame arrived before any resize");
-        for unit in common::batch_units(frame) {
-            assert_eq!(
-                (u64::from(unit.w), u64::from(unit.h)),
-                (size.w, size.h),
-                "an access unit that is not the {}x{} desktop",
-                size.w,
-                size.h
-            );
-            self.painted |= unit.keyframe;
+        for record in common::batch_records(frame) {
+            match record {
+                common::BatchRecord::Video(unit) => {
+                    assert_eq!(
+                        (u64::from(unit.w), u64::from(unit.h)),
+                        (size.w, size.h),
+                        "an access unit that is not the {}x{} desktop",
+                        size.w,
+                        size.h
+                    );
+                    self.painted |= unit.keyframe;
+                }
+                common::BatchRecord::Tile(tile) => {
+                    let coverage = self.coverage.as_mut().expect("a resize made the coverage");
+                    coverage.add(&tile);
+                    self.painted |= coverage.whole();
+                }
+            }
         }
     }
 
@@ -331,7 +344,6 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     );
     let decode = view.decode.as_deref().expect("a video format was announced");
     assert!(decode.starts_with("vp09.01."), "the stream was announced as {decode}");
-    assert_eq!(view.passed, Some(true), "the stream is wlshare's own");
 }
 
 /// The entry that shows both outputs, as the gateway lists it.
@@ -409,7 +421,7 @@ async fn all_displays_shows_the_second_output_in_a_tab_of_its_own() {
 
 /// The same server behind a plain `vnc` target is read as any VNC server is: the
 /// gateway lists nothing of wlshare's, so wlshare is never asked for its VP9 and
-/// sends ZRLE, which is encoded here; the 2x browser is shown the output at the
+/// sends ZRLE, which is sent as tiles; the 2x browser is shown the output at the
 /// 1x generic VNC is presented at, and no output list arrives. Its size is the
 /// server's own: a plain target is never sent a SetDesktopSize.
 #[tokio::test]
@@ -428,7 +440,7 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
     )))
     .await
     .unwrap();
-    view.until(&mut ws, "the desktop at the server's own size", |v| v.decode.is_some()).await;
+    view.until(&mut ws, "the desktop at the server's own size", |v| v.tiles).await;
     // A while longer, for a resize that should never come.
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         while let Some(msg) = ws.next().await {
@@ -444,9 +456,8 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
     })
     .await;
 
-    assert_eq!(view.passed, Some(false), "the picture is encoded here");
-    let decode = view.decode.as_deref().expect("a video format was announced");
-    assert!(decode.starts_with("vp09.00."), "the gateway's own VP9 is 4:2:0, announced as {decode}");
+    assert!(view.tiles, "the picture is the tiles coded here");
+    assert_eq!(view.decode, None, "a stream was announced to a plain target");
     assert!(
         view.sizes.iter().all(|size| size.scale == 1.0),
         "a plain target takes no density from the server or the browser: {:?}",
@@ -486,7 +497,6 @@ async fn a_browser_without_4_4_4_is_sent_wlshares_vp9_at_4_2_0() {
 
     let decode = view.decode.as_deref().expect("a video format was announced");
     assert!(decode.starts_with("vp09.00.") && decode.contains(".08.01."), "the stream was announced as {decode}");
-    assert_eq!(view.passed, Some(true), "the stream is wlshare's own");
     assert!(
         container.logs().contains("asked for VP9 at 4:2:0"),
         "wlshare was not asked for its VP9 at 4:2:0:\n{}",

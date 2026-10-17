@@ -1198,9 +1198,8 @@ from RFB. RFB only negotiates a media stream: the viewer sends an offer, and
 AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with SRTP,
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
 (`src/vnc_apple_media.rs`). The stream alone is the picture. The Mac's ZRLE
-rectangles are stepped over by their length, never inflated and never encoded,
-so a session builds no VP9 encoder, with the worker
-threads and frame buffers one holds for a session's life. Until the stream
+rectangles are stepped over by their length, never inflated and never coded,
+so a session codes no tile. Until the stream
 delivers, at connect, across display changes and across a stream the Mac
 restarts, the gateway sends `screenUnavailable` and the page says "Screen not
 available" over the canvas and sends the Mac no input, since nobody can see

@@ -185,18 +185,23 @@ impl Default for AudioPlan {
     }
 }
 
-/// The render choices an engine sees: the target's resolved VP9 plan and the
+/// The render choices an engine sees: the target's resolved picture and the
 /// passthrough the session was started with, from [`TargetConfig::render_plan`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RenderPlan {
-    /// The 1–100 dial the stream holds on a link that can carry it, rather than a
-    /// quantizer: turning that into one is [`crate::vp9`]'s business, and it is the
-    /// only module that should know what a quantizer is.
+    /// The 1–100 dial: the JPEG quality of the tiles coded here ([`crate::tiles`]),
+    /// and on a `wlshare` target the ceiling of wlshare's VP9, which wlshare maps onto
+    /// its own quantizer.
     pub quality: u8,
-    /// Whether the quality walk listens to the client's lag
-    /// ([`TargetConfig::render_adaptive`]). Off, the congestion walk keeps its
-    /// historical shape: pressure only.
+    /// Whether wlshare's VP9 walks its dial on the browser's lag
+    /// ([`TargetConfig::render_adaptive`]), on a `wlshare` target and nowhere else:
+    /// the tiles coded here follow the browser's painting at the one quality.
     pub adaptive: bool,
+    /// The picture is wlshare's own VP9 ([`Self::chroma`]), asked of a `wlshare`
+    /// target's server and passed as it comes; otherwise, where no passthrough below
+    /// says the picture is the remote's, it is the tiles coded here. A wlshare server
+    /// that ignores the listing is coded here too.
+    pub wlshare: bool,
     /// The Mac's picture passes as it came, its HEVC:
     /// [`Passthrough::AppleMedia`], chosen at the picker. None of the fields
     /// above reach such a picture.
@@ -220,14 +225,10 @@ pub struct RenderPlan {
     /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
     /// [`Self::rdp_graphics`].
     pub rdp_h264: bool,
-    /// How the VP9 samples colour, whichever end codes it. 4:2:0, VP9 profile 0,
-    /// wherever this gateway encodes the picture — plain VNC and the RDP bitmap
-    /// path, which are not prioritized, so their stream is the one cheapest to code
-    /// and every decoder takes — and on a `wlshare` target for a browser whose own
-    /// decoder takes no profile 1 ([`Decoders::vp9_444`]); 4:4:4 on a `wlshare`
-    /// target for a browser that takes it, whose stream wlshare is asked for at that
-    /// chroma, and which a server that ignores the listing has encoded here at the
-    /// same. Fixed for the session, as the rest of the plan is.
+    /// How wlshare's VP9 samples colour: 4:4:4, VP9 profile 1, for a browser whose own
+    /// decoder takes it ([`Decoders::vp9_444`]), and 4:2:0, profile 0, for any other.
+    /// 4:2:0 wherever the picture is not wlshare's, where nothing reads it. Fixed for
+    /// the session, as the rest of the plan is.
     pub chroma: crate::vp9::Chroma,
 }
 
@@ -692,18 +693,20 @@ impl RenderPlan {
     ///
     /// The resolved plan rather than the config keys: what a target *does* is the
     /// plan its keys collapse to, defaults included, and a description built from
-    /// the keys would restate the file while the encoder did something the reader
-    /// has to derive. The VP9's chroma is the target's and the browser's, so the
-    /// card says it.
+    /// the keys would restate the file while the picture did something the reader
+    /// has to derive. wlshare's VP9's chroma is the browser's, so the card says it.
     pub fn describe(&self) -> String {
         if let Some(passthrough) = self.passthrough() {
             let h264 = if self.rdp_h264 { " with H.264" } else { "" };
             return format!("{}{h264}, passed through", passthrough.stream());
         }
+        if !self.wlshare {
+            return format!("tiles q{}", self.quality);
+        }
         // The walk as a suffix: the quality named before it is a ceiling the link
         // may fall below.
         let adaptive = if self.adaptive { " · adaptive" } else { "" };
-        format!("video q{} · {}{adaptive}", self.quality, crate::stream::chroma_name(self.chroma))
+        format!("VP9 q{} · {}{adaptive}", self.quality, self.chroma.name())
     }
 }
 
@@ -919,35 +922,34 @@ pub struct TargetConfig {
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub audio_adaptive: Option<bool>,
-    /// The quality (1–100) this target's VP9 stream holds on a link that can carry
-    /// it. `None` reads as [`DEFAULT_VIDEO_QUALITY`].
+    /// The quality (1–100) of this target's picture. `None` reads as
+    /// [`DEFAULT_VIDEO_QUALITY`].
     ///
-    /// A ceiling rather than a promise: a link that cannot hold it coarsens until
+    /// Where the picture is the tiles coded here, the JPEG quality a changed tile of
+    /// many colours is sent at until it is still and sent exactly. On a `wlshare`
+    /// target, the ceiling of wlshare's VP9: a link that cannot hold it coarsens until
     /// it can, and one with room to spare never earns better.
     #[serde(default)]
     pub video_quality: Option<u8>,
-    /// Let [`Self::video_quality`] track the measured link — on unless the
-    /// operator turned it off.
+    /// Let wlshare's VP9 walk [`Self::video_quality`] on the measured link — on
+    /// unless the operator turned it off. A `wlshare` target's key alone: the tiles
+    /// coded here follow the browser's painting at the one quality, and have no walk.
     ///
     /// The configured quality stays the *ceiling* — a link with room to spare
     /// never earns a better picture than the one asked for — and the walk's floor
-    /// is the encoder's own, fixed where a coarser picture stops being worth more
-    /// than fewer frames, as every adaptive stream fixes it. The stream already
-    /// gives quality up when queueing a frame blocks; this adds the client's own
-    /// lag — how long the oldest unacknowledged paint batch has been owed, beyond
-    /// the link's measured floor — as a second reason to. A desktop left coarse is
-    /// sharpened at the dial once it goes quiet, which is what keeps a coarse walk
-    /// from being a coarse screen.
+    /// is wlshare's own. wlshare's stream gives quality up as the fences it asks this
+    /// end to echo come back late, and sharpens a desktop left coarse at the dial once
+    /// it goes quiet. Off, wlshare holds the dial.
     ///
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub render_adaptive: Option<bool>,
 }
 
-/// The stream quality a target streams at when [`TargetConfig::video_quality`] is
-/// unset — the ceiling of the adaptive walk, not a promise. High enough that a link
-/// with room to spare shows a desktop worth looking at, and the walk is what takes
-/// it down on one that has not.
+/// The quality a target's picture is at when [`TargetConfig::video_quality`] is
+/// unset: the JPEG quality of a moving tile coded here, and the ceiling of wlshare's
+/// walk, not a promise. High enough that a link with room to spare shows a desktop
+/// worth looking at.
 pub const DEFAULT_VIDEO_QUALITY: u8 = 90;
 
 /// The Opus bitrate (kbit/s) when [`TargetConfig::audio_bitrate`] is unset — the
@@ -1045,9 +1047,10 @@ impl TargetConfig {
         self.video_quality.unwrap_or(DEFAULT_VIDEO_QUALITY)
     }
 
-    /// The adaptive walk, resolved: on unless the operator turned it off.
+    /// wlshare's adaptive walk, resolved: on unless the operator turned it off, and
+    /// off wherever the picture is not wlshare's.
     pub fn render_adaptive(&self) -> bool {
-        self.render_adaptive.unwrap_or(true)
+        self.wlshare() && self.render_adaptive.unwrap_or(true)
     }
 
     /// The stream keys resolved to the one [`RenderPlan`] the engines see, so
@@ -1071,6 +1074,7 @@ impl TargetConfig {
         RenderPlan {
             quality,
             adaptive,
+            wlshare: self.wlshare(),
             apple_media,
             apple_h264,
             apple_standard,
@@ -1953,20 +1957,21 @@ impl ConfigFile {
                  encoder's bitrate, and no session there has sound to encode. Remove the key.",
                 target.name
             );
-            // The video keys tune the VP9 encoded here, and wlshare's. A Mac's
+            // `video_quality` is the tiles' JPEG quality and wlshare's dial. A Mac's
             // picture is always passed as it came, in either mode, the Mac's own
-            // rate control behind it, so they could not do anything there.
-            let video = !target.apple();
+            // rate control behind it, so it could not do anything there.
             anyhow::ensure!(
-                target.video_quality.is_none() || video,
-                "target {:?} is {kind} and sets video_quality — it is the VP9's dial, and \
-                 the Mac's picture there is always passed as it came. Remove the key.",
+                target.video_quality.is_none() || !target.apple(),
+                "target {:?} is {kind} and sets video_quality — it is the picture's quality, \
+                 and the Mac's picture there is always passed as it came. Remove the key.",
                 target.name
             );
+            // `render_adaptive` walks wlshare's VP9 and nothing else: the tiles coded
+            // here follow the browser's painting at the one quality.
             anyhow::ensure!(
-                target.render_adaptive.is_none() || video,
-                "target {:?} is {kind} and sets render_adaptive — it walks the VP9's dial, \
-                 and the Mac's picture there is always passed as it came. Remove the key.",
+                target.render_adaptive.is_none() || target.wlshare(),
+                "target {:?} is {kind} and sets render_adaptive — it walks wlshare's VP9, \
+                 which only a `wlshare` target is sent. Remove the key.",
                 target.name
             );
             if let Some(kbps) = target.audio_bitrate {
@@ -3246,41 +3251,41 @@ mod tests {
         assert!(msg.contains("rdp") && msg.contains("vnc"), "{msg}");
     }
 
-    /// A target with no stream keys streams the whole desktop at the default dial,
-    /// with the adaptive walk on.
+    /// A target with no picture keys is tiles at the default quality, with no walk:
+    /// the tiles follow the browser's painting.
     #[test]
-    fn a_bare_target_streams_at_the_defaults() {
+    fn a_bare_target_is_tiles_at_the_defaults() {
         let cfg = parse_target("").expect("a bare target");
         assert_eq!(
             cfg.targets[0].render_plan(Choices::default(), Decoders::ALL),
             RenderPlan {
                 quality: DEFAULT_VIDEO_QUALITY,
-                adaptive: true,
+                adaptive: false,
                 apple_media: false,
                 apple_h264: false,
                 apple_standard: None,
                 rdp_graphics: false,
                 rdp_h264: false,
-
+                wlshare: false,
                 chroma: crate::vp9::Chroma::Yuv420,
             }
         );
     }
 
     #[test]
-    fn a_video_quality_is_the_streams_dial() {
+    fn a_video_quality_is_the_pictures_quality() {
         let cfg = parse_target("video_quality = 60").expect("a quality");
         assert_eq!(
             cfg.targets[0].render_plan(Choices::default(), Decoders::ALL),
             RenderPlan {
                 quality: 60,
-                adaptive: true,
+                adaptive: false,
                 apple_media: false,
                 apple_h264: false,
                 apple_standard: None,
                 rdp_graphics: false,
                 rdp_h264: false,
-
+                wlshare: false,
                 chroma: crate::vp9::Chroma::Yuv420,
             }
         );
@@ -3295,24 +3300,24 @@ mod tests {
     }
 
     /// The TUI reads a config file with no browser in front of it, and a session
-    /// card reads the resolved plan: both say the dial and whether the walk runs.
+    /// card reads the resolved plan: both say the picture and its quality, and of
+    /// wlshare's VP9 its chroma and whether the walk runs.
     #[test]
-    fn a_card_describes_the_stream() {
-        let summary = |extra: &str| {
-            parse_target(&format!("video_quality = 60\n{extra}")).unwrap().targets[0].render_summary()
+    fn a_card_describes_the_picture() {
+        assert_eq!(parse_target("video_quality = 60").unwrap().targets[0].render_summary(), "tiles q60");
+        let plain = &ConfigFile::parse(&vnc_toml("video_quality = 60")).unwrap().targets[0];
+        assert_eq!(plain.render_summary(), "tiles q60");
+        assert_eq!(plain.render_plan(Choices::default(), Decoders::ALL).describe(), "tiles q60");
+        let wlshare = |extra: &str| {
+            ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 60\n{extra}"))).unwrap().targets.remove(0)
         };
-        assert_eq!(summary(""), "video q60 · 4:2:0 · adaptive");
-        assert_eq!(summary("render_adaptive = false"), "video q60 · 4:2:0");
-        let describe = |keys: &str| {
-            parse_target(keys).unwrap().targets[0].render_plan(Choices::default(), Decoders::ALL).describe()
-        };
-        assert_eq!(describe("video_quality = 60"), "video q60 · 4:2:0 · adaptive");
-        assert_eq!(describe("video_quality = 60\nrender_adaptive = false"), "video q60 · 4:2:0");
+        assert_eq!(wlshare("").render_summary(), "VP9 q60 · 4:4:4 · adaptive");
+        assert_eq!(wlshare("render_adaptive = false").render_summary(), "VP9 q60 · 4:4:4");
     }
 
-    /// The VP9 is 4:2:0 wherever the gateway encodes the picture, for every browser,
-    /// and on a `wlshare` target follows the browser: 4:4:4 where its own decoder
-    /// takes it, 4:2:0 where it does not.
+    /// wlshare's VP9 follows the browser: 4:4:4 where its own decoder takes it, 4:2:0
+    /// where it does not; and a target whose picture is tiles reads no chroma, at
+    /// 4:2:0 for every browser.
     #[test]
     fn the_chroma_follows_the_target_and_the_browser() {
         use crate::vp9::Chroma;
@@ -4336,7 +4341,7 @@ vnc_password = \"x\"")).unwrap();
 
     /// Standard mode never touches the Mac's sound, so an `ard` target has none to
     /// offer and no use for the keys that tune it, and its picture is the Mac's
-    /// own, so nor have the VP9's.
+    /// own, so nor have the picture's.
     #[test]
     fn a_standard_mac_carries_no_sound() {
         let target = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\n\
@@ -4374,7 +4379,7 @@ vnc_password = \"x\"")).unwrap();
 
         // The sound is the Mac's own AAC-ELD, so the Opus encoder's keys have
         // nothing to tune, and the picture the Mac's HEVC or H.264, so nor have
-        // the VP9's.
+        // the picture's.
         for key in ["audio_bitrate = 128", "audio_adaptive = false", "video_quality = 60", "render_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
@@ -4492,25 +4497,29 @@ vnc_password = \"x\"")).unwrap();
         }
     }
 
-    /// The switch resolves into the plan, and the plan says so.
+    /// The switch resolves into a `wlshare` target's plan, and the plan says so;
+    /// turned off, wlshare holds its dial.
     #[test]
-    fn render_adaptive_resolves_into_the_plan() {
-        let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
-        let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 });
-        assert_eq!(plan.describe(), "video q80 · 4:2:0 · adaptive");
+    fn render_adaptive_resolves_into_a_wlshare_plan() {
+        for (key, adaptive) in [("render_adaptive = true", true), ("render_adaptive = false", false), ("", true)] {
+            let cfg = ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 80\n{key}"))).expect("a wlshare target");
+            let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
+            assert_eq!(plan, RenderPlan { quality: 80, adaptive, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 }, "{key}");
+        }
     }
 
-    /// A target that turned the walk off stays exactly on its dial: the
-    /// pressure-only walk the stream had before the key existed, and a card that
-    /// promises no walk.
+    /// The walk is wlshare's alone: a target whose picture is tiles, or passed from an
+    /// RDP host, refuses the key.
     #[test]
-    fn render_adaptive_false_leaves_the_plan_without_a_walk() {
-        let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
-            .expect("video with the walk off");
-        let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 });
-        assert_eq!(plan.describe(), "video q80 · 4:2:0");
+    fn render_adaptive_is_a_wlshare_key() {
+        for toml in [
+            vnc_toml("render_adaptive = false"),
+            format!("[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\nrender_adaptive = true\n", site_passwd_line()),
+        ] {
+            let err = ConfigFile::parse(&toml).unwrap_err();
+            assert!(format!("{err:#}").contains("render_adaptive — it walks wlshare's VP9"), "{err:#}");
+        }
+        assert!(parse_target("render_adaptive = true").is_err(), "the bitmap path took the key");
     }
 
     /// The floor key is gone: a settle sharpens a quiet desktop at the dial, which

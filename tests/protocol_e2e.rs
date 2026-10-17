@@ -1361,17 +1361,20 @@ async fn expect_picker(ws: &mut Ws) {
     .expect("timed out waiting for picker");
 }
 
-/// Read from the socket until a binary frame of the desktop's stream arrives.
-async fn expect_frame(ws: &mut Ws) -> Vec<common::BatchUnit> {
+/// Read from the socket until a binary frame of the desktop's picture arrives, and
+/// acknowledge it as a browser's painter does: the gateway sends the next tiles as
+/// the browser paints.
+async fn expect_frame(ws: &mut Ws) -> Vec<common::BatchRecord> {
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.display_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
                     // Parsed rather than sniffed: the envelope's own invariants
                     // are checked on the way past.
-                    let units = common::batch_units(&frame);
-                    assert!(!units.is_empty());
-                    return units;
+                    let records = common::batch_records(&frame);
+                    assert!(!records.is_empty());
+                    ws.display_socket().send(Message::text(common::paint_ack(&frame))).await.expect("acknowledge a batch");
+                    return records;
                 }
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
@@ -1402,7 +1405,7 @@ async fn expect_standard(ws: &mut Ws, quality: Option<&str>) -> Vec<common::Stan
                 }
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
-                    assert!(!text.contains(r#""type":"videoFormat""#), "a Standard picture encoded here: {text}");
+                    assert!(!text.contains(r#""type":"tilesStart""#), "a Standard picture coded here: {text}");
                     if text.contains(r#""type":"standardStart""#) {
                         let start: serde_json::Value = serde_json::from_str(&text).unwrap();
                         assert_eq!(start["quality"].as_str(), quality, "{text}");
@@ -1577,7 +1580,7 @@ async fn an_audio_socket_without_a_valid_token_is_closed_with_4000() {
 ///
 /// Both are asserted from the other side of a wire nothing in `src/vnc.rs` wrote:
 /// the scripted server reads the client's messages itself, and the records are
-/// parsed by `common::batch_units`.
+/// parsed by `common::batch_records`.
 #[tokio::test]
 async fn continuous_updates_carry_an_unasked_update_to_the_browser() {
     let (vnc_port, mut seen) = spawn_scrolling_vnc().await;
@@ -1745,9 +1748,9 @@ async fn expect_no_picture(ws: &mut Ws) {
 }
 
 /// Started with resize, the window sizes the desktop and nothing is held: a server
-/// that answers past the ceiling ends the session with the stream's refusal. A
+/// that answers past the ceiling ends the session with the ceiling's refusal. A
 /// `wlshare` target, since a plain one never follows a window; the fake ignores
-/// the listing and is encoded here.
+/// the listing and is coded here.
 #[tokio::test]
 async fn an_oversize_vnc_desktop_under_resize_is_refused() {
     let (w, h) = (3842, 2);
@@ -1762,7 +1765,7 @@ async fn an_oversize_vnc_desktop_under_resize_is_refused() {
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target_with(&mut ws, "test-target", RESIZE).await;
     let error = expect_error(&mut ws).await;
-    assert!(error.contains("will not encode a 3842x2 picture"), "unexpected error: {error}");
+    assert!(error.contains("will not show a 3842x2 picture"), "unexpected error: {error}");
 }
 
 /// Logging out ends the desktop, and the login after it starts from the picker.
@@ -2050,7 +2053,7 @@ async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
 /// reading for one kind reads that socket alone, so what it skips past is never
 /// a message of the other socket that a later helper is waiting for.
 fn socket_for<'a>(ws: &'a mut Ws, kind: &str) -> &'a mut common::Socket {
-    const DISPLAY: [&str; 11] = [
+    const DISPLAY: [&str; 12] = [
         "resize",
         "cursor",
         "mosaic",
@@ -2062,6 +2065,7 @@ fn socket_for<'a>(ws: &'a mut Ws, kind: &str) -> &'a mut common::Socket {
         "videoFormat",
         "graphicsStart",
         "standardStart",
+        "tilesStart",
     ];
     if DISPLAY.contains(&kind) { ws.display_socket() } else { ws.session_socket() }
 }

@@ -2,7 +2,7 @@
 //! messages flush the pending batch to preserve ordering against the records
 //! around them, and batches are bounded.
 
-use crate::protocol::{self, StandardUnit, GraphicsUnit, ServerMsg, VideoUnit, WireFrame, batch};
+use crate::protocol::{self, GraphicsUnit, ServerMsg, StandardUnit, TileUnit, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead.
@@ -21,7 +21,8 @@ pub enum WireError {
 pub struct Wire {
     /// Records accumulated for the batch currently being built. Every one is sent,
     /// in order: an access unit is a link in a chain, and a dropped one decodes
-    /// wrongly until the next keyframe.
+    /// wrongly until the next keyframe, and a tile drawn after a later one shows what
+    /// the desktop no longer does.
     pending: Vec<Record>,
     /// What `pending` will serialize to, so the byte cap can be checked without
     /// serializing to find out.
@@ -75,6 +76,7 @@ impl Wire {
                 None => match msg {
                     ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames)?,
                     ServerMsg::Standard(unit) => self.push(Record::Standard(unit), &mut frames)?,
+                    ServerMsg::Tile(unit) => self.push(Record::Tile(unit), &mut frames)?,
                     // A frame's last run is its batch's last record: the browser
                     // shows a batch once it has drawn all of it, and acknowledges
                     // it then, which is this frame's acknowledgement to the host.
@@ -155,6 +157,12 @@ impl Wire {
                     painted.push(unit.painted);
                     unit.held
                 }
+                Record::Tile(unit) => {
+                    self.totals.tile(unit.record_len());
+                    unit.write_record(&mut frame);
+                    painted.push(unit.painted);
+                    unit.held
+                }
             });
         }
         self.pending_bytes = 0;
@@ -169,6 +177,7 @@ enum Record {
     Video(VideoUnit),
     Graphics(GraphicsUnit),
     Standard(StandardUnit),
+    Tile(TileUnit),
 }
 
 impl Record {
@@ -177,6 +186,7 @@ impl Record {
             Record::Video(unit) => unit.record_len(),
             Record::Graphics(unit) => unit.record_len(),
             Record::Standard(unit) => unit.record_len(),
+            Record::Tile(unit) => unit.record_len(),
         }
     }
 }
@@ -198,6 +208,9 @@ pub struct Totals {
     /// A Standard Mac's passed rectangles, Adaptive or Full, and their record bytes.
     pub standard: u64,
     pub standard_bytes: u64,
+    /// Rectangles of the tiles coded here, and their record bytes.
+    pub tile: u64,
+    pub tile_bytes: u64,
     /// Audio packets and their binary-frame bytes. On a separate socket, so on any
     /// one `Wire` these and the video counters are mutually exclusive.
     pub audio_frames: u64,
@@ -238,6 +251,11 @@ impl Totals {
         self.standard_bytes += len as u64;
     }
 
+    fn tile(&mut self, len: usize) {
+        self.tile += 1;
+        self.tile_bytes += len as u64;
+    }
+
     fn text(&mut self, len: usize) {
         self.text_frames += 1;
         self.text_bytes += len as u64;
@@ -249,7 +267,8 @@ impl std::fmt::Display for Totals {
         write!(
             f,
             "{} binary frames / {} bytes carrying {} video records / {} bytes \
-             and {} graphics records / {} bytes and {} standard records / {} bytes, \
+             and {} graphics records / {} bytes and {} standard records / {} bytes \
+             and {} tile records / {} bytes, \
              {} text frames / {} bytes, largest binary {} bytes, \
              {} audio frames / {} bytes carrying {} audio packets",
             self.binary_frames,
@@ -260,6 +279,8 @@ impl std::fmt::Display for Totals {
             self.graphics_bytes,
             self.standard,
             self.standard_bytes,
+            self.tile,
+            self.tile_bytes,
             self.text_frames,
             self.text_bytes,
             self.largest_binary,

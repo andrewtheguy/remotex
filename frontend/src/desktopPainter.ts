@@ -87,6 +87,8 @@ export interface DesktopPainter {
   startGraphics(): void;
   /** A Mac's own picture starts, in `quality`, for the worker to decode. */
   startStandard(quality: StandardQuality): void;
+  /** The gateway's tiles start, for the worker to draw. */
+  startTiles(): void;
   /** The part of the pipeline's picture this page's display is (`graphicsView`). */
   setGraphicsView(part: PicturePart): void;
   /**
@@ -231,6 +233,9 @@ export function desktopPainterFor(
     startStandard(quality) {
       ownModule = true;
       post({ type: "standardStart", quality });
+    },
+    startTiles() {
+      post({ type: "tilesStart" });
     },
     setGraphicsView(part) {
       post({ type: "graphicsView", part });

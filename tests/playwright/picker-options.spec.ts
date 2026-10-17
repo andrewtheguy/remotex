@@ -221,7 +221,7 @@ test.describe("the picker's options", () => {
       const second = watchSession(other);
       await logIn(other);
 
-      // It is given neither the session nor one encoded as VP9 in its place: it
+      // It is given neither the session nor tiles in its place: it
       // lands on the picker, where the target cannot start, with the reason.
       await expect(
         other.getByRole("heading", { name: "Pick a target" }),

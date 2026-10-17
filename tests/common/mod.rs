@@ -289,8 +289,8 @@ pub async fn connect_display_ws(addr: SocketAddr, cookie: &str, display: u32) ->
     ws
 }
 
-/// One `VIDEO` record parsed out of a batch frame: an access unit of the desktop's
-/// stream. No test here decodes the VP9 inside; what is checked is the envelope and
+/// One `VIDEO` record parsed out of a batch frame: an access unit of a stream the
+/// remote coded, passed. No test here decodes it; what is checked is the envelope and
 /// the geometry.
 #[allow(dead_code)]
 pub struct BatchUnit {
@@ -298,6 +298,25 @@ pub struct BatchUnit {
     pub w: u16,
     pub h: u16,
     pub payload: Vec<u8>,
+}
+
+/// One `TILE` record parsed out of a batch frame: a rectangle of the desktop in the
+/// tiles the gateway codes, its image a JPEG or a PNG.
+#[allow(dead_code)]
+pub struct BatchTile {
+    pub format: u8,
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub image: Vec<u8>,
+}
+
+/// One picture record of a batch frame.
+#[allow(dead_code)]
+pub enum BatchRecord {
+    Video(BatchUnit),
+    Tile(BatchTile),
 }
 
 /// The acknowledgment a browser's painter sends once it has drawn the batch `frame`,
@@ -309,7 +328,7 @@ pub fn paint_ack(frame: &[u8]) -> String {
     format!(r#"{{"type":"paintAck","sequence":{sequence},"queuedMs":0,"drawMs":0}}"#)
 }
 
-/// Parse a server -> client binary frame into its access units.
+/// Parse a server -> client binary frame into its picture records.
 ///
 /// One parser for every test that looks at what was painted, so a wire change is
 /// applied once. Asserts the envelope's own invariants on the way through — kind,
@@ -317,7 +336,7 @@ pub fn paint_ack(frame: &[u8]) -> String {
 /// exactly fill the frame — so every test that reads a record also checks the frame
 /// carrying it was well formed.
 #[allow(dead_code)]
-pub fn batch_units(frame: &[u8]) -> Vec<BatchUnit> {
+pub fn batch_records(frame: &[u8]) -> Vec<BatchRecord> {
     use remotex::protocol::batch;
 
     assert!(frame.len() >= batch::HEADER_LEN, "frame is shorter than a batch header");
@@ -333,22 +352,100 @@ pub fn batch_units(frame: &[u8]) -> Vec<BatchUnit> {
             u32::from_le_bytes([frame[at + o], frame[at + o + 1], frame[at + o + 2], frame[at + o + 3]])
                 as usize
         };
-        assert_eq!(frame[at], batch::OP_VIDEO, "unknown record op {}", frame[at]);
-        let flags = frame[at + 1];
-        assert_eq!(flags & !batch::VIDEO_KEYFRAME, 0, "unknown record flags {flags:#x}");
-        let len = le32(6);
-        let start = at + batch::VIDEO_HEADER_LEN;
-        records.push(BatchUnit {
-            keyframe: flags & batch::VIDEO_KEYFRAME != 0,
-            w: le(2),
-            h: le(4),
-            payload: frame[start..start + len].to_vec(),
-        });
-        at = start + len;
+        match frame[at] {
+            batch::OP_VIDEO => {
+                let flags = frame[at + 1];
+                assert_eq!(flags & !batch::VIDEO_KEYFRAME, 0, "unknown record flags {flags:#x}");
+                let len = le32(6);
+                let start = at + batch::VIDEO_HEADER_LEN;
+                records.push(BatchRecord::Video(BatchUnit {
+                    keyframe: flags & batch::VIDEO_KEYFRAME != 0,
+                    w: le(2),
+                    h: le(4),
+                    payload: frame[start..start + len].to_vec(),
+                }));
+                at = start + len;
+            }
+            batch::OP_TILE => {
+                let format = frame[at + 1];
+                assert!(
+                    format == batch::TILE_JPEG || format == batch::TILE_PNG,
+                    "unknown tile format {format:#x}"
+                );
+                let len = le32(10);
+                let start = at + batch::TILE_HEADER_LEN;
+                let image = frame[start..start + len].to_vec();
+                assert!(!image.is_empty(), "a tile with no image");
+                let magic: &[u8] = if format == batch::TILE_JPEG { &[0xff, 0xd8] } else { b"\x89PNG" };
+                assert!(image.starts_with(magic), "a tile that is not the image its format says");
+                records.push(BatchRecord::Tile(BatchTile { format, x: le(2), y: le(4), w: le(6), h: le(8), image }));
+                at = start + len;
+            }
+            op => panic!("unknown record op {op}"),
+        }
     }
     assert_eq!(at, frame.len(), "records must exactly fill the frame");
     assert_eq!(records.len(), usize::from(count), "the header's count must match the records present");
     records
+}
+
+/// [`batch_records`] for a frame of a passed stream: its access units, and no tile.
+#[allow(dead_code)]
+pub fn batch_units(frame: &[u8]) -> Vec<BatchUnit> {
+    batch_records(frame)
+        .into_iter()
+        .map(|record| match record {
+            BatchRecord::Video(unit) => unit,
+            BatchRecord::Tile(tile) => panic!("a tile at ({}, {}) in a passed stream's batch", tile.x, tile.y),
+        })
+        .collect()
+}
+
+/// Which of a desktop's 64×64 tiles the browser has been sent, so a test can tell
+/// when the whole desktop has been painted.
+#[allow(dead_code)]
+pub struct Coverage {
+    w: u16,
+    h: u16,
+    sent: std::collections::HashSet<(u16, u16)>,
+}
+
+#[allow(dead_code)]
+impl Coverage {
+    pub fn new(w: u16, h: u16) -> Self {
+        Self { w, h, sent: std::collections::HashSet::new() }
+    }
+
+    /// A tile record sent, which must lie on the tile grid and inside the desktop.
+    pub fn add(&mut self, tile: &BatchTile) {
+        const TILE: u16 = remotex::tiles::TILE;
+        assert!(
+            tile.x.is_multiple_of(TILE) && tile.y.is_multiple_of(TILE),
+            "a tile at ({}, {}) off the {TILE}-pixel grid",
+            tile.x,
+            tile.y
+        );
+        assert!(
+            u32::from(tile.x) + u32::from(tile.w) <= u32::from(self.w) && u32::from(tile.y) + u32::from(tile.h) <= u32::from(self.h),
+            "a {}x{} tile at ({}, {}) past the {}x{} desktop",
+            tile.w,
+            tile.h,
+            tile.x,
+            tile.y,
+            self.w,
+            self.h
+        );
+        for col in tile.x / TILE..(tile.x + tile.w).div_ceil(TILE) {
+            for row in tile.y / TILE..(tile.y + tile.h).div_ceil(TILE) {
+                self.sent.insert((col, row));
+            }
+        }
+    }
+
+    /// Whether every tile of the desktop has been sent.
+    pub fn whole(&self) -> bool {
+        self.sent.len() == usize::from(self.w.div_ceil(remotex::tiles::TILE)) * usize::from(self.h.div_ceil(remotex::tiles::TILE))
+    }
 }
 
 /// One `STANDARD` record parsed out of a batch frame: one of a Mac's rectangles in

@@ -6,7 +6,7 @@
 //! canvas paint timing or pixels (see CLAUDE.md). Xtigervnc
 //! serves its root window with no session behind it, so the first
 //! non-incremental update request drives real pixels through the whole
-//! pipeline: RFB handshake + DES auth -> the video stream -> the same
+//! pipeline: RFB handshake + DES auth -> the tiles -> the same
 //! binary WS frames the engines emit.
 //!
 //! This is also the ZRLE test of record. The container paints a pattern on its
@@ -103,23 +103,18 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
     addr
 }
 
-/// Validate one binary batch frame against the desktop it arrived under, and say
-/// whether it carried a keyframe — the picture a decoder that has seen nothing
-/// before it paints the whole desktop from.
-fn check_unit_frame(frame: &[u8], desktop_w: u32, desktop_h: u32) -> bool {
-    let units = common::batch_units(frame);
-    assert!(!units.is_empty(), "a batch frame that carries nothing");
-    let mut keyframe = false;
-    for unit in units {
-        assert_eq!(
-            (u32::from(unit.w), u32::from(unit.h)),
-            (desktop_w, desktop_h),
-            "an access unit that is not the {desktop_w}x{desktop_h} desktop"
-        );
-        assert!(!unit.payload.is_empty(), "an empty access unit");
-        keyframe |= unit.keyframe;
+/// Validate one binary batch frame against the desktop it arrived under: every
+/// record a tile of it, which `coverage` marks sent. A plain target's picture is the
+/// tiles the gateway codes, never a stream.
+fn check_tile_frame(frame: &[u8], coverage: &mut common::Coverage) {
+    let records = common::batch_records(frame);
+    assert!(!records.is_empty(), "a batch frame that carries nothing");
+    for record in records {
+        match record {
+            common::BatchRecord::Tile(tile) => coverage.add(&tile),
+            common::BatchRecord::Video(_) => panic!("a plain target was sent a stream"),
+        }
     }
-    keyframe
 }
 
 /// A `resize` control message names the desktop the client is to show: its
@@ -193,7 +188,7 @@ async fn vnc_session_streams_the_full_desktop_at_the_servers_own_size() {
     common::connect_target(&mut ws, "tigervnc-dummy").await;
 
     let mut got_resize = false;
-    let mut painted = false;
+    let mut painted = common::Coverage::new(DESKTOP_W as u16, DESKTOP_H as u16);
     let mut cursor: Option<String> = None;
 
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -208,7 +203,6 @@ async fn vnc_session_streams_the_full_desktop_at_the_servers_own_size() {
                     );
                     if text.contains(r#""type":"resize""#) {
                         assert!(!got_resize, "a plain target was resized: {text}");
-                        assert!(!painted, "resize arrived after frames");
                         assert_resize(&text, DESKTOP_W, DESKTOP_H, "the VNC server's own desktop");
                         got_resize = true;
                     }
@@ -219,18 +213,19 @@ async fn vnc_session_streams_the_full_desktop_at_the_servers_own_size() {
                 }
                 Message::Binary(frame) => {
                     assert!(got_resize, "a frame arrived before resize");
-                    painted |= check_unit_frame(&frame, DESKTOP_W, DESKTOP_H);
-                    // Once the desktop's keyframe has arrived, the raw->video
+                    check_tile_frame(&frame, &mut painted);
+                    ws.send(Message::text(common::paint_ack(&frame))).await.expect("acknowledge a batch");
+                    // Once every tile of the desktop has arrived, the ZRLE->tile
                     // path is proven. The Cursor pseudo-encoding rides the
                     // opening update, so wait for the pointer shape too.
-                    if painted && cursor.is_some() {
+                    if painted.whole() && cursor.is_some() {
                         return;
                     }
                 }
                 _ => {}
             }
         }
-        panic!("websocket closed without a keyframe of the server's desktop");
+        panic!("websocket closed before the whole of the server's desktop was sent");
     })
     .await
     .expect("timed out waiting for the full-desktop paint and pointer shape");
@@ -255,7 +250,7 @@ async fn vnc_session_streams_the_full_desktop_at_the_servers_own_size() {
 
     let mut reannounced = false;
     let mut replayed_cursor = false;
-    let mut repainted = false;
+    let mut repainted = common::Coverage::new(DESKTOP_W as u16, DESKTOP_H as u16);
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
@@ -283,15 +278,16 @@ async fn vnc_session_streams_the_full_desktop_at_the_servers_own_size() {
                     if !reannounced {
                         continue;
                     }
-                    repainted |= check_unit_frame(&frame, DESKTOP_W, DESKTOP_H);
-                    if repainted && replayed_cursor {
+                    check_tile_frame(&frame, &mut repainted);
+                    ws.send(Message::text(common::paint_ack(&frame))).await.expect("acknowledge a batch");
+                    if repainted.whole() && replayed_cursor {
                         return;
                     }
                 }
                 _ => {}
             }
         }
-        panic!("websocket closed without the reattach keyframe");
+        panic!("websocket closed before the reattach repainted the whole desktop");
     })
     .await
     .expect("timed out waiting for the reattach repaint and pointer replay");

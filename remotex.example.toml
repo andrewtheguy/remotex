@@ -303,17 +303,16 @@ password = "change-me"
 # on, a Windows host draws the desktop through the pipeline's surfaces and marks
 # every frame, and each resize is a graphics reset, cheap enough for the window
 # to drive continuously. `false` is the bitmap path: the host draws with bitmap
-# updates, decoded here and encoded as VP9, and the desktop keeps its size — the
+# updates, decoded here and sent as tiles, and the desktop keeps its size — the
 # picker then offers neither the window nor the pipeline's rows. That is the
 # target for a browser that cannot compose the pipeline, and the escape hatch
 # for a host whose pipeline the page's decoders cannot paint. RDP only, and
 # refused on VNC whatever the value.
 #
 # With the pipeline on, every session passes it to the browser, which composes
-# it; the gateway composes none, and a browser that cannot is not sent VP9 in
-# its place. What the host draws with is sent as it is, with no quality walk
-# behind it, so the video keys further down do nothing here: nothing of the
-# picture is encoded. A host that does not start the pipeline within 20 seconds
+# it; the gateway composes none, and a browser that cannot is not sent tiles in
+# its place. What the host draws with is sent as it is, so `video_quality`
+# further down does nothing here: nothing of the picture is coded here. A host that does not start the pipeline within 20 seconds
 # ends the session, and needs `egfx = false`. How the host draws it, high quality or
 # adaptive H.264, is chosen at the picker (Graphics, above). It takes the encoding
 # and the decoding off the gateway — a few percent of a core are left, whatever
@@ -437,8 +436,8 @@ password = "change-me"
 # A plain VNC target needs host and, usually, one of the two passwords; domain is
 # refused, and it is asked once for `size`, or 1440×900, as above.
 # `vnc_password` is the server's own password and is all a server without user
-# accounts takes. It is the RFB baseline: the picture comes as ZRLE and is encoded
-# here, shown at 1x, with no sound, camera or microphone.
+# accounts takes. It is the RFB baseline: the picture comes as ZRLE and is sent as
+# tiles, shown at 1x, with no sound, camera or microphone.
 # [[targets]]
 # name = "workstation-vnc"
 # protocol = "vnc"
@@ -554,10 +553,10 @@ password = "change-me"
 #
 # EXPERIMENTAL. The picture is always passed to the browser as the Mac sent it,
 # in the codec chosen at the picker: its HEVC, or its H.264. The gateway decodes
-# neither, and encodes no VP9 of the Mac's. Every picture the Mac sends goes, up
+# neither, and codes nothing of the Mac's. Every picture the Mac sends goes, up
 # to 30 a second, at the Mac's own quality. Its ZRLE rectangles are never read or
-# shown, so a session builds no video encoder here, and the video keys below are
-# refused on this target. See docs/apple-vnc-889.md, "The media stream".
+# shown, so a session codes no tile here, and the picture keys below are refused
+# on this target. See docs/apple-vnc-889.md, "The media stream".
 #
 # The Mac's own rate controller walks the stream's target between 20 and 60
 # Mbit/s, from the delay this gateway reports as Apple's viewer does, which ends at
@@ -585,42 +584,29 @@ password = "change-me"
 # username = "andrew"
 # password = "the-account-password"
 
-# How this target's VP9 stream is configured. The gateway applies the plan when it
-# encodes a desktop, and wlshare applies the same plan to the VP9 it makes and the
-# gateway passes through. A passed Mac media stream or RDP graphics pipeline keeps
-# the remote's own quality, so the keys are refused on an ard-high-performance
-# target, and on RDP apply only to the bitmap path. Every key below is per target, so it belongs
-# *inside* a [[targets]] table and not in a section of their own — uncommented here
-# they would attach to whichever [[targets]] block precedes them, which is the
-# "example" one at the top of this file. There is no global render setting, and
-# every key has a default.
+# How this target's picture is configured. Where the gateway codes the picture —
+# plain VNC, and RDP's bitmap path — it is tiles: the desktop in 64×64 tiles, a
+# changed tile of few colours sent exactly as PNG and any other as JPEG, sent again
+# exactly as PNG once it has stopped changing. Tiles go as fast as the browser
+# paints them, so a slow link gets fewer updates of the current picture rather than
+# coarser ones. A `wlshare` target's picture is wlshare's own VP9, passed through.
+# A passed Mac media stream or RDP graphics pipeline keeps the remote's own quality,
+# so the keys are refused on both Mac subtypes, and on RDP apply only to the bitmap
+# path. Every key below is per target, so it belongs *inside* a [[targets]] table
+# and not in a section of their own — uncommented here they would attach to
+# whichever [[targets]] block precedes them, which is the "example" one at the top
+# of this file. There is no global render setting, and every key has a default.
 #
-# video_quality is the dial, 1-100 and defaulting to 90. It is a *ceiling*: on a link
-# that can carry it you get exactly that quality, and a link that cannot makes the
-# picture coarser until it can, then sends fewer frames. Nothing ever goes finer than
-# what is set here, and a desktop that has gone quiet is sharpened back at it.
-#
-# It is decoded with WebCodecs, which is **secure-context only** — the same limit
-# remote audio has. A browser pointed at a gateway on a plain-HTTP LAN address shows
-# a banner saying so instead of a desktop, until it is behind TLS (localhost is
-# exempt).
-#
-# The stream is always VP9 at 4:4:4 (profile 1), a colour sample per pixel, so
-# coloured text keeps its colour; there is no chroma to set. A browser whose own
-# decoder takes profile 1 decodes it there, in software, since no browser's
-# hardware VP9 path takes it. One whose decoder does not — Safari on iOS and
-# iPadOS, which decodes VP9 in hardware alone — decodes it in the page's own
-# WebAssembly decoder, which is part of the page and needs nothing set here.
+# video_quality is 1-100 and defaults to 90. On tiles it is the JPEG quality of a
+# changed tile of many colours, a photograph or a gradient, until it is still and
+# sent exactly. On a `wlshare` target it is a *ceiling*: on a link that can carry it
+# you get exactly that quality, and a link that cannot makes wlshare's picture
+# coarser until it can, then sends fewer frames.
 #video_quality = 90
 
-# `video_quality` tracks measured client queueing — on unless this turns it off. The
-# configured quality remains the ceiling; the stream adds the client's paint lag to its
-# existing send-pressure signal. There is no floor to set: like every adaptive
-# stream's, the point where a coarser picture gives way to fewer frames is built into
-# the encoder, and a desktop that has gone quiet is sharpened back at `video_quality`,
-# so a coarse walk is never a coarse screen for long.
-#
-# Turning it off walks on send pressure alone, which is worth having only to pin one
-# side of a measurement.
+# `subtype = "wlshare"` only: wlshare's VP9 walks `video_quality` on the browser's
+# queueing — on unless this turns it off, which holds wlshare at `video_quality`.
+# The configured quality remains the ceiling, and a desktop that has gone quiet is
+# sharpened back at it. Refused on every other target: tiles have no walk.
 #render_adaptive = true
 

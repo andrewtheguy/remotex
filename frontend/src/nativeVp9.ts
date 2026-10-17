@@ -22,7 +22,7 @@
 /**
  * The configuration the question is asked about: VP9 profile 1, level 4.0, eight
  * bits, 4:4:4, BT.601 studio swing — a 1080p desktop, and the shape of every 4:4:4
- * string the gateway announces (`codec_string` in screen-vp9). Every field is
+ * string the gateway announces (`codec_string` in src/vp9.rs). Every field is
  * spelled out because the defaults are wrong for this stream: an omitted chroma
  * field means 4:2:0, which Chromium reads as 4:2:2 on a profile 1 string.
  */

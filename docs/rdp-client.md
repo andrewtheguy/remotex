@@ -616,8 +616,9 @@ one.
 
 With `egfx = false` the pipeline is not advertised, so the server draws with bitmap
 updates, decoded by the planar bitmap codec (`proto/planar.rs`) into the
-client's framebuffer, the only picture it decodes, which the gateway encodes as
-VP9. The client announces no drawing orders either, so the path is bitmaps
+client's framebuffer, the only picture it decodes, which the gateway sends as
+tiles ([The tiles](architecture.md#the-tiles)). The client announces no drawing
+orders either, so the path is bitmaps
 throughout. The desktop keeps its opening size: without the pipeline a resize is
 the Deactivation-Reactivation Sequence, which this client does not implement, so
 Display Control is not taken without it, and a target with `egfx = false` offers

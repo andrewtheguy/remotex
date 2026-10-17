@@ -1,304 +1,236 @@
-//! VP9 encoding: one stream over a [`crate::video::Mirror`].
+//! VP9 as this gateway meets it: wlshare's own stream, passed to the browser as wlshare
+//! coded it ([`pass`]). The gateway encodes no VP9; the picture it codes itself is
+//! tiles ([`crate::tiles`]).
 //!
-//! The video codec — this gateway streams VP9 only. It is BSD-licensed with a patent grant,
-//! which is exactly the property that gets it into every browser build: a Chromium built
-//! without proprietary codecs still decodes it.
-//!
-//! The coding is `screen-vp9`'s, the crate wlshare's own stream is coded with, pinned
-//! by its release tag: the one place libvpx is spoken to for either side, so a
-//! passed wlshare frame and one encoded here are the same stream by construction. What
-//! this module owns is the stream over the mirror: the picture limits, the keyframe
-//! owed until a frame carries it, and the WebCodecs string the browser is configured
-//! with. When a round is taken is [`crate::encode`]'s business.
-//!
-//! A stream is at the chroma its plan names ([`crate::config::RenderPlan::chroma`]):
-//! 4:2:0, VP9 profile 0, for every target whose picture is encoded here — plain VNC and
-//! the RDP bitmap path, which are not prioritized, so their stream is the one that costs
-//! the least to code and that every browser decodes, its hardware decoder included —
-//! and 4:4:4, profile 1, only for a `wlshare` target's, whose server ignored the listing
-//! of its own stream, sent to a browser that decodes profile 1. 4:4:4 is where the
-//! picture loss on a desktop stream actually is, not the quantizer: measured 2026-09-01
-//! on 1280×800 of rendered text, every 4:2:0 quantizer from the dial's finest to
-//! mathematically lossless lands at the same 28.5 dB with a worst pixel 135 code values
-//! off, a one-pixel coloured glyph stem sharing its one colour sample with three
-//! background pixels and coming back at a quarter of its saturation, where 4:4:4 at the
-//! same quantizer measures 42.8 dB with a worst pixel 33 off. But no browser's hardware
-//! VP9 path takes profile 1, and iOS and iPadOS have no software one, so a browser that
-//! says it takes no profile 1 is never sent it.
+//! What a passed frame needs here is what the browser cannot read out of it: the
+//! profile and the keyframe bit of its uncompressed header ([`frame_header`]), and the
+//! WebCodecs string a decoder is configured with ([`codec_string`]), since VP9 carries
+//! no parameter sets. The chroma ([`Chroma`]) is the plan's, which the listing asks
+//! wlshare for: 4:4:4 for a browser whose own decoder takes profile 1, which the page
+//! asks it once at load (`vp9_444` on the session socket), and 4:2:0 otherwise. No
+//! browser's hardware VP9 path takes profile 1, and iOS and iPadOS have no software
+//! one, so a browser that says it takes no profile 1 is never sent it.
 
-use anyhow::Context as _;
+use crate::video::check_picture;
 
-use crate::shadow::Rect;
-use crate::video::{AccessUnit, Mirror, check_picture};
-
-pub use screen_vp9::{Chroma, FrameHeader, frame_header};
-
-/// The frame rate the level of a stream this gateway encodes is figured at.
-///
-/// Nothing paces frames to it — the remote decides when a frame happens — but a VP9 level is
-/// defined over a *sample rate*, so a number is needed to turn a picture size into one. 30 is
-/// what `VIDEO_FRAME_INTERVAL` in [`crate::encode`] paces access units to, so it is the rate a
-/// stream cannot exceed rather than a guess. A passed stream is paced by its server and figured
-/// at its own rate ([`crate::stream::pass`]).
-pub const ENCODED_FPS: u64 = 30;
-
-/// The WebCodecs codec string for a `w`×`h` stream at `fps` and `chroma` — what
-/// `ServerMsg::VideoFormat` carries, derived here rather than in the client because VP9
-/// has no in-band parameter sets for a client to read one out of. `None` for a picture no
-/// VP9 level covers, which [`check_picture`] has already refused long before this is
-/// reached.
-pub fn codec_string(w: u16, h: u16, fps: u64, chroma: Chroma) -> Option<String> {
-    screen_vp9::codec_string(w, h, fps, chroma)
+/// How a stream samples colour, which is its VP9 profile: a sample per pixel, or one
+/// per 2×2 block of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chroma {
+    /// 4:4:4, VP9 profile 1: a colour sample per pixel.
+    Yuv444,
+    /// 4:2:0, VP9 profile 0: a colour sample per 2×2 pixels.
+    Yuv420,
 }
 
-/// One VP9 stream over a [`Mirror`]'s picture.
-///
-/// The picture size is fixed for the stream's whole life, and that is what makes an inter-frame
-/// stream mean anything: every frame is expressed as a change from the last one. A desktop that
-/// is resized gets a *new* stream.
-pub struct Stream {
-    /// The encoder and the conversion in front of it, which reads the mirror whole or
-    /// where it changed.
-    stream: screen_vp9::Stream,
-    /// The picture encoded: the mirror's, the desktop at its own size.
-    size: (u16, u16),
-    /// Whether the next frame must be one a decoder can start from.
-    keyframe_owed: bool,
-    /// The WebCodecs codec string for this stream's picture, computed once at construction:
-    /// VP9 carries no parameter sets, so the string follows from the picture size, which is
-    /// fixed for the stream's life.
-    decode: Option<String>,
-}
-
-impl Stream {
-    /// A stream over a mirror of a `size` desktop, at `quality` (1–100) and `chroma`.
-    ///
-    /// The refusal of a picture too large is [`check_picture`]'s. The encoder is
-    /// libvpx, as wlshare's is.
-    pub fn new(size: (u16, u16), quality: u8, chroma: Chroma) -> anyhow::Result<Self> {
-        check_picture(size)?;
-        // Every core but one for the one stream, which has nothing to overlap with. See
-        // `video::threads`.
-        let stream = screen_vp9::Stream::new(size.0, size.1, quality, chroma, crate::video::threads(), screen_vp9::Coder::Libvpx)
-            .with_context(|| format!("vp9 encoder for a {}x{} picture", size.0, size.1))?;
-        Ok(Self {
-            stream,
-            size,
-            keyframe_owed: false,
-            decode: codec_string(size.0, size.1, ENCODED_FPS, chroma),
-        })
-    }
-
-    /// The dial this stream is currently encoding at.
-    pub fn quality(&self) -> u8 {
-        self.stream.quality()
-    }
-
-    /// The coarsest dial any block of the client's picture was last encoded at: a frame
-    /// encoded where the mirror changed leaves every other block at the dial it had, so
-    /// this trails [`Self::quality`] until a whole frame, or enough changes, have coded
-    /// them all since.
-    pub fn coarsest(&self) -> u8 {
-        self.stream.coarsest()
-    }
-
-    /// The WebCodecs codec string for this stream, known from construction.
-    pub fn decode_string(&self) -> Option<&str> {
-        self.decode.as_deref()
-    }
-
-    /// Make the next access unit one a decoder can start from.
-    ///
-    /// Recorded rather than done, because libvpx takes it as a flag on the next encode —
-    /// there is nothing to tell the encoder in advance.
-    pub fn force_keyframe(&mut self) {
-        self.keyframe_owed = true;
-    }
-
-    /// Move the dial, without a keyframe.
-    ///
-    /// This is how a congested link gives up quality (the walk in `screen_vp9::walk`), and
-    /// "without a keyframe" is the whole reason it is a retune rather than a rebuild — which
-    /// would force a keyframe on the next frame, spending a few hundred KB at the exact moment
-    /// the link has run out of room. The frame coded at the dial is what takes libvpx there,
-    /// so a libvpx that will not go is that frame's error.
-    pub fn set_quality(&mut self, quality: u8) {
-        self.stream.set_quality(quality);
-    }
-
-    /// Encode `mirror` as it stands.
-    ///
-    /// `changed` is where the mirror differs from the one read for the last access
-    /// unit, or `None` for one that may differ anywhere: only those rectangles are
-    /// converted and only the blocks they touch encoded, the rest of the frame being
-    /// the picture the client holds, at the quality it holds it. A keyframe and a
-    /// stream's first frame are the whole mirror whatever `changed` says.
-    ///
-    /// `None` means libvpx made no frame of the mirror ([`screen_vp9::Error::NoFrame`]). The caller must then leave its dirty flag
-    /// set, so those pixels ride on the next frame — which is what keeps a frame that produced
-    /// nothing from becoming pixels the client never gets. With no lag and no dropped frames it
-    /// should be unreachable; it is a return value rather than an assertion because the caller
-    /// has to be ready for it anyway.
-    pub fn encode(&mut self, mirror: &Mirror, changed: Option<&[Rect]>) -> anyhow::Result<Option<AccessUnit>> {
-        self.read(mirror, changed.filter(|_| !self.keyframe_owed))?;
-        let mut data = Vec::new();
-        let encoded = self.stream.encode(self.keyframe_owed, &mut data);
-        self.unit(encoded, data).context("encoding a VP9 frame")
-    }
-
-    /// Settle `mirror` at `quality`: encode it whole and at that quality, as one
-    /// inter frame unless a keyframe is owed, and leave the dial where it was.
-    ///
-    /// What a desktop that went quiet while the link had it coarse is sent once
-    /// ([`crate::encode`]): every block sharpened, and the rounds after it at what
-    /// the link bears again. `None` is as [`Self::encode`] has it.
-    pub fn settle(&mut self, mirror: &Mirror, quality: u8) -> anyhow::Result<Option<AccessUnit>> {
-        self.read(mirror, None)?;
-        let mut data = Vec::new();
-        let encoded = self.stream.settle(quality, self.keyframe_owed, &mut data);
-        self.unit(encoded, data).context("settling a VP9 stream")
-    }
-
-    /// Read `mirror` into the stream where it `changed`, or whole.
-    fn read(&mut self, mirror: &Mirror, changed: Option<&[Rect]>) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            mirror.size() == self.size,
-            "a {}x{} vp9 stream was handed a {}x{} mirror",
-            self.size.0,
-            self.size.1,
-            mirror.size().0,
-            mirror.size().1
-        );
-        let changed: Option<Vec<screen_vp9::Rect>> =
-            changed.map(|rects| rects.iter().map(|rect| screen_vp9::Rect { x: rect.left, y: rect.top, width: rect.w(), height: rect.h() }).collect());
-        self.stream.read_rgb(mirror.picture(), changed.as_deref()).context("reading the mirror for a VP9 frame")
-    }
-
-    /// The access unit an encode produced, if it produced one.
-    fn unit(&mut self, encoded: Result<bool, screen_vp9::Error>, data: Vec<u8>) -> Result<Option<AccessUnit>, screen_vp9::Error> {
-        match encoded {
-            Ok(keyframe) => {
-                self.keyframe_owed = false;
-                Ok(Some(AccessUnit { data, keyframe }))
-            }
-            // Nothing came out, so the keyframe is still owed, and the caller's
-            // dirty flag is what brings the pixels back.
-            Err(screen_vp9::Error::NoFrame) => Ok(None),
-            Err(e) => Err(e),
+impl Chroma {
+    /// The VP9 profile of a stream at this chroma, eight bits, which is what
+    /// [`FrameHeader::profile`] says of one of its frames.
+    pub fn profile(self) -> u8 {
+        match self {
+            Self::Yuv444 => 1,
+            Self::Yuv420 => 0,
         }
     }
+
+    /// The codec string's chroma field: 3 is 4:4:4, and 1 is 4:2:0 with its samples
+    /// sited at the luma's, WebM's default, which is what a decoder assumes of a VP9
+    /// 4:2:0 picture anyway: the bitstream does not say.
+    fn codec_field(self) -> &'static str {
+        match self {
+            Self::Yuv444 => "03",
+            Self::Yuv420 => "01",
+        }
+    }
+
+    /// The chroma as a sentence names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Yuv444 => "4:4:4",
+            Self::Yuv420 => "4:2:0",
+        }
+    }
+}
+
+/// What the opening bits of a VP9 frame say about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHeader {
+    /// The VP9 profile, 0–3: 1 for 4:4:4 and 0 for 4:2:0 ([`Chroma::profile`]).
+    pub profile: u8,
+    /// Whether a decoder that has seen nothing before this frame can start here.
+    pub keyframe: bool,
+}
+
+/// Read the first fields of a frame's uncompressed header (VP9 bitstream §6.2):
+/// `frame_marker` (two bits, always 2), `profile_low_bit`, `profile_high_bit`, a
+/// reserved zero bit on profile 3, `show_existing_frame`, and `frame_type`, where 0
+/// is a keyframe. A frame that only shows an earlier one is not a keyframe.
+///
+/// `None` for bytes that do not start a VP9 frame.
+pub fn frame_header(frame: &[u8]) -> Option<FrameHeader> {
+    let mut bits = frame.iter().take(2).flat_map(|byte| (0..8).rev().map(move |i| byte >> i & 1));
+    let mut bit = || bits.next();
+    if (bit()? << 1 | bit()?) != 2 {
+        return None;
+    }
+    let low = bit()?;
+    let profile = bit()? << 1 | low;
+    if profile == 3 && bit()? != 0 {
+        return None;
+    }
+    let show_existing = bit()? == 1;
+    let keyframe = !show_existing && bit()? == 0;
+    Some(FrameHeader { profile, keyframe })
+}
+
+/// VP9's levels, as `(level, max_luma_sample_rate, max_luma_picture_size,
+/// max_luma_breadth)`.
+///
+/// Transcribed from `vp9_level_defs[]` in libvpx's `vp9/encoder/vp9_encoder.c`, and
+/// not from memory: the table is the normative one, the rows are not evenly spaced,
+/// and 4K30 lands on level 5.0 rather than the 5.1 a plausible guess gives. Only the
+/// three fields a picture size decides are kept. A level also caps the bitrate, the
+/// buffer size and the compression ratio, which wlshare's quality walk, not a level,
+/// keeps within the link. So the level announced is the picture's, which is what a
+/// browser reads it for: it picks a decoder by profile and size, and it refuses a
+/// string whose level is not one of the fourteen — Chromium's parser rejects the
+/// "undefined" 0 the file-format binding allows — so a level must be named.
+///
+/// The lowest row a picture fits is the level announced, which matters because a
+/// level is a ceiling: a decoder that accepts 5.0 accepts every stream below it, so
+/// the smallest level the picture fits is the widest claim to make.
+const LEVELS: [(u8, u64, u32, u16); 14] = [
+    (10, 829_440, 36_864, 512),
+    (11, 2_764_800, 73_728, 768),
+    (20, 4_608_000, 122_880, 960),
+    (21, 9_216_000, 245_760, 1_344),
+    (30, 20_736_000, 552_960, 2_048),
+    (31, 36_864_000, 983_040, 2_752),
+    (40, 83_558_400, 2_228_224, 4_160),
+    (41, 160_432_128, 2_228_224, 4_160),
+    (50, 311_951_360, 8_912_896, 8_384),
+    (51, 588_251_136, 8_912_896, 8_384),
+    (52, 1_176_502_272, 8_912_896, 8_384),
+    (60, 1_176_502_272, 35_651_584, 16_832),
+    (61, 2_353_004_544, 35_651_584, 16_832),
+    (62, 4_706_009_088, 35_651_584, 16_832),
+];
+
+/// The WebCodecs codec string for a `w`×`h` stream of wlshare's at `chroma`, every
+/// field of it:
+/// `vp09.<profile>.<level>.<depth>.<chroma>.<primaries>.<transfer>.<matrix>.<range>`.
+///
+/// The chroma's profile, eight bits and the chroma, because that is what wlshare's
+/// encoder produces. The optional fields are spelled out rather than left to their
+/// defaults because the defaults are wrong for this stream: an omitted chroma field
+/// means 4:2:0, which Chromium reads as 4:2:2 on a profile 1 string since 4:2:0 is not
+/// a profile 1 picture, and omitted colour fields mean BT.709 where the keyframe
+/// header says BT.601 (SMPTE 170M primaries, transfer and matrix — code 6 each, what
+/// Chromium's own VP9 parser maps that header flag to) at studio swing. The level
+/// comes from `LEVELS` at `fps` frames a second. `None` for a picture no VP9 level
+/// covers.
+pub fn codec_string(w: u16, h: u16, fps: u64, chroma: Chroma) -> Option<String> {
+    let size = u32::from(w) * u32::from(h);
+    let rate = u64::from(size) * fps;
+    let breadth = w.max(h);
+    let (level, ..) = LEVELS
+        .iter()
+        .find(|(_, max_rate, max_size, max_breadth)| rate <= *max_rate && size <= *max_size && breadth <= *max_breadth)
+        .copied()?;
+    Some(format!("vp09.{:02}.{level:02}.08.{}.06.06.06.00", chroma.profile(), chroma.codec_field()))
+}
+
+/// An access unit the remote encoded itself, as the browser is told about it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Passed {
+    /// The configuration string a decoder for it is built with.
+    pub decode: String,
+    pub keyframe: bool,
+    /// Which strip of the picture it is, where it is not the whole of it.
+    pub strip: Option<crate::protocol::Strip>,
+}
+
+/// The frame rate a passed stream's level is figured at: wlshare's own default ceiling,
+/// `max_fps = 60`, since its server rather than this gateway paces it. A level tells a decoder
+/// the most it will be asked for, so the rate the remote may reach is the one to name.
+const PASSED_FPS: u64 = 60;
+
+/// Check a `w`×`h` frame of wlshare's VP9 encoding: at `chroma`, the plan's, which the
+/// listing asked wlshare for, BT.601 at studio swing, declared in its keyframes. The
+/// profile is read and held to the chroma's ([`Chroma::profile`]), so the configuration
+/// announced for it is the one the frame needs, and the browser that said it takes no
+/// 4:4:4 is never handed one.
+pub fn pass(w: u16, h: u16, frame: &[u8], chroma: Chroma) -> anyhow::Result<Passed> {
+    let header =
+        frame_header(frame).ok_or_else(|| anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header"))?;
+    anyhow::ensure!(
+        header.profile == chroma.profile(),
+        "the server's VP9 frame is profile {}, not the profile {} of the {} this session asked for",
+        header.profile,
+        chroma.profile(),
+        chroma.name()
+    );
+    check_picture((w, h))?;
+    let decode = codec_string(w, h, PASSED_FPS, chroma).ok_or_else(|| anyhow::anyhow!("no VP9 level covers a {w}x{h} picture"))?;
+    Ok(Passed { decode, keyframe: header.keyframe, strip: None })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A rectangle from a position and a size, which is what most of these want.
-    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
-        Rect::from_size(x, y, w, h).expect("a rectangle with a size")
-    }
-
-    /// `w`×`h` of one colour.
-    fn flat(w: u16, h: u16, colour: [u8; 3]) -> Vec<u8> {
-        colour.iter().copied().cycle().take(usize::from(w) * usize::from(h) * 3).collect()
-    }
-
-    /// A mirror and the 4:2:0 stream over it, every encoded target's.
-    fn whole(w: u16, h: u16, quality: u8) -> (Mirror, Stream) {
-        whole_at(w, h, quality, Chroma::Yuv420)
-    }
-
-    /// A mirror and the stream over it at `chroma`.
-    fn whole_at(w: u16, h: u16, quality: u8, chroma: Chroma) -> (Mirror, Stream) {
-        let mirror = Mirror::new(w, h).expect("a mirror");
-        let stream = Stream::new(mirror.size(), quality, chroma).expect("a stream");
-        (mirror, stream)
-    }
-
-    /// Blit a moving block and encode, so there is something for the quantizer to be coarse
-    /// about.
-    fn moving(mirror: &mut Mirror, stream: &mut Stream, step: u16) -> AccessUnit {
-        let mut picture = flat(320, 240, [30, 60, 90]);
-        let stride = 320 * 3;
-        for row in 0..80 {
-            let at = (usize::from(step) * 3 + row) * stride + usize::from(step) * 9;
-            picture[at..at + 300].fill(230);
-        }
-        mirror.blit(rect(0, 0, 320, 240), &picture).expect("a full-screen blit");
-        stream.encode(mirror, None).expect("an encode").expect("an access unit")
-    }
-
-    /// The keyframe is owed until a frame carries it, and not a frame longer.
+    /// A passed picture is held to the ceiling every picture is, so a desktop past it
+    /// ends on the same refusal whichever picture it would have been.
     #[test]
-    fn the_first_frame_is_a_keyframe_and_another_can_be_asked_for() {
-        let (mut mirror, mut stream) = whole(320, 240, 60);
-        assert!(moving(&mut mirror, &mut stream, 0).keyframe, "a decoder has to be able to start somewhere");
-        assert!(!moving(&mut mirror, &mut stream, 1).keyframe, "an unasked-for keyframe is bytes for nothing");
-        assert!(!moving(&mut mirror, &mut stream, 2).keyframe);
-        stream.force_keyframe();
-        let asked = moving(&mut mirror, &mut stream, 3);
-        assert!(asked.keyframe, "force_keyframe did not reach the encoder");
-        assert_eq!(frame_header(&asked.data), Some(FrameHeader { profile: 0, keyframe: true }));
-        // And it is not sticky: the frame after a forced keyframe is an ordinary one.
-        let after = moving(&mut mirror, &mut stream, 4);
-        assert!(!after.keyframe);
-        assert_eq!(frame_header(&after.data), Some(FrameHeader { profile: 0, keyframe: false }));
+    fn a_passed_frame_past_the_ceiling_is_refused() {
+        let keyframe = [0xa0u8, 0, 0, 0];
+        assert!(pass(1920, 1080, &keyframe, Chroma::Yuv444).is_ok());
+        let refused = pass(5376, 2288, &keyframe, Chroma::Yuv444).expect_err("a 5376x2288 frame was passed");
+        assert_eq!(refused.to_string(), check_picture((5376, 2288)).unwrap_err().to_string());
     }
 
-    /// The dial reaches the running encoder without a keyframe.
+    /// A passed frame is announced at the chroma the session asked for, and one of
+    /// another profile — a server that did not code what it was asked — is refused by
+    /// name rather than handed to a decoder configured for something else.
     #[test]
-    fn the_quality_moves_on_a_live_encoder() {
-        let (mut mirror, mut stream) = whole(320, 240, 90);
-        assert_eq!(stream.quality(), 90);
-        moving(&mut mirror, &mut stream, 0);
-        let fine: usize = (1..5).map(|step| moving(&mut mirror, &mut stream, step).data.len()).sum();
-        stream.set_quality(crate::video::QUALITY_MIN);
-        assert_eq!(stream.quality(), crate::video::QUALITY_MIN);
-        let coarse: Vec<_> = (5..9).map(|step| moving(&mut mirror, &mut stream, step)).collect();
-        assert!(coarse.iter().map(|unit| unit.data.len()).sum::<usize>() < fine, "the quantizer did not reach the running encoder");
-        assert!(!coarse.iter().any(|unit| unit.keyframe), "moving the quantizer cost a keyframe");
+    fn a_passed_frame_is_held_to_the_sessions_chroma() {
+        let (profile_0, profile_1) = ([0x80u8, 0, 0, 0], [0xa0u8, 0, 0, 0]);
+        let full = pass(1920, 1080, &profile_1, Chroma::Yuv444).expect("a 4:4:4 frame");
+        assert_eq!(full.decode, "vp09.01.41.08.03.06.06.06.00");
+        let subsampled = pass(1920, 1080, &profile_0, Chroma::Yuv420).expect("a 4:2:0 frame");
+        assert_eq!(subsampled.decode, "vp09.00.41.08.01.06.06.06.00");
+        assert_eq!(
+            pass(1920, 1080, &profile_0, Chroma::Yuv444).unwrap_err().to_string(),
+            "the server's VP9 frame is profile 0, not the profile 1 of the 4:4:4 this session asked for"
+        );
+        assert_eq!(
+            pass(1920, 1080, &profile_1, Chroma::Yuv420).unwrap_err().to_string(),
+            "the server's VP9 frame is profile 1, not the profile 0 of the 4:2:0 this session asked for"
+        );
     }
 
-    /// The string the browser is configured with is its chroma's profile, at the rate
-    /// this gateway paces to: profile 0 for 4:2:0, profile 1 for 4:4:4.
+    /// The header's first bits: the marker, the profile either way round, a reserved
+    /// bit on profile 3, a frame that shows an earlier one, and the frame type.
     #[test]
-    fn the_codec_string_is_the_chromas_profile() {
-        assert_eq!(codec_string(1920, 1080, ENCODED_FPS, Chroma::Yuv420).as_deref(), Some("vp09.00.40.08.01.06.06.06.00"));
-        assert_eq!(whole(1920, 1080, 60).1.decode_string(), Some("vp09.00.40.08.01.06.06.06.00"));
-        assert_eq!(whole_at(1920, 1080, 60, Chroma::Yuv444).1.decode_string(), Some("vp09.01.40.08.03.06.06.06.00"));
+    fn a_frame_header_says_its_profile_and_whether_it_is_a_keyframe() {
+        assert_eq!(frame_header(&[0x80, 0]), Some(FrameHeader { profile: 0, keyframe: true }));
+        assert_eq!(frame_header(&[0x84, 0]), Some(FrameHeader { profile: 0, keyframe: false }));
+        assert_eq!(frame_header(&[0xa0, 0]), Some(FrameHeader { profile: 1, keyframe: true }));
+        assert_eq!(frame_header(&[0x90, 0]), Some(FrameHeader { profile: 2, keyframe: true }));
+        assert_eq!(frame_header(&[0xb0, 0]), Some(FrameHeader { profile: 3, keyframe: true }));
+        assert_eq!(frame_header(&[0xb8, 0]), None, "profile 3's reserved bit set");
+        assert_eq!(frame_header(&[0x88, 0]), Some(FrameHeader { profile: 0, keyframe: false }), "a shown earlier frame");
+        assert_eq!(frame_header(&[0x40, 0]), None, "no frame marker");
+        assert_eq!(frame_header(&[]), None);
     }
 
-    /// An odd desktop is encoded at its own size, at either chroma.
+    /// The level is the lowest a picture fits at the rate named, 4K30 on 5.0 and
+    /// 1080p60 on 4.1, and a picture no level covers has no string.
     #[test]
-    fn an_odd_desktop_encodes_at_its_own_size() {
-        for chroma in [Chroma::Yuv420, Chroma::Yuv444] {
-            let (mut mirror, mut stream) = whole_at(1919, 1079, 60, chroma);
-            mirror.blit(rect(0, 0, 1919, 1079), &flat(1919, 1079, [90, 90, 90])).expect("a full-screen blit");
-            let unit = stream.encode(&mirror, None).expect("an encode").expect("a unit");
-            assert_eq!(frame_header(&unit.data).map(|header| header.profile), Some(chroma.profile()));
-            let mut decoder = screen_vp9::Decoder::new(1).expect("a decoder");
-            let decoded = decoder.decode(&unit.data).expect("a decode");
-            assert_eq!((decoded.size(), decoded.chroma()), ((1919, 1079), chroma));
-        }
-    }
-
-    #[test]
-    fn a_picture_too_large_is_refused_by_name() {
-        let Err(refused) = Stream::new((5120, 2880), 60, Chroma::Yuv420) else {
-            panic!("a 5K picture was accepted");
-        };
-        let message = format!("{refused:#}");
-        assert!(message.contains("5120x2880"), "the message does not say what was asked for");
-        assert!(message.contains("3840"), "the message does not say what the limit is");
-        assert!(message.contains("resize"), "the message does not say what to do instead");
-    }
-
-    /// A stream is built for one picture size, and a mirror of any other is refused rather
-    /// than read past its end.
-    #[test]
-    fn a_mirror_of_another_size_is_refused() {
-        let (_, mut stream) = whole(320, 240, 60);
-        let other = Mirror::new(640, 480).expect("a mirror");
-        assert!(stream.encode(&other, None).is_err());
+    fn the_codec_string_names_the_lowest_level_the_picture_fits() {
+        assert_eq!(codec_string(1920, 1080, 30, Chroma::Yuv420).as_deref(), Some("vp09.00.40.08.01.06.06.06.00"));
+        assert_eq!(codec_string(1920, 1080, 60, Chroma::Yuv444).as_deref(), Some("vp09.01.41.08.03.06.06.06.00"));
+        assert_eq!(codec_string(3840, 2160, 30, Chroma::Yuv420).as_deref(), Some("vp09.00.50.08.01.06.06.06.00"));
+        assert_eq!(codec_string(16_832, 16_832, 60, Chroma::Yuv420), None);
     }
 }

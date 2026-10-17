@@ -55,8 +55,10 @@ https://github.com/user-attachments/assets/596640b5-9b35-45c3-a875-87934d1c0c0f
   display has a browser tab of its own, and each tab's window sizes its
   display. Apple's own viewer on macOS 26 does not offer this: with two virtual
   displays it reports that dynamic resolution is not available.
-- **Adaptive VP9, or the remote's own picture path.** The gateway's VP9 follows
-  the browser link; wlshare's passed VP9 does too. A Windows host's graphics
+- **The gateway's tiles, or the remote's own picture path.** Where the gateway
+  codes the picture it sends 64×64 tiles, exact as PNG where they hold few
+  colours and as JPEG where they move, sent again exactly once still, as fast as
+  the browser paints them; wlshare's passed VP9 follows the browser link too. A Windows host's graphics
   pipeline is passed for the browser to compose, drawn in high quality for a LAN or, in
   alpha, as H.264 the host fits to the browser link. A High Performance Mac's
   HEVC or its H.264 is always passed unchanged, and neither adapts to the
@@ -121,7 +123,7 @@ seamlessly of the three, since what RFB lacks is added to it.
   browser tab of its own (alpha).
 
 Every other VNC server is a plain `vnc` target reached through the RFB
-baseline: one framebuffer at 1x, not resized, no sound, VP9 from the gateway.
+baseline: one framebuffer at 1x, not resized, no sound, tiles from the gateway.
 Another RDP server may happen to work but is not tested against. See
 [Prioritized servers](docs/architecture.md#prioritized-servers) for the
 comparison table, what they share, and what each passes.

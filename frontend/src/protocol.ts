@@ -255,8 +255,8 @@ export type ControlMsg =
       // Whether this target redirects the browser's microphone to the remote. The
       // camera's twin: enabled afresh each session by opening /ws/mic.
       microphone: boolean;
-      // The render dial this session resolved to, in one line —
-      // `video q90 · libvpx · adaptive`. The *resolved plan* rather than the config keys,
+      // The picture this session resolved to, in one line — `tiles q90`, or
+      // `VP9 q90 · 4:4:4 · adaptive` for wlshare's. The *resolved plan* rather than the config keys,
       // which the reader may not have: defaults are already applied.
       render: string;
     }
@@ -288,14 +288,12 @@ export type ControlMsg =
   // `decode` is the exact WebCodecs string to configure with, for example
   // `vp09.00.40.08.01.06.06.06.00`. Nothing here parses a bitstream to find it out:
   // VP9 has no parameter sets, and the gateway already parsed a passed HEVC stream's.
-  // `passthrough` says whose stream it is: the remote's own, passed through
-  // untouched (wlshare's VP9, a High Performance Mac's HEVC), or one the gateway
-  // encoded. Which decoder takes it is this page's own to say
-  // (softwareDecoder.ts), and the gateway is not told.
+  // Every stream is the remote's own, passed through untouched: wlshare's VP9, or a
+  // High Performance Mac's HEVC or H.264. Which decoder takes it is this page's own
+  // to say (softwareDecoder.ts), and the gateway is not told.
   | {
       type: "videoFormat";
       decode: string;
-      passthrough: boolean;
       // How many strips each picture comes in, a unit each (`VideoStrip`): 4 for
       // a High Performance Mac's passed in strips, 1 for whole pictures.
       strips: number;
@@ -311,6 +309,12 @@ export type ControlMsg =
   // the Adaptive quality's 8x8 tiles or the Full quality's zlib. Whatever it held
   // of a video stream before is done with. `engine` as a format's.
   | { type: "standardStart"; engine: number; quality: StandardQuality }
+  // The picture is the tiles the gateway codes from here, the whole of it following
+  // in TILE records, each an image this page decodes and draws where it says.
+  // Whatever it held of a stream, a pipeline or a Mac's own picture before is done
+  // with. It comes again whenever the gateway sends the whole picture again.
+  // `engine` as a format's.
+  | { type: "tilesStart"; engine: number }
   // The part of a passed pipeline's picture this display is, in the picture's
   // pixels: the host draws its virtual displays as one span, and this names one
   // display's column of it, `w` by `h` from `x`, `y`. Only a session started with
@@ -472,7 +476,22 @@ export interface StandardMsg {
   data: Uint8Array;
 }
 
-export type BatchRecord = VideoMsg | GraphicsMsg | StandardMsg;
+// A rectangle of the desktop in the tiles the gateway codes, a row's run of 64x64
+// tiles as one image: a JPEG of tiles still changing, which the gateway sends again
+// as PNG once they are still, or a PNG of the exact pixels. Each replaces what the
+// canvas held there and depends on no other, so they are drawn in wire order and may
+// be decoded in any. See `TileUnit` in src/protocol.rs for the contract.
+export interface TileMsg {
+  kind: "tile";
+  format: "jpeg" | "png";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  data: Uint8Array;
+}
+
+export type BatchRecord = VideoMsg | GraphicsMsg | StandardMsg | TileMsg;
 
 // Why a desktop has no picture: see `oversize`.
 export type HoldCause = "size";
@@ -492,6 +511,11 @@ const OP_GRAPHICS = 0x04;
 const GRAPHICS_HEADER_LEN = 5;
 const OP_STANDARD = 0x05;
 const STANDARD_HEADER_LEN = 13;
+const OP_TILE = 0x06;
+const TILE_HEADER_LEN = 14;
+// A TILE record's format byte. Any other means a gateway newer than this client,
+// and the batch is dropped rather than guessed at.
+const TILE_FORMATS = { 1: "jpeg", 2: "png" } as const;
 // A VIDEO record's flags: a decoder that has seen nothing before it can start here;
 // the unit is one strip of the picture, its number in two bits, and whether it is the
 // first sent of its frame. Any other bit means a gateway newer than this client, and
@@ -516,6 +540,7 @@ const VIDEO_STRIP_FLAGS = VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS;
 //   VIDEO (op 0x03):     u8 flags | u16 w | u16 h | u32 len | payload[len]
 //   GRAPHICS (op 0x04):  u32 len | message[len]
 //   STANDARD (op 0x05):  u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
+//   TILE (op 0x06):      u8 format | u16 x | u16 y | u16 w | u16 h | u32 len | image[len]
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
@@ -568,6 +593,8 @@ function decodeRecord(
       return decodeGraphics(view, buf, at);
     case OP_STANDARD:
       return decodeStandard(view, buf, at);
+    case OP_TILE:
+      return decodeTile(view, buf, at);
     default:
       return decodeVideo(view, buf, at);
   }
@@ -615,6 +642,40 @@ function decodeStandard(
       y: field(1),
       w: field(2),
       h: field(3),
+      data: new Uint8Array(buf, start, len),
+    },
+    next: start + len,
+  };
+}
+
+function decodeTile(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: TileMsg; next: number } | null {
+  if (at + TILE_HEADER_LEN > buf.byteLength) {
+    return null;
+  }
+  const format = view.getUint8(at + 1);
+  if (format !== 1 && format !== 2) {
+    return null;
+  }
+  const field = (i: number) => view.getUint16(at + 2 + 2 * i, true);
+  const len = view.getUint32(at + 10, true);
+  const start = at + TILE_HEADER_LEN;
+  const [x, y, w, h] = [field(0), field(1), field(2), field(3)];
+  // An empty rectangle, or one with no image, is one the gateway never sends.
+  if (w === 0 || h === 0 || len === 0 || start + len > buf.byteLength) {
+    return null;
+  }
+  return {
+    record: {
+      kind: "tile",
+      format: TILE_FORMATS[format],
+      x,
+      y,
+      w,
+      h,
       data: new Uint8Array(buf, start, len),
     },
     next: start + len,

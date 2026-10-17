@@ -222,10 +222,9 @@ const PAINT_WINDOW: usize = 24;
 /// A depth window alone cannot pace video, which the UAT showed rather than
 /// argued: with the renderer throttled twenty times, a VP9 attachment ran 222ms
 /// behind while never exceeding 7 batches in flight. Nothing parked, so nothing
-/// filled the queues behind the socket, so the congestion loop in
-/// [`crate::encode`] — which reads exactly that blocking — coarsened not one
-/// round while the client fell a fifth of a second behind. Depth is the wrong
-/// unit for a path whose messages are whole frames.
+/// filled the queues behind the socket, and nothing upstream that reads that
+/// blocking could see the client fall a fifth of a second behind. Depth is the
+/// wrong unit for a path whose messages are whole frames.
 ///
 /// So the window has two rules and a batch waits on either: too many owed, or
 /// the oldest owed for too long. Past this limit the wait is until the painter

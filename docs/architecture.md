@@ -21,11 +21,14 @@ axum server ── single session slot ── protocol engine
                                          └─ built-in RFB client (3.8 or Apple 003.889)
 ```
 
-Ordinary RDP and VNC source frames are decoded in the gateway and sent as one VP9
-stream of the whole desktop, at 4:2:0 and at the quality the target's render
-plan resolves to. wlshare, reached as `subtype = "wlshare"`, instead codes that
-resolved VP9 stream itself for the gateway to pass through unchanged, at 4:4:4
-for a browser whose own decoder takes it and 4:2:0 for one that does not. A
+Ordinary RDP and VNC source frames are decoded in the gateway and sent as tiles:
+the desktop in 64×64 tiles, each changed tile an image the browser decodes on its
+own, PNG where it holds few enough colours to be exact and JPEG at the target's
+quality where it does not, and a JPEG tile sent again as PNG once it is still —
+see [The tiles](#the-tiles). wlshare, reached as `subtype = "wlshare"`, instead
+codes its own VP9 stream, at the quality and walk the target's render plan
+resolves to, for the gateway to pass through unchanged, at 4:4:4 for a browser
+whose own decoder takes it and 4:2:0 for one that does not. A
 VNC desktop too large for that stream, in a session that does not resize it, has no
 picture, a Standard Mac's own included: the session stays up and the page offers
 the remote's displays — see
@@ -79,11 +82,11 @@ camera and microphone, and how its picture reaches the browser.
 
 | Server | Target | Displays | Sound | Camera and microphone | Picture |
 |---|---|---|---|---|---|
-| Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; VP9 from the gateway on the bitmap path |
+| Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; tiles from the gateway on the bitmap path |
 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | the Mac's HEVC or its H.264, passed through |
 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | the Mac's Adaptive or Full-quality picture, passed through (beta) |
 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
-| any other VNC server, not prioritized | `vnc` | one framebuffer at the size the server says, at 1x, never resized from the browser | none | no | VP9 from the gateway |
+| any other VNC server, not prioritized | `vnc` | one framebuffer at the size the server says, at 1x, never resized from the browser | none | no | tiles from the gateway |
 
 The three native servers have these in common:
 
@@ -138,9 +141,9 @@ floor: a screen with little movement comes far under it, so a slow link carries
 a still screen and falls behind one in motion. A slow link with much motion is
 an `ard` target's, whose Adaptive picture the Mac codes for it. See
 [A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
-On RDP VP9 serves only the bitmap path, a target with `egfx = false`. With the
-pipeline on nothing is encoded: the gateway composes no graphics pipeline, and a
-host that does not draw one ends the session
+On RDP the tiles serve only the bitmap path, a target with `egfx = false`. With
+the pipeline on nothing is coded here: the gateway composes no graphics pipeline,
+and a host that does not draw one ends the session
 ([A host without the pipeline is refused](#rdps-graphics-pipeline-passed-through)).
 
 #### A Mac's Standard Screen Sharing
@@ -176,7 +179,7 @@ ask for the stream. See
 #### Other servers, not prioritized
 
 Every other VNC server is a plain `vnc` target, reached through the RFB baseline
-and always encoded as VP9 in the gateway, at 1x, without sound, and at the
+and always sent as the gateway's tiles, at 1x, without sound, and at the
 size the server picks: it is never asked to resize. The gateway asks for ZRLE
 and reads nothing else but Raw, which RFB lets any server send; the older
 standard encodings, Tight and the other vendor or lossy ones are not listed. A wlshare server behind a plain target is read the same way: its
@@ -187,7 +190,7 @@ Another RDP server, an older Windows or xrdp say, may happen to work if it
 speaks what the client implements ([The RDP client](rdp-client.md)), but it is
 not a target: it is not tested against. Its picture follows Windows' rule: a
 pipeline it draws is passed, and one without the pipeline needs `egfx = false`,
-whose bitmap updates are encoded as VP9 in the gateway.
+whose bitmap updates are sent as tiles by the gateway.
 
 ### The client and its bundle
 
@@ -216,8 +219,9 @@ whose bitmap updates are encoded as VP9 in the gateway.
   picture, the page's alone on the same terms: the gateway passes the Mac's
   rectangles and decodes none of them. There is no VP9 module: every VP9 is
   sent at a chroma the browser's own decoder takes
-  ([the codec](#the-codec)). Do not fold one module into another, or add a
-  fourth without a stream that needs it.
+  ([the codec](#the-codec)). Nor a module for the tiles: each is a JPEG or a PNG
+  the browser decodes itself (`createImageBitmap`). Do not fold one module into
+  another, or add a fourth without a stream that needs it.
 - A page whose browser gives it less memory than a desktop's does loads as
   little WebAssembly as it can. No browser says how much a page may have, so the
   page goes by what they do say (`frontend/src/memoryBudget.ts`): an iPhone or
@@ -347,13 +351,15 @@ whose bitmap updates are encoded as VP9 in the gateway.
 
 ### Media paths
 
-#### One encoder, or passed untouched
+#### The gateway's tiles, or passed untouched
 
 A session's picture reaches the browser one of two ways, both ordinary:
-- **Encoded here** as VP9 by the `screen-vp9` crate wlshare codes its own
-  stream with, pinned by release tag in `Cargo.toml`, with libvpx. A libvpx
-  setting, the conversion in front of it, the codec string or the quality walk
-  changes in the screen-vp9 repository and reaches here as a pin bump.
+- **Coded here** as tiles ([The tiles](#the-tiles)): the desktop in 64×64 tiles,
+  a changed tile a PNG where it holds few enough colours to be exact and a JPEG at
+  the target's quality where it does not, a JPEG tile sent again as PNG once it is
+  still, and every tile sent as fast as the browser paints them. The coders are
+  the `jpeg-encoder` and `png` crates, both pure Rust, and the browser decodes both
+  images itself.
 - **Passed untouched**, as the remote made it, for the browser to decode or
   compose: today wlshare's VP9 on a `wlshare` target, a High Performance Mac's
   HEVC or its H.264 in every session, whichever it was started with, a Standard
@@ -363,13 +369,12 @@ A session's picture reaches the browser one of two ways, both ordinary:
   asks to pass joins them with a rule of its own; do not refuse it on this
   rule's account.
 
-The gateway keeps to one encoder: whatever it transcodes goes to VP9, and a
-second encoder (H.264, AV1 or any other), a codec probe, or a codec key that
-selects one is not added as a side effect of other work. The rule is about the
-stream that has to follow the browser's link, and VP9 holds the place because it
-is the only candidate for that today, not because another codec is ruled out: a
-second encoder is a decision of its own, weighed as
-[The codec](#the-codec) weighs HEVC.
+Whatever the gateway transcodes goes to tiles. A video encoder (VP9, H.264, AV1 or
+any other), a codec probe, or a codec key that selects one is not added as a side
+effect of other work: a video encoder here is a decision of its own, weighed as
+[The codec](#the-codec) weighs tiles against one. Keep the tiles stateless: each is
+drawn on its own and depends on no other, which is what lets a slow link be sent
+the newest pixels whenever a round goes.
 
 #### The browser's four answers
 
@@ -435,8 +440,8 @@ detect wlshare on one.
 A `wlshare` target lists the VP9 encoding for every browser, with the plan's
 dial, walk and chroma as pseudo-encodings beside it, and passes its frames
 untouched; the stream is the subtype's picture, with no key and no choice at
-the picker beside it. A server that ignores the listing is encoded here from
-ZRLE, at the plan's chroma. Do not transcode a passed frame, pass one at a
+the picker beside it. A server that ignores the listing is sent as tiles from its
+ZRLE. Do not transcode a passed frame, pass one at a
 chroma other than the plan's, ask wlshare for the plan with a client message,
 or add a key or a choice that selects the stream or its chroma. See
 [wlshare's stream, passed through](#wlshares-stream-passed-through).
@@ -490,8 +495,8 @@ or add a key or a choice that selects the stream or its chroma. See
   carries sound and the picker offers no choice of it. Both are passed to the
   browser in every session, the sound as the Mac's AAC-ELD units and the
   picture as its HEVC or its H.264, so the gateway has no decoder for either
-  and encodes no VP9 of the Mac's. Do not add one: a decoder of the Mac's
-  picture, a library it would load, or a VP9 of it. A session that names
+  and codes nothing of the Mac's. Do not add one: a decoder of the Mac's
+  picture, a library it would load, or tiles of it. A session that names
   neither stream is refused. The picture is offered as Apple's viewer is, in
   four strips, which the page puts together.
   The media stream alone is the picture: ZRLE is stepped over unread and never
@@ -528,9 +533,8 @@ or add a key or a choice that selects the stream or its chroma. See
   stream is the only picture. Until its first picture, at connect and
   across every display change, the page says the screen is not available
   (`screenUnavailable`) and sends the Mac no input; the Mac's ZRLE
-  rectangles are stepped over unread and never reach an encoder, so a session
-  that passes the stream builds none. Do not show them in the gaps: that
-  builds a VP9 encoder a passed session then holds idle for its whole life.
+  rectangles are stepped over unread and never reach the tiles, so a session
+  that passes the stream codes none. Do not show them in the gaps.
   A PLI is a passed stream's
   repaint. The page answers for the
   sound by decoding one of the Mac's units in each form `isConfigSupported`
@@ -545,8 +549,8 @@ this order: its Adaptive picture passed (beta) and its Full-quality picture
 passed (beta), the two qualities of Apple's viewer's menu. The Adaptive one is
 taken until the other is chosen, and neither is greyed: the page decodes them in
 WebAssembly, which every page that starts has. A session that names neither is
-refused, since nothing of a Standard Mac's is encoded here: do not add a VP9 of
-it back, for a view or a link. It is one picture on every view, one screen, the
+refused, since nothing of a Standard Mac's is coded here: do not add tiles of it,
+for a view or a link. It is one picture on every view, one screen, the
 virtual display and Combined Display alike.
 
 - **What is asked.** The session lists the encoding of its quality ahead of
@@ -558,7 +562,7 @@ virtual display and Combined Display alike.
 - **Passed as it came.** Each rectangle goes to the page as a `STANDARD` record,
   where the Mac put it and its body as the Mac sent it, behind an
   `standardStart` that names the quality. The gateway decodes none of them and
-  builds no VP9 encoder; the page decodes them in its own module
+  codes no tile; the page decodes them in its own module
   (`frontend/wasm/vnc`), the tiles in a decoder written there and the zlib
   on miniz_oxide's inflater, onto a framebuffer of its own and paints the canvas
   where each drew, through the mosaic where Combined Display needs one. Do not
@@ -604,7 +608,7 @@ passed, with no box to tick, and only a
 page that said it composes one can start the target: a cross-origin isolated
 page, for the compositor's threads, with a WebGL 2 canvas to present on
 (`frontend/src/rdpGraphics.ts`). Any other has Start disabled with the reason,
-and has no VP9 to fall back to; `egfx = false` is the target for it. The page
+and has no tiles to fall back to; `egfx = false` is the target for it. The page
 composes with the gateway's own compositor, `crates/remotex-rdp-graphics`,
 bound to WebAssembly by `frontend/wasm/egfx`: keep that crate building for
 `wasm32-unknown-unknown`. One decoder and compositor is the gateway's rule; do
@@ -618,9 +622,9 @@ displays: the page composes the span once and shows the column `graphicsView`
 names, and on *All Displays* the second display's tab is painted that column of
 the same picture, handed across the browser (`frontend/src/displayRelay.ts`).
 Do not compose a pipeline in two tabs, and do not deal its commands out by
-display. A target with `egfx = false` draws with bitmap updates, encoded here
-as VP9; with the pipeline on, the pipeline is the only picture, and no bitmap
-update is decoded or encoded.
+display. A target with `egfx = false` draws with bitmap updates, sent as the
+gateway's tiles; with the pipeline on, the pipeline is the only picture, and no
+bitmap update is decoded or coded.
 
 How the host draws the pipeline is chosen at the picker: High quality, the
 pipeline's codecs without H.264, by default, or Adaptive
@@ -664,8 +668,9 @@ wire format, no record and no second stream. See
 | `aac_eld.rs` | what that stream's AAC-ELD sound is, for the browser that decodes it |
 | `camera.rs`, `mic.rs` | browser camera and microphone bridges into the active engine |
 | `shadow.rs` | change detection: what the client already has |
-| `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
-| `vp9.rs` | the VP9 stream over the mirror, coded by the `screen-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
+| `encode.rs`, `video.rs` | the ordered picture paced by the browser's painting: its rounds, its paint window, the passed streams' queue, the mirror and the picture limits |
+| `tiles.rs` | the tiles coded here: which of the desktop's 64×64 tiles the browser is owed, and their JPEG and PNG |
+| `vp9.rs` | what a passed wlshare frame needs: its header's profile and keyframe bit, and its codec string |
 | `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding by the `sound-opus` crate wlshare codes its own sound with, resampling, the FLAC coding of a lossless target's PCM, and the passing of a remote's own stream |
 | `frontend/wasm/flac/` | the page's FLAC decoder for a session's lossless sound, a WebAssembly module of its own |
 | `frontend/src/softwareDecoder.ts`, `softwareDecoder.worker.ts`, `softwareDecoderPool.worker.ts`, `softwareDecoderModule.ts` | the page's software HEVC decoder: the `VideoDecoder` shape, its decode worker and its pool's threads, and where its module is loaded from |
@@ -674,167 +679,140 @@ wire format, no record and no second stream. See
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
-Where the gateway owns the encode, RDP and VNC pass dirty pixels through the
-ordered encoder before reaching that boundary.
+Where the gateway codes the picture, RDP and VNC pass dirty pixels through the
+ordered tile coder before reaching that boundary.
 
 Ordering is a correctness requirement throughout the frame path. Every access unit
-is a change from the one before it, and a resize changes the picture that follows.
-The encoding and outbound queues therefore keep access units, resizes, and cursor
-updates in source order even though each encode runs off the engine's own task.
+of a passed stream is a change from the one before it, a tile drawn after a later
+one shows what the desktop no longer does, and a resize changes the picture that
+follows. The coding and outbound queues therefore keep tiles, access units,
+resizes, and cursor updates in source order even though each round is coded off
+the engine's own task.
 
-### The video stream
+### The picture
 
-Each target has one full-desktop picture path. Ordinarily it is one inter-frame
-VP9 stream, encoded by the gateway or made by wlshare and passed through. Two
-paths keep another representation the remote made: an
-`ard-high-performance` session can pass the Mac's HEVC, chosen at the picker,
-and every session of an RDP target with the pipeline on passes the host's
-graphics pipeline for the browser to compose. A VNC desktop past the stream's picture ceiling in a session started
-without resize has no picture until the remote sends a smaller one — see
+Each target has one full-desktop picture path. Ordinarily it is the tiles the
+gateway codes, or wlshare's own VP9 stream, passed through. Three paths keep
+another representation the remote made: an `ard-high-performance` session passes
+the Mac's HEVC or its H.264, chosen at the picker, an `ard` session passes the
+Mac's own Adaptive or Full-quality picture, and every session of an RDP target
+with the pipeline on passes the host's graphics pipeline for the browser to
+compose. A VNC desktop past the picture ceiling in a session started without
+resize has no picture until the remote sends a smaller one — see
 [past the ceiling](#past-the-ceiling).
 
-A target's stream keys are per target, and every one has a default:
+A target's picture keys are per target, and every one has a default:
 
-- `video_quality` (1–100, default 90) is the ceiling the stream holds to.
-- `render_adaptive` (on unless a target writes `false`) lets VP9 encoded in the
-  gateway track the measured link — see
-  [what the link will bear](#colour-and-what-the-link-will-bear) for the signal
-  and the walk.
+- `video_quality` (1–100, default 90) is the JPEG quality of a changed tile of many
+  colours coded here, and the ceiling wlshare's VP9 holds to.
+- `render_adaptive` (on unless a target writes `false`), a `wlshare` target's
+  alone, lets wlshare's VP9 walk its quality on the browser's link — see
+  [wlshare's stream, passed through](#wlshares-stream-passed-through). The tiles
+  have no walk: they follow the browser's painting at the one quality
+  ([what the link will bear](#colour-and-what-the-link-will-bear)).
 
-There is no chroma key: the chroma follows the target and the browser
-(`RenderPlan::chroma`). See [the codec](#the-codec) for which streams are
-4:4:4 and why the chroma, and not the quality, is where a desktop stream's
-picture goes.
-  There is no floor key: the walk's floor is a constant of the encoder's, where
-  it hands off from quality to frame rate as WebRTC's quality scaler does at its
-  own quantizer threshold, and the settle sharpens a quiet desktop back at the
-  dial. Turned off, the walk is the pressure-only one.
+There is no chroma key: wlshare's chroma follows the browser
+(`RenderPlan::chroma`, [the codec](#the-codec)).
 
-Neither reaches a passed stream: a session started with the Mac's passthrough
-sends its HEVC as it came, and an RDP target with the pipeline on sends the
-host's pipeline as it came, so the two keys reach nothing on such a target.
-wlshare's stream, passed on every `wlshare` target, is told both and walks
-itself. Which passed streams follow the browser's link, and how, is in
+Neither reaches a picture the remote makes but wlshare's: a session started with
+the Mac's passthrough sends its stream as it came, and an RDP target with the
+pipeline on sends the host's pipeline as it came, so the keys reach nothing on
+such a target. Which passed streams follow the browser's link, and how, is in
 [A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
 
 The engines never see the config keys. They and the session's choices collapse
-to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `apple_h264`,
+to one `RenderPlan` (`quality`, `adaptive`, `wlshare`, `apple_media`, `apple_h264`,
 `apple_standard`, `rdp_graphics`, `rdp_h264`, `chroma`) at the config boundary in
-`TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
+`TargetConfig::render_plan`, which reaches the coder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
 ```text
 video_quality / render_adaptive, and the session's choices
   → TargetConfig::render_plan(choices, browser decoders) → RenderPlan → vnc::run / rdp::run
   → VideoSink::new(engine, frame_tx, plan, feedback, oversize)
-  → DesktopStream (src/stream.rs) → vp9::Stream
+  → Tiles (src/tiles.rs) → JPEG and PNG
 ```
 
-Every size an engine asks a remote for is held under the stream's picture ceiling
+Every size an engine asks a remote for is held under the picture ceiling
 (`video::fit_ceiling`: a long side of 3840 and a short side of 2400), and a
 configured `size` past it is refused at config load. A remote the gateway cannot
 size can still answer past it; what happens then is
 [past the ceiling](#past-the-ceiling).
 
-Five rules hold the stream up, and each is a rule somewhere:
+#### The tiles
 
-- **Accepted source pixels remain pending until an encoded access unit contains
-  them.** `Shadow::accept` records new source pixels and returns only the regions
-  that differ from the accepted source state. Those regions are copied to the
-  mirror and marked dirty. Because the remote is not required to resend them, VP9
-  frame dropping is disabled (`rc_dropframe_thresh = 0`); if an encode produces no
-  bitstream, the dirty state is retained for the next attempt. This invariant is
-  about source damage accepted by the encoder. It does not prohibit the later
-  transport queues from dropping an already encoded unit under their documented
-  backpressure rules.
-- **The stream is fed rectangles, not frames.** `VideoSink::damage` is called once
+The picture the gateway codes, plain VNC's and the RDP bitmap path's, is the
+desktop in 64×64 tiles (`src/tiles.rs`), a tile at a right or bottom edge cut there.
+Both picture paths it serves arrive in 64-pixel tiles already: ZRLE's tiles and the
+RDP host's bitmap updates.
+
+- **A changed tile is an image.** A tile of at most 256 colours — text, rules and
+  flat panels, which is most of a desktop — is sent as a PNG of a palette, exact. Any
+  other, a photograph or a gradient, is sent as a baseline JPEG at the target's
+  `video_quality`, its colour sampled once per 2×2 pixels. Each tile is drawn on its
+  own, replacing what the browser held there whatever it held, and depends on no
+  other, so nothing is a keyframe and nothing predicts from what came before.
+- **A still JPEG tile is sent again exactly.** Every 50 ms (`SETTLE_TICK`) the order
+  task marks still each tile last sent as JPEG that has not changed since the tick
+  before, and a round taken while no tile has changed sends those as PNG of the
+  mirror's pixels, as many as the paint window's room comes to at what a tile's
+  exact picture has lately cost, top row first, and at least one. It is TigerVNC's
+  lossless refresh (its `EncodeManager`'s lossy and recently changed regions),
+  region by region rather than when the whole screen is still: a tile that keeps
+  changing is not refreshed while it moves, and the screen around it is made exact
+  meanwhile. A tile sent exactly owes nothing, so a still screen costs nothing once
+  it is exact.
+- **A row's run is one image.** A round takes, row by row, each run of owed tiles,
+  and cuts it where its tiles change format, so a row of text is one PNG and a
+  photograph in it one JPEG. Runs are coded on every core (rayon).
+- **The coders are crates.** JPEG is `jpeg-encoder`, its AVX2 kernels chosen at run
+  time; PNG is `png` at its fast compression, a palette unfiltered and RGB with each
+  row's filter chosen. Both are pure Rust, so the gateway links no image library.
+  The browser decodes both itself, off its own thread (`createImageBitmap`), so the
+  page carries no decoder for them.
+
+Four rules hold the picture up, and each is a rule somewhere:
+
+- **Accepted source pixels remain owed until a tile carries them.**
+  `Shadow::accept` records new source pixels and returns only the regions that
+  differ from the accepted source state. Those regions are copied to the mirror and
+  the tiles they touch marked owed, and they stay owed until a round takes them:
+  the remote is not required to resend them. This invariant is about source damage
+  accepted by the coder. It does not prohibit the later transport queues from
+  dropping a payload under their documented backpressure rules.
+- **The picture is fed rectangles, not frames.** `VideoSink::damage` is called once
   per damage *rectangle*, and VNC's pixels can only be cropped out of the rect just
-  decoded, so the stream keeps its own whole-framebuffer RGB copy — the mirror — to
-  blit into. `VideoSink::frame` encodes it, called at RDP's outputs-loop end (and its
-  `Refresh` arm, which `continue`s past that) and at VNC's `FramebufferUpdate` end.
-  It is a no-op when nothing was blitted, because RDP's loop turns once per PDU and
+  decoded, so the coder keeps its own whole-framebuffer RGB copy — the mirror — to
+  blit into. `VideoSink::frame` takes a round, called at RDP's outputs-loop end (and
+  its `Refresh` arm, which `continue`s past that) and at VNC's `FramebufferUpdate`
+  end. It is a no-op when nothing is owed, because RDP's loop turns once per PDU and
   most redraw nothing.
-- **Remote frame boundaries trigger encode attempts; they do not set the output
-  rate.** A busy RDP desktop was measured reporting 126 boundaries per second to a
-  30 Hz stream on a 60 Hz display. Encoding at every boundary made a session under
-  800 kbit/s spend 88% of its time in the encoder. `VIDEO_FRAME_INTERVAL` therefore
-  limits ordinary output to one access unit per 33 ms. Damage received during that
-  interval remains dirty in the mirror and is included in the next attempt. Forced
-  keyframes for repaint, reattach and resize bypass the interval. When an attempt is
-  deferred, `VideoSink::due_at` schedules another attempt even if no further remote
-  damage arrives: RDP waits in a `select!` beside layout retry, while VNC races the
-  deadline against its next message and flushes only at a message boundary so it
-  cannot split a `FramebufferUpdate`.
-- **The encode is pipelined, and serial.** A round takes the mirror and the encoder
-  to a blocking worker; the spare mirror takes the blits meanwhile and the order task
-  puts the round back when it lands, signalling `round_returned` if pixels arrived
-  while it was away. At most one round is out, because two encoders on one chain of
-  frames would decode wrongly. A resize while a round is out drops that round on its
-  return (its epoch is stale), and the pixels the new desktop blitted meanwhile are
-  owed a stream of their own.
-- **The picture is the desktop, odd sides included.** Neither VP9 nor its
-  conversion needs even sides, at either chroma, so the mirror is the desktop's
-  size and the record header carries it.
+- **Remote frame boundaries propose rounds; they do not set the output rate.** A
+  busy RDP desktop was measured reporting 126 boundaries per second on a 60 Hz
+  display. `ROUND_INTERVAL` limits rounds to one per 33 ms, and the paint window to
+  what the browser has painted ([what the link will bear](#colour-and-what-the-link-will-bear)).
+  Damage received meanwhile stays owed in the mirror and the next round carries it,
+  each tile once. A restart for a repaint, a reattach or a resize bypasses the
+  interval. When a round is deferred, `VideoSink::due_at` schedules another attempt
+  even if no further remote damage arrives, and `VideoSink::round_returned` wakes the
+  engine when a round may be taken that could not be before — a round came back, the
+  browser painted, or tiles went still: RDP waits in a `select!` beside layout
+  retry, while VNC races both against its next message and takes a round only at a
+  message boundary so it cannot split a `FramebufferUpdate`.
+- **Rounds are serial, and off the engine's task.** A round crops the tiles it takes
+  out of the mirror and is coded on a blocking worker while the engine goes on
+  blitting into the mirror; what lands meanwhile marks its tiles owed again. At most
+  one round is out, so a tile is marked by what was sent of it — owed its exact
+  picture or not — before the next round looks at it. A round that comes back after
+  a resize marks nothing, the new desktop's tiles being owed rounds of their own.
 
-`video_quality` maps to a constant quantizer: the dial spans 63 → 8 of VP9's own
-0–63 (the floor is where screen content goes visually lossless — mapping past it
-would give a dial whose top third did nothing but spend bandwidth). The quantizer
-never leaves the codec module —
-the dial is what everything above it speaks. A constant quantizer *is* variable
-bitrate — bits go where the
-picture needs them, so a motionless desktop costs almost nothing.
-
-**Above the middle of that dial the loss you can see is not the quantizer's; it is
-the chroma sampling's.** VP9 profile 0 carries one colour sample per 2×2 pixels,
-and a one-pixel coloured glyph stem on a dark terminal shares its sample with three
-pixels of background: the luma survives, the colour comes back at a quarter of its
-saturation, and no quantizer can restore what was averaged before the encoder saw
-it. Measured 2026-09-01 on 1280×800 of rendered text — coloured monospace on a dark
-pane, black and coloured proportional on a light one, one-pixel rules, a gradient —
-encoded and decoded through the same libvpx:
-
-| stream                       | keyframe | inter frame | PSNR    | worst pixel |
-|------------------------------|----------|-------------|---------|-------------|
-| 4:2:0, quality 100 (q 8)     | 408 KB   | 52 KB       | 28.4 dB | 136         |
-| 4:2:0, lossless (q 0)        | 640 KB   | 122 KB      | 28.5 dB | 135         |
-| 4:2:0 conversion, no codec   | —        | —           | 28.5 dB | 135         |
-| 4:4:4, quality 100 (q 8)     | 558 KB   | 48 KB       | 42.8 dB | 33          |
-| 4:4:4, lossless (q 0)        | 912 KB   | 70 KB       | 49.5 dB | 4           |
-
-Every 4:2:0 row is the conversion's own floor; speed, loop filter, tuning and
-adaptive quantization moved nothing either. 4:4:4 is VP9 profile 1 — a colour
-sample per pixel, the same quantizer, a keyframe a third larger, inter frames no
-larger, about a third more encode time — announced as `vp09.01.…`, and 4:2:0 is
-profile 0, `vp09.00.…`. The cost of 4:4:4 is the decoder: no browser's hardware
-VP9 path takes profile 1 — Intel's media engines from Ice Lake on decode it, but
-Chromium's D3D11 and VA-API decoders advertise profiles 0 and 2 only — so it
-always decodes in software, and a browser with no software VP9 at all, which is
-iOS and iPadOS, refuses it. So the chroma is the plan's (`RenderPlan::chroma`),
-for the session's life:
-
-- **4:2:0 for plain VNC and the RDP bitmap path**, the pictures this gateway
-  encodes, for every browser; a `wlshare` target's server that ignores the
-  listing is encoded here too, but at that target's chroma (below). They are
-  not prioritized, so their stream is
-  the one that costs the least to code — a 1080p frame of a moving window in
-  about 70% of 4:4:4's time, at well under half the bytes, measured in
-  `screen-vp9` — and that every decoder takes, its hardware one included.
-- **On a `wlshare` target, the browser's**: 4:4:4 where its own decoder takes
-  profile 1, which the page asks it once at load (`frontend/src/nativeVp9.ts`)
-  and states on the session socket (`vp9_444`), and 4:2:0 where it does not, or
-  will not say. wlshare is asked for that chroma beside its encoding (`WLSS`
-  for 4:2:0), and a server that ignores the listing is encoded here at the
-  same. A browser that comes back answering otherwise is given the session from
-  its start ([Session lifecycle](#session-lifecycle)).
-
-The page has no VP9 decoder of its own: a stream at a chroma the browser does not
-take is never sent. `a_444_stream_keeps_the_colour_420_averages_away` in
-`screen-vp9` is the round trip that pins the difference, through the archive's own
-decoder.
+The picture starts, after a resize and whenever the browser is owed the whole of it
+— a reattach, a repaint, the gap of a passed stream — with `tilesStart` on the
+display socket, and every tile of the desktop follows it.
 
 #### Past the ceiling
 
-A desktop past the picture ceiling is one a video stream will not encode
+A desktop past the picture ceiling is one the gateway will not show
 (`video::check_picture`). The gateway sizes every desktop it asks for under it, so
 only a remote it cannot size gets there: a plain VNC server, a wlshare one on
 a physical output, whose desktop is simply that large, or a Mac in Standard
@@ -847,14 +825,14 @@ of it, fixed when the engine starts:
 | Source | `Oversize` | Past the ceiling |
 |---|---|---|
 | VNC (plain, wlshare, Apple Standard) started without resize | `Hold` | the session stays up without a picture; Standard's rectangles are still passed, decoded under the notice |
-| VNC started with resize, Apple High Performance, RDP | `Refuse` | the session ends: "a video stream will not encode a W×H picture" |
+| VNC started with resize, Apple High Performance, RDP | `Refuse` | the session ends: "the gateway will not show a W×H picture" |
 
 Resize refuses because it is the gateway sizing the remote: every size it asks
 for is under the ceiling, and a remote that answers past it has refused what it
 was asked. High Performance's virtual display is held under the ceiling.
 
 A `Hold` source is decided at each `Resize`. Held, the sink drops every rectangle
-and passed frame and builds no stream, and past the ceiling wlshare's VP9 comes off
+and passed frame and builds no mirror, and past the ceiling wlshare's VP9 comes off
 the encoding list, so wlshare codes nothing that would not be sent. After every
 `Resize` of a `Hold` source the gateway sends `oversize` with its `cause`
 (`"size"`, or `null` for a picture), a reattach included. While there is a cause
@@ -865,22 +843,21 @@ output, is how such a desktop gets back; with no list, it says that
 nothing can be shown until the remote's desktop is smaller. A choice is a
 `selectDisplay` like the menu's, and the notice comes down only at a `Resize`
 without a cause. The remote repaints that desktop in full, as after any resize,
-and its stream starts from an announcement and a keyframe. A Standard Mac's
-picture needs neither: the page has gone on decoding it under the notice.
+and its picture starts over: the tiles behind a `tilesStart`, or a passed stream
+from an announcement and a keyframe. A Standard Mac's picture needs neither: the
+page has gone on decoding it under the notice.
 
 #### wlshare's stream, passed through
 
 wlshare has a VP9 encoding of its own, `WLSV` (`0x574c5356`), made for its desktop
 clients and for this gateway: every update one rectangle over the whole desktop, a
-`u32` length and one frame of a single stream. That stream is the one this gateway
-would encode from the same pixels — coded by the same `screen-vp9` crate at the
-same speed, screen tuning, dial and chroma, 8-bit, BT.601 at studio swing
-declared in its keyframes, so the two are one stream by construction — so on a
+`u32` length and one frame of a single stream, coded by wlshare's `screen-vp9`
+crate with libvpx, 8-bit, BT.601 at studio swing declared in its keyframes. On a
 `wlshare` target the gateway lists it for every browser, tells wlshare what the
 plan resolved to, and each frame goes to the browser as it came: no ZRLE on either
-side, and no encode here. A plain target never lists it, so the same server sends
-it ZRLE, which is encoded here, as is what any server that ignores the listing
-sends.
+side, and nothing coded here. A plain target never lists it, so the same server
+sends it ZRLE, which is sent as tiles, as is what any server that ignores the
+listing sends.
 
 - **Listed for every browser, with the plan beside it.** The encoding goes at
   the head of a `wlshare` target's `SetEncodings` for a desktop within the ceiling,
@@ -889,9 +866,7 @@ sends.
   ceiling wlshare's walk never goes above, `WLSD` for a plan without
   `render_adaptive`, which holds the dial there rather than walking it on the
   browser's lag, and `WLSS` for a plan at 4:2:0, a browser's whose own decoder
-  takes no profile 1. So the target's keys mean on a passed stream what they
-  mean on one coded here. wlshare codes it with libvpx, as this gateway codes
-  its own.
+  takes no profile 1. So the target's keys reach the passed stream.
   Pseudo-encodings rather than a client message because a server that is not
   wlshare ignores an encoding it does not know where a message it does not know
   ends the connection, and because they ride the list that names the encoding, so
@@ -902,12 +877,12 @@ sends.
   its profile, which must be the plan's chroma's — a server that did not code
   what it was asked is refused by name rather than handed to a decoder
   configured for another — and whether it is a keyframe; its size is held to the
-  ceiling a stream encoded here is; the configuration announced ahead of it is
+  ceiling every picture is; the configuration announced ahead of it is
   that profile's string for its size, its level figured at 60 frames a second, wlshare's
   default `max_fps`, since wlshare rather than the gateway paces it. Its bytes take their share
   of `QUEUE_BUDGET` and go out in order with the messages around them. The mirror,
-  the rounds, the interval, the quality walk and the settle do not run: wlshare
-  paces, codes, walks and settles its stream itself.
+  the rounds, the interval and the refresh do not run: wlshare paces, codes, walks
+  and settles its stream itself.
 - **A restart waits for a keyframe.** A reattach and a resize reset the
   render as always. On a reattach the full update the engine asks for
   is what makes wlshare send a keyframe; after a resize it asks for none, because
@@ -977,7 +952,7 @@ Three controls with similar names therefore remain separate:
 |---|---|---|
 | Standard **Adaptive** / **Full** | Apple's viewer and the picker, in Standard mode only | Which RFB framebuffer encodings the viewer asks for |
 | High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder's target, within its fixed 20–60 Mbit/s range, by the gateway's reports |
-| `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway; refused on both Apple subtypes, whose picture is never VP9 |
+| `render_adaptive` | A remotex target key, on by default, a `wlshare` target's alone | wlshare's VP9 walk; refused on both Apple subtypes, whose picture is never VP9 |
 
 - **The browser says whether it can.** The page asks once, at load (`frontend/src/appleMedia.ts`),
   and states the answer as `apple_media=true|false` on every session socket,
@@ -1046,7 +1021,7 @@ Three controls with similar names therefore remain separate:
   (`frontend/src/planesPicture.ts`, `glPicture.ts`). The canvas is given the
   stream's primaries, Display P3, so the browser takes the picture to the display
   as it takes a video frame. A media-stream session never paints the desktop's
-  own canvas, which gateway-encoded VP9 is drawn on. The
+  own canvas, which the gateway's tiles are drawn on. The
   decoder holds a picture's memory until the paint worker releases it, and
   decodes the next unit into other memory meanwhile, two pictures out at most,
   so one decodes while the paint worker uploads another. A `VideoFrame` over the
@@ -1068,7 +1043,7 @@ Three controls with similar names therefore remain separate:
   picture, behind a `VideoFormat` whose configuration string and size are read from
   the stream's own sequence parameter set (`parse_sps` in
   `src/vnc_apple_media.rs`, per ISO/IEC 14496-15 Annex E: `hev1` for parameter sets
-  in band). Its size is held to the ceiling a stream encoded here is, and its bytes
+  in band). Its size is held to the ceiling every picture is, and its bytes
   take their share of `QUEUE_BUDGET` like any access unit. Every picture the Mac
   sends goes out, up to the virtual display's 30 a second, at the quality the
   offer and the rate reports bring.
@@ -1127,8 +1102,7 @@ Three controls with similar names therefore remain separate:
   ([In strips](apple-vnc-889.md#in-strips)). The Mac's ZRLE rectangles
   are stepped over by their length (`Decoders::step_over`), never inflated and
   never handed to `VideoSink::damage`, so a session that passes the stream
-  builds no VP9 encoder: one held idle for a session's life was some 240 MB at
-  1080p 4:4:4. Few come at all, since the Mac sends no pixels from an offer
+  codes no tile. Few come at all, since the Mac sends no pixels from an offer
   until the next display change. `active: false` follows the first unit of the
   stream's first picture of the display on the channel (`VideoSink::uncover`),
   so the notice never lifts on a canvas with nothing new on it. The page lifts it only once its paint worker has drawn what
@@ -1140,8 +1114,8 @@ Three controls with similar names therefore remain separate:
   announced again by its `VideoFormat`. The resize notice covers a resize in
   progress and stands in front while both hold.
 - **The dial does not reach it.** `video_quality` and the adaptive
-  walk govern only VP9, which no session of the target has, so they are refused
-  on the target, as the Opus keys are, which have no sound to reach. Nor does
+  walk govern only the tiles and wlshare's VP9, which no session of the target
+  has, so they are refused on the target, as the Opus keys are, which have no sound to reach. Nor does
   anything here enable or disable the Mac's separate, always-on High
   Performance controller.
 - **The sound always passes, on `/ws/audio`.** Whichever picture is passed,
@@ -1240,7 +1214,7 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   page acknowledges the batch it rode in (a `Painted` in the record, as a
   pipeline's frame has). The bound is twice what the page paints in the
   session's shortest round trip of a small rectangle, at the fastest rate it
-  painted within the last second, and never less than `STANDARD_AHEAD` (32 KiB)
+  painted within the last second, and never less than `AHEAD` (32 KiB)
   or more than 16 MiB, so each round on a fast link carries twice the last until
   the link or the painting holds it. The shortest only falls, so a slow link's
   queue, which under motion never empties, cannot widen the bound past its floor. One
@@ -1291,15 +1265,14 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
 
 An `rdp` target with the pipeline on composes nothing of it here: in every
 session the pipeline's commands go to the browser as the host sent them, and the
-page composes them. Composing it here and encoding the picture as VP9 was
-measured, for a desktop in use, at about three quarters VP9 encoding and a
-quarter decoding; passing the commands leaves the gateway the connection,
+page composes them. Composing it here and encoding the picture as VP9, as the
+gateway once did, was measured, for a desktop in use, at about three quarters
+VP9 encoding and a quarter decoding; passing the commands leaves the gateway the connection,
 unwrapping the channel's bulk compression to read the commands' headers, and the
 frame acknowledgements, a few percent of a core whatever the desktop is doing.
-What it costs is the browser's work, and the quality walk: what the host draws
-with is sent as it is, so `video_quality` and `render_adaptive` reach nothing of
-it. A browser that cannot compose it cannot start the target, and there is no
-VP9 to fall back to: a target with
+What it costs is the browser's work: what the host draws with is sent as it is,
+so `video_quality` reaches nothing of it. A browser that cannot compose it cannot
+start the target, and there are no tiles to fall back to: a target with
 `egfx = false` is the one for it. The host still follows the browser's link by
 its own pacing, as *The page paces the host* and *The host finds a slow page
 for itself* below describe, and with Adaptive by its rate control
@@ -1514,7 +1487,7 @@ the pipeline.
 - **A host without the pipeline is refused.** With the pipeline on, nothing of
   the picture is decoded or encoded here: the RDP client sizes no framebuffer,
   drops a bitmap update undecoded, before the host confirms the pipeline or
-  beside it, and the engine keeps no shadow, so no VP9 stream is ever built. A
+  beside it, and the engine keeps no shadow, so no tile is ever coded. A
   host that has not confirmed the pipeline 20 s after the share began, or after
   it closed the channel, ends the session, as does one that joined no dynamic
   channel; the message names `egfx = false`, which is the target for such a
@@ -1587,123 +1560,41 @@ desktop's (`frontend/src/planesPicture.ts`).
 
 ### Colour and what the link will bear
 
-Every stream encoded here is 4:2:0, profile 0, but a `wlshare` target's for a
-browser that takes 4:4:4 ([the codec](#the-codec)). The chroma is fixed for an
-engine, so a reattach resumes the running engine only for a page that would be
-sent the same, and the encoder makes one bitstream.
+**A tile is sRGB.** A PNG holds the desktop's RGB as it is, and a JPEG is baseline
+JFIF, its YCbCr full-range BT.601 as JFIF defines it, which every decoder turns
+back the same way. The page decodes both with no colour space conversion and draws
+them on the desktop's 2D canvas. wlshare's VP9 says its conversion in its
+keyframes, BT.601 studio swing, as wlshare's libvpx is told to write it, where
+libvpx left alone writes *unknown* and a decoder guesses, Chromium BT.709 for
+anything HD.
 
-The keyframe header also *says* the conversion is BT.601 studio swing
-(`VP9E_SET_COLOR_SPACE` / `VP9E_SET_COLOR_RANGE`). libvpx writes *unknown* unless
-told, and a decoder given unknown guesses — Chromium picks BT.709 for anything HD —
-so a 1080p desktop was converted with one matrix and displayed with another, every
-saturated colour a little off. Nothing on the wire carries it; the decoder reads it
-from the bitstream.
+**The tiles follow the browser's painting, at one quality.** They have no quality
+walk: a changed tile of many colours goes at the target's `video_quality` on any
+link. What a slow link changes is how often a round goes. A round is taken only
+while what the browser was sent is painted back under the paint window
+(`PaintWindow` in `src/encode.rs`), the bound a Standard Mac's rectangles are held
+to: twice what the browser paints in its shortest round trip, at the fastest rate
+it painted within the last second, and between 32 KiB and 16 MiB. A round, once
+taken, is sent whole whatever it came to, and holds the next until the browser has
+painted it back under the bound. While the window is full the engine goes on
+reading its remote into the mirror, so the damage merges there, and the round the
+painting lets go carries the newest pixels of every tile that changed meanwhile,
+each once. A slower link gets fewer updates of the current picture rather than
+coarser ones, as a Mac's Adaptive picture does for a viewer on one
+([A Standard Mac's own picture](#a-standard-macs-own-picture)), and what is queued
+is never more than the window holds. The painting that brings the window back
+under its bound wakes the engine (`VideoSink::round_returned`), so a round is never
+left waiting for the next frame boundary. A still JPEG tile's exact picture goes
+in the room the window leaves, once nothing changed is waiting
+([The tiles](#the-tiles)).
 
-The configured dial is the maximum quality the controller may use. The controller
-does not estimate link capacity or try to consume unused capacity above that setting;
-its job is to reduce queued picture age under pressure and then recover toward the
-configured maximum.
+**A round costs what changed and not the desktop.** Only the tiles the mirror
+changed in since the last round are taken, and a tile that changed many times
+between two rounds is coded once.
 
-The walk is `QualityWalk` in the `screen-vp9` crate, shared with wlshare and driven
-from `src/encode.rs`. Every target supplies the local pressure signal: the time an
-encoded access unit waits for outbound capacity, including a wait for the byte
-budget. With `render_adaptive` enabled, the client acknowledgement path adds a
-second signal for picture lag, described below. This is necessary because a client
-can fall behind while each local queue remains shallow. Neither signal attempts to
-separate propagation delay from transmission time or to predict available headroom;
-the baseline and thresholds only classify whether delivered pictures are
-accumulating additional delay.
-
-When pressure persists, the walk lowers quality to its floor of 20 and then lowers
-the frame rate. Clear observations recover frame rate first and quality second,
-never above the configured value. It adjusts the public 1–100 dial rather than
-exposing the codec's quantizer scale. `Stream::set_quality` retunes the running
-encoder; rebuilding it would force a large keyframe at each adjustment.
-
-The walk has two knobs in a fixed order. Quality goes first, to the floor, and
-by more the further behind the link is: ten points for a frame 60 ms behind, twenty
-at 150 ms, thirty at 400 ms, where the frame rate is halved as well. On the floor
-the frame interval doubles instead, 33 ms up to 267 — bytes on the wire are bytes
-per frame times frames per second, and the floor bounds only the first: at 2 Mbit/s
-the picture ran 0.7 s behind on the floor with nothing left to give up, and with the
-frames going as well it ran 0.2 s behind at a fifth of the frames, every one of them
-fresh. A verdict is two behind frames among the last four, not a run — the queueing
-a link that is barely too small shows is intermittent, and a run that one clear
-frame reset took eleven seconds per step — and a keyframe is no verdict, being the
-whole picture and slow by its nature; the frames behind it queue behind its
-crossing, which says how big it was and not what the link bears, so the verdicts
-wait two seconds after one. A step is taken at most once a second, and
-while the lag is still falling a fifth per second from the step before, the queue
-that step left is draining and no further one is taken: judging the drain as a
-link still too small was measured to take 69 to the floor in three seconds on a
-link that carried 55. A second of clear frames, four at the least, takes the frames
-back first, then the quality, in steps that double from three to twenty-four while
-the link keeps taking them — a span rather than thirty frames, because a link
-slowed to four frames a second never saw thirty inside a burst of motion and stayed
-on the floor; a step the link refuses within four seconds is walked back after
-300 ms rather than a full cooldown, to the quality it came from, and for fifteen
-seconds the walk climbs no further than halfway back towards the one refused —
-TCP's slow-start threshold, on the dial, found by bisection. Without it a walk
-whose steps double would spend a session bouncing off the same quality; with plain
-steps of three, 5 Mbit/s already cycled 47 → 59 → 49 every ten seconds, and a walk
-that stepped ten down from a refusal and climbed to one under it cycled 43 → 49 →
-39 → 48 → 38 every few seconds, the ceiling dropping a point a cycle.
-
-`render_adaptive` gives the same walk a second signal on every VP9 picture
-encoded here, unless its target turned the walk off. On a
-decoded High Performance session that is the whole picture; on a passed one it
-is only the VP9 picture between HEVC stretches. The signal is the client's own lag: the paint window already tracks how
-long the oldest unacknowledged batch has been owed, and `LinkFeedback`
-(`src/feedback.rs`) publishes that age minus a baseline — the link's distance,
-so distance never reads as queueing; RustDesk and Guacamole both make the same
-subtraction. The distance is the smallest ping round trip of the last minute
-rather than the smallest batch's end-to-end time, because a batch's time carries
-its own transmission, and a stream whose frames are all one size spends the
-same time sending every one: taken from them, the baseline read that time as
-distance and the walk stood still. A ping is a few bytes; every ping carries its
-own number, every one sent is kept until its pong times it, and a parked wait's
-ping does not displace the heartbeat's — on the slow link where the distance is
-wanted, a pong takes the queue ahead of it to return, and one that answered a
-displaced ping measured nothing. Sixty milliseconds of queueing lag
-counts as a behind frame even when nothing local blocked, which is exactly the
-case the paint window measured a VP9 attachment falling 222 ms behind at 7
-batches in flight while every queue stayed shallow. Under `render_adaptive =
-false` the walk is pressure-only.
-
-A round costs what changed and not the desktop. The rectangles blitted into the
-mirror since the round before are what the picture differs by, and the encoder is
-handed them: screen-vp9 reads the rectangles into its planes and codes the blocks they touch,
-and every other block is skipped as the client holds it, at the quality it holds it.
-With one small change a 4K frame encodes in 11 ms for 26 and a 1080p one in 4 for 9,
-measured in screen-vp9. A keyframe, a stream's first frame and the settle's are the
-whole picture.
-
-The walk only runs when a round is taken, and a round is only taken when something
-changed, so a desktop that stops moving right after the link coarsened it would keep
-that picture until something changed again. The order task's settle tick is what
-comes back for it. Once the stream has been idle screen-vp9's `SETTLE_IDLE` since a
-round that left any of the picture below the dial — one encoded below it, or one at
-the dial over part of a picture coarsened before it, which the walk is told and
-keeps — and on a `render_adaptive` target the lag has cleared, it marks the
-unchanged mirror dirty, the whole of it, to be encoded at the dial. The engine
-encodes that as one inter frame, and the encoder's dial is left where the link had
-it: the frame is screen-vp9's, the one wlshare's own stream is settled with. libvpx codes the residual of unchanged blocks at
-the finer quantizer, so the frame sharpens the whole desktop without a keyframe; the
-vp9 test `a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe` guards
-that. The walk keeps its place through it: the round after the settle's goes back
-to the quality the link bears, and the settle's frame is no verdict. The screen
-stopping says nothing about the link, and a walk that started every burst of motion
-from the dial was measured, on a desktop moving four seconds in eight over 5 Mbit/s,
-to put the picture 0.45 s behind on average and the walk back at 50 or 60 every
-burst; keeping its place, the same run held 42 to 59 and 0.12 s. The clear frames
-before the quiet do not span it either: the walk's run of clear frames starts over
-at the settle, so a burst earns its step back up from its own frames rather than
-taking one on its first. A stream that went
-out at the dial owes nothing and sends nothing when it goes quiet.
-
-That signal only works because those queues are shallow. One message is a whole
-frame, and a deep queue at each of two hops in series is seconds of buffered
-picture, so `FRAME_BUFFER` is 4 at both.
+The queues behind the coder are shallow. One message is a whole frame of a passed
+stream or a tile, and a deep queue at each of two hops in series is seconds of
+buffered picture, so `FRAME_BUFFER` is 4 at both.
 
 Shallow in messages is not shallow in time, and time is what a person at the
 keyboard feels: a message is whatever a frame compressed to, so on a link that
@@ -1712,16 +1603,14 @@ the queues held 30 MB, which at 4 Mbit/s is a picture 63 s behind its desktop �
 input reaches the remote and its effect arrives a minute later, which reads as a
 session that stopped responding until a fresh engine throws the queues away. So
 the path is bounded in bytes as well. `QUEUE_BUDGET` in `src/encode.rs` (512 KiB,
-two full batches) is taken by the *engine* before a round is encoded, at the size of
+two full batches) is taken by the *engine* before a round is coded, at the size of
 the last round, which the order task settles once the size is known, and the share
 travels inside the unit (`Held` in `src/protocol.rs`) so that every way out of the
 queues returns it: dropped while nobody is attached, left in a channel an ended
 engine took with it — or delivered. With the budget spent the
 engine waits and stops reading its remote, which is the backpressure the message
 counts were meant to be. The order task never waits on it, because everything
-queued behind the order task holds a share only the order task can move. The wait
-also counts towards the walk's blocked time, which is where a link that is behind
-holds the engine instead of at a full queue.
+queued behind the order task holds a share only the order task can move.
 
 One thing beside the engine touches the budget: a socket replaced by its own browser's next attach gives everything back at once. Such a
 socket is usually one parked on a link that stopped, the engine lives on into the
@@ -1731,7 +1620,13 @@ that signal travels beside the events (`Attachment::superseded`) and the outboun
 task races it: the queue is dropped, the shares of batches in flight are let go,
 and the close goes out last.
 
-**The client decodes it with WebCodecs** `VideoDecoder`, reached through
+**The client draws the tiles itself.** Every tile of a batch is handed to the
+browser's image decoder at once (`createImageBitmap`), off the paint worker's
+thread, and each is drawn in wire order as its turn comes (`frontend/src/framePainter.ts`).
+A tile that does not decode, and a batch that arrives malformed, ask the gateway
+for the whole picture again, since nothing of a tile is sent twice unasked.
+
+**The client decodes a passed stream with WebCodecs** `VideoDecoder`, reached through
 `frontend/src/videoDecoder.ts` and driven from `framePainter.ts` — the batch loop,
 which replaces the decoder when the stream restarts on a different size. A stream
 [decoded in the page](#decoded-in-the-page) runs the page's software decoder
@@ -1762,21 +1657,21 @@ would not take.
 
 #### A passed stream and the browser's link
 
-The walk above follows the browser's link only for VP9 the gateway encodes. A
-passed stream is coded by the remote, so it can follow that link only if the
-remote is told how the link is doing. Today three of the five passthroughs are:
+The tiles follow the browser's link by its painting, as above. A passed stream is
+coded by the remote, so it can follow that link only if the remote is told how the
+link is doing. Today three of the five passthroughs are:
 
 | Passed stream | Who adapts it | What it hears of the browser's link | Target keys that reach it |
 |---|---|---|---|
-| wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`, the same walk as here: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
+| wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
 | An RDP host's graphics pipeline (passed whenever it is on) | The Windows host: frame rate by acknowledgements; with Adaptive, its H.264's rate control by its network detection, and its Progressive quality by its socket | Frames are acknowledged once the page has composed them; with Adaptive, the detection is answered at the page's pace, and while two large frames wait the host's socket goes unread through a small receive buffer; with High quality, nothing more | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
 | A High Performance Mac's HEVC or H.264 (always passed) | The Mac's rate controller, a target of 20–60 Mbit/s that a still screen comes far under | Nothing: the delay in its rate reports ends at the gateway | None: the video keys are refused on the target |
 | A Standard Mac's Adaptive picture (passed where chosen) | The Mac: how many updates it sends, and whether it refines them while the screen moves | Its connection, read as the page paints, through a small receive buffer | None: the video keys are refused on the target |
 | A Standard Mac's Full-quality picture (passed where chosen) | Nobody: zlib is lossless, and only comes slower on a slow link | Its connection, read as the page paints, through a small receive buffer | None: the video keys are refused on the target |
 
-- **wlshare** walks its encoder exactly as the gateway walks its own, so a passed
-  stream there is a peer of one encoded here: quality goes down to the floor, then
-  the frame rate, and both come back as the link clears. See
+- **wlshare** walks its encoder: quality goes down to the floor, then the frame
+  rate, and both come back as the link clears, and a desktop it left coarse is
+  sharpened at the dial once it goes quiet. See
   [wlshare's stream, passed through](#wlshares-stream-passed-through).
 - **A Windows host** has no quality dial for a client to turn, but it has its
   own network detection. Every session with the pipeline takes part in it, and
@@ -1808,8 +1703,8 @@ remote is told how the link is doing. Today three of the five passthroughs are:
   [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)
   and [The pipeline, passed on](rdp-client.md#the-pipeline-passed-on). On the
   bitmap path the host's updates are decoded here and its socket is read at the
-  gateway's own speed: it adapts to the gateway, and the VP9 walk adapts to the
-  browser.
+  gateway's own speed: it adapts to the gateway, and the tiles follow the
+  browser's painting.
 - **A Mac** walks its HEVC or H.264 by the one-way delay to the gateway, which on
   a LAN is never behind. A browser that falls behind fills the gateway's queue,
   which drops to the next IDR and asks the Mac for one. A still screen comes far
@@ -1827,70 +1722,61 @@ remote is told how the link is doing. Today three of the five passthroughs are:
   only comes slower. See
   [A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through).
 - **Other VNC servers**, a plain `vnc` target included even when wlshare answers
-  it, have no passed stream:
-  their picture is always encoded here, and the walk follows the browser's link
-  wherever `render_adaptive` is on.
+  it, have no passed stream: their picture is always the tiles coded here, which
+  follow the browser's painting.
 
 #### The codec
 
-The gateway **encodes VP9 only** (`src/vp9.rs`), and there is no codec key: one
-codec is one to maintain. The encoder is the `screen-vp9` crate, its own
-repository pinned by release tag here and in wlshare. Every stream coded here is
-libvpx's. The crate's other encoder, an **alpha** one written in Rust, is built
-for x86-64-v3 on amd64, above the baseline this gateway is built for
-([x86-64 CPU compatibility](../packaging/README.md#x86-64-cpu-compatibility)),
-so it is wlshare's alone: a session asks wlshare for it at the picker
-([What a session is started with](#what-a-session-is-started-with)).
-The crate is the one place libvpx is
-spoken to for this gateway and for wlshare's own stream: the quantizer pinned to the dial, screen-content
-tuning, no lag, no dropped frames, no keyframe unasked, the colour declared in the
-bitstream, the retune without a keyframe, and the RGB→YUV conversion in front of it
-all live there, proved once by tests that read every frame back with the archive's
-own decoder. `src/vp9.rs` is the stream over the mirror: the picture limits, the
-keyframe owed until a frame carries it, and the codec string. The one stream the
-gateway sends in another codec is one it does not encode: a High Performance Mac's
-own HEVC, passed through for a browser that takes it
-([Apple's media stream, passed through](#apples-media-stream-passed-through)). VP9 is BSD-3-Clause
-with a patent grant and present in every browser build, the ones that carry no
-proprietary codecs included. On synthetic screen content at 1080p and quality 60 it
-encodes a frame in **4.7 ms** at **18 KB** — measure with
-`cargo test --release measure_the_encoder -- --ignored --nocapture`; a debug build
-reports nonsense, because the RGB→YUV conversion it also times is Rust — the `yuv`
-crate's, on the AVX2 or NEON path the machine has — and runs an order of magnitude
-slower unoptimised.
+The gateway **codes no video**. What it codes is tiles, a JPEG or a PNG each
+([The tiles](#the-tiles)), and every stream the browser decodes is the remote's
+own, passed as it came: wlshare's VP9, a High Performance Mac's HEVC or H.264, and
+an RDP host's pipeline, whose H.264 the page decodes. There is no codec key.
 
-**VP9 is the one encoder because nothing else qualifies yet.** What the encoder is
-for is the stream that adapts: the quality walk, and the frame rate after it, set
-between frames with no keyframe
-([Colour and what the link will bear](#colour-and-what-the-link-will-bear) for
-what the walk moves). A second encoder
-has to do that at 4:4:4 before it is worth maintaining. HEVC is the one with a
-reason behind it: Apple's devices decode it in hardware, where VP9 at 4:4:4 is
-decoded in software by every browser, and a High Performance Mac's picture
-arrives as HEVC already. It is not taken further for now, for want of an encoder
-with a clear way to adapt at 4:4:4:
+**Tiles rather than a video encoder.** A tile holds no state: it is drawn on its
+own and predicts from nothing, so a slow link is sent the newest pixels whenever a
+round goes, with nothing to drop, keep in order for a decoder or start over from a
+keyframe; a still screen is made exact; and the browser decodes it itself, so the
+page carries no decoder. What a video encoder would buy is motion in fewer bytes:
+a scroll or a playing video across the desktop costs a tile coder every changed
+tile at its JPEG, where an inter-frame stream codes what moved. The pictures the
+gateway codes are plain VNC's and the RDP bitmap path's, neither prioritized, and
+each prioritized server sends a stream of its own for motion.
 
-- **The Mac's own stream cannot be thinned in place.** Its pictures predict each
-  from the last, so a smaller one means decoding and encoding again
-  ([Apple's media stream, passed through](#apples-media-stream-passed-through)).
-- **VideoToolbox's 4:4:4 is undocumented.** A compression session lists
-  `kVTProfileLevel_HEVC_Main444_AutoLevel`, which is in the framework's symbols
-  and in no header, and Apple says nothing of relying on it.
-- **Its quantizer bounds belong to another mode.** `MaxAllowedFrameQP` and
-  `MinAllowedFrameQP` take effect only under low-latency rate control, which
-  Apple documents for H.264, and a bound the bitrate cannot meet drops frames.
-  What is left is the average bitrate, a target the encoder is free to miss,
-  where the walk sets a quantizer.
-- **It would encode on a Mac only.** A gateway on Linux or Windows would need a
-  different HEVC encoder for the same stream.
+**wlshare's VP9 is at the browser's chroma.** VP9 profile 0 carries one colour
+sample per 2×2 pixels, and a one-pixel coloured glyph stem on a dark terminal
+shares its sample with three pixels of background: the luma survives, the colour
+comes back at a quarter of its saturation, and no quantizer can restore what was
+averaged before the encoder saw it. Measured 2026-09-01 on 1280×800 of rendered
+text — coloured monospace on a dark pane, black and coloured proportional on a
+light one, one-pixel rules, a gradient — encoded and decoded through the same
+libvpx:
 
-These are read from developers' reports and FFmpeg's VideoToolbox patches, not
-measured here.
-An encoder that shows the walk's two knobs at 4:4:4 reopens the question.
+| stream                       | keyframe | inter frame | PSNR    | worst pixel |
+|------------------------------|----------|-------------|---------|-------------|
+| 4:2:0, quality 100 (q 8)     | 408 KB   | 52 KB       | 28.4 dB | 136         |
+| 4:2:0, lossless (q 0)        | 640 KB   | 122 KB      | 28.5 dB | 135         |
+| 4:2:0 conversion, no codec   | —        | —           | 28.5 dB | 135         |
+| 4:4:4, quality 100 (q 8)     | 558 KB   | 48 KB       | 42.8 dB | 33          |
+| 4:4:4, lossless (q 0)        | 912 KB   | 70 KB       | 49.5 dB | 4           |
 
-Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,
-`stream.rs` and the wire carry access units, a keyframe bit and a configuration
-string, and `vp9.rs` is reachable only from `stream.rs`.
+Every 4:2:0 row is the conversion's own floor. 4:4:4 is VP9 profile 1, announced
+as `vp09.01.…`, and 4:2:0 is profile 0, `vp09.00.…`. The cost of 4:4:4 is the
+decoder: no browser's hardware VP9 path takes profile 1 — Intel's media engines
+from Ice Lake on decode it, but Chromium's D3D11 and VA-API decoders advertise
+profiles 0 and 2 only — so it always decodes in software, and a browser with no
+software VP9 at all, which is iOS and iPadOS, refuses it. So a `wlshare` target's
+chroma is the browser's (`RenderPlan::chroma`), for the session's life: 4:4:4
+where its own decoder takes profile 1, which the page asks it once at load
+(`frontend/src/nativeVp9.ts`) and states on the session socket (`vp9_444`), and
+4:2:0 where it does not, or will not say. wlshare is asked for that chroma beside
+its encoding (`WLSS` for 4:2:0). A browser that comes back answering otherwise is
+given the session from its start ([Session lifecycle](#session-lifecycle)). The
+page has no VP9 decoder of its own: a stream at a chroma the browser does not take
+is never sent.
+
+Nothing downstream of `TargetConfig::render_plan` names a codec but `vp9.rs`, which
+reads a passed wlshare frame's header and names its configuration string: the wire
+carries tiles, access units, a keyframe bit and a configuration string.
 
 **The browser is not asked for a codec, and never asked to justify itself.**
 There is no codec probe ahead of a session: it would put a round trip and a
@@ -2056,7 +1942,7 @@ and `GET /api/targets` carries it:
   radios in that order, HEVC passed through, H.264 passed through, and takes
   the first that is not greyed until somebody chooses another (`pictureOptions`
   in `frontend/src/targetChoices.ts`). A `connect` that names neither is
-  refused: no picture of a High Performance Mac's is encoded here. A Standard
+  refused: no picture of a High Performance Mac's is coded here. A Standard
   Mac's Picture group is Adaptive (beta) and Full quality (beta) passed
   through, which `connect` names as `apple-adaptive` and `apple-full`, the
   Adaptive one taken first; one that names neither is refused the same way.
@@ -2065,7 +1951,7 @@ and `GET /api/targets` carries it:
   Mac's HEVC, or a gateway with no HEVC decoder archive to serve a browser that
   needs it. The Mac's H.264 is never greyed, and nor are a Standard Mac's
   own pictures. `/api/targets` says which streams a target can pass, as
-  `passthroughs`; a target with any has no picture encoded here. For the pipeline the picker says the stream is always
+  `passthroughs`; a target with any has no picture coded here. For the pipeline the picker says the stream is always
   passed, as a note
   with nothing to choose, and where the
   browser cannot take it Start is disabled and says why, before the host is
@@ -2149,7 +2035,8 @@ started with — `resize`, `audio` and `passthrough` — and includes the
 expose only supported controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
-`render`, the resolved render dial, and `subtype`, the target's `wlshare`, `ard`
+`render`, the resolved picture — `tiles q90`, or for wlshare's VP9
+`VP9 q90 · 4:4:4 · adaptive` — and `subtype`, the target's `wlshare`, `ard`
 or `ard-high-performance` where it has one. The
 last is there because `protocol` is not an answer on VNC — a plain server, a
 wlshare one and a Mac on either subtype all say `vnc`, and they differ in whether
@@ -2178,6 +2065,7 @@ u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
 GRAPHICS op 0x04: u32 len | message[len]
 STANDARD op 0x05: u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
+TILE     op 0x06: u8 format | u16 x | u16 y | u16 w | u16 h | u32 len | image[len]
 ```
 
 One frame carries every record ready at once, so a backlog does not cost one
@@ -2188,8 +2076,14 @@ is `0x01` for a keyframe, and for a unit that is one strip of the picture
 ([in strips](#apples-media-stream-passed-through)) `0x02`, with the strip's
 number from the top in `0x0C` and `0x10` on the last strip of its frame —
 any other bit is rejected the same way, as is a number or a frame bit without
-`0x02`. A session's records are `VIDEO` unless its target passes an RDP host's
-[graphics pipeline](#rdps-graphics-pipeline-passed-through): a `GRAPHICS` record
+`0x02`. A session whose picture the gateway codes sends `TILE` records, from the
+`tilesStart` that begins its picture: a rectangle of the desktop, a row's run of
+64×64 tiles, its `format` `0x01` for a baseline JPEG and `0x02` for a PNG, any
+other rejected, as are an empty rectangle and one with no image. Each replaces what
+the canvas held there and depends on no other
+([The tiles](#the-tiles)). A session's records are `VIDEO` where its picture is a
+passed stream. Where its target passes an RDP host's
+[graphics pipeline](#rdps-graphics-pipeline-passed-through), a `GRAPHICS` record
 is one message of that pipeline as the host sent it, in its bulk compression,
 which means something only after every message before it from the
 `graphicsStart` that began the pipeline. One of no length is rejected. A session
@@ -2207,15 +2101,18 @@ worker queue and draw times. `ws.rs` consumes this transport feedback rather tha
 forwarding it to the remote engine — save a passed graphics pipeline, where a
 batch's acknowledgment is its frame's to the host
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)),
-and a Mac's passed own picture, where it lets the engine read on from the Mac
-([A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through)) —
+a Mac's passed own picture, where it lets the engine read on from the Mac
+([A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through)),
+and the tiles, where it lets the coder take its next round
+([Colour and what the link will bear](#colour-and-what-the-link-will-bear)) —
 and logs those measurements with the attachment totals. A socket generation travels through the worker so a late
 completion from a dead attachment cannot acknowledge a new one. This is the
 measurement contract for application-level backpressure, and the gateway acts on
 it three times: the paint window in `ws.rs` holds the next batch when too many are
-owed or the oldest is owed too long, on a `render_adaptive` target the same
-measurement — published through `LinkFeedback` — moves a stream's quality before
-the window ever parks, and it decides when a batch's share of `QUEUE_BUDGET` (see
+owed or the oldest is owed too long, on a `wlshare` target the same measurement —
+published through `LinkFeedback` and held into wlshare's fence echoes — moves
+wlshare's quality before the window ever parks, and it decides when a batch's
+share of `QUEUE_BUDGET` (see
 [Colour and what the link will bear](#colour-and-what-the-link-will-bear),
 where the queues are sized) goes back to
 the engine.
@@ -2245,13 +2142,12 @@ has only moved from a queue into the send buffer. Measured with an incompressibl
 12 Mbit/s of damage, that holds the picture 0.6 s behind at 4 Mbit/s and 4 s at
 1 Mbit/s (23 s without), and the link's return to full speed is immediate.
 
-`VIDEO` carries one access unit of the desktop: VP9, or a passed High Performance
-Mac's HEVC as Annex B. Its keyframe bit comes from the encoder, or the stream's own
-NAL unit types, rather than from the client parsing the payload — VP9 carries no
-parameter sets to read one out of. `(w, h)` is the desktop's true size, and the decoded picture may exceed
-it by a pixel on either axis (see [the video stream](#the-video-stream)); a size that
-differs from the last unit's is a stream that started over, preceded by a fresh
-`videoFormat`.
+`VIDEO` carries one access unit of the desktop: wlshare's VP9, or a passed High
+Performance Mac's HEVC or H.264 as Annex B. Its keyframe bit comes from the frame's
+header or the stream's own NAL unit types, read here, rather than from the client
+parsing the payload — VP9 carries no parameter sets to read one out of. `(w, h)` is
+the desktop's true size; a size that differs from the last unit's is a stream that
+started over, preceded by a fresh `videoFormat`.
 
 ### Audio frames
 
@@ -2684,7 +2580,7 @@ the remainder bare. A configured size already
 over the ceiling at 1x is rejected during config parsing; a physical or
 non-resizable remote may still answer past it because the gateway cannot ask it
 for a smaller desktop: a VNC one [holds the session](#past-the-ceiling) without a
-picture, and any other reaches the encoder's refusal.
+picture, and any other reaches the ceiling's refusal.
 
 High Performance paces what the window asks for. A second
 `SetDisplayConfiguration` overlapping the first, or a region of the old size
@@ -2744,7 +2640,7 @@ monitor count, so a host that opens one desktop lists nothing. The pipeline is
 passed beside it as over one display: the browser composes a passed pipeline
 whole and shows one column of it
 ([Two displays, one picture](#rdps-graphics-pipeline-passed-through)). Two
-displays are never encoded here, so `egfx = false` beside them is refused at
+displays are never coded here, so `egfx = false` beside them is refused at
 load: the bitmap path is one display.
 
 With two columns the list ends with *All Displays* (alpha), under the id Apple's
@@ -3006,7 +2902,7 @@ It also covers camera and microphone redirection.
 The built-in client speaks two dialects, chosen by the target's `subtype`, that
 share everything below the handshake — one read loop, one input path, one video
 path. Both force the same 32-bit true-color BGRX pixel format rather than
-negotiating one, and use the same shadow and encoder path as RDP. `src/vnc_encodings.rs`
+negotiating one, and use the same shadow and tile path as RDP. `src/vnc_encodings.rs`
 decodes ZRLE, and the Raw a server may send in its place, into the packed RGB888
 the shadow and the mirror take, so nothing above it knows which arrived.
 
@@ -3175,10 +3071,10 @@ data messages inside its encrypted record layer. See [`roadmap.md`](roadmap.md).
 
 ### Browser SPA
 
-The React SPA has login, target picker, and remote desktop states. It decodes
-the desktop's video stream onto a canvas — or composes an RDP host's passed
-graphics pipeline onto it, with the gateway's compositor built to WebAssembly —
-applies incoming frames serially, and overlays mouse,
+The React SPA has login, target picker, and remote desktop states. It draws the
+gateway's tiles onto a canvas, or decodes a passed stream onto it, or composes an
+RDP host's passed graphics pipeline, with the gateway's compositor built to
+WebAssembly — applies incoming frames serially, and overlays mouse,
 keyboard, touch, clipboard, display, and audio controls.
 
 **It refuses to start without a secure context and a WebCodecs video decoder**

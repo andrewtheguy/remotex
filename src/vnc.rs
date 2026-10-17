@@ -726,13 +726,13 @@ struct DesktopState {
     /// The picture is the media stream alone, decoded here or passed: a High
     /// Performance session, whose ZRLE rectangles are stepped over undecoded and
     /// never shown, in the stream's gaps either — the seconds before it delivers,
-    /// and across a display change — so a session that passes the stream builds no
-    /// video encoder at all.
+    /// and across a display change — so a session that passes the stream codes no
+    /// tile at all.
     media_stream: bool,
     /// The picture is the Mac's own, passed for the page to decode
     /// ([`Passthrough::AppleAdaptive`], [`Passthrough::AppleFull`]): its rectangles
     /// are in the one encoding of that quality ([`vnc_apple::encoding`]), and no
-    /// video encoder is built.
+    /// tile is coded here.
     standard: Option<StandardQuality>,
     /// The browser has been told the screen is not available
     /// ([`ServerMsg::ScreenUnavailable`]) and waits for the stream's first picture
@@ -2584,7 +2584,7 @@ fn encoding_label(encoding: i32) -> String {
 /// target's has wlshare's extensions in it, with its VP9 and the plan it is asked
 /// for at their head for a desktop within the ceiling. A plain target's has none
 /// of them, so a wlshare server reached as one serves it as it serves any VNC
-/// client: ZRLE, encoded here.
+/// client: ZRLE, coded here as tiles.
 #[allow(clippy::too_many_arguments)]
 async fn rfb38_preface(
     downlink: Downlink,
@@ -2656,9 +2656,8 @@ fn lists_wlshare_vp9((w, h): (u16, u16)) -> bool {
 /// preference puts what it would rather have — wlshare takes it wherever it is —
 /// and beside it what the stream is to be, from the plan: the dial as the ceiling
 /// wlshare's walk never goes above, and `WLSD` for a plan that holds the dial rather
-/// than walking it. So the target's keys mean on a passed
-/// stream what they mean on one encoded here; and `WLSS` for a plan at 4:2:0
-/// ([`RenderPlan::chroma`]).
+/// than walking it, so the target's keys reach the passed stream; and `WLSS` for a
+/// plan at 4:2:0 ([`RenderPlan::chroma`]).
 fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
     let mut listed = vec![ENCODING_WLSHARE_VP9, ENCODING_WLSHARE_VP9_QUALITY_BASE + i32::from(plan.quality)];
     if !plan.adaptive {
@@ -3840,10 +3839,9 @@ fn refused_small(what: &str, points: (u16, u16)) {
 /// window to a Retina display re-renders the same desktop at 2x. wlshare uses
 /// `SetDesktopSize` once the server declares support via an ExtendedDesktopSize
 /// rect; until then, its report is stashed for replay. Its points are taken to
-/// pixels at the scale the server reported — and they are held under the video
-/// stream's picture ceiling ([`crate::video::fit_ceiling`])
-/// before anything is sent or stashed, so the desktop asked for is one the encoder
-/// takes. A High Performance display needs no such hold: the Mac's own 3840×2160
+/// pixels at the scale the server reported — and they are held under the picture
+/// ceiling ([`crate::video::fit_ceiling`]) before anything is sent or stashed, so
+/// the desktop asked for is one the gateway shows. A High Performance display needs no such hold: the Mac's own 3840×2160
 /// backing ceiling in [`vnc_apple::virtual_display_mode`] is already inside it.
 async fn request_resize(
     uplink: &SharedUplink,
@@ -4135,7 +4133,7 @@ async fn pass_unit(
         uncover(shared, sink);
     }
     let (w, h) = unit.size;
-    let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
+    let passed = crate::vp9::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
     if !sink.pass_media(w, h, unit.data, passed).await? {
         media.lock().unwrap().want_keyframe(leg);
     }
@@ -4172,7 +4170,7 @@ async fn tab_unit(shared: &Shared, leg: usize, unit: PassedUnit, media: &SharedM
         tab_uncover(&shared.tab, &shared.desktop);
     }
     let (w, h) = unit.size;
-    let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
+    let passed = crate::vp9::Passed { decode: unit.decode, keyframe: unit.keyframe, strip: unit.strip };
     match sink.pass_media(w, h, unit.data, passed).await {
         Ok(true) => {}
         Ok(false) => media.lock().unwrap().want_keyframe(leg),
@@ -8697,9 +8695,9 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv444 };
+        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(with_wlshare_vp9(&rest, walked), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
-        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv444 };
+        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -9920,7 +9918,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-
+            wlshare: true,
             chroma: crate::vp9::Chroma::Yuv444,
         };
         Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
@@ -9958,7 +9956,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-
+            wlshare: true,
             chroma: crate::vp9::Chroma::Yuv444,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Refuse);
@@ -9986,13 +9984,11 @@ mod tests {
         (sink, rx)
     }
 
-    /// The access units a flushed sink has put on its channel.
-    fn units(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<crate::protocol::VideoUnit> {
+    /// The pictures a flushed sink has put on its channel: access units passed, and
+    /// tiles coded here.
+    fn units(rx: &mut mpsc::Receiver<ServerMsg>) -> Vec<ServerMsg> {
         std::iter::from_fn(|| rx.try_recv().ok())
-            .filter_map(|msg| match msg {
-                ServerMsg::Video(unit) => Some(unit),
-                _ => None,
-            })
+            .filter(|msg| matches!(msg, ServerMsg::Video(_) | ServerMsg::Tile(_)))
             .collect()
     }
 
@@ -10251,8 +10247,8 @@ mod tests {
         assert_eq!(d.viewport, Some((640, 480)));
     }
 
-    /// A generic server is never asked for a desktop the encoder refuses: the
-    /// window's size is held under the picture ceiling before it is sent or stashed.
+    /// A generic server is never asked for a desktop past the picture ceiling: the
+    /// window's size is held under it before it is sent or stashed.
     #[tokio::test]
     async fn a_generic_resize_is_held_under_the_video_ceiling() {
         let (uplink, wire) = test_uplink();
@@ -11566,7 +11562,7 @@ mod tests {
         assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
 
         sink.flush().await;
-        assert_eq!(units(&mut rx).len(), 1, "one update, one access unit");
+        assert_eq!(units(&mut rx).len(), 1, "one update, one tile");
         // Both encodings decoded the same picture, so the shadow — which holds what
         // the last of them left — matches the first.
         let held = shadow.lock().unwrap().copy_out(Rect::from_size(0, 0, 2, 2).unwrap());
@@ -11576,8 +11572,8 @@ mod tests {
 
     /// The picture of a session with a media stream is the stream alone: the
     /// screen the Mac sends as ZRLE between streams is stepped over undecoded, so
-    /// a passed stream is never displaced by video encoded here, and a session
-    /// that passes builds no encoder.
+    /// a passed stream is never displaced by tiles coded here, and a session that
+    /// passes codes none.
     #[tokio::test]
     async fn the_screen_between_streams_is_not_encoded() {
         let bgrx = [0x30, 0x20, 0x10, 0].repeat(4);
@@ -12596,7 +12592,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, chroma: crate::vp9::Chroma::Yuv420 };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -13192,7 +13188,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-
+            wlshare: false,
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let (frames, mut tab_rx) = mpsc::channel(8);
@@ -13234,7 +13230,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-
+            wlshare: false,
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let feed = || {

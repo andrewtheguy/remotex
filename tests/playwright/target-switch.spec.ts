@@ -6,13 +6,13 @@
 // decode worker.
 //
 // Everything asserted is decided by the system and not by a machine's timing: that
-// each session's picture starts as its target passes or encodes it and is
+// each session's picture starts as its target passes or codes it and is
 // acknowledged, which paint worker it was painted by, as Playwright reports them
 // starting and closing, and how often each decoder's module is fetched, which is
 // once for each decode worker that loads it. The browser's own decoder is made to
 // refuse the Mac's HEVC (`fakeOwnDecoder`), so it is the page's to decode in its
-// module; the gateway's VP9 is the browser's own decoder's. Nothing here looks at
-// a pixel.
+// module; the gateway's tiles are the browser's own image decoder's. Nothing here
+// looks at a pixel.
 //
 // It needs a gateway whose local config names a live RDP host twice, once with the
 // pipeline on and once with `egfx = false`, and a live Mac as an `ard` and an
@@ -112,13 +112,13 @@ function watch(page: Page): Watched {
 
 /// How a session's picture starts: the control message that announces it.
 type Start =
-  | { control: "graphicsStart" | "standardStart" }
+  | { control: "graphicsStart" | "standardStart" | "tilesStart" }
   | { control: "videoFormat"; decode: RegExp };
 
 const PIPELINE: Start = { control: "graphicsStart" };
 const STANDARD: Start = { control: "standardStart" };
-/// The gateway's VP9 of a bitmap target, 4:2:0 for every browser.
-const VP9: Start = { control: "videoFormat", decode: /^vp09\.00\./ };
+/// The gateway's tiles of a bitmap target.
+const TILES: Start = { control: "tilesStart" };
 const HEVC: Start = { control: "videoFormat", decode: /^hev1\./ };
 
 /// That the session started at `from` announced its picture as `start`, and the
@@ -141,7 +141,10 @@ async function expectPainted(
         );
         return at >= 0 && events.slice(at).some((event) => "ack" in event);
       },
-      { message: `a ${start.control} and a batch painted after it`, timeout: 30_000 },
+      {
+        message: `a ${start.control} and a batch painted after it`,
+        timeout: 30_000,
+      },
     )
     .toBe(true);
 }
@@ -162,7 +165,6 @@ async function session(
   await expectPainted(seen, from, start);
   await expect(faults(page)).toHaveCount(0);
 }
-
 
 test.describe("a Mac's and an RDP host's targets on one page", () => {
   test.skip(
@@ -192,16 +194,16 @@ test.describe("a Mac's and an RDP host's targets on one page", () => {
     await expectPainted(seen, 0, PIPELINE);
     expect(seen.painters).toHaveLength(1);
 
-    // Its end ends that worker; the RDP host's VP9 is decoded in the next.
+    // Its end ends that worker; the RDP host's tiles are drawn in the next.
     await returnToPicker(page);
     await expect.poll(() => open(seen.painters[0])).toBe(false);
-    await session(page, seen, bitmap, VP9);
+    await session(page, seen, bitmap, TILES);
     expect(seen.painters).toHaveLength(2);
 
-    // A VP9 session's end keeps the worker: the next VP9 is decoded in the same
-    // paint worker.
+    // A session of tiles keeps the worker at its end: the next one's are drawn in
+    // the same paint worker.
     await returnToPicker(page);
-    await session(page, seen, bitmap, VP9);
+    await session(page, seen, bitmap, TILES);
     expect(seen.painters).toHaveLength(2);
     expect(open(seen.painters[1])).toBe(true);
 
@@ -230,9 +232,9 @@ test.describe("a Mac's and an RDP host's targets on one page", () => {
       2 * hevcLoads,
     );
 
-    // And the RDP host's VP9 there, in the same paint worker.
+    // And the RDP host's tiles there, in the same paint worker.
     await returnToPicker(page);
-    await session(page, seen, bitmap, VP9);
+    await session(page, seen, bitmap, TILES);
     expect(seen.painters).toHaveLength(3);
 
     // And the pipeline after it, composed in the same worker, whose end it is.

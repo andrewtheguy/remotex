@@ -21,6 +21,7 @@ import {
   type StandardMsg,
   type StandardQuality,
   stripRows,
+  type TileMsg,
   type VideoMsg,
 } from "./protocol.ts";
 import { type DecodedPicture, isSoftwarePlanes } from "./softwareDecoder.ts";
@@ -37,8 +38,8 @@ import {
 } from "./videoDecoder.ts";
 
 // The browser SPA's batch draw loop: each batch's records — access units, runs
-// of an RDP host's graphics pipeline and a Mac's own rectangles — decoded or
-// composed in wire order and drawn onto the canvas. The decoder lives here rather than beside each caller:
+// of an RDP host's graphics pipeline, a Mac's own rectangles and the gateway's
+// tiles — decoded or composed in wire order and drawn onto the canvas. The decoder lives here rather than beside each caller:
 // it belongs to exactly one attachment, and `clear` is the one place that ends it.
 
 // The destination's 2D context. A union rather than the element's alone because
@@ -80,6 +81,12 @@ export interface FramePainter {
    * before is done with.
    */
   startStandard(quality: StandardQuality): void;
+  /**
+   * Adopt a `tilesStart`: the picture is the gateway's tiles from here, the TILE
+   * records after it each an image drawn on the desktop's canvas where it says.
+   * Whatever decoder or compositor stood before is done with.
+   */
+  startTiles(): void;
   /**
    * Adopt a `graphicsView` on the page that composes the pipeline: the part of
    * its picture this display is, shown from now, by this pipeline and the next.
@@ -207,6 +214,10 @@ export function createFramePainter(options: {
   }
   let standard: Standard | null = null;
   const loadStandardPicture = options.loadStandard ?? (() => loadStandard());
+  // Whether the picture is the gateway's tiles, from its `tilesStart`: a tile is
+  // drawn only then, so one of a picture since replaced is not.
+  let tiles = false;
+
   // The desktop's size in pixels, from the last resize: what a Mac's own
   // picture's framebuffer is, the resize coming ahead of the picture's start.
   let framebuffer: { w: number; h: number } | null = null;
@@ -285,10 +296,10 @@ export function createFramePainter(options: {
   const describe = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
 
-  // A software decoder's picture, made by the first one it decodes. A Mac's
-  // passed stream gives way to VP9 encoded here across a display change, which
-  // the browser's decoder may take and is then painted on the desktop's own
-  // canvas, so `shown` goes both ways in a session.
+  // A software decoder's picture, made by the first one it decodes. A stream it
+  // decodes gives way to a picture the browser's decoder takes, or to the
+  // gateway's tiles, painted on the desktop's own canvas, so `shown` goes both
+  // ways in a session.
   // `broken` once the GPU would not take a picture: said once, and the pictures
   // after it are dropped, since nothing sent again would be taken either.
   const planar: {
@@ -341,6 +352,7 @@ export function createFramePainter(options: {
   };
 
   const releaseVideo = () => {
+    tiles = false;
     releasePipeline();
     releaseStandard();
     releaseMirror();
@@ -448,7 +460,8 @@ export function createFramePainter(options: {
 
   // Every unit is part of one chain, so a dropped batch cuts it: the deltas after it
   // name a picture this decoder never made. Restarted rather than fed them, and a
-  // keyframe asked for, exactly as a failed decoder is. A pipeline's dropped batch
+  // keyframe asked for, exactly as a failed decoder is. A dropped batch of tiles
+  // leaves the canvas without them, and the same ask brings the whole picture. A pipeline's dropped batch
   // is commands its
   // compositor never composed, which no repaint brings back, so it ends there.
   const dropMalformed = () => {
@@ -540,6 +553,58 @@ export function createFramePainter(options: {
     if (!current.shown && run.width > 0 && run.height > 0) {
       current.shown = true;
       options.onGraphicsShown?.(true);
+    }
+  };
+
+  // One tile's image, decoded by the browser off this thread as soon as its batch
+  // lands: null for a record that is no tile, or a tile of no picture of tiles.
+  const tileImage = (record: BatchRecord): Promise<ImageBitmap> | null => {
+    if (record.kind !== "tile" || !tiles) {
+      return null;
+    }
+    const type = record.format === "jpeg" ? "image/jpeg" : "image/png";
+    return createImageBitmap(
+      new Blob([record.data as Uint8Array<ArrayBuffer>], { type }),
+      {
+        colorSpaceConversion: "none",
+        premultiplyAlpha: "none",
+      },
+    );
+  };
+
+  // One tile, drawn where it says when its turn comes. One that does not decode
+  // leaves the canvas without it, and the gateway sends nothing of a tile twice
+  // unasked, so the whole picture is asked for.
+  const paintTile = async (
+    record: TileMsg,
+    pending: Promise<ImageBitmap> | null,
+    born: number,
+  ) => {
+    if (!pending) {
+      return;
+    }
+    let image: ImageBitmap;
+    try {
+      image = await pending;
+    } catch (error) {
+      if (generation === born && tiles) {
+        options.onVideoNeedsKeyframe(
+          `a tile did not decode: ${describe(error)}`,
+        );
+      }
+      return;
+    }
+    try {
+      const ctx = options.context();
+      if (generation !== born || !tiles || !ctx) {
+        return;
+      }
+      ctx.drawImage(image, record.x, record.y);
+      // The desktop's own canvas is the picture again.
+      hidePlanes();
+      painted();
+    } finally {
+      image.close();
     }
   };
 
@@ -747,6 +812,7 @@ export function createFramePainter(options: {
       // the moment it is drawn instead of the whole batch's worth staying alive until
       // the slowest.
       const decodes = records.map(decode);
+      const images = records.map(tileImage);
       for (let i = 0; i < records.length; i += 1) {
         const record = records[i];
         if (record.kind === "graphics") {
@@ -755,6 +821,10 @@ export function createFramePainter(options: {
         }
         if (record.kind === "standard") {
           await paintStandard(record, born);
+          continue;
+        }
+        if (record.kind === "tile") {
+          await paintTile(record, images[i], born);
           continue;
         }
         show(record, await decodes[i], born);
@@ -837,6 +907,10 @@ export function createFramePainter(options: {
           }
         });
       standard = starting;
+    },
+    startTiles() {
+      releaseVideo();
+      tiles = true;
     },
     setGraphicsView(part) {
       graphicsPart = part;
@@ -924,9 +998,10 @@ export function createFramePainter(options: {
       }
     },
     setVideoFormat(format) {
-      // A stream takes the picture from whatever passed picture was painted:
-      // a pipeline, the Mac's own picture, or in a tab the mirror of the
-      // session page's picture, which shows the display no more.
+      // A stream takes the picture from whatever else was painted: the
+      // gateway's tiles, a pipeline, the Mac's own picture, or in a tab the
+      // mirror of the session page's picture, which shows the display no more.
+      tiles = false;
       releasePipeline();
       releaseStandard();
       releaseMirror();

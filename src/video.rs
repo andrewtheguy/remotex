@@ -1,55 +1,45 @@
-//! What the video stream shares with the rest of the gateway: the framebuffer copy it
-//! reads and the picture limits it encodes within. [`crate::vp9`] knows only how to
-//! encode a picture; when a round is taken is [`crate::encode`]'s business.
+//! What every picture shares with the rest of the gateway: the framebuffer copy the
+//! tiles are cut from ([`Mirror`]) and the picture ceiling every picture, coded here or
+//! passed, is held under ([`check_picture`]). When a round is taken is
+//! [`crate::encode`]'s business, and what it codes is [`crate::tiles`]'.
 //!
-//! Two things about the shape follow from the rest of the gateway rather than from
-//! any codec:
+//! **Accepted pixels are owed until a tile carries them.** [`crate::shadow::Shadow`]
+//! records source pixels as delivered the moment it accepts them, and nothing
+//! re-sends them, so the tiles they land on stay owed until a round takes them. The
+//! mirror holds the whole framebuffer because damage arrives as rectangles, and VNC's
+//! can only be cropped out of the one it just decoded.
 //!
-//! - **A frame may never be dropped.** [`crate::shadow::Shadow`] records source pixels
-//!   as delivered the moment it accepts them, so a frame the encoder skipped is
-//!   permanently wrong pixels — nothing re-sends it. Hence an empty bitstream leaves
-//!   the caller's dirty flag alone instead of clearing it.
-//! - **The stream is fed rectangles, not frames.** Damage arrives as rectangles, and
-//!   VNC's can only be cropped out of the one it just decoded, so the [`Mirror`] holds
-//!   the whole framebuffer and the stream encodes it when the engine says a frame has
-//!   ended.
-//!
-//! A detach drops frames outright (`SessionManager::pump`), so a client coming back has
-//! missed part of the stream and cannot decode from where it left off. It recovers
-//! because every attach injects a repaint, which is one of the moments the stream's
-//! keyframe is forced.
+//! A detach drops what was queued (`SessionManager::pump`), so a client coming back has
+//! missed part of the picture. It recovers because every attach injects a repaint,
+//! which owes it every tile from the picture's start.
 
 use crate::shadow::Rect;
 
 /// The 1–100 quality dial, coarsest first.
 ///
-/// The dial is the gateway's own scale rather than a quantizer: [`crate::vp9`] maps it
-/// onto its 0–63, and that mapping is the only place the two numbers meet. The
-/// congestion loop in [`crate::encode`] walks *this* scale, so a future codec is a new
-/// mapping rather than a new loop.
+/// The dial is the gateway's own scale: a tile's JPEG quality, which is the same 1–100,
+/// and the ceiling a `wlshare` target asks wlshare's VP9 for, which wlshare maps onto
+/// its own quantizer.
 pub const QUALITY_MIN: u8 = 1;
 /// See [`QUALITY_MIN`].
 pub const QUALITY_MAX: u8 = 100;
 
-/// The longest side a stream will encode, and the longest the *other* side may then
-/// be.
+/// The longest side a picture may have, and the longest the *other* side may then be.
 ///
 /// Checked either way up, because the limit is on the picture and not on width:
 /// 3840×2400 and 2400×3840 are both legal, and 3840×3840 is not. A `w <= 3840 &&
-/// h <= 2400` test would read almost the same and would refuse a portrait desktop the
-/// encoder is perfectly happy with.
+/// h <= 2400` test would read almost the same and would refuse a portrait desktop.
 ///
-/// libvpx has no ceiling this near — 4K is only VP9 level 5.0 of 6.2 — so this is the
-/// gateway's own line: past 4K a software realtime encode of a desktop stops being
-/// realtime. 4K is the *panel*, in
-/// either shape: 3840×2160 is a 16:9 one and 3840×2400 the 16:10 one a 1920×1200
-/// laptop at 2x is, 11% more pixels and one VP9 level up (6.0, which every browser's
-/// decoder takes). 5K is past the line.
+/// The gateway's own line, which every picture is held under, the tiles coded here
+/// and every stream passed: past 4K a desktop shown at 100%, as every picture is, is
+/// more than a browser window takes. 4K is the *panel*, in either shape: 3840×2160 is
+/// a 16:9 one and 3840×2400 the 16:10 one a 1920×1200 laptop at 2x is. 5K is past the
+/// line.
 pub const MAX_LONG_SIDE: u16 = 3840;
 /// See [`MAX_LONG_SIDE`].
 pub const MAX_SHORT_SIDE: u16 = 2400;
 
-/// Whether a picture of this many pixels is one a stream will encode — the test
+/// Whether a picture of this many pixels is under the ceiling — the test
 /// [`check_picture`] refuses on, for a caller deciding what to ask a remote for.
 pub fn within_ceiling((w, h): (u32, u32)) -> bool {
     let (long, short) = (w.max(h), w.min(h));
@@ -60,8 +50,8 @@ pub fn within_ceiling((w, h): (u32, u32)) -> bool {
 /// display under the Mac's: each axis clamped, the orientation kept, so a
 /// landscape desktop is held to 3840×2400 and a portrait one to 2400×3840.
 ///
-/// This is what lets a resizing engine ask the remote for a desktop the stream
-/// will take instead of ending the session over the one it was about to get: a
+/// This is what lets a resizing engine ask the remote for a desktop under the
+/// ceiling instead of ending the session over the one it was about to get: a
 /// 5120×2880 screen, or a 2560×1440 one at 2x, opens and resizes to a 3840×2400
 /// desktop shown at 100% with the rest of the window left bare. Not a scale —
 /// the gateway never shrinks a picture, every pixel the remote draws reaches the
@@ -76,15 +66,8 @@ pub fn fit_ceiling((w, h): (u32, u32)) -> (u32, u32) {
     }
 }
 
-/// One encoded frame: a complete access unit, and whether a decoder that has seen
-/// nothing before it can start here.
-pub struct AccessUnit {
-    pub data: Vec<u8>,
-    pub keyframe: bool,
-}
-
-/// The whole framebuffer as packed RGB888, and the copy the stream reads: the
-/// desktop at its own size, odd sides included, which is the picture encoded.
+/// The whole framebuffer as packed RGB888, which the tiles are cut from: the desktop
+/// at its own size, odd sides included.
 #[derive(Clone)]
 pub struct Mirror {
     /// The desktop as the client knows it, and as a record header reports it.
@@ -134,9 +117,8 @@ impl Mirror {
         Ok(())
     }
 
-    /// `rect`'s pixels as packed RGB888, into a buffer the caller reuses — for the
-    /// tests asserting what landed where.
-    #[cfg(test)]
+    /// `rect`'s pixels as packed RGB888, into a buffer the caller reuses: a run of
+    /// tiles a round takes ([`crate::tiles::Tiles::take_round`]).
     pub fn crop_into(&self, rect: Rect, out: &mut Vec<u8>) -> anyhow::Result<()> {
         anyhow::ensure!(
             rect.right < self.size.0 && rect.bottom < self.size.1,
@@ -158,35 +140,9 @@ impl Mirror {
         }
         Ok(())
     }
-
-    /// Copy `rect`'s pixels from `src` — the double-buffer sync in
-    /// [`crate::encode`]'s round.
-    ///
-    /// The two mirrors are twins by construction (the spare is a clone of the
-    /// current one), and every staged rect went through [`Self::blit`]'s bounds
-    /// check, so a mismatch here is a bug in that bookkeeping rather than a state a
-    /// session can reach — asserted in debug, clamped to a no-op in release, where
-    /// the worst outcome is a stale region the next damage repaints.
-    pub fn adopt(&mut self, src: &Mirror, rect: Rect) {
-        debug_assert_eq!(self.size, src.size, "a mirror adopted from a differently sized twin");
-        if self.size != src.size || rect.right >= self.size.0 || rect.bottom >= self.size.1 {
-            return;
-        }
-        let stride = usize::from(self.size.0) * 3;
-        let (w, h) = (usize::from(rect.w()), usize::from(rect.h()));
-        for row in 0..h {
-            let at = (usize::from(rect.top) + row) * stride + usize::from(rect.left) * 3;
-            self.rgb[at..at + w * 3].copy_from_slice(&src.rgb[at..at + w * 3]);
-        }
-    }
-
-    /// The whole picture as one packed RGB888 slice — what the stream encodes.
-    pub fn picture(&self) -> &[u8] {
-        &self.rgb
-    }
 }
 
-/// Refuse a picture the encoder will not take.
+/// Refuse a picture past the ceiling.
 ///
 /// That cannot be a config-time refusal — only the remote knows its own size, and it
 /// may change mid-session — so the message has to carry the whole explanation to
@@ -194,43 +150,13 @@ impl Mirror {
 pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
     anyhow::ensure!(
         within_ceiling((u32::from(w), u32::from(h))),
-        "a video stream will not encode a {w}x{h} picture: one is refused with a long \
+        "the gateway will not show a {w}x{h} picture: one is refused with a long \
          side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
          remote knows its own size, so check-config cannot catch this — give this \
          target a remote that can be asked for a smaller desktop: in a session started \
          with resize the gateway holds every size it asks for under this ceiling"
     );
     Ok(())
-}
-
-/// How many threads the encoder gets: every core but one, at least two where there
-/// are two, at most [`MAX_THREADS`]. The stream has one picture and nothing to
-/// overlap with, so its parallelism has to come from inside the picture — VP9's
-/// row-based multithreading and the tile columns the encoder cuts for this count.
-/// An encode is a burst of milliseconds that the person at the browser is waiting
-/// on, so it gets the machine; the one core kept back is for the engine's read
-/// loop and the socket, which are what make the next frame. Measured with the
-/// encoder's bench on six cores: at 1080p the picture is too small for more than
-/// three threads to matter either way, and at 4K six threads take a frame in six
-/// sevenths of the time three do.
-pub fn threads() -> usize {
-    threads_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
-}
-
-/// The most threads the encoder takes, whatever the machine: what a 4K picture
-/// can use. The useful count is the picture's, not the machine's — libvpx's
-/// row-based multithreading hands out superblock rows within each tile column,
-/// so the work to share grows with the picture — and the bench's two points, 1080p
-/// saturating at three threads and 4K still gaining at six, put it at about one
-/// thread a megapixel: eight for 4K's 8.3. 4K is the largest desktop this gateway
-/// is tuned for; a larger one is an edge case that streams, not a target, and
-/// gets the 4K count. Not measured past six threads, since the host had six cores.
-/// libvpx itself refuses more than 64.
-const MAX_THREADS: usize = 8;
-
-/// [`threads`] for a machine of `cores`.
-fn threads_for(cores: usize) -> usize {
-    if cores <= 2 { cores } else { (cores - 1).min(MAX_THREADS) }
 }
 
 #[cfg(test)]
@@ -253,167 +179,6 @@ mod tests {
     /// A rectangle from a position and a size, which is what most of these want.
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
-    }
-
-    /// Every core but one, both cores of a two-core machine, the one core of a
-    /// single-core one, and eight at most.
-    #[test]
-    fn the_encoder_takes_every_core_but_one_up_to_eight() {
-        let cores = [1, 2, 3, 4, 5, 6, 8, 9, 16, 64, 256];
-        let threads: Vec<usize> = cores.into_iter().map(threads_for).collect();
-        assert_eq!(threads, [1, 2, 2, 3, 4, 5, 7, 8, 8, 8, 8]);
-    }
-
-    /// Synthetic screen content: a light panel with text-like runs, and one window being
-    /// dragged across the dark side of the desktop.
-    ///
-    /// Screen content rather than a gradient or noise, and moving rather than still,
-    /// because both encoders are tuned for the first and neither is measurable on the
-    /// second: identical frames cost nearly nothing at any quality, and noise costs the
-    /// same at every quality. This is the same picture `crates/libvpx-e2e` draws, in RGB
-    /// rather than I420, so a number from one is comparable with a number from the other.
-    fn screen(w: u16, h: u16, frame: u32) -> Vec<u8> {
-        let (w, h) = (usize::from(w), usize::from(h));
-        let mut rgb = vec![24u8; w * h * 3];
-        let put = |rgb: &mut [u8], row: usize, from: usize, to: usize, shade: u8| {
-            let to = to.min(w);
-            if from < to {
-                rgb[(row * w + from) * 3..(row * w + to) * 3].fill(shade);
-            }
-        };
-        for row in 0..h {
-            put(&mut rgb, row, w * 2 / 3, w, 200);
-        }
-        for line in 0..(h / 20) {
-            let row = 24 + line * 20;
-            if row + 9 >= h {
-                break;
-            }
-            for glyph in 0..14 {
-                let x = w * 2 / 3 + 8 + glyph * 12;
-                for dy in 0..9 {
-                    put(&mut rgb, row + dy, x, x + 7, 32);
-                }
-            }
-        }
-        let x0 = 8 + (frame as usize * 9) % (w / 2);
-        let y0 = 40 + (frame as usize * 5) % (h / 2);
-        for dy in 0..120 {
-            let row = y0 + dy;
-            if row >= h {
-                break;
-            }
-            put(&mut rgb, row, x0, x0 + 160, if dy < 24 { 96 } else { 144 });
-        }
-        rgb
-    }
-
-    /// What the encoder costs on desktop pixels — the measurement that settles VP9's
-    /// `Q_FINEST`, `CPU_USED` and thread count.
-    ///
-    /// `#[ignore]`d because it takes a minute and prints rather than asserts: the numbers
-    /// are the output, and a threshold on them would be a test of this machine.
-    ///
-    /// **`--release`, and that is not the usual boilerplate — a debug run measures the
-    /// wrong thing and says so convincingly.** The encoder is C and is optimized
-    /// whatever this profile is: libvpx is compiled `-O3` once, into the archive
-    /// `libvpx-prebuilt` publishes, and nothing a consumer does can touch it. The
-    /// conversion is *Rust* — [`Yuv::read_rgb`], the `yuv` crate's — so it is compiled
-    /// with **this** crate's profile, and at `opt-level = 0` its SIMD paths are function
-    /// calls around scalar arithmetic with bounds checks. The scalar loop it replaced
-    /// measured 29.1 ms/frame at 1280×800 in debug against 0.44 in release, a 66× swing
-    /// that made the conversion look like 90% of the encode.
-    ///
-    /// ```sh
-    /// cargo test --release --lib video::tests::measure_the_encoder -- --ignored --nocapture
-    /// ```
-    ///
-    /// The conversion column is measured separately because it is the one part of an
-    /// encode this crate owns: on a six-core host the scalar loop was two fifths of a
-    /// 1080p encode, which is what put the `yuv` crate in front of the encoder, and
-    /// nothing else here would say so. Sweeping VP9's speed and thread settings means editing the constants
-    /// at the top of `src/vp9.rs` and running this again; they are compile-time on
-    /// purpose, since a deployment has no business setting them.
-    #[test]
-    #[ignore = "manual: measures the encoder and prints a table"]
-    fn measure_the_encoder() {
-        const FRAMES: u32 = 60;
-        let sizes = [(1280u16, 800u16), (1920, 1080)];
-        let qualities = [20u8, 40, 60, 80];
-
-        println!(
-            "\n| size      | chroma | quality | KB total | KB keyframe | µs/frame encode \
-             | µs/frame convert | kbit/s at 30fps |"
-        );
-        println!(
-            "|-----------|--------|---------|----------|-------------|-----------------\
-             |------------------|-----------------|"
-        );
-        let rows = sizes.into_iter().flat_map(|size| [crate::vp9::Chroma::Yuv420, crate::vp9::Chroma::Yuv444].map(|chroma| (size, chroma)));
-        for ((w, h), chroma) in rows {
-            for quality in qualities {
-                let mut mirror = Mirror::new(w, h).expect("a mirror");
-                let mut stream = crate::vp9::Stream::new(mirror.size(), quality, chroma).expect("a stream");
-                let mut total = 0usize;
-                let mut keyframe_bytes = 0usize;
-                let mut encode = std::time::Duration::ZERO;
-                for frame in 0..FRAMES {
-                    mirror
-                        .blit(rect(0, 0, w, h), &screen(w, h, frame))
-                        .expect("a full-screen blit");
-                    let started = std::time::Instant::now();
-                    let unit = stream
-                        .encode(&mirror, None)
-                        .expect("an encode")
-                        .expect("an access unit");
-                    encode += started.elapsed();
-                    total += unit.data.len();
-                    if unit.keyframe {
-                        keyframe_bytes += unit.data.len();
-                    }
-                }
-
-                // The conversion on its own, over the same pixels: it is inside the
-                // encode timing above, and this is what says how much of it it was.
-                let mut picture = screen_vp9::Picture::new(mirror.size().0, mirror.size().1, chroma, threads()).expect("a picture");
-                let crop = mirror.picture().to_vec();
-                let started = std::time::Instant::now();
-                for _ in 0..FRAMES {
-                    picture.read_rgb(&crop).expect("its own picture");
-                }
-                let convert = started.elapsed();
-
-                let bits = total as f64 * 8.0;
-                println!(
-                    "| {:9} | {:6} | {:7} | {:8} | {:11} | {:15} | {:16} | {:15.0} |",
-                    format!("{w}x{h}"),
-                    crate::stream::chroma_name(chroma),
-                    quality,
-                    total / 1024,
-                    keyframe_bytes / 1024,
-                    encode.as_micros() / u128::from(FRAMES),
-                    convert.as_micros() / u128::from(FRAMES),
-                    bits / (f64::from(FRAMES) / 30.0) / 1000.0,
-                );
-            }
-        }
-        println!(
-            "\n  {FRAMES} frames of synthetic screen content per row, one stream over the \
-             whole desktop.\n  A row's keyframe column is its first frame; everything else \
-             is inter-frame."
-        );
-        // Said in the output rather than only in the doc comment, because the numbers are
-        // what gets pasted into a commit message or a doc, and a debug row's conversion
-        // column is off by two orders of magnitude — see this test's doc comment.
-        if cfg!(debug_assertions) {
-            println!(
-                "  ** debug build: the conversion column is Rust at opt-level 0 and is \
-                 ~66x\n     slower than what ships. Re-run with --release before believing \
-                 it.**\n"
-            );
-        } else {
-            println!("  Release build, so the conversion column is the one that ships.\n");
-        }
     }
 
     /// `w`×`h` of one colour, which makes "did these pixels land here" readable a byte
@@ -480,7 +245,7 @@ mod tests {
     fn a_picture_too_large_is_refused_by_name() {
         // Straight to `check_picture` rather than through a 44 MB allocation: a mirror
         // will hold whatever it is asked to, and the refusal being tested is the
-        // encoder's.
+        // ceiling's.
         let Err(refused) = check_picture((5120, 2880)) else {
             panic!("a 5K picture was accepted");
         };
@@ -507,7 +272,7 @@ mod tests {
     fn a_desktop_is_held_under_the_ceiling_per_axis() {
         assert_eq!(fit_ceiling((5120, 2880)), (3840, 2400), "a 5K screen");
         assert_eq!(fit_ceiling((2880, 5120)), (2400, 3840), "the same screen on its side");
-        assert_eq!(fit_ceiling((1920, 1200)), (1920, 1200), "a desktop the stream takes");
+        assert_eq!(fit_ceiling((1920, 1200)), (1920, 1200), "a desktop under the ceiling");
         assert_eq!(fit_ceiling((3840, 2160)), (3840, 2160), "16:9 4K is under the ceiling");
         assert_eq!(fit_ceiling((3840, 2400)), (3840, 2400), "the ceiling itself");
         for size in [(5120, 2880), (2880, 5120), (4000, 4000), (3840, 2401)] {
@@ -516,7 +281,7 @@ mod tests {
             assert!(within_ceiling(held), "{size:?} held to {held:?} is still over it");
             assert!(
                 check_picture((held.0 as u16, held.1 as u16)).is_ok(),
-                "the encoder refuses the {held:?} the engine was told to ask for"
+                "the ceiling refuses the {held:?} the engine was told to ask for"
             );
         }
     }

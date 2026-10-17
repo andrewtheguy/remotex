@@ -114,23 +114,19 @@ filenames, which the container build selects by release version.
 An x86-64 gateway is built for the baseline x86-64 ISA: nothing sets
 `target-cpu`, and SIMD is chosen at run time. The prebuilt archives the sys
 crates download keep that baseline, with their hand-written kernels selected by
-CPUID: libvpx's rtcd tables, opus's `MAY_HAVE` dispatch and libFLAC's own CPU
-detection. The sys crates fetch each dependency repository's latest release, so
+CPUID: opus's `MAY_HAVE` dispatch and libFLAC's own CPU detection, as the tile
+coder's JPEG encoder picks its AVX2 kernels at run time. The sys crates fetch each dependency repository's latest release, so
 that release's archives—not the tag pinned in this repository's
 `Cargo.toml`—set the effective CPU floor.
 
-screen-vp9's encoder in Rust is not built here: on amd64 it refuses to build
-under x86-64-v3. A session that chooses it asks wlshare for it.
-
 ## Prebuilt native dependencies
 
-Release builds link `opus-prebuilt`, `libvpx-prebuilt` and, under
+Release builds link `opus-prebuilt` and, under
 [sound-flac](https://github.com/andrewtheguy/sound-flac), `libflac-prebuilt`.
 Their sys crates download static archives instead of building vendored C and
 C++, so this project needs no CMake, assembler, pkg-config, libclang, vcpkg, or
 system copies of those libraries, and no artifact carries or depends on one.
-`LIBVPX_PREBUILT_DIR`, `LIBOPUS_PREBUILT_DIR` and `LIBFLAC_PREBUILT_DIR` select
-locally built archives.
+`LIBOPUS_PREBUILT_DIR` and `LIBFLAC_PREBUILT_DIR` select locally built archives.
 
 No artifact holds the software HEVC decoder, the page's decoder of a High
 Performance Mac's passed HEVC, whose licence keeps it out: an operator
@@ -151,13 +147,11 @@ decodes none of the Mac's streams: its HEVC and its H.264 are passed, and its
 AAC-ELD sound too, so no artifact needs FFmpeg.
 Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
-libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
-with `--enable-realtime-only`; additional features need a separately built
-archive selected with `LIBVPX_PREBUILT_DIR`, not a source-build fallback.
+libopus build in `build-tarball.sh`.
 
 The one C library built from source is jemalloc, through `tikv-jemallocator`.
 It is the global allocator on Unix and is linked with unprefixed `malloc` symbols,
-so allocations in libvpx and libopus use it as well as Rust allocations. The build
+so allocations in libopus and libFLAC use it as well as Rust allocations. The build
 environment must provide a C compiler and `make`. Windows continues to use its
 system heap.
 

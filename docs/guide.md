@@ -85,7 +85,7 @@ config key.
   button reads *Audio not supported* in such a browser, and *AAC-ELD not
   supported* in one that cannot decode the Mac's AAC-ELD.
 - **Passthrough.** Sends the remote's own stream to the browser as it came
-  instead of VP9 encoded by the gateway. A High Performance Mac's picture is
+  instead of tiles coded by the gateway. A High Performance Mac's picture is
   always passed, and which stream is the choice: its HEVC, greyed where the
   browser cannot take it, or its H.264, which is offered to every browser and
   needs no HEVC decoder in the page. On an `rdp` target with the
@@ -147,7 +147,7 @@ touch.
   browser without them cannot start the target. How the host draws the
   pipeline, high quality or adaptive H.264 (alpha), is chosen at the picker.
 - `egfx = false` makes the host draw with bitmap updates instead, which the
-  gateway encodes as VP9: the target for a browser that cannot compose the
+  gateway sends as tiles: the target for a browser that cannot compose the
   pipeline. The desktop then keeps its size: without the pipeline Windows
   resizes by rebuilding the share, which this gateway does not take.
 - **Alpha:** `virtual_displays = 2` asks the host for two displays, each the

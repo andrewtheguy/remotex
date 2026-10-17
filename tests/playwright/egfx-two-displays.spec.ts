@@ -1,7 +1,7 @@
 // A session with the graphics pipeline, over two virtual displays: the page that
 // holds the session composes the span the host draws and shows one display of it,
 // and the second display's tab is painted from the same picture, handed across the
-// browser, where a target on bitmap updates sends that tab VP9 cut from the
+// browser, where a target on bitmap updates sends that tab tiles cut from the
 // gateway's framebuffer.
 //
 // Everything asserted is decided by the system and not by a machine's timing: the

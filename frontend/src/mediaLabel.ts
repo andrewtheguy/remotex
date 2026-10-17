@@ -150,18 +150,21 @@ export function hostPictureLabel(picture: HostPicture): string {
     : `Lossy (${codecs}): the host's image quality policy is not Lossless`;
 }
 
-/** The wire fields of `videoFormat`, or a pipeline this browser composes. */
+/**
+ * The wire fields of `videoFormat` — every stream the remote's own, passed through
+ * untouched — or a picture that is no stream.
+ */
 export interface VideoStreamInfo {
   decode: string;
-  // The remote's own stream, passed through untouched — wlshare's VP9, a High
-  // Performance Mac's HEVC — rather than one the gateway encoded.
-  passthrough: boolean;
   // Not a stream at all: an RDP host's graphics pipeline, composed here
   // (`graphicsStart`). No decoder is configured and `decode` names nothing.
   composed?: boolean;
   // Not a stream either: a Mac's own picture in this quality, decoded by this
   // page (`standardStart`). No decoder is configured and `decode` names nothing.
   standard?: StandardQuality;
+  // Nor this: the gateway's tiles, images this page decodes (`tilesStart`). No
+  // decoder is configured and `decode` names nothing.
+  tiles?: boolean;
   // Decoded by the page's WebAssembly decoder (softwareDecoder.ts) and not by
   // the browser's own: a Mac's HEVC where the browser's own does not take it.
   software?: boolean;
@@ -174,7 +177,7 @@ export interface VideoStreamInfo {
  * stream it decodes, in how many strips where its pictures come in strips, and
  * which decoder that is, the browser's own or one of the
  * page's in WebAssembly, or what the row is waiting for before the stream's format has
- * arrived. While the desktop is held, past what a video stream encodes, there is
+ * arrived. While the desktop is held, past the picture ceiling, there is
  * no picture, whatever decoder was built before; a Mac's own picture is still
  * decoded by this page, under the notice.
  */
@@ -187,7 +190,7 @@ export function videoLabel(
     return `Not in use: the Mac's ${picture} picture is decoded by this page`;
   }
   if (held === "size") {
-    return "Not in use: the desktop is past what video carries";
+    return "Not in use: the desktop is past what the gateway shows";
   }
   if (!stream) {
     return "Waiting for the video format";
@@ -195,12 +198,12 @@ export function videoLabel(
   if (stream.composed) {
     return "Not in use: the host's graphics pipeline is composed by this browser";
   }
-  const whose = stream.passthrough
-    ? "passthrough from the remote"
-    : "encoded by the gateway";
+  if (stream.tiles) {
+    return "Not in use: the gateway's tiles are images this page decodes";
+  }
   const strips = (stream.strips ?? 1) > 1 ? ` in ${stream.strips} strips` : "";
   const decoder = stream.software
     ? "decoded by this page's WebAssembly decoder"
     : "decoded by the browser's native decoder";
-  return `${stream.decode} · ${whose}${strips} · ${decoder}`;
+  return `${stream.decode} · passthrough from the remote${strips} · ${decoder}`;
 }

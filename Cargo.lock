@@ -1530,6 +1530,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpeg-encoder"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0370574b86f7eca156b9f298392b5e69a23f8c86f3f865add60bbc2e79467a6"
+
+[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1585,11 +1591,6 @@ dependencies = [
  "pkg-config",
  "vcpkg",
 ]
-
-[[package]]
-name = "libvpx-prebuilt-sys"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libvpx-prebuilt?tag=v1.16.0-20260924182850-e78d74f#e78d74fff89fe8d03a6ee0323da9421cf6c5dc73"
 
 [[package]]
 name = "linux-raw-sys"
@@ -2292,6 +2293,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hmac",
+ "jpeg-encoder",
  "libc",
  "log",
  "md-5",
@@ -2299,13 +2301,13 @@ dependencies = [
  "opus-prebuilt",
  "png",
  "rand 0.10.2",
+ "rayon",
  "remotex-rdp-graphics",
  "rpassword",
  "rsa",
  "rubato",
  "rusqlite",
  "rust-embed",
- "screen-vp9",
  "serde",
  "serde_json",
  "sha1 0.11.0",
@@ -2613,17 +2615,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "screen-vp9"
-version = "0.0.26"
-source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.26#36900a832359c8af40887ab372d2911d196c823f"
-dependencies = [
- "libvpx-prebuilt-sys",
- "log",
- "thiserror",
- "yuv",
-]
 
 [[package]]
 name = "sec1"
@@ -3791,15 +3782,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "synstructure",
-]
-
-[[package]]
-name = "yuv"
-version = "0.8.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a295923535c00a4e72a50a0a1130097f93160b39892dd4d2d006b1e2b90d6bf9"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]

@@ -1459,7 +1459,8 @@ export function useRemoteDesktop(
       if (
         (msg.type === "videoFormat" ||
           msg.type === "graphicsStart" ||
-          msg.type === "standardStart") &&
+          msg.type === "standardStart" ||
+          msg.type === "tilesStart") &&
         msg.engine <= endedEngines
       ) {
         return;
@@ -2243,7 +2244,7 @@ export function useRemoteDesktop(
         return;
       }
       painter()?.mirrorGraphics(tabDisplay, part);
-      setVideoStream({ decode: "", passthrough: true, composed: true });
+      setVideoStream({ decode: "", composed: true });
     };
 
     const handleControlMsg = (msg: ControlMsg) => {
@@ -2300,7 +2301,6 @@ export function useRemoteDesktop(
           // stream it is: only the gateway knows whether it encoded it.
           setVideoStream({
             decode: msg.decode,
-            passthrough: msg.passthrough,
             software:
               pageModuleFor(msg.decode, {
                 nativeHevc: decodesAppleMedia(),
@@ -2312,18 +2312,20 @@ export function useRemoteDesktop(
           // Queued in the worker like a format, behind the frames already posted:
           // the pipeline's first run must find a compositor with nothing in it.
           painter()?.startGraphics();
-          setVideoStream({ decode: "", passthrough: true, composed: true });
+          setVideoStream({ decode: "", composed: true });
           setHostPicture({ exact: true, codecs: [] });
           break;
         case "standardStart":
           // Queued the same way: the picture's first rectangle must find a
           // decoder with nothing in it.
           painter()?.startStandard(msg.quality);
-          setVideoStream({
-            decode: "",
-            passthrough: true,
-            standard: msg.quality,
-          });
+          setVideoStream({ decode: "", standard: msg.quality });
+          break;
+        case "tilesStart":
+          // Queued the same way: the picture's first tile must find no decoder or
+          // compositor standing.
+          painter()?.startTiles();
+          setVideoStream({ decode: "", tiles: true });
           break;
         case "hostPicture":
           setHostPicture({ exact: msg.exact, codecs: msg.codecs });

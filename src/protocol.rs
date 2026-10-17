@@ -426,6 +426,7 @@ pub enum ClientMsg {
 /// 0x03 VIDEO     u8 flags | u16 w | u16 h | u32 len | payload[len]
 /// 0x04 GRAPHICS  u32 len | commands[len]
 /// 0x05 STANDARD  u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
+/// 0x06 TILE      u8 format | u16 x | u16 y | u16 w | u16 h | u32 len | image[len]
 /// ```
 ///
 /// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
@@ -440,6 +441,11 @@ pub enum ClientMsg {
 /// A `STANDARD` record is one of a Mac's rectangles in its own picture, as the Mac sent
 /// it — see [`StandardUnit`]. A receiver rejects one with no body.
 ///
+/// A `TILE` record is a rectangle of the desktop in the tiles this gateway codes, an
+/// image the browser decodes on its own — see [`TileUnit`]. Its format is
+/// [`batch::TILE_JPEG`] or [`batch::TILE_PNG`], and a receiver rejects any other, an
+/// empty rectangle and one with no image.
+///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
@@ -448,6 +454,7 @@ pub mod batch {
     pub const OP_VIDEO: u8 = 0x03;
     pub const OP_GRAPHICS: u8 = 0x04;
     pub const OP_STANDARD: u8 = 0x05;
+    pub const OP_TILE: u8 = 0x06;
 
     /// Bytes a `VIDEO` record costs besides its payload.
     pub const VIDEO_HEADER_LEN: usize = 10;
@@ -457,6 +464,13 @@ pub mod batch {
 
     /// Bytes a `STANDARD` record costs besides its body.
     pub const STANDARD_HEADER_LEN: usize = 13;
+
+    /// Bytes a `TILE` record costs besides its image.
+    pub const TILE_HEADER_LEN: usize = 14;
+    /// A `TILE` record's image is a baseline JPEG.
+    pub const TILE_JPEG: u8 = 0x01;
+    /// A `TILE` record's image is a PNG.
+    pub const TILE_PNG: u8 = 0x02;
 
     /// A `VIDEO` record's flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
@@ -742,14 +756,14 @@ impl Strip {
 /// The contract every client implements:
 ///
 /// - The payload is **one whole access unit** — exactly one picture's worth, never a partial one
-///   and never two: VP9 or HEVC as its source encoder emitted it.
+///   and never two: VP9, HEVC or H.264 as the remote's encoder emitted it.
 /// - **[`ServerMsg::VideoFormat`] arrives first**, before the stream's first record, and names
 ///   the exact WebCodecs configuration string to build the decoder with. The client does not
 ///   derive it from payloads: VP9 has no parameter sets, while the gateway has already parsed a
 ///   passed HEVC stream's sequence parameters.
 /// - `keyframe` is on the wire, as bit 0 of the record's flags. The source path decides it.
-/// - `(w, h)` is the **true desktop size**, in framebuffer pixels, which a VP9 picture, passed or
-///   gateway-encoded, is exactly, odd sides included: a client draws the top-left `w`×`h` of what
+/// - `(w, h)` is the **true desktop size**, in framebuffer pixels, which a VP9 picture is
+///   exactly, odd sides included: a client draws the top-left `w`×`h` of what
 ///   it decodes and ignores anything past it. A record whose size differs from the last one means the decoder is
 ///   starting over on a differently sized picture, and a fresh `VideoFormat` precedes it.
 /// - Every access unit matters and their order matters: each is a link in a chain, where
@@ -765,10 +779,8 @@ pub struct VideoUnit {
     pub strip: Option<Strip>,
     /// Whether a decoder that has seen nothing before this can start here.
     ///
-    /// On the wire, as [`batch::VIDEO_KEYFRAME`] in the record's flags byte: reported by libvpx
-    /// for gateway-encoded VP9, and parsed from a passed stream. The gateway also keeps it for the
-    /// totals, where keyframe bytes against total bytes is the whole measurement of whether the
-    /// stream is winning.
+    /// On the wire, as [`batch::VIDEO_KEYFRAME`] in the record's flags byte, parsed from the
+    /// remote's stream. The gateway also keeps it for the totals.
     pub keyframe: bool,
     /// The access unit, in whatever codec [`ServerMsg::VideoFormat`] announced.
     pub data: Vec<u8>,
@@ -898,6 +910,57 @@ impl StandardUnit {
     /// Append this rectangle as a `STANDARD` record.
     pub fn write_record(&self, out: &mut Vec<u8>) {
         out.push(batch::OP_STANDARD);
+        for value in [self.x, self.y, self.w, self.h] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.data);
+    }
+}
+
+/// A rectangle of the desktop in the tiles this gateway codes ([`crate::tiles`]),
+/// carried as a `TILE` record inside a [`batch`] frame: where it is, and its image, a
+/// row's run of 64×64 tiles as one JPEG or one PNG.
+///
+/// The contract every client implements:
+///
+/// - [`ServerMsg::TilesStart`] arrives first, and says the picture is tiles from here:
+///   whatever a client held of a stream, a pipeline or a Mac's own picture is done
+///   with. It comes again whenever the gateway owes the whole picture, ahead of it.
+/// - A record is drawn on the desktop's canvas where it says, in its turn: each
+///   replaces what the canvas held there whatever it held, and none depends on another,
+///   so a client draws them in order, and decodes them in any.
+/// - A JPEG record is the lossy pass of tiles that are still changing, and the gateway
+///   sends them again as PNG once they are still; a PNG record is the exact pixels.
+/// - A client acknowledges a batch when it has drawn it and not before: the gateway
+///   sends the next tiles as the client paints, which is how the picture follows the
+///   client's link.
+#[derive(Debug, Clone)]
+pub struct TileUnit {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub format: crate::tiles::Format,
+    /// The image.
+    pub data: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
+    /// What the coder is owed once the browser has drawn the rectangle: room to send
+    /// the next — see [`crate::encode`]'s paint window.
+    pub painted: Painted,
+}
+
+impl TileUnit {
+    /// What this rectangle will cost inside a batch, its image included.
+    pub fn record_len(&self) -> usize {
+        batch::TILE_HEADER_LEN + self.data.len()
+    }
+
+    /// Append this rectangle as a `TILE` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_TILE);
+        out.push(self.format.code());
         for value in [self.x, self.y, self.w, self.h] {
             out.extend_from_slice(&value.to_le_bytes());
         }
@@ -1043,7 +1106,7 @@ pub struct DisplayInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HoldCause {
-    /// Past what a video stream encodes ([`crate::video::within_ceiling`]).
+    /// Past the picture ceiling ([`crate::video::within_ceiling`]).
     Size,
 }
 
@@ -1073,7 +1136,7 @@ pub struct MosaicRegion {
 /// post-login state it is in — the target picker, or a live desktop.
 #[derive(Debug, Clone)]
 pub enum ServerMsg {
-    /// One VP9 access unit. It has no text encoding and is not a control message:
+    /// One access unit of a stream the remote coded, passed. It has no text encoding and is not a control message:
     /// it is a binary record, and [`crate::wire`] puts it in a batch in its place
     /// among the control messages around it, which is load-bearing.
     Video(VideoUnit),
@@ -1093,6 +1156,14 @@ pub enum ServerMsg {
     /// client held of a video stream before it is done with. `engine` is the
     /// engine that sent it ([`ServerMsg::stamped`]).
     StandardStart { engine: u64, quality: StandardQuality },
+    /// A rectangle of the desktop in the tiles this gateway codes. A binary record like
+    /// [`ServerMsg::Video`], ordered the same way.
+    Tile(TileUnit),
+    /// The picture is the tiles this gateway codes from here, the whole of it
+    /// following ([`ServerMsg::Tile`]), and whatever a client held of a stream, a
+    /// pipeline or a Mac's own picture before it is done with. `engine` is the engine
+    /// that sent it ([`ServerMsg::stamped`]).
+    TilesStart { engine: u64 },
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1332,18 +1403,15 @@ pub enum ServerMsg {
     /// The video counterpart of [`ServerMsg::AudioFormat`], and it exists for the same reason: a
     /// decoder configured after the first packet has already thrown away the frame it was meant
     /// to decode. [`crate::wire`] flushes the pending batch before any text frame, so pushing this
-    /// ahead of a round's units is enough to guarantee the order.
+    /// ahead of a stream's units is enough to guarantee the order.
     ///
     /// One per session, plus one per resize and per repaint: the configuration string carries a
     /// size-derived level, and a browser that just attached has seen none.
     ///
     /// `decode` is the exact WebCodecs configuration string to hand `VideoDecoder.configure` —
-    /// `vp09.01.40.08.03.06.06.06.00`. It comes from the encoder rather than from a prediction, and it is sent
-    /// with the round that produced the stream's first unit because that is where the encoder's
-    /// answer exists.
-    ///
-    /// `passthrough` says whose stream it is: the remote's own, passed to the browser untouched
-    /// (wlshare's VP9, a High Performance Mac's HEVC), or one this gateway encoded.
+    /// `vp09.01.40.08.03.06.06.06.00`, read from the passed stream: its VP9 profile and size,
+    /// or a Mac's HEVC or H.264 parameter sets. Every stream is the remote's own, passed to the
+    /// browser untouched: wlshare's VP9 or a High Performance Mac's HEVC or H.264.
     ///
     /// Which decoder takes the stream is each page's own to say, and the gateway is not told:
     /// the browser's `VideoDecoder` where it takes the stream, and the page's WebAssembly one
@@ -1354,7 +1422,7 @@ pub enum ServerMsg {
     /// each ([`Strip`]): [`Strip::COUNT`] for a High Performance Mac's passed in
     /// strips, and 1 for every stream whose units are whole pictures. `engine` is the
     /// engine that sent it ([`ServerMsg::stamped`]).
-    VideoFormat { decode: String, passthrough: bool, strips: u8, engine: u64 },
+    VideoFormat { decode: String, strips: u8, engine: u64 },
     /// The remote started consuming the camera — an application on it opened
     /// the device — and the browser should encode and send from now on,
     /// starting at a keyframe. Camera-socket traffic only, like the two below:
@@ -1428,6 +1496,7 @@ enum ControlMsg<'a> {
     GraphicsStart { engine: u64 },
     GraphicsView { x: u16, y: u16, w: u16, h: u16 },
     StandardStart { engine: u64, quality: StandardQuality },
+    TilesStart { engine: u64 },
     Connected {
         name: &'a str,
         protocol: &'a str,
@@ -1478,7 +1547,6 @@ enum ControlMsg<'a> {
     },
     VideoFormat {
         decode: &'a str,
-        passthrough: bool,
         strips: u8,
         engine: u64,
     },
@@ -1518,6 +1586,7 @@ impl ServerMsg {
     pub fn stamped(mut self, engine: u64) -> Self {
         if let ServerMsg::GraphicsStart { engine: slot }
         | ServerMsg::StandardStart { engine: slot, .. }
+        | ServerMsg::TilesStart { engine: slot }
         | ServerMsg::VideoFormat { engine: slot, .. } = &mut self
         {
             *slot = engine;
@@ -1538,6 +1607,8 @@ impl ServerMsg {
                 | ServerMsg::GraphicsView { .. }
                 | ServerMsg::Standard(_)
                 | ServerMsg::StandardStart { .. }
+                | ServerMsg::Tile(_)
+                | ServerMsg::TilesStart { .. }
                 | ServerMsg::VideoFormat { .. }
                 | ServerMsg::Resize { .. }
                 | ServerMsg::Cursor(_)
@@ -1563,6 +1634,7 @@ impl ServerMsg {
             ServerMsg::Video(_)
             | ServerMsg::Graphics(_)
             | ServerMsg::Standard(_)
+            | ServerMsg::Tile(_)
             | ServerMsg::Audio(_)
             | ServerMsg::AudioGap => {
                 return None;
@@ -1571,6 +1643,7 @@ impl ServerMsg {
             ServerMsg::StandardStart { engine, quality } => {
                 control(&ControlMsg::StandardStart { engine: *engine, quality: *quality })
             }
+            ServerMsg::TilesStart { engine } => control(&ControlMsg::TilesStart { engine: *engine }),
             ServerMsg::GraphicsView { x, y, w, h } => {
                 control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
             }
@@ -1635,8 +1708,8 @@ impl ServerMsg {
             ServerMsg::CameraKeyframe => control(&ControlMsg::CameraKeyframe),
             ServerMsg::MicOpen => control(&ControlMsg::MicOpen),
             ServerMsg::MicClose => control(&ControlMsg::MicClose),
-            ServerMsg::VideoFormat { decode, passthrough, strips, engine } => {
-                control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough, strips: *strips, engine: *engine })
+            ServerMsg::VideoFormat { decode, strips, engine } => {
+                control(&ControlMsg::VideoFormat { decode, strips: *strips, engine: *engine })
             }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::HostPicture { exact, codecs } => {
@@ -2045,13 +2118,13 @@ mod tests {
             passthrough: None,
             camera: false,
             microphone: false,
-            render: "video q90 · 4:2:0 · adaptive".to_owned(),
+            render: "tiles q90".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 · 4:2:0 · adaptive"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"tiles q90"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -2081,19 +2154,23 @@ mod tests {
         // answer and a renamed one is a decoder that never gets configured.
         // The engine is what the session layer stamped in, which the page fences a
         // late start of an ended session on.
-        match (ServerMsg::VideoFormat { decode: "vp09.01.40.08".to_owned(), passthrough: true, strips: 1, engine: 0 })
+        match (ServerMsg::VideoFormat { decode: "vp09.01.40.08".to_owned(), strips: 1, engine: 0 })
             .stamped(7)
             .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"videoFormat","decode":"vp09.01.40.08","passthrough":true,"strips":1,"engine":7}"#
+                r#"{"type":"videoFormat","decode":"vp09.01.40.08","strips":1,"engine":7}"#
             ),
             None => panic!("videoFormat must be a text frame"),
         }
         assert_eq!(
             ServerMsg::GraphicsStart { engine: 0 }.stamped(7).text_frame().as_deref(),
             Some(r#"{"type":"graphicsStart","engine":7}"#)
+        );
+        assert_eq!(
+            ServerMsg::TilesStart { engine: 0 }.stamped(7).text_frame().as_deref(),
+            Some(r#"{"type":"tilesStart","engine":7}"#)
         );
         assert_eq!(
             ServerMsg::Picker { engines: 7 }.text_frame().as_deref(),
@@ -2424,6 +2501,32 @@ mod tests {
         assert_eq!(flags(Strip { index: 0, ends: true }, true), 0x13);
         assert_eq!(flags(Strip { index: 3, ends: false }, false), 0x0E);
         assert_eq!(flags(Strip { index: 2, ends: true }, false), 0x1A);
+    }
+
+    // The tile record layout `protocol.ts` (decodeBatchFrame) parses.
+    #[test]
+    fn tile_record_layout_is_op_format_le_rect_len_image() {
+        let unit = TileUnit {
+            x: 0x0102,
+            y: 0x0304,
+            w: 0x0506,
+            h: 0x0708,
+            format: crate::tiles::Format::Png,
+            data: vec![0xAA, 0xBB],
+            held: Held::default(),
+            painted: Painted::default(),
+        };
+        let mut out = Vec::new();
+        unit.write_record(&mut out);
+        assert_eq!(out.len(), unit.record_len());
+        assert_eq!(
+            out,
+            [batch::OP_TILE, batch::TILE_PNG, 0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x08, 0x07, 2, 0, 0, 0, 0xAA, 0xBB]
+        );
+        let mut jpeg = Vec::new();
+        TileUnit { format: crate::tiles::Format::Jpeg, ..unit.clone() }.write_record(&mut jpeg);
+        assert_eq!(jpeg[1], batch::TILE_JPEG);
+        assert!((ServerMsg::Tile(unit)).text_frame().is_none(), "a tile has no standalone frame");
     }
 
     /// What a payload is owed is said once, wherever the payload ends, and a copy of

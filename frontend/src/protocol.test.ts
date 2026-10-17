@@ -85,6 +85,62 @@ test("a standard record is where its rectangle is, then its body, whole", () => 
   assert.equal(decodeBatchFrame(empty), null, "a rectangle with no body");
 });
 
+test("a tile record is its format, where its rectangle is, then its image, whole", () => {
+  // Transcribed from `TileUnit::write_record` in src/protocol.rs: op 0x06, the
+  // format byte, x, y, w and h as u16, a u32 length, the image, little-endian.
+  const frame = (format: number, w: number, image: number[]) =>
+    new Uint8Array([
+      0x02,
+      0x00,
+      0x01,
+      0x00,
+      0x09,
+      0x00,
+      0x00,
+      0x00,
+      0x06,
+      format,
+      0x40,
+      0x00,
+      0x80,
+      0x00,
+      w,
+      0x00,
+      0x24,
+      0x00,
+      image.length,
+      0x00,
+      0x00,
+      0x00,
+      ...image,
+    ]).buffer;
+  const records = decodeBatchFrame(frame(2, 64, [0x89, 0x50]));
+  assert.equal(records?.length, 1);
+  const record = records?.[0];
+  assert.equal(record?.kind, "tile");
+  if (record?.kind === "tile") {
+    assert.deepEqual(
+      [record.format, record.x, record.y, record.w, record.h, [...record.data]],
+      ["png", 64, 128, 64, 36, [0x89, 0x50]],
+    );
+  }
+  const jpeg = decodeBatchFrame(frame(1, 64, [0xff]))?.[0];
+  assert.equal(jpeg?.kind === "tile" && jpeg.format, "jpeg");
+  const whole = frame(2, 64, [0x89, 0x50]);
+  assert.equal(decodeBatchFrame(whole.slice(0, whole.byteLength - 1)), null);
+  assert.equal(
+    decodeBatchFrame(frame(3, 64, [1])),
+    null,
+    "a format this client does not know",
+  );
+  assert.equal(decodeBatchFrame(frame(2, 0, [1])), null, "an empty rectangle");
+  assert.equal(
+    decodeBatchFrame(frame(2, 64, [])),
+    null,
+    "a rectangle with no image",
+  );
+});
+
 test("a video record's flags say a keyframe, and which strip of its picture it is", () => {
   // Transcribed from `VideoUnit::write_record` in src/protocol.rs: op 0x03, flags,
   // the size and the length little-endian, the unit.

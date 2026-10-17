@@ -290,14 +290,13 @@ export function createDesktopVideo(
 //
 // A number rather than a measurement, and it does not have to be the truth: the wire
 // carries no timestamps and a frame is painted when it decodes. A nominal 30 Hz keeps
-// them recognisable in a decoder's own diagnostics, and it is the interval
-// `VIDEO_FRAME_INTERVAL` in src/encode.rs actually paces rounds at.
+// them recognisable in a decoder's own diagnostics.
 const VIDEO_FRAME_US = 33_333;
 
 // How long a decoder may owe a frame before the stream is treated as stalled.
 //
 // Generous on purpose, because this is a liveness backstop and not a deadline: the
-// worker draws one batch at a time, so this is sixty frames' grace at the 30 Hz `VIDEO_FRAME_INTERVAL` in src/encode.rs paces rounds at.
+// worker draws one batch at a time, so this is sixty frames' grace at 30 Hz.
 // A decode that has not landed by now is not slow, it is not coming.
 const STALL_MS = 2_000;
 

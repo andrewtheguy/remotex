@@ -150,59 +150,55 @@ test("a channel count that is neither mono nor stereo still names itself", () =>
   );
 });
 
-test("the video row waits for the format, then names it and whose stream it is", () => {
+test("the video row waits for the format, then names it and its decoder", () => {
   assert.equal(videoLabel(null, null), "Waiting for the video format");
   assert.equal(
-    videoLabel({ decode: "vp09.00.40.08", passthrough: false }, null),
-    "vp09.00.40.08 · encoded by the gateway · decoded by the browser's native decoder",
+    videoLabel({ decode: "vp09.00.40.08" }, null),
+    "vp09.00.40.08 · passthrough from the remote · decoded by the browser's native decoder",
   );
   assert.equal(
-    videoLabel({ decode: "hev1.4.10.L150.BE.8", passthrough: true }, null),
+    videoLabel({ decode: "hev1.4.10.L150.BE.8" }, null),
     "hev1.4.10.L150.BE.8 · passthrough from the remote · decoded by the browser's native decoder",
   );
   // A High Performance Mac's pictures come in strips, and the row says how many.
   assert.equal(
-    videoLabel(
-      { decode: "hev1.4.10.L153.BE.8", passthrough: true, strips: 4 },
-      null,
-    ),
+    videoLabel({ decode: "hev1.4.10.L153.BE.8", strips: 4 }, null),
     "hev1.4.10.L153.BE.8 · passthrough from the remote in 4 strips · decoded by the browser's native decoder",
   );
   assert.equal(
-    videoLabel(
-      { decode: "hev1.4.10.L153.BE.8", passthrough: true, strips: 1 },
-      null,
-    ),
+    videoLabel({ decode: "hev1.4.10.L153.BE.8", strips: 1 }, null),
     "hev1.4.10.L153.BE.8 · passthrough from the remote · decoded by the browser's native decoder",
   );
   assert.equal(
-    videoLabel(
-      { decode: "vp09.01.40.08", passthrough: false, software: true },
-      null,
-    ),
-    "vp09.01.40.08 · encoded by the gateway · decoded by this page's WebAssembly decoder",
+    videoLabel({ decode: "hev1.4.10.L153.BE.8", software: true }, null),
+    "hev1.4.10.L153.BE.8 · passthrough from the remote · decoded by this page's WebAssembly decoder",
   );
   assert.equal(
-    videoLabel({ decode: "", passthrough: true, standard: "adaptive" }, null),
+    videoLabel({ decode: "", standard: "adaptive" }, null),
     "Not in use: the Mac's Adaptive picture is decoded by this page",
   );
   assert.equal(
-    videoLabel({ decode: "", passthrough: true, standard: "full" }, null),
+    videoLabel({ decode: "", standard: "full" }, null),
     "Not in use: the Mac's Full-quality picture is decoded by this page",
   );
+  // The gateway's tiles are no stream.
   assert.equal(
-    videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "size"),
-    "Not in use: the desktop is past what video carries",
+    videoLabel({ decode: "", tiles: true }, null),
+    "Not in use: the gateway's tiles are images this page decodes",
+  );
+  assert.equal(
+    videoLabel({ decode: "vp09.00.40.08" }, "size"),
+    "Not in use: the desktop is past what the gateway shows",
   );
   // Held, a Mac's own picture is still decoded, under the notice.
   assert.equal(
-    videoLabel({ decode: "", passthrough: true, standard: "full" }, "size"),
+    videoLabel({ decode: "", standard: "full" }, "size"),
     "Not in use: the Mac's Full-quality picture is decoded by this page",
   );
 });
 
 test("the Render row waits for the target, then names its dial", () => {
-  const plan = "video q90 · libvpx · adaptive";
+  const plan = "tiles q90";
   assert.equal(renderLabel(""), "Waiting for the target");
   assert.equal(renderLabel(plan), plan);
 });

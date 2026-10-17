@@ -1,12 +1,13 @@
 //! What the attachment's paint window has learned about the link, published for
-//! the encoders.
+//! the engines.
 //!
 //! The paint window (`src/ws.rs`) already collects the one latency figure this
-//! gateway has — how long the oldest unacknowledged batch has been owed — but
-//! until now it only *gated* the send window with it. This handle is the other
-//! half: the same measurement, readable where quality decisions are made
-//! (`src/encode.rs`), so an adaptive target can move quality *before* the window
-//! parks instead of after.
+//! gateway has — how long the oldest unacknowledged batch has been owed — and
+//! gates the send window with it. This handle is the other half: the same
+//! measurement, readable where a passed stream's fence is held
+//! ([`crate::encode::VideoSink::fence_hold`]), so wlshare's walk reads the
+//! browser's queueing and moves its quality *before* the window parks instead of
+//! after.
 //!
 //! The figure published is **queueing lag**, not raw staleness. A batch's
 //! end-to-end time includes the network round trip, and on a distant link that
@@ -60,7 +61,7 @@ fn micros_since_epoch(at: Instant) -> u64 {
 }
 
 /// The link as the paint window sees it, shared between the ws bridge (writer)
-/// and the encoders (readers). One per session slot; it outlives attachments,
+/// and the engines (readers). One per session slot; it outlives attachments,
 /// and [`Self::reset`] on every attachment change is what keeps a new browser
 /// from inheriting the last one's verdict.
 #[derive(Debug)]

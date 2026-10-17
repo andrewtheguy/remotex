@@ -70,9 +70,9 @@ area's section before changing what it covers:
 - [Input and display](docs/architecture.md#input-and-display): the two touch
   layers, the display picker as the remote's, presentation at 100%, density as
   the wire's word, and the Apple mosaic as the one rescale.
-- [Media paths](docs/architecture.md#media-paths): one VP9 encoder or passed
-  untouched, with a rule for each passthrough, a desktop past the ceiling, audio,
-  camera and microphone.
+- [Media paths](docs/architecture.md#media-paths): the gateway's own tiles or
+  passed untouched, with a rule for each passthrough, a desktop past the ceiling,
+  audio, camera and microphone.
 
 ## Packaging and platforms
 

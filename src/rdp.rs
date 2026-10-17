@@ -1531,12 +1531,12 @@ async fn active_loop(
                 None => std::future::pending().await,
             }
         };
-        // Video only, and `None` unless the mirror is holding pixels no access unit
-        // has carried — see `VideoSink::due_at` for why a paced stream cannot rely on
-        // the next event to come and collect them. A clean mirror parks on
-        // the round-returned signal instead of forever: while a round is away being
-        // encoded the live table is empty and `due_at` cannot see the damage that
-        // lands meanwhile, so the round's return is what re-arms this.
+        // The picture only, and `None` unless tiles are owed that a round could take
+        // now — see `VideoSink::due_at` for why a paced picture cannot rely on the
+        // next event to come and collect them. Otherwise it parks on the
+        // round-returned signal instead of forever: while a round is away being
+        // coded, or the browser has not painted what it was sent, `due_at` says
+        // nothing, and the round's return or the painting is what re-arms this.
         let video_flush = async {
             match sink.due_at().await {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -2109,9 +2109,9 @@ async fn active_loop(
                 continue;
             }
             _ = video_flush => {
-                // The interval elapsed with pixels still sitting in the mirror. On the
-                // same task as every other frame boundary, so the stream stays serial
-                // by construction rather than by the lock.
+                // The interval elapsed with tiles still owed. On the same task as every
+                // other frame boundary, so the rounds stay serial by construction
+                // rather than by the lock.
                 sink.frame().await?;
                 continue;
             }
@@ -2516,7 +2516,7 @@ fn translate_input(
 const DISTANCE_CHECK: Duration = Duration::from_secs(1);
 
 /// The shortest gap between two damage flushes into the mirror, at the 60 Hz a
-/// screen actually presents; `VIDEO_FRAME_INTERVAL` paces the encodes at 30.
+/// screen actually presents; `ROUND_INTERVAL` paces the rounds of tiles at 30.
 ///
 /// The interval coalesces, it does not merely defer: a busy server's ~126 damage
 /// batches a second overlap heavily and [`stage_damage`] folds an overlapping
@@ -2614,7 +2614,7 @@ async fn flush_damage(
 /// Comparing against `shadow` earns its keep on this engine in particular: it
 /// repaints regions that did not change, which nothing upstream filters. They come
 /// back as `None` here and cost nothing but a pack and a `memcmp` — and, since they
-/// never reach the mirror, no access unit either.
+/// never reach the mirror, no tile either.
 ///
 /// The framebuffer lock is held for the pack and released before the await, which
 /// is what keeps a slow encoder from stalling the RDP client's next paint: the
@@ -2839,7 +2839,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-
+            wlshare: false,
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());

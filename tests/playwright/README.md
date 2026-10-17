@@ -27,12 +27,14 @@ agree with their own fixtures and disagree with each other. Its frame parser is
 deliberately a second implementation rather than an import of the SPA's, because a
 wrong parser would otherwise agree with itself.
 
-`video-stream.spec.ts` is the desktop's stream read from the same socket. Video is
-VP9 only, and the harness desktop is well within the video ceiling, so every record
-is VIDEO and everything it asserts is
-decidable without asking the browser anything. It parses VIDEO records itself — op, keyframe flags byte, the desktop size the last
-`resize` announced — and checks that no access unit outran the `videoFormat` that
-says how to decode it.
+`tiles.spec.ts` is the picture the gateway codes, read from the same socket, on a
+plain `vnc` target or an `rdp` one with `egfx = false`: the harness desktop is
+well within the ceiling, so every record is TILE and everything it asserts is
+decidable without asking the browser anything. It parses TILE records itself — op,
+format byte, the image's own signature, a rectangle on the 64-pixel grid inside the
+desktop the last `resize` announced — and checks that no tile outran the
+`tilesStart` that begins the picture, that the whole desktop is covered, that no
+`videoFormat` is sent, and that the page acknowledges the batches.
 
 `egfx-passthrough.spec.ts` is an RDP host's graphics pipeline passed for the page
 to compose, read from the same socket: that `graphicsStart` comes ahead of the
@@ -71,7 +73,7 @@ at the new size, decoded, without starting again.
 `target-switch.spec.ts` switches one page, without a reload, between an RDP
 host's pipeline and bitmap targets and a Mac's Adaptive and High Performance
 pictures, with the browser's own decoder made to refuse the HEVC: that each
-session's picture starts and is acknowledged, the bitmap target's as 4:2:0 VP9,
+session's picture starts and is acknowledged, the bitmap target's as tiles,
 that a session that loaded the compositor or the decoder of a Mac's own picture
 ends its paint worker and any other keeps it, and, by how often the HEVC
 module's file is fetched, that a kept worker ends its HEVC decode worker.
@@ -153,7 +155,7 @@ the choices made under the target and `connected` reports them back, that a
 target opens to the size it will have and the options its type offers and the
 browser remembers what was chosen, and that a second browser taking the session
 over is given none of it: it lands on a picker where a target whose pipeline it
-cannot compose has Start disabled, with the reason, and no VP9 in its place. It
+cannot compose has Start disabled, with the reason, and no tiles in its place. It
 also checks that the pipeline is said to be always passed, with no box to tick,
 and that the Graphics
 group opens on High quality and, under Adaptive, on H.264 full screen. Its sound
@@ -228,12 +230,13 @@ that address before starting, rather than failing later inside the browser and
 making an unavailable target look like a product bug. This is the same bargain
 the Rust e2e tests make with `#[ignore]`.
 
-The video spec needs a local gateway config with a live target. Put that
-gitignored config under `tmp/` (for example, `tmp/qa_video.toml`) and name the
-target with `REMOTEX_PLAYWRIGHT_VIDEO_TARGET`:
+The tiles spec needs a local gateway config with a live plain `vnc` target or an
+`rdp` one with `egfx = false`. Put that gitignored config under `tmp/` (for
+example, `tmp/qa_tiles.toml`) and name the target with
+`REMOTEX_PLAYWRIGHT_TILES_TARGET`:
 
 ```sh
-cargo run -- serve --config tmp/qa_video.toml
+cargo run -- serve --config tmp/qa_tiles.toml
 ```
 
 ```sh
@@ -241,8 +244,8 @@ cd tests/playwright
 REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
 REMOTEX_PLAYWRIGHT_USERNAME='admin' \
 REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
-REMOTEX_PLAYWRIGHT_VIDEO_TARGET='video' \
-bun run test:video
+REMOTEX_PLAYWRIGHT_TILES_TARGET='bitmap' \
+bun run test:tiles
 ```
 
 That gateway serves the SPA compiled into its binary, so rebuild the gateway

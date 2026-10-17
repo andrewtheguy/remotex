@@ -232,7 +232,7 @@ pub struct DisplayAttachment {
     /// closed for a claim change, a log out, an engine that no longer shows its
     /// display, or the first display's newer socket.
     pub evicted: oneshot::Receiver<DisplayLetGo>,
-    /// Where this socket's paint tracker publishes the link's lag for the encoder
+    /// Where this socket's paint tracker publishes the link's lag for the engine
     /// drawing its display. The first display's is the slot's one handle, freshly
     /// [`LinkFeedback::reset`]; another display's is its own.
     pub feedback: Arc<LinkFeedback>,
@@ -1754,7 +1754,7 @@ impl SessionManager {
     ) -> ServerMsg {
         let Selected { target, choices } = &selected;
         // Resolved once, here, and handed to the engine rather than resolved again
-        // there: the card and the encoder are then the same plan by construction,
+        // there: the card and the engine are then the same plan by construction,
         // and cannot disagree about the colour a browser is being sent.
         let plan = target.render_plan(*choices, decoders);
         let render = plan.describe();
@@ -2652,7 +2652,7 @@ mod tests {
         assert!(hooks.try_recv().is_ok(), "engine spawned on connect");
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Connected { render, .. }) => {
-                assert_eq!(render, "video q60 · 4:2:0 · adaptive")
+                assert_eq!(render, "tiles q60")
             }
             other => panic!("expected connected, got {other:?}"),
         }
@@ -2695,7 +2695,7 @@ mod tests {
     /// A session started with the Mac's stream passed is resumed by the browser
     /// that started it. A reload that says it no longer decodes the stream ends
     /// the session: it is told why and lands on the picker, and nothing is rebuilt
-    /// onto VP9 for it.
+    /// onto tiles for it.
     #[tokio::test]
     async fn a_passed_session_ends_for_a_reload_that_cannot_take_it() {
         let (hook_tx, hook_rx) = std_mpsc::channel();
@@ -2995,7 +2995,7 @@ mod tests {
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
 
-        // Encoded here: the frame is dropped and the session goes on.
+        // Coded here: the frame is dropped and the session goes on.
         mgr.connect(att.id, "desk", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "desk").await;
         let (input_rx, frame_tx) = hook_rx.try_recv().expect("engine spawned on connect");
