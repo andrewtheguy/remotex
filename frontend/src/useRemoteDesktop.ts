@@ -1676,6 +1676,7 @@ export function useRemoteDesktop(
           pageHevc: runnableDecoders().hevc,
           rdpGraphics: composesRdpGraphics(),
           rdpH264: decodesRdpH264(),
+          vp9444: nativeVp9(),
         }),
       );
       ws = socket;
@@ -2302,7 +2303,6 @@ export function useRemoteDesktop(
             passthrough: msg.passthrough,
             software:
               pageModuleFor(msg.decode, {
-                nativeVp9: nativeVp9(),
                 nativeHevc: decodesAppleMedia(),
               }) !== undefined,
             strips: msg.strips,

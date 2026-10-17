@@ -58,7 +58,7 @@ test("other failures are not", () => {
   for (const reason of [
     "This browser could not load the graphics compositor (Out of bounds memory access (evaluating 'T.startPool(t)')).",
     "This browser could not show the display's picture (unreachable). Reload the page to start it over.",
-    "This browser's own decoder does not take the gateway's 4:4:4 VP9, and this page cannot run its own: that needs WebGL 2 and a cross-origin isolated page.",
+    "This browser's own decoder does not take the Mac's HEVC, and this page cannot run its own: that needs WebGL 2 and a cross-origin isolated page.",
     "the ROOMS were full",
   ]) {
     assert.equal(saysOutOfMemory(reason), false, reason);

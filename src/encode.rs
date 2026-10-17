@@ -374,6 +374,9 @@ struct Shared {
     /// congestion walk beside the push-blocked signal, and the settle tick asks it
     /// whether the client has room for what it is about to send.
     feedback: Arc<LinkFeedback>,
+    /// The plan's chroma, which every stream encoded here is at and a passed
+    /// wlshare frame is held to ([`crate::stream::pass`]).
+    chroma: crate::vp9::Chroma,
     units: AtomicU64,
     encoded_bytes: AtomicU64,
     /// Runs of a graphics pipeline passed ([`VideoSink::pass_graphics`]), and their
@@ -413,13 +416,13 @@ struct Shared {
 
 impl Shared {
     fn new(plan: RenderPlan, feedback: Arc<LinkFeedback>, oversize: Oversize) -> Self {
-        let RenderPlan { quality, adaptive, .. } = plan;
+        let RenderPlan { quality, adaptive, chroma, .. } = plan;
         Self {
             oversize,
             oversized: AtomicBool::new(false),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
-                stream: DesktopStream::new(quality),
+                stream: DesktopStream::new(quality, chroma),
                 congestion: QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, adaptive),
                 due_at: None,
             }),
@@ -430,6 +433,7 @@ impl Shared {
             uncover_owed: AtomicBool::new(false),
             keyframe_owed: AtomicBool::new(false),
             feedback,
+            chroma,
             units: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
             graphics: AtomicU64::new(0),
@@ -731,7 +735,7 @@ impl VideoSink {
     /// keyframe, which the full update the engine asks for at the same moment brings,
     /// and the keyframe goes out behind a fresh announcement.
     pub async fn pass(&self, w: u16, h: u16, frame: Vec<u8>) -> anyhow::Result<()> {
-        let passed = crate::stream::pass(w, h, &frame)?;
+        let passed = crate::stream::pass(w, h, &frame, self.shared.chroma)?;
         self.forward(w, h, frame, passed).await.map(drop)
     }
 
@@ -1360,13 +1364,22 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv420 };
+
+    /// A `wlshare` target's plan for a browser that decodes 4:4:4, whose stream wlshare
+    /// passes at that chroma.
+    const PASSED: RenderPlan = RenderPlan { chroma: crate::vp9::Chroma::Yuv444, ..VIDEO };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
     async fn video_sink(w: u16, h: u16) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
+        video_sink_at(w, h, VIDEO).await
+    }
+
+    /// [`video_sink`] at `plan`.
+    async fn video_sink_at(w: u16, h: u16, plan: RenderPlan) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), Oversize::Refuse);
+        let sink = VideoSink::new("test", frame_tx, plan, feedback(), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w, h, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
         // The resize itself, so a test can count what follows.
@@ -1545,7 +1558,7 @@ mod tests {
         }
     }
 
-    /// The opening byte of a profile 1 VP9 frame — the 4:4:4 every stream is:
+    /// The opening byte of a profile 1 VP9 frame — the 4:4:4 [`PASSED`] asks for:
     /// `frame_marker` 2, profile 1, not a repeat, then `frame_type`. What `pass`
     /// reads; the rest is the remote's.
     fn passed_frame(keyframe: bool, len: usize) -> Vec<u8> {
@@ -1558,7 +1571,7 @@ mod tests {
     /// decoder needs, and the ones before the first keyframe are not sent at all.
     #[tokio::test]
     async fn a_passed_stream_starts_at_a_keyframe_behind_its_announcement() {
-        let (sink, mut frame_rx) = video_sink(1280, 800).await;
+        let (sink, mut frame_rx) = video_sink_at(1280, 800, PASSED).await;
         assert!(!sink.passing());
         sink.pass(1280, 800, passed_frame(false, 40)).await.unwrap();
         sink.pass(1280, 800, passed_frame(true, 900)).await.unwrap();
@@ -1582,7 +1595,7 @@ mod tests {
     /// again for the browser that has never seen the announcement.
     #[tokio::test]
     async fn a_reset_passed_stream_waits_for_a_keyframe_and_announces_it_again() {
-        let (sink, mut frame_rx) = video_sink(1280, 800).await;
+        let (sink, mut frame_rx) = video_sink_at(1280, 800, PASSED).await;
         sink.pass(1280, 800, passed_frame(true, 10)).await.unwrap();
         sink.flush().await;
         drain(&mut frame_rx, 2).await;
@@ -1708,14 +1721,19 @@ mod tests {
         assert!(frame_rx.try_recv().is_err());
     }
 
-    /// Only a 4:4:4 stream — the one the announcement describes — is passed.
+    /// Only a stream at the plan's chroma — the one the announcement describes — is
+    /// passed: a 4:2:0 frame to a session that asked for 4:4:4, and a 4:4:4 one to a
+    /// session that asked for 4:2:0, which its browser may not decode, are refused.
     #[tokio::test]
     async fn a_passed_frame_of_another_profile_is_refused() {
-        let (sink, _frame_rx) = video_sink(1280, 800).await;
+        let (sink, _frame_rx) = video_sink_at(1280, 800, PASSED).await;
         let mut frame = passed_frame(true, 10);
         frame[0] = 0x80; // profile 0
         let error = sink.pass(1280, 800, frame).await.unwrap_err();
-        assert!(format!("{error:#}").contains("profile 0, not the 4:4:4"), "{error:#}");
+        assert!(format!("{error:#}").contains("profile 0, not the profile 1 of the 4:4:4"), "{error:#}");
+        let (sink, _frame_rx) = video_sink(1280, 800).await;
+        let error = sink.pass(1280, 800, passed_frame(true, 10)).await.unwrap_err();
+        assert!(format!("{error:#}").contains("profile 1, not the profile 0 of the 4:2:0"), "{error:#}");
     }
 
     /// Past the ceiling, a source that holds sends nothing of the picture: its
@@ -1843,7 +1861,7 @@ mod tests {
         let ServerMsg::VideoFormat { decode, passthrough: false, .. } = &out[0] else {
             panic!("the first thing a stream sends must be its format, encoded here, got {:?}", out[0]);
         };
-        assert!(decode.starts_with("vp09.01."), "not a VP9 profile-1 configuration: {decode}");
+        assert!(decode.starts_with("vp09.00."), "not a VP9 profile-0 configuration: {decode}");
         let announced = decode.clone();
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
 
@@ -2183,7 +2201,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv420 };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2310,7 +2328,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false, chroma: crate::vp9::Chroma::Yuv420 };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

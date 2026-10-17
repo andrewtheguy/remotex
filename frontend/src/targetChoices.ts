@@ -37,9 +37,9 @@
 //   (alpha), is a choice on a `wlshare` target: see `encoderOptions`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
-// - Which decoder takes the picture is no choice: the page decodes the VP9, and
-//   a Mac's passed HEVC where the gateway serves the decoder for it, in
-//   WebAssembly wherever the browser's own decoder does not take it
+// - Which decoder takes the picture is no choice: the browser's own decodes the
+//   VP9, and the page a Mac's passed HEVC where the gateway serves the decoder
+//   for it, in WebAssembly wherever the browser's own decoder does not take it
 //   (softwareDecoder.ts).
 
 /** A stream a target can pass untouched, as `/api/targets` names it. */

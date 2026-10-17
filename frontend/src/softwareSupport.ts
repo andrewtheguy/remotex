@@ -65,13 +65,11 @@ export type RunnableDecoders = Record<SoftwareModule, boolean>;
 
 /**
  * How this page decodes the streams it is sent: which of its software decoders it
- * can run, and whether the browser's own decoder takes the gateway's VP9
- * (nativeVp9.ts) and a Mac's HEVC (appleMedia.ts), each of which the page decodes
- * itself where it does not.
+ * can run, and whether the browser's own decoder takes a Mac's HEVC
+ * (appleMedia.ts), which the page decodes itself where it does not.
  */
 export interface PageDecoding {
   runs: RunnableDecoders;
-  nativeVp9: boolean;
   nativeHevc: boolean;
 }
 
@@ -79,12 +77,11 @@ let runnable: RunnableDecoders | null = null;
 
 /**
  * Which of them this page runs, asked once: a Mac's HEVC needs the canvas given
- * its primaries, Display P3, and the gateway's VP9 is presented in sRGB's.
+ * its primaries, Display P3.
  */
 export function runnableDecoders(): RunnableDecoders {
   runnable ??= {
     hevc: runsSoftwareDecoder({ widePrimaries: true }),
-    vp9: runsSoftwareDecoder({ widePrimaries: false }),
   };
   return runnable;
 }

@@ -162,9 +162,8 @@ export interface VideoStreamInfo {
   // Not a stream either: a Mac's own picture in this quality, decoded by this
   // page (`standardStart`). No decoder is configured and `decode` names nothing.
   standard?: StandardQuality;
-  // Decoded by one of the page's WebAssembly decoders (softwareDecoder.ts) and
-  // not by the browser's own: the VP9 where the browser's own does not take it,
-  // and a Mac's HEVC where the gateway said so with the format.
+  // Decoded by the page's WebAssembly decoder (softwareDecoder.ts) and not by
+  // the browser's own: a Mac's HEVC where the browser's own does not take it.
   software?: boolean;
   // How many strips each picture of the stream comes in, where more than one.
   strips?: number;

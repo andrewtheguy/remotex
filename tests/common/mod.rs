@@ -430,7 +430,7 @@ pub async fn connect_ws_stating(addr: SocketAddr, token: &str, cookie: &str, app
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
     let mut request = format!(
-        "ws://{addr}/ws?session={token}&apple_media={apple_media}&page_hevc=false&rdp_graphics=true&rdp_h264=false"
+        "ws://{addr}/ws?session={token}&apple_media={apple_media}&page_hevc=false&rdp_graphics=true&rdp_h264=false&vp9_444=true"
     )
         .into_client_request()
         .unwrap();

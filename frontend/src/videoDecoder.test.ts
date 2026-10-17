@@ -262,58 +262,19 @@ test("a stream is decoded by the page where the browser's own decoder does not t
   const VP9_444 = "vp09.01.40.08.03.06.06.06.00";
   const VP9_420 = "vp09.00.40.08.01.06.06.06.00";
   const HEVC = "hev1.4.10.L150.BE.8";
-  const BOTH = { hevc: true, vp9: true };
+  const RUNS = { hevc: true };
   try {
     // The format, how the page decodes, then the worker started, or "browser"
     // for its own decoder, or null for a stream said and not decoded.
     const cases: [{ decode: string }, PageDecoding, string | null][] = [
-      // The VP9 is the page's where the browser's own decoder does not take it.
-      [
-        { decode: VP9_444 },
-        { runs: BOTH, nativeVp9: true, nativeHevc: true },
-        "browser",
-      ],
-      [
-        { decode: VP9_444 },
-        { runs: BOTH, nativeVp9: false, nativeHevc: true },
-        "vp9-decoder",
-      ],
-      // A profile its module does not decode stays the browser's.
-      [
-        { decode: VP9_420 },
-        { runs: BOTH, nativeVp9: false, nativeHevc: false },
-        "browser",
-      ],
+      // The VP9 is the browser's, at either profile: the page has no module for it.
+      [{ decode: VP9_444 }, { runs: RUNS, nativeHevc: false }, "browser"],
+      [{ decode: VP9_420 }, { runs: RUNS, nativeHevc: false }, "browser"],
       // A Mac's HEVC is the page's where the browser's own decoder does not take it.
-      [
-        { decode: HEVC },
-        { runs: BOTH, nativeVp9: true, nativeHevc: false },
-        "hevc-decoder",
-      ],
-      [
-        { decode: HEVC },
-        { runs: BOTH, nativeVp9: false, nativeHevc: true },
-        "browser",
-      ],
+      [{ decode: HEVC }, { runs: RUNS, nativeHevc: false }, "hevc-decoder"],
+      [{ decode: HEVC }, { runs: RUNS, nativeHevc: true }, "browser"],
       // The page's to decode with a module it cannot run: no other stands in.
-      [
-        { decode: VP9_444 },
-        {
-          runs: { hevc: true, vp9: false },
-          nativeVp9: false,
-          nativeHevc: true,
-        },
-        null,
-      ],
-      [
-        { decode: HEVC },
-        {
-          runs: { hevc: false, vp9: true },
-          nativeVp9: true,
-          nativeHevc: false,
-        },
-        null,
-      ],
+      [{ decode: HEVC }, { runs: { hevc: false }, nativeHevc: false }, null],
     ];
     for (const [format, decoding, expected] of cases) {
       resetSoftwareDecodersForTests();

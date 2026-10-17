@@ -1347,7 +1347,8 @@ pub enum ServerMsg {
     ///
     /// Which decoder takes the stream is each page's own to say, and the gateway is not told:
     /// the browser's `VideoDecoder` where it takes the stream, and the page's WebAssembly one
-    /// for the gateway's VP9 or a Mac's HEVC where it does not.
+    /// for a Mac's HEVC where it does not. Every VP9 is the browser's own decoder's, at a
+    /// chroma the browser said it takes ([`crate::config::RenderPlan::chroma`]).
     ///
     /// `strips` says how many strips each picture of the stream comes in, a unit
     /// each ([`Strip`]): [`Strip::COUNT`] for a High Performance Mac's passed in

@@ -388,6 +388,12 @@ async def main() -> int:
         help="state that this client composes an RDP host's graphics pipeline",
     )
     parser.add_argument(
+        "--no-vp9-444",
+        action="store_true",
+        help="state that this client's decoder takes no VP9 at 4:4:4, as iOS Safari's "
+        "does not, so a wlshare target sends it 4:2:0",
+    )
+    parser.add_argument(
         "--records",
         action="store_true",
         help="print each screen batch's VIDEO records",
@@ -412,16 +418,18 @@ async def main() -> int:
     print(f"  logged in, session {token[:12]}…")
 
     # The session socket requires the browser's answers about itself; the probe stands
-    # in for a decoder that takes VP9 profile 1, as a desktop browser does, takes the
-    # Mac's stream only with --apple-media or --page-hevc and composes an RDP pipeline
-    # only with --rdp-graphics. It decodes no H.264, so a pipeline passed to it carries
-    # none.
+    # in for a decoder that takes VP9 profile 1, as a desktop browser does, unless
+    # --no-vp9-444, takes the Mac's stream only with --apple-media or --page-hevc and
+    # composes an RDP pipeline only with --rdp-graphics. It decodes no H.264, so a
+    # pipeline passed to it carries none.
+    vp9_444 = "false" if args.no_vp9_444 else "true"
     apple_media = "true" if args.apple_media else "false"
     page_hevc = "true" if args.page_hevc else "false"
     rdp_graphics = "true" if args.rdp_graphics else "false"
     url = (
         f"ws://127.0.0.1:{args.port}/ws?session={token}"
         f"&apple_media={apple_media}&page_hevc={page_hevc}&rdp_graphics={rdp_graphics}&rdp_h264=false"
+        f"&vp9_444={vp9_444}"
     )
     choices = {
         "size": "window" if args.resize else "target",

@@ -6,9 +6,6 @@ use std::process::Command;
 use anyhow::{Context, Result, bail, ensure};
 
 const PREBUILT_FRONTEND: &str = "REMOTEX_PREBUILT_FRONTEND";
-/// A copy of the software VP9 decoder's release archive, which the frontend's
-/// build takes instead of downloading the release (frontend/wasm/vp9/fetch.ts).
-const VP9_WASM_ARCHIVE: &str = "REMOTEX_VP9_WASM_ARCHIVE";
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed={PREBUILT_FRONTEND}");
@@ -85,15 +82,9 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "frontend/wasm/vnc/.cargo/config.toml",
         "frontend/wasm/vnc/rust-toolchain.toml",
         "frontend/wasm/vnc/src",
-        // The page's software VP9 decoder, which is not built here: the release
-        // of andrewtheguy/vp9-wasm the pin names, unpacked beside it by the
-        // script.
-        "frontend/wasm/vp9/pin.json",
-        "frontend/wasm/vp9/fetch.ts",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
-    println!("cargo:rerun-if-env-changed={VP9_WASM_ARCHIVE}");
 
     let frontend_dir = root.join("frontend");
     let mut bun = Command::new("bun");

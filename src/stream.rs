@@ -10,7 +10,7 @@
 use crate::protocol::{Held, VideoUnit};
 use crate::shadow::Rect;
 use crate::video::Mirror;
-use crate::vp9::Stream;
+use crate::vp9::{Chroma, Stream};
 
 /// Most rectangles the staged-damage list holds before collapsing to a bounding
 /// box — see [`DesktopStream::stage`].
@@ -44,6 +44,9 @@ pub struct DesktopStream {
     /// has moved it. A stream rebuilt after a resize starts here, so one built while
     /// the link is behind starts where the link left off.
     quality: u8,
+    /// How every encoder of this stream samples colour: the plan's, for the
+    /// session's life ([`crate::config::RenderPlan::chroma`]).
+    chroma: Chroma,
     /// The desktop, learned from [`crate::protocol::ServerMsg::Resize`]. `None` until
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
@@ -74,9 +77,10 @@ pub struct DesktopStream {
 }
 
 impl DesktopStream {
-    pub fn new(quality: u8) -> Self {
+    pub fn new(quality: u8, chroma: Chroma) -> Self {
         Self {
             quality,
+            chroma,
             size: None,
             mirror: None,
             spare: None,
@@ -216,7 +220,7 @@ impl DesktopStream {
                 let size = self.mirror.as_ref().expect("owed pixels mean a mirror").size();
                 self.owed = false;
                 Live {
-                    stream: Stream::new(size, self.quality)?,
+                    stream: Stream::new(size, self.quality, self.chroma)?,
                     quality: self.quality,
                     // Its whole picture is owed: nothing has carried these pixels yet.
                     dirty: true,
@@ -469,23 +473,33 @@ pub struct Passed {
 const PASSED_FPS: u64 = 60;
 
 /// Check a `w`×`h` frame of wlshare's VP9 encoding, which is the stream this gateway
-/// would otherwise have encoded from the same pixels: 4:4:4, BT.601 at studio swing,
-/// declared in its keyframes. The profile is read and held to 4:4:4's
-/// ([`screen_vp9::PROFILE`]), so the configuration announced for it is the one the
-/// frame needs.
-pub fn pass(w: u16, h: u16, frame: &[u8]) -> anyhow::Result<Passed> {
+/// would otherwise have encoded from the same pixels: at `chroma`, the plan's, which
+/// the listing asked wlshare for, BT.601 at studio swing, declared in its keyframes.
+/// The profile is read and held to the chroma's ([`Chroma::profile`]), so the
+/// configuration announced for it is the one the frame needs, and the browser that
+/// said it takes no 4:4:4 is never handed one.
+pub fn pass(w: u16, h: u16, frame: &[u8], chroma: Chroma) -> anyhow::Result<Passed> {
     let header = crate::vp9::frame_header(frame)
         .ok_or_else(|| anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header"))?;
     anyhow::ensure!(
-        header.profile == screen_vp9::PROFILE,
-        "the server's VP9 frame is profile {}, not the 4:4:4 profile {} this gateway streams",
+        header.profile == chroma.profile(),
+        "the server's VP9 frame is profile {}, not the profile {} of the {} this session asked for",
         header.profile,
-        screen_vp9::PROFILE
+        chroma.profile(),
+        chroma_name(chroma)
     );
     crate::video::check_picture((w, h))?;
-    let decode = crate::vp9::codec_string(w, h, PASSED_FPS)
+    let decode = crate::vp9::codec_string(w, h, PASSED_FPS, chroma)
         .ok_or_else(|| anyhow::anyhow!("no VP9 level covers a {w}x{h} picture"))?;
     Ok(Passed { decode, keyframe: header.keyframe, strip: None })
+}
+
+/// A chroma as a sentence names it.
+pub fn chroma_name(chroma: Chroma) -> &'static str {
+    match chroma {
+        Chroma::Yuv444 => "4:4:4",
+        Chroma::Yuv420 => "4:2:0",
+    }
 }
 
 #[cfg(test)]
@@ -497,30 +511,36 @@ mod tests {
     #[test]
     fn a_passed_frame_past_the_ceiling_is_refused() {
         let keyframe = [0xa0u8, 0, 0, 0];
-        assert!(pass(1920, 1080, &keyframe).is_ok());
-        let refused = pass(5376, 2288, &keyframe).expect_err("a 5376x2288 frame was passed");
+        assert!(pass(1920, 1080, &keyframe, Chroma::Yuv444).is_ok());
+        let refused = pass(5376, 2288, &keyframe, Chroma::Yuv444).expect_err("a 5376x2288 frame was passed");
         assert_eq!(
             refused.to_string(),
             crate::video::check_picture((5376, 2288)).unwrap_err().to_string()
         );
     }
 
-    /// A passed frame is announced as 4:4:4, and one of another profile — a server
-    /// that did not code what this gateway streams — is refused by name rather than
-    /// handed to a decoder configured for something else.
+    /// A passed frame is announced at the chroma the session asked for, and one of
+    /// another profile — a server that did not code what it was asked — is refused by
+    /// name rather than handed to a decoder configured for something else.
     #[test]
-    fn a_passed_frame_is_held_to_4_4_4() {
+    fn a_passed_frame_is_held_to_the_sessions_chroma() {
         let (profile_0, profile_1) = ([0x80u8, 0, 0, 0], [0xa0u8, 0, 0, 0]);
-        let full = pass(1920, 1080, &profile_1).expect("a 4:4:4 frame");
+        let full = pass(1920, 1080, &profile_1, Chroma::Yuv444).expect("a 4:4:4 frame");
         assert!(full.decode.starts_with("vp09.01."), "{}", full.decode);
+        let subsampled = pass(1920, 1080, &profile_0, Chroma::Yuv420).expect("a 4:2:0 frame");
+        assert_eq!(subsampled.decode, "vp09.00.41.08.01.06.06.06.00");
         assert_eq!(
-            pass(1920, 1080, &profile_0).unwrap_err().to_string(),
-            "the server's VP9 frame is profile 0, not the 4:4:4 profile 1 this gateway streams"
+            pass(1920, 1080, &profile_0, Chroma::Yuv444).unwrap_err().to_string(),
+            "the server's VP9 frame is profile 0, not the profile 1 of the 4:4:4 this session asked for"
+        );
+        assert_eq!(
+            pass(1920, 1080, &profile_1, Chroma::Yuv420).unwrap_err().to_string(),
+            "the server's VP9 frame is profile 1, not the profile 0 of the 4:2:0 this session asked for"
         );
     }
 
     fn stream(w: u16, h: u16) -> DesktopStream {
-        let mut stream = DesktopStream::new(60);
+        let mut stream = DesktopStream::new(60, Chroma::Yuv420);
         stream.want(w, h);
         stream
     }

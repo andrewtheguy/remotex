@@ -1,19 +1,15 @@
-// The page's software decoders, for a stream the browser's `VideoDecoder` does
-// not take, or is not given:
-// - `vp9`, the gateway's VP9 at 4:4:4, profile 1: andrewtheguy/vp9-wasm's
-//   decoder, which is in the bundle (frontend/wasm/vp9). Which decodes the VP9 is
-//   each page's to say: the browser's own decoder where it takes profile 1, and
-//   this one where it does not (nativeVp9.ts), so a session's pages may differ.
-// - `hevc`, a High Performance Mac's passed HEVC: andrewtheguy/hevc-wasm's
-//   decoder, which the gateway serves where it has the release archive. Which
-//   decodes that is each page's to say too: the browser's own decoder where it
-//   takes the Mac's HEVC, and this one where it does not (appleMedia.ts).
+// The page's software decoder, for a stream the browser's `VideoDecoder` does
+// not take: `hevc`, a High Performance Mac's passed HEVC, andrewtheguy/hevc-wasm's
+// decoder, which the gateway serves where it has the release archive. Which
+// decodes that is each page's to say: the browser's own decoder where it takes
+// the Mac's HEVC, and this one where it does not (appleMedia.ts). The VP9 has no
+// module: the gateway sends 4:4:4 only to a browser whose own decoder takes it,
+// and 4:2:0, which every decoder takes, to the rest (nativeVp9.ts).
 //
 // `pageModuleFor` says which, and `videoDecoder.ts` builds it.
 //
-// Each is written for the one stream it decodes and compiled to WebAssembly with
-// SIMD128 and threads, and the two modules present one interface, so one worker
-// implementation runs either (softwareDecoder.worker.ts). A module runs in a
+// The module is written for the one stream it decodes and compiled to
+// WebAssembly with SIMD128 and threads (softwareDecoder.worker.ts). It runs in a
 // decode worker of its own beside the paint worker: a picture takes milliseconds
 // of CPU, and the paint worker has to go on answering a `clear` while one does.
 //
@@ -44,40 +40,28 @@
 // (planesPicture.ts): the strips that did not change are on the GPU already.
 
 /** The modules: which stream each decodes is `softwareModuleFor`'s to say. */
-export type SoftwareModule = "hevc" | "vp9";
+export type SoftwareModule = "hevc";
 
 /** What a module decodes, as a sentence names it. */
 export const MODULE_CODEC: Record<SoftwareModule, string> = {
   hevc: "HEVC",
-  vp9: "VP9",
 };
 
-/**
- * The module that decodes a configuration string, or null for one neither does:
- * HEVC, and VP9 profile 1, which is the gateway's 4:4:4 (`codec_string` in
- * src/vp9.rs).
- */
+/** The module that decodes a configuration string, or null for one none does. */
 export function softwareModuleFor(codec: string): SoftwareModule | null {
-  if (codec.startsWith("hev1.") || codec.startsWith("hvc1.")) {
-    return "hevc";
-  }
-  return codec.startsWith("vp09.01.") ? "vp9" : null;
+  return codec.startsWith("hev1.") || codec.startsWith("hvc1.") ? "hevc" : null;
 }
 
 /**
  * The page's module that decodes a stream announced as `decode`, or undefined
  * for the browser's own decoder: the module where the browser's own decoder
- * does not take the stream, the gateway's VP9 at profile 1 (`nativeVp9`) or a
- * Mac's HEVC (`nativeHevc`).
+ * does not take the stream, a Mac's HEVC (`nativeHevc`).
  */
 export function pageModuleFor(
   decode: string,
-  native: { nativeVp9: boolean; nativeHevc: boolean },
+  native: { nativeHevc: boolean },
 ): SoftwareModule | undefined {
   const module = softwareModuleFor(decode);
-  if (module === "vp9" && !native.nativeVp9) {
-    return "vp9";
-  }
   return module === "hevc" && !native.nativeHevc ? "hevc" : undefined;
 }
 
@@ -229,11 +213,9 @@ interface Client {
 // ends with its session (`endDecodeWorker`): few targets' pictures need either.
 const workers: Record<SoftwareModule, Worker | null> = {
   hevc: null,
-  vp9: null,
 };
 const clients: Record<SoftwareModule, Map<number, Client>> = {
   hevc: new Map(),
-  vp9: new Map(),
 };
 let nextId = 1;
 
@@ -405,5 +387,4 @@ export function endDecodeWorker(module: SoftwareModule): void {
 /** Test seam: end every decode worker, so the next stream starts its module's. */
 export function resetSoftwareDecodersForTests(): void {
   endDecodeWorker("hevc");
-  endDecodeWorker("vp9");
 }

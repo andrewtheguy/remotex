@@ -1,7 +1,7 @@
 // The one question the page asks about the browser's own VP9 decoder, and what each
-// answer means. The property under test is that only a definite "no" hands the
-// stream to the page's WebAssembly decoder: a browser's "yes", and a browser that
-// cannot answer, both keep its own decoder.
+// answer means. The property under test is that only a definite "yes" is sent
+// 4:4:4: a browser's "no", and a browser that cannot answer, are sent 4:2:0,
+// which every decoder takes.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -24,7 +24,7 @@ function browserAnswering(
   globals.VideoDecoder = { isConfigSupported: ({ codec }) => reply(codec) };
 }
 
-test("a browser that decodes profile 1 decodes the stream itself", async () => {
+test("a browser that decodes profile 1 is sent 4:4:4", async () => {
   const asked: string[] = [];
   browserAnswering(async (codec) => {
     asked.push(codec);
@@ -37,20 +37,20 @@ test("a browser that decodes profile 1 decodes the stream itself", async () => {
   assert.deepEqual(asked, ["vp09.01.40.08.03.06.06.06.00"]);
 });
 
-test("a browser without profile 1 leaves the stream to the page", async () => {
+test("a browser without profile 1 is sent 4:2:0", async () => {
   browserAnswering(async () => ({ supported: false }));
   assert.equal(await askNativeVp9(), false);
   assert.equal(nativeVp9(), false);
 });
 
-test("a browser that cannot answer keeps its own decoder, whose refusal is its to make", async () => {
+test("a browser that cannot answer is sent 4:2:0, which nothing refuses", async () => {
   browserAnswering(async () => {
     throw new TypeError("isConfigSupported disliked the string");
   });
-  assert.equal(await askNativeVp9(), true);
-  // And an answer with no verdict at all is not a "no".
+  assert.equal(await askNativeVp9(), false);
+  // And an answer with no verdict at all is not a "yes".
   browserAnswering(async () => ({}));
-  assert.equal(await askNativeVp9(), true);
+  assert.equal(await askNativeVp9(), false);
 });
 
 test("the question is asked once, and the answer is not available before it", async () => {

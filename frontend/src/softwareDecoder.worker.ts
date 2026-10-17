@@ -53,7 +53,7 @@ const scope = self as unknown as {
 };
 
 // The pool's threads, on which a picture decodes in parallel: an HEVC picture's
-// rows under wavefront parallel processing, a VP9 frame's stages. Past eight a
+// rows under wavefront parallel processing. Past eight a
 // 3200×2000 HEVC picture was measured gaining nothing more. On one, a decoder
 // decodes on this worker and starts no pool.
 const THREADS = Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 8));
@@ -70,10 +70,8 @@ function load(decoder: SoftwareModule): Promise<LoadedModule> {
     if (decoder !== loaded) {
       throw new Error(`this worker is the ${codec()} decoder's`);
     }
-    const { glue, wasm } = await decoderGlue(decoder);
-    const { memory } = await glue.default(
-      wasm === undefined ? undefined : { module_or_path: wasm },
-    );
+    const { glue, wasm } = await decoderGlue();
+    const { memory } = await glue.default({ module_or_path: wasm });
     if (THREADS > 1) {
       await seatThreads({ decoder, module: glue.module(), memory });
       glue.startPool(THREADS);
@@ -117,15 +115,9 @@ function seatThreads(seat: PoolSeat): Promise<unknown> {
 // shader presents (planesPicture.ts): Y'CbCr made with BT.709's coefficients or
 // BT.601's, in sRGB's primaries or Display P3's, the Mac's, and a transfer a
 // display takes as it is. A stream that states nothing is taken as WebCodecs
-// takes one: BT.709.
-//
-// The gateway's VP9 states BT.601 for all three, VP9 having one field for them
-// (`color_space`), and of the three only the matrix is a fact about it: the
-// encoder's conversion (the screen-vp9 crate's `Picture`) makes its Y'CbCr from
-// the desktop's own R'G'B' with BT.601's coefficients at studio swing, and
-// converts neither primaries nor transfer. So SMPTE 170M's primaries are
-// presented as sRGB's, which gives the display the desktop's pixels as they
-// were.
+// takes one: BT.709. SMPTE 170M's primaries are presented as sRGB's, which is
+// what a stream converted from a desktop's own R'G'B' with BT.601's coefficients
+// means by them.
 const UNSPECIFIED = 2;
 const MATRIX: Record<number, DecodedPlanes["matrix"]> = {
   1: "bt709",
@@ -144,8 +136,8 @@ const TRANSFERS = [1, UNSPECIFIED, 6, 13];
 const FULL_RANGE = 2;
 
 // The chroma layout a picture states, of which the page takes 4:4:4 alone: the
-// gateway's VP9 is profile 1 and the Mac's HEVC Range Extensions 4:4:4, and each
-// module refuses a stream of another by name.
+// Mac's HEVC is Range Extensions 4:4:4, and the module refuses a stream of
+// another by name.
 const YUV444 = 2;
 
 // The strips a picture sent in strips comes in.
