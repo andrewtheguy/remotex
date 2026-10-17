@@ -414,10 +414,15 @@ the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
 cropped picture. See [Past the ceiling](#past-the-ceiling). A Standard Mac on
-its physical screens is held there too, though its picture is its own: Combined
-Display over large screens shows the notice until one screen is chosen. Its
-rectangles are still passed while it is held, and the page decodes them under
-the notice, since each is drawn on the ones before it.
+its physical screens is held there too, though its picture is its own. The
+ceiling is counted in the pixels the Mac sends, not in what the page draws of
+them: Combined Display over a 2x screen beside a 1x one keeps the 2x screen's
+backing pixels, so the virtual Mac's 1280×800 and 1440×900-point screens come to
+4160×1800 and are held, though the page's mosaic would show them at 2720×900 in
+a 1x browser. The notice stays up until one screen is chosen
+([roadmap](roadmap.md#combined-displays-ceiling-counted-in-what-the-page-shows)).
+Its rectangles are still passed while it is held, and the page decodes them
+under the notice, since each is drawn on the ones before it.
 
 #### wlshare's VP9 and the `wlshare` subtype
 
@@ -586,8 +591,10 @@ virtual display and Combined Display alike.
   its changes per update and reads it off the screen as it sends it, so any wait
   between updates has a moving window's strips read off different moments. Do
   not add a request per update or an interval above zero.
-- **The ceiling, as for video.** A desktop past it is held, Combined Display
-  over large screens among them, and the page offers its screens. The
+- **The ceiling, as for video, in the Mac's pixels.** A desktop whose pixels
+  as the Mac sends them are past it is held, and the page offers its screens:
+  Combined Display over mixed densities among them, though the mosaic would
+  draw it smaller. The
   rectangles go on being passed and decoded under the notice: dropping one
   would spoil every picture drawn on it. See
   [A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through).

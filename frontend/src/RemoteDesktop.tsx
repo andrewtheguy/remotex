@@ -26,7 +26,8 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 };
 
 // The notice over a desktop with no picture, offering every display but the one
-// being sent, which is the one held: past the picture ceiling. A click sends a `selectDisplay` and nothing else: the
+// being sent, which is the one held: past the picture ceiling, counted in the
+// pixels the remote sends (`size` here), not in what the page would draw. A click sends a `selectDisplay` and nothing else: the
 // notice comes down when the gateway says the desktop has a picture again.
 function OversizeNotice({
   size,
@@ -44,8 +45,8 @@ function OversizeNotice({
     <div className="oversize-overlay" role="alert">
       <span className="status">Too large to show</span>
       <span className="status-hint">
-        The remote desktop is {size.w}×{size.h} pixels, past the largest picture
-        this page shows.
+        The remote desktop is {size.w}×{size.h} pixels as the remote sends it,
+        past the 3840×2400 this page shows.
       </span>
       {others.length > 0 ? (
         <>
@@ -81,6 +82,7 @@ function SessionCovers({
   unavailable,
   withheld,
   oversize,
+  heldPixels,
   size,
   displays,
   activeDisplayId,
@@ -90,6 +92,7 @@ function SessionCovers({
   unavailable: boolean;
   withheld: boolean;
   oversize: HoldCause | null;
+  heldPixels: RemoteSize | null;
   size: RemoteSize | null;
   displays: DisplayInfo[];
   activeDisplayId: number | null;
@@ -147,7 +150,7 @@ function SessionCovers({
           under it is not on screen. */}
       {oversize && size && (
         <OversizeNotice
-          size={size}
+          size={heldPixels ?? size}
           displays={displays}
           activeDisplayId={activeDisplayId}
           onSelectDisplay={onSelectDisplay}
@@ -279,6 +282,7 @@ export default function RemoteDesktop({
     hostScale,
     renderPlan,
     oversize,
+    heldPixels,
     connection,
     canAudio,
     audioEnabled,
@@ -521,6 +525,7 @@ export default function RemoteDesktop({
           unavailable={screenUnavailable}
           withheld={pictureWithheld}
           oversize={oversize}
+          heldPixels={heldPixels}
           size={size}
           displays={displays}
           activeDisplayId={activeDisplayId}

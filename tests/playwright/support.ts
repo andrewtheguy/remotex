@@ -363,8 +363,9 @@ export async function openClipboardPanel(page: Page): Promise<void> {
 }
 
 /// The page's alerts but the notice over a desktop past the picture ceiling, a
-/// Standard Mac's Combined Display over large screens among them: a session
-/// opens behind it on such a Mac, and the Combined Display case checks the hold.
+/// Standard Mac's Combined Display past it in the Mac's own pixels among them:
+/// a session opens behind it on such a Mac, and the Combined Display case checks
+/// the hold.
 export function faults(page: Page) {
   return page.getByRole("alert").filter({ hasNotText: "Too large to show" });
 }

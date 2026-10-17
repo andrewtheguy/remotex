@@ -718,6 +718,10 @@ export function useRemoteDesktop(
   // encodes. Null in the picker and at
   // every `connected`, until the gateway says otherwise.
   const [oversize, setOversize] = useState<HoldCause | null>(null);
+  // The desktop held, in the pixels the remote sends, which the ceiling is
+  // counted in: a Mac's Combined Display over mixed densities is shown smaller
+  // than that (`size`), each screen at its points.
+  const [heldPixels, setHeldPixels] = useState<RemoteSize | null>(null);
   // Whether it is held, which is what input and focus follow.
   const held = oversize !== null;
   // What this session is speaking, from `connected`: the protocol and the target's
@@ -2106,6 +2110,7 @@ export function useRemoteDesktop(
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
       setOversize(null);
+      setHeldPixels(null);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
       // The two Apple subtypes are the Macs; `remoteOs` says the same once the
       // desktop is up, and the first report goes out before then.
@@ -2168,6 +2173,7 @@ export function useRemoteDesktop(
       setVideoError(null);
       setRenderPlan("");
       setOversize(null);
+      setHeldPixels(null);
       // Back to the default rather than left as the last target's answer: the
       // next one may not report at all, and inheriting "the remote is a Mac"
       // would silently stop translating Command for a Windows guest.
@@ -2369,6 +2375,7 @@ export function useRemoteDesktop(
           break;
         case "oversize":
           setOversize(msg.cause);
+          setHeldPixels(msg.cause ? framebufferSize : null);
           break;
         case "picker":
           // No target selected (idle attach, switch-target, a takeover, or an
@@ -3316,6 +3323,7 @@ export function useRemoteDesktop(
     hostScale,
     renderPlan,
     oversize,
+    heldPixels,
     connection,
     canAudio,
     audioEnabled,

@@ -655,6 +655,12 @@ test.describe("a Standard Mac on Combined Display over screens of two densities"
         .poll(() => seen.oversize, { message: "held past the ceiling alone" })
         .toBe(held ? "size" : null);
       await expect(notice).toHaveCount(held ? 1 : 0);
+      if (held) {
+        // In the Mac's pixels, which the ceiling counts, not the mosaic's.
+        await expect(notice).toContainText(
+          `${seen.size?.w}×${seen.size?.h} pixels as the remote sends it`,
+        );
+      }
 
       // One screen ends the composition and the hold, chosen from the notice
       // where there is one, and Combined Display brings both back.
