@@ -270,11 +270,9 @@ connection with the same error as wrong credentials. See
     `virtual_display = true`** (below), which sizes one display to the browser
     window. Combined Display, every screen at once, is shown at 100%, so it
     works well only for two small displays side by side that fit one browser
-    window, and anything larger has to be scrolled constantly. It is counted
-    against the 3840×2400 ceiling by the pixels each screen is sent at, not by
-    the bounds they span: a 1x screen and a 2x one of a laptop's size are well
-    within it, at a 1x browser or a 2x one. Past it the session shows a notice.
-    Tried on a virtual Mac alone.
+    window, and anything larger has to be scrolled constantly. It has no size
+    limit: every screen is shown at the pixels it is sent at, however many
+    there are. Tried on a virtual Mac alone.
 - Every Apple subtype carries the Mac's native pasteboard.
 - **`subtype = "ard-high-performance"`** is High Performance mode as Apple's
   viewer has it, and is **experimental**. The Mac disables its physical displays

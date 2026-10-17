@@ -26,9 +26,12 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 };
 
 // The notice over a desktop with no picture, offering every display but the one
-// being sent, which is the one held: past the picture ceiling, counted in the
-// pixels the remote sends (`size` here), not in what the page would draw. A click sends a `selectDisplay` and nothing else: the
-// notice comes down when the gateway says the desktop has a picture again.
+// being sent, which is the one held: past the ceiling of the video stream that
+// carries it, a wlshare output's VP9, in the pixels the remote sends (`size`
+// here). The tiles the gateway codes and a Mac's own rectangles have no ceiling,
+// so only a stream's desktop is ever held. A click sends a `selectDisplay` and
+// nothing else: the notice comes down when the gateway says the desktop has a
+// picture again.
 function OversizeNotice({
   size,
   displays,
@@ -46,7 +49,7 @@ function OversizeNotice({
       <span className="status">Too large to show</span>
       <span className="status-hint">
         The remote desktop is {size.w}×{size.h} pixels as the remote sends it,
-        past the 3840×2400 this page shows.
+        past the 3840×2400 its video stream carries.
       </span>
       {others.length > 0 ? (
         <>
@@ -82,7 +85,6 @@ function SessionCovers({
   unavailable,
   withheld,
   oversize,
-  heldPixels,
   size,
   displays,
   activeDisplayId,
@@ -92,7 +94,6 @@ function SessionCovers({
   unavailable: boolean;
   withheld: boolean;
   oversize: HoldCause | null;
-  heldPixels: RemoteSize | null;
   size: RemoteSize | null;
   displays: DisplayInfo[];
   activeDisplayId: number | null;
@@ -142,15 +143,14 @@ function SessionCovers({
         </div>
       )}
 
-      {/* A desktop past the picture ceiling: no picture is shown, and the session
-          stays up for the one way out, a smaller desktop from the remote. A
-          Standard Mac's own picture goes on being decoded under the notice. Choosing one of
-          its displays is that way where it lists them, so they are offered here and
-          not only in the menu. It takes the pointer, since the remote
-          under it is not on screen. */}
+      {/* A desktop past its video stream's ceiling, a wlshare output's: no picture
+          is shown, and the session stays up for the one way out, a smaller desktop
+          from the remote. Choosing one of its displays is that way where it lists
+          them, so they are offered here and not only in the menu. It takes the
+          pointer, since the remote under it is not on screen. */}
       {oversize && size && (
         <OversizeNotice
-          size={heldPixels ?? size}
+          size={size}
           displays={displays}
           activeDisplayId={activeDisplayId}
           onSelectDisplay={onSelectDisplay}
@@ -282,7 +282,6 @@ export default function RemoteDesktop({
     hostScale,
     renderPlan,
     oversize,
-    heldPixels,
     connection,
     canAudio,
     audioEnabled,
@@ -525,7 +524,6 @@ export default function RemoteDesktop({
           unavailable={screenUnavailable}
           withheld={pictureWithheld}
           oversize={oversize}
-          heldPixels={heldPixels}
           size={size}
           displays={displays}
           activeDisplayId={activeDisplayId}

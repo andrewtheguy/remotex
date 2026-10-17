@@ -644,7 +644,7 @@ test.describe("a Standard Mac of two screens shown one at a time", () => {
         seen.mosaics.every((regions) => regions.length === 0),
         "a screen presented whole",
       ).toBe(true);
-      await expect.poll(() => seen.oversize).toBe(null);
+      expect(seen.oversize, "a Mac's own picture has no ceiling").toBeUndefined();
       expect(seen.controlTypes).not.toContain("videoFormat");
       expect(seen.outside, "rectangles off the framebuffer").toEqual([]);
       for (const batch of seen.batches) {

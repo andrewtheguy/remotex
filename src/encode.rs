@@ -389,22 +389,30 @@ impl PaintAhead {
 /// What a source's desktop past the picture ceiling ([`video::within_ceiling`])
 /// comes to.
 ///
-/// A desktop within the ceiling always has a picture. Past it there is none: a
-/// source the gateway cannot size holds the session open and says so, for the
-/// browser to offer a smaller desktop, and any other ends the session with
-/// [`video::check_picture`]'s refusal.
+/// The ceiling is a passed video stream's ([`video::MAX_LONG_SIDE`]). A source
+/// whose picture is one has none past it: the gateway sizes the remote under the
+/// ceiling and ends the session on a remote that answers past it, or, where it
+/// cannot size the remote, holds the session open and says so, for the browser to
+/// offer a smaller desktop. A source whose picture is no stream has no ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Oversize {
     /// The session ends: the gateway sized the remote, and a remote that answers
-    /// past the ceiling has refused what it was asked.
+    /// past the ceiling has refused what it was asked. A High Performance Mac, an
+    /// RDP host with its graphics pipeline, and a `wlshare` target started with
+    /// resize.
     Refuse,
     /// The picture stops until a `Resize` brings the desktop within the ceiling,
     /// which only the remote can do: [`VideoSink::damage`] drops what it is handed
     /// while [`VideoSink::oversized`] says so, and the browser is told
-    /// ([`ServerMsg::Oversize`]). A Standard Mac's own rectangles are passed all
-    /// the same, for the page to decode behind its notice: each is drawn on the
-    /// ones before it, so one dropped would spoil the picture after the hold.
+    /// ([`ServerMsg::Oversize`]). A `wlshare` target on a physical output, whose VP9
+    /// comes off the encoding list past the ceiling.
     Hold,
+    /// The desktop is shown at whatever size the remote has: the tiles coded here
+    /// of a plain VNC server's desktop or an RDP host's bitmap path, and a
+    /// Standard Mac's own rectangles, passed one by one. No picture of these is a
+    /// stream of the whole desktop, so none has the stream's ceiling, and the
+    /// browser is never told of a hold.
+    Shown,
 }
 
 /// One item in the ordered queue.
@@ -435,9 +443,6 @@ struct Shared {
     /// Whether the desktop's picture is held — see [`Oversize`]. Decided by each
     /// `Resize` ([`VideoSink::msg`]).
     oversized: AtomicBool,
-    /// The pixels the ceiling counts the desktop by where it is not the `Resize`'s
-    /// bounds — see [`VideoSink::counts`].
-    counted: Mutex<Option<u64>>,
     /// Why the order task gave up, so the engine's next push can report it rather
     /// than a bare closed channel. The error itself, so the cause chain survives
     /// the hop from the task to the push. See [`VideoSink::closed`].
@@ -518,7 +523,6 @@ impl Shared {
         Self {
             oversize,
             oversized: AtomicBool::new(false),
-            counted: Mutex::default(),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video { tiles: Tiles::new(quality), due_at: None }),
             round_returned: Arc::new(Notify::new()),
@@ -592,6 +596,11 @@ impl VideoSink {
     /// While [`Self::oversized`] the rectangle is dropped: there is no picture to put
     /// it in, and the resize that ends the hold is repainted in full.
     ///
+    /// On a source that refuses a desktop past the ceiling ([`Oversize::Refuse`]),
+    /// this is where the refusal surfaces: learning the size ([`Self::msg`]) must not
+    /// fail, and every caller of this is on the engine's `?` path, which ends the
+    /// session with the message attached.
+    ///
     /// A rectangle while a passed stream is the picture ([`Self::passing`]) is the gap
     /// after it, on a source whose rectangles come back — a `wlshare` target's server
     /// between its VP9 frames, across an output switch: they carry the picture again,
@@ -606,22 +615,13 @@ impl VideoSink {
             debug!("{}: the source's rectangles carry the picture again, as tiles coded here", self.engine);
             self.reset_render();
         }
-        self.shared.video.lock().await.tiles.blit(rect, rgb)
-    }
-
-    /// Say the picture ceiling counts the desktops the `Resize`s from here name by
-    /// `pixels` against its area ([`video::within_area`]), or by their bounds for
-    /// `None`: a Standard Mac's Combined Display, counted by the sum of what the
-    /// page is sent of each screen, the gaps between them aside
-    /// ([`crate::combined`]). From the next `Resize` on, for the hold and for the
-    /// tiles alike.
-    pub fn counts(&self, pixels: Option<u64>) {
-        *self.shared.counted.lock().unwrap() = pixels;
-    }
-
-    /// What [`Self::counts`] last said, which the next `Resize` is held by.
-    pub fn counted(&self) -> Option<u64> {
-        *self.shared.counted.lock().unwrap()
+        let mut video = self.shared.video.lock().await;
+        if self.shared.oversize == Oversize::Refuse
+            && let Some(size) = video.tiles.size()
+        {
+            video::check_picture(size)?;
+        }
+        video.tiles.blit(rect, rgb)
     }
 
     /// Whether the desktop's picture is held ([`Oversize::Hold`]): past the picture
@@ -1015,14 +1015,9 @@ impl VideoSink {
     pub async fn msg(&self, msg: ServerMsg) -> anyhow::Result<()> {
         if let ServerMsg::Resize { w, h, .. } = &msg {
             let (w, h) = (*w, *h);
-            let counted = *self.shared.counted.lock().unwrap();
-            let within = match counted {
-                Some(pixels) => video::within_area(pixels),
-                None => video::within_ceiling((u32::from(w), u32::from(h))),
-            };
-            let pixels = counted.unwrap_or(u64::from(w) * u64::from(h));
+            let within = video::within_ceiling((u32::from(w), u32::from(h)));
             let cause = match self.shared.oversize {
-                Oversize::Refuse => None,
+                Oversize::Refuse | Oversize::Shown => None,
                 Oversize::Hold if !within => Some(HoldCause::Size),
                 Oversize::Hold => None,
             };
@@ -1031,20 +1026,16 @@ impl VideoSink {
                 if oversized {
                     self.shared.passing.store(false, Ordering::Relaxed);
                     info!(
-                        "{}: a {w}x{h} desktop of {pixels} pixels is past the picture ceiling; \
-                         the picture is held until the remote sends another",
+                        "{}: a {w}x{h} desktop is past the picture ceiling; the picture is \
+                         held until the remote sends another",
                         self.engine
                     );
                 } else {
-                    info!(
-                        "{}: a {w}x{h} desktop of {pixels} pixels is within the ceiling, and \
-                         its picture shown again",
-                        self.engine
-                    );
+                    info!("{}: a {w}x{h} desktop is within the ceiling, and its picture shown again", self.engine);
                     self.reset_render();
                 }
             }
-            self.shared.video.lock().await.tiles.want(w, h, counted);
+            self.shared.video.lock().await.tiles.want(w, h);
             if self.shared.oversize == Oversize::Hold {
                 self.push(Pending::Msg(msg)).await?;
                 return self.push(Pending::Msg(ServerMsg::Oversize { cause })).await;
@@ -1057,7 +1048,7 @@ impl VideoSink {
     /// channel, for an engine test that reads the channel and never sent one.
     #[cfg(test)]
     pub(crate) fn presize(&self, w: u16, h: u16) {
-        self.shared.video.try_lock().expect("a fresh sink").tiles.want(w, h, None);
+        self.shared.video.try_lock().expect("a fresh sink").tiles.want(w, h);
     }
 
     /// Shut the picture down: deliver what is still in flight, then log what it cost.
@@ -1960,19 +1951,38 @@ mod tests {
         assert!(sink.due_at().await.is_none(), "an oversize desktop is owed a round");
     }
 
-    /// A Standard Mac's own rectangles are passed while its desktop is held: the
-    /// page decodes them behind its notice, so the picture is whole when one
-    /// screen is chosen.
+    /// A source with no ceiling is tiles at any size: a 5K desktop is coded like
+    /// any other, and the browser is told nothing of a hold.
     #[tokio::test]
-    async fn a_held_standard_picture_is_still_passed() {
-        let (sink, mut rx) = holding_sink(5376, 2288).await;
-        assert!(sink.oversized());
+    async fn a_source_with_no_ceiling_shows_a_desktop_past_it() {
+        let (frame_tx, mut frame_rx) = mpsc::channel(256);
+        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), Oversize::Shown);
+        sink.msg(ServerMsg::Resize { w: 5376, h: 2288, scale: UNSCALED }).await.unwrap();
+        assert!(!sink.oversized());
+        let area = rect(5312, 2240, 64, 48);
+        sink.damage(area, &rgb(64, 48, 1)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 3).await;
+        assert!(matches!(out[0], ServerMsg::Resize { w: 5376, .. }), "{:?}", out[0]);
+        assert!(matches!(out[1], ServerMsg::TilesStart { .. }), "a hold was said, or the picture had no start");
+        assert!(matches!(&out[2], ServerMsg::Tile(unit) if (unit.x, unit.y) == (5312, 2240)), "{:?}", out[2]);
+    }
+
+    /// A Standard Mac's own rectangles are passed whatever the desktop's size: they
+    /// are no stream, and have no ceiling.
+    #[tokio::test]
+    async fn a_standard_picture_past_the_ceiling_is_passed() {
+        let (frame_tx, mut rx) = mpsc::channel(256);
+        let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), Oversize::Shown);
+        sink.msg(ServerMsg::Resize { w: 5376, h: 2288, scale: UNSCALED }).await.unwrap();
         sink.standard_start(StandardQuality::Full).await.unwrap();
         sink.pass_standard(5000, 2000, 64, 16, vec![1; 16]).await.unwrap();
         sink.flush().await;
-        let out = drain(&mut rx, 2).await;
-        assert!(matches!(out[0], ServerMsg::StandardStart { .. }));
-        assert!(matches!(&out[1], ServerMsg::Standard(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (5000, 2000)));
+        let out = drain(&mut rx, 3).await;
+        assert!(matches!(out[0], ServerMsg::Resize { .. }));
+        assert!(matches!(out[1], ServerMsg::StandardStart { .. }), "{:?}", out[1]);
+        assert!(matches!(&out[2], ServerMsg::Standard(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (5000, 2000)));
     }
 
     /// Within the ceiling a source that holds is tiles like any other, and a source

@@ -1,6 +1,6 @@
 //! What every picture shares with the rest of the gateway: the framebuffer copy the
-//! tiles are cut from ([`Mirror`]) and the picture ceiling every picture, coded here or
-//! passed, is held under ([`check_picture`]). When a round is taken is
+//! tiles are cut from ([`Mirror`]) and the picture ceiling every video stream passed
+//! is held under ([`check_picture`]). When a round is taken is
 //! [`crate::encode`]'s business, and what it codes is [`crate::tiles`]'.
 //!
 //! **Accepted pixels are owed until a tile carries them.** [`crate::shadow::Shadow`]
@@ -24,17 +24,24 @@ pub const QUALITY_MIN: u8 = 1;
 /// See [`QUALITY_MIN`].
 pub const QUALITY_MAX: u8 = 100;
 
-/// The longest side a picture may have, and the longest the *other* side may then be.
+/// The longest side a passed video stream's picture may have, and the longest the
+/// *other* side may then be.
 ///
 /// Checked either way up, because the limit is on the picture and not on width:
 /// 3840×2400 and 2400×3840 are both legal, and 3840×3840 is not. A `w <= 3840 &&
 /// h <= 2400` test would read almost the same and would refuse a portrait desktop.
 ///
-/// The gateway's own line, which every picture is held under, the tiles coded here
-/// and every stream passed: past 4K a desktop shown at 100%, as every picture is, is
-/// more than a browser window takes. 4K is the *panel*, in either shape: 3840×2160 is
-/// a 16:9 one and 3840×2400 the 16:10 one a 1920×1200 laptop at 2x is. 5K is past the
-/// line.
+/// The ceiling is a *stream's*: a picture of the whole desktop that the remote codes
+/// and the gateway passes, wlshare's VP9, a High Performance Mac's HEVC or H.264,
+/// and an RDP host's graphics pipeline. 4K is the *panel*, in either shape: 3840×2160
+/// is a 16:9 one and 3840×2400 the 16:10 one a 1920×1200 laptop at 2x is. 5K is
+/// past the line, and past the level a browser's decoder is asked for.
+///
+/// A picture that is not such a stream has no ceiling: the tiles coded here, of a
+/// plain VNC server's desktop or an RDP host's bitmap path, and a Standard Mac's own
+/// rectangles, passed one by one, are shown at whatever size the remote has, a
+/// Combined Display of several screens included. A session on one of them is sized
+/// by the remote, and what it sends is shown.
 pub const MAX_LONG_SIDE: u16 = 3840;
 /// See [`MAX_LONG_SIDE`].
 pub const MAX_SHORT_SIDE: u16 = 2400;
@@ -46,28 +53,17 @@ pub fn within_ceiling((w, h): (u32, u32)) -> bool {
     long <= u32::from(MAX_LONG_SIDE) && short <= u32::from(MAX_SHORT_SIDE)
 }
 
-/// The most pixels a picture counted by its screens may have: the ceiling's own
-/// area, for a Standard Mac's Combined Display, whose screens are counted by what
-/// the page is sent of each rather than by the bounds they span
-/// ([`crate::combined::Composition::pixels`]).
-pub const MAX_PIXELS: u64 = MAX_LONG_SIDE as u64 * MAX_SHORT_SIDE as u64;
-
-/// Whether a picture counted as `pixels` is under the ceiling: [`MAX_PIXELS`].
-pub fn within_area(pixels: u64) -> bool {
-    pixels <= MAX_PIXELS
-}
-
 /// `pixels` held under the ceiling, the way High Performance holds a virtual
 /// display under the Mac's: each axis clamped, the orientation kept, so a
 /// landscape desktop is held to 3840×2400 and a portrait one to 2400×3840.
 ///
-/// This is what lets a resizing engine ask the remote for a desktop under the
-/// ceiling instead of ending the session over the one it was about to get: a
-/// 5120×2880 screen, or a 2560×1440 one at 2x, opens and resizes to a 3840×2400
-/// desktop shown at 100% with the rest of the window left bare. Not a scale —
-/// the gateway never shrinks a picture, every pixel the remote draws reaches the
-/// browser as drawn — so the remote is the one asked for less. Per axis and not
-/// by aspect, as the Mac's ceiling is: it keeps the most of the window.
+/// This is what lets an engine whose picture is a passed stream ask the remote for
+/// a desktop under the ceiling instead of ending the session over the one it was
+/// about to get: a 5120×2880 screen, or a 2560×1440 one at 2x, opens and resizes
+/// to a 3840×2400 desktop shown at 100% with the rest of the window left bare. Not
+/// a scale — the gateway never shrinks a picture, every pixel the remote draws
+/// reaches the browser as drawn — so the remote is the one asked for less. Per
+/// axis and not by aspect, as the Mac's ceiling is: it keeps the most of the window.
 pub fn fit_ceiling((w, h): (u32, u32)) -> (u32, u32) {
     let (long, short) = (u32::from(MAX_LONG_SIDE), u32::from(MAX_SHORT_SIDE));
     if w >= h {
@@ -159,7 +155,7 @@ impl Mirror {
     }
 }
 
-/// Refuse a picture past the ceiling.
+/// Refuse a stream's picture past the ceiling.
 ///
 /// That cannot be a config-time refusal — only the remote knows its own size, and it
 /// may change mid-session — so the message has to carry the whole explanation to
@@ -167,21 +163,11 @@ impl Mirror {
 pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
     anyhow::ensure!(
         within_ceiling((u32::from(w), u32::from(h))),
-        "the gateway will not show a {w}x{h} picture: one is refused with a long \
-         side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
-         remote knows its own size, so check-config cannot catch this — give this \
-         target a remote that can be asked for a smaller desktop: in a session started \
-         with resize the gateway holds every size it asks for under this ceiling"
-    );
-    Ok(())
-}
-
-/// Refuse a picture counted past the ceiling's area ([`within_area`]).
-pub fn check_area(pixels: u64) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        within_area(pixels),
-        "the gateway will not show {pixels} pixels of a Mac's screens at once: the ceiling \
-         is {MAX_PIXELS}, a {MAX_LONG_SIDE}x{MAX_SHORT_SIDE} picture's"
+        "the gateway will not show a {w}x{h} picture as a video stream: one is refused \
+         with a long side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. \
+         Only the remote knows its own size, so check-config cannot catch this — give \
+         this target a remote that can be asked for a smaller desktop: in a session \
+         started with resize the gateway holds every size it asks for under this ceiling"
     );
     Ok(())
 }

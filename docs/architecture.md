@@ -30,9 +30,8 @@ see [The tiles](#the-tiles). wlshare, reached as `subtype = "wlshare"`, instead
 codes its own VP9 stream, at the quality and walk the target's render plan
 resolves to, for the gateway to pass through unchanged, at 4:4:4 for a browser
 whose own decoder takes it and 4:2:0 for one that does not. A
-VNC desktop too large for that stream, in a session that does not resize it, has no
-picture, a Standard Mac's own included: the session stays up and the page offers
-the remote's displays — see
+`wlshare` desktop too large for that stream, in a session that does not resize it,
+has no picture: the session stays up and the page offers the server's outputs — see
 [past the ceiling](#past-the-ceiling). A
 Mac is reached
 over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
@@ -425,22 +424,20 @@ Preserve the announced configuration and color-space behavior in
 
 #### A desktop past the ceiling
 
-A desktop past the video ceiling has no picture. On VNC started without resize
-the session stays up and the page says so, offering the remote's displays; every
-other source ends on the ceiling's refusal. Do not carry such a desktop some
-other way, in the gateway or the page: rectangles as images, a scaled or a
-cropped picture. See [Past the ceiling](#past-the-ceiling). A Standard Mac on
-its physical screens is held there too, though its picture is its own, and its
-rectangles are still passed while it is held, the page decoding them under the
-notice, since each is drawn on the ones before it. Combined Display is counted
-by its screens, not by the bounds they span: the sum of the pixels the page is
-sent of each, as composed in the gateway or as the Mac sent them, against the
-ceiling's area, 3840×2400 (`video::MAX_PIXELS`). The virtual Mac's 1280×800 1x
-screen and 1440×900-point 2x one come to 1280×800 + 1440×900 pixels in a 1x
-browser and 1280×800 + 2880×1800 in a 2x one, within it either way. Until the
-first layout names the screens, a Standard Mac is counted by its framebuffer's
-area, the most they can come to, so a view its layout will show is not held on
-the way to it.
+The picture ceiling is a passed video stream's, 3840×2400 either way up
+(`video::MAX_LONG_SIDE`): wlshare's VP9, a High Performance Mac's HEVC or H.264,
+and an RDP host's graphics pipeline. A desktop past it has no such stream. On a
+`wlshare` target started without resize the session stays up and the page says
+so, offering the server's outputs; every other source of a stream ends on the
+ceiling's refusal. Do not carry such a desktop some other way, in the gateway or
+the page: rectangles as images, a scaled or a cropped picture. See
+[Past the ceiling](#past-the-ceiling). A picture that is no stream has no
+ceiling: the tiles coded here, of a plain `vnc` server's desktop or an RDP
+host's bitmap path (`egfx = false`), and a Standard Mac's own rectangles, passed
+one by one, are shown at whatever size the remote has, a screen past 4K or a
+Combined Display of several screens included. Do not hold or shrink one of these
+for its size, and do not hold a layout the bitmap path asks for under the
+ceiling.
 
 #### wlshare's VP9 and the `wlshare` subtype
 
@@ -615,10 +612,9 @@ never switched to or from mid-session.
   its changes per update and reads it off the screen as it sends it, so any wait
   between updates has a moving window's strips read off different moments. Do
   not add a request per update or an interval above zero.
-- **The ceiling, as for video, in the Mac's pixels.** A screen whose pixels
-  as the Mac sends them are past it is held, and the page offers the other
-  screens. The rectangles go on being passed and decoded under the notice:
-  dropping one would spoil every picture drawn on it. See
+- **No ceiling.** The Mac's rectangles are no stream of the whole desktop, so a
+  screen of any size is passed and shown as the Mac sends it, a 5K one at 2x
+  included. Do not hold or shrink one for its size. See
   [A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through).
 
 #### A Standard Mac's Combined Display
@@ -655,12 +651,9 @@ the Mac's pictures, as it passes neither.
 - **Kept on every screen.** A layout of one screen, which a login or a lock at
   the Mac makes, is answered with the combined view again and not shown: the
   browser keeps every screen meanwhile. The display menu offers no screen.
-- **Counted by its screens.** The ceiling counts the sum of the pixels the page
-  is sent of each screen, against its area
-  ([A desktop past the ceiling](#a-desktop-past-the-ceiling)), and until the
-  first layout by the framebuffer's. A layout counted otherwise decides the hold
-  again, by a resize of the same framebuffer where it stayed the same, with the
-  picture asked for whole.
+- **No ceiling.** Every screen is shown at the pixels the page is sent of it,
+  however many there are and whatever they come to
+  ([A desktop past the ceiling](#a-desktop-past-the-ceiling)).
 
 #### RDP's graphics pipeline
 
@@ -762,8 +755,8 @@ another representation the remote made: an `ard-high-performance` session passes
 the Mac's HEVC or its H.264, chosen at the picker, an `ard` session passes the
 Mac's own Adaptive or Full-quality picture, and every session of an RDP target
 with the pipeline on passes the host's graphics pipeline for the browser to
-compose. A VNC desktop past the picture ceiling in a session started without
-resize has no picture until the remote sends a smaller one — see
+compose. A `wlshare` desktop past the picture ceiling in a session started without
+resize has no picture until the server sends a smaller one — see
 [past the ceiling](#past-the-ceiling).
 
 A target's picture keys are per target, and every one has a default:
@@ -801,10 +794,11 @@ video_quality / render_adaptive, and the session's choices
   → Tiles (src/tiles.rs) → JPEG and PNG
 ```
 
-Every size an engine asks a remote for is held under the picture ceiling
-(`video::fit_ceiling`: a long side of 3840 and a short side of 2400), and a
-configured `size` past it is refused at config load. A remote the gateway cannot
-size can still answer past it; what happens then is
+Every size an engine whose picture is a passed stream asks a remote for is held
+under the picture ceiling (`video::fit_ceiling`: a long side of 3840 and a short
+side of 2400), and a configured `size` past it is refused at config load, an
+`rdp` target with `egfx = false` aside. A remote the gateway cannot size can
+still answer past it; what happens then is
 [past the ceiling](#past-the-ceiling).
 
 #### The tiles
@@ -905,27 +899,30 @@ display socket, and every tile of the desktop follows it.
 
 #### Past the ceiling
 
-A desktop past the picture ceiling is one the gateway will not show
-(`video::check_picture`). The gateway sizes every desktop it asks for under it, so
-only a remote it cannot size gets there: a plain VNC server, a wlshare one on
-a physical output, whose desktop is simply that large, or a Mac in Standard
-mode, on a screen past it or on Combined Display. Combined Display is counted by
-its screens' pixels as the page is sent them, against the ceiling's area,
-3840×2400 (`video::within_area`), and not by the bounds they span: a 1x screen
-beside a 2x one spans 4160 pixels across and is within it
-(`VideoSink::counts`, which the tiles' own check follows).
+The picture ceiling is a passed video stream's (`video::check_picture`): a
+picture of the whole desktop the remote codes and the gateway passes, wlshare's
+VP9, a High Performance Mac's HEVC or H.264, and an RDP host's graphics
+pipeline. The gateway sizes every desktop such a stream carries under it, so
+only a remote it cannot size gets there: a wlshare server on a physical output
+whose desktop is simply that large. A picture that is no stream has no ceiling:
+the tiles coded here, of a plain VNC server's desktop or an RDP host's bitmap
+path, and a Standard Mac's own rectangles, passed one by one, are shown at
+whatever size the remote has, Combined Display included.
 
-Such a desktop has no picture. `Oversize` in `src/encode.rs` is the source's side
-of it, fixed when the engine starts:
+A stream's desktop past it has no picture. `Oversize` in `src/encode.rs` is the
+source's side of it, fixed when the engine starts:
 
 | Source | `Oversize` | Past the ceiling |
 |---|---|---|
-| VNC (plain, wlshare, Apple Standard) started without resize | `Hold` | the session stays up without a picture; Standard's rectangles are still passed, decoded under the notice |
-| VNC started with resize, Apple High Performance, RDP | `Refuse` | the session ends: "the gateway will not show a W×H picture" |
+| wlshare started without resize | `Hold` | the session stays up without a picture |
+| wlshare started with resize, Apple High Performance, RDP with the pipeline | `Refuse` | the session ends: "the gateway will not show a W×H picture as a video stream" |
+| Plain VNC, Apple Standard, RDP with `egfx = false` | `Shown` | no ceiling: the desktop is shown at its size, and no `oversize` is sent |
 
 Resize refuses because it is the gateway sizing the remote: every size it asks
 for is under the ceiling, and a remote that answers past it has refused what it
-was asked. High Performance's virtual display is held under the ceiling.
+was asked. High Performance's virtual display is held under the ceiling, and so
+is every layout an RDP session with the pipeline asks for; one on the bitmap
+path asks for the window whole.
 
 A `Hold` source is decided at each `Resize`. Held, the sink drops every rectangle
 and passed frame and builds no mirror, and past the ceiling wlshare's VP9 comes off
@@ -940,8 +937,7 @@ nothing can be shown until the remote's desktop is smaller. A choice is a
 `selectDisplay` like the menu's, and the notice comes down only at a `Resize`
 without a cause. The remote repaints that desktop in full, as after any resize,
 and its picture starts over: the tiles behind a `tilesStart`, or a passed stream
-from an announcement and a keyframe. A Standard Mac's picture needs neither: the
-page has gone on decoding it under the notice.
+from an announcement and a keyframe.
 
 #### wlshare's stream, passed through
 
@@ -2671,17 +2667,20 @@ What is engine-specific is the mechanism:
 | Apple High Performance VNC | applies dynamic-resolution sizes within its fixed 3840×2160 backing ceiling |
 | RDP | applies a requested size, and the client's reported display density |
 
-Every desktop is also held under the gateway's 3840-pixel long
-side by 2400-pixel short side ceiling at the negotiated density. RDP opening and
-layout sizes and the sizes a `wlshare` target asks for all pass through
-`video::fit_ceiling`; High Performance separately keeps its native 3840×2160
-backing ceiling. This changes what the remote is asked to render, not how the
-browser scales it: a 5K window receives at most a 3840×2400 desktop at 100%, with
-the remainder bare. A configured size already
-over the ceiling at 1x is rejected during config parsing; a physical or
-non-resizable remote may still answer past it because the gateway cannot ask it
-for a smaller desktop: a VNC one [holds the session](#past-the-ceiling) without a
-picture, and any other reaches the ceiling's refusal.
+Every desktop a passed video stream carries is also held under the gateway's
+3840-pixel long side by 2400-pixel short side ceiling at the negotiated density.
+The opening and layout sizes of an RDP session with the pipeline and the sizes a
+`wlshare` target asks for all pass through `video::fit_ceiling`; High
+Performance separately keeps its native 3840×2160 backing ceiling. This changes
+what the remote is asked to render, not how the browser scales it: a 5K window
+receives at most a 3840×2400 desktop at 100%, with the remainder bare. A
+configured size already over the ceiling at 1x is rejected during config
+parsing; a physical or non-resizable remote may still answer past it because the
+gateway cannot ask it for a smaller desktop: a `wlshare` one
+[holds the session](#past-the-ceiling) without a picture, and any other stream's
+source reaches the ceiling's refusal. An RDP session with `egfx = false` has no
+ceiling: its tiles are coded here at any size, it asks for the window whole, and
+its configured `size` may be any.
 
 High Performance paces what the window asks for. A second
 `SetDisplayConfiguration` overlapping the first, or a region of the old size
