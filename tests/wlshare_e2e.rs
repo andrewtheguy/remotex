@@ -445,6 +445,8 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
     .await;
 
     assert_eq!(view.passed, Some(false), "the picture is encoded here");
+    let decode = view.decode.as_deref().expect("a video format was announced");
+    assert!(decode.starts_with("vp09.00."), "the gateway's own VP9 is 4:2:0, announced as {decode}");
     assert!(
         view.sizes.iter().all(|size| size.scale == 1.0),
         "a plain target takes no density from the server or the browser: {:?}",
@@ -457,6 +459,37 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
     assert!(
         !container.logs().contains("asked for VP9"),
         "a plain target asked wlshare for its VP9 encoding:\n{}",
+        container.logs()
+    );
+}
+
+/// A browser whose own decoder takes no 4:4:4 VP9 is sent wlshare's own stream
+/// at 4:2:0: the gateway lists `WLSS` beside the encoding, and wlshare codes the
+/// profile 0 stream the browser is told of, which is passed as it came.
+#[tokio::test]
+#[ignore = "requires Docker or Podman"]
+async fn a_browser_without_4_4_4_is_sent_wlshares_vp9_at_4_2_0() {
+    common::init_logging();
+    let (container, vnc_port) = start_wlshare().await;
+
+    let addr = spawn_app(vnc_port).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = common::connect_ws_decoding(addr, &token, &cookie, false, false).await;
+    let mut view = View::new();
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"target"}}}}"#
+    )))
+    .await
+    .unwrap();
+    view.until(&mut ws, "wlshare's stream at 4:2:0", |v| v.decode.is_some()).await;
+
+    let decode = view.decode.as_deref().expect("a video format was announced");
+    assert!(decode.starts_with("vp09.00.") && decode.contains(".08.01."), "the stream was announced as {decode}");
+    assert_eq!(view.passed, Some(true), "the stream is wlshare's own");
+    assert!(
+        container.logs().contains("asked for VP9 at 4:2:0"),
+        "wlshare was not asked for its VP9 at 4:2:0:\n{}",
         container.logs()
     );
 }

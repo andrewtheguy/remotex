@@ -201,8 +201,8 @@ whose bitmap updates are encoded as VP9 in the gateway.
   bundle privately or stages that artifact. Do not add a web root, a
   `static_dir`, or any run-time path the SPA is read from. Every URL the page
   uses goes through `frontend/src/gateway.ts`.
-- The bundle holds four WebAssembly modules, each a directory of its own under
-  `frontend/wasm`. Three are built by the frontend's build for
+- The bundle holds three WebAssembly modules, each a directory of its own under
+  `frontend/wasm`, all built by the frontend's build for
   `wasm32-unknown-unknown`. `frontend/wasm/egfx` is the compositor, around
   `crates/remotex-rdp-graphics`, built with threads by the dated nightly that
   directory's `rust-toolchain.toml` pins. The pin is that module's alone: the
@@ -232,12 +232,12 @@ whose bitmap updates are encoded as VP9 in the gateway.
   leaves the page: at the gateway's `picker`, a takeover, or a logout. A
   WebAssembly memory grows and never
   shrinks, so ending the worker that holds a module is the only way to give its
-  memory back (`frontend/src/desktopPainter.ts`). The VP9's and the HEVC's
-  decode workers end. The pipeline's compositor and the decoder of a Mac's own
+  memory back (`frontend/src/desktopPainter.ts`). The HEVC's decode worker
+  ends. The pipeline's compositor and the decoder of a Mac's own
   picture run in the paint worker itself, so a session that loaded either ends
   that worker, and the page mounts new canvases for the next, since a canvas is
   transferred to one worker once. A display tab that stops showing its display
-  lets go of its decode workers too. The display socket outlives a session and
+  lets go of its decode worker too. The display socket outlives a session and
   is not ordered against the session socket, so an ended engine's format or
   picture start can arrive after its `picker`. Each carries its `engine`, which
   the session layer stamps in on the way out (`ServerMsg::stamped`), and
@@ -371,7 +371,7 @@ is the only candidate for that today, not because another codec is ruled out: a
 second encoder is a decision of its own, weighed as
 [The codec](#the-codec) weighs HEVC.
 
-#### The browser's three answers
+#### The browser's four answers
 
 The browser is asked four questions, each once at page load and stated on the
 session socket: whether it decodes a High Performance Mac's HEVC, whether it

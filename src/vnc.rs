@@ -9920,7 +9920,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-           
+
             chroma: crate::vp9::Chroma::Yuv444,
         };
         Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
@@ -9958,7 +9958,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-           
+
             chroma: crate::vp9::Chroma::Yuv444,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Refuse);
@@ -13192,7 +13192,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-           
+
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let (frames, mut tab_rx) = mpsc::channel(8);
@@ -13234,7 +13234,7 @@ mod tests {
             apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
-           
+
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let feed = || {
