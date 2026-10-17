@@ -1199,9 +1199,9 @@ impl TargetConfig {
     /// target card, which describes a config file rather than a session.
     ///
     /// Which passthrough is passed, where that is a choice, is a session's and not
-    /// the file's, so such a target's card names each it may pass. The encoder is
-    /// a session's choice too, so a VP9 card is libvpx's, and its chroma is the most
-    /// the target sends, a `wlshare` target's 4:4:4. An RDP target with its
+    /// the file's, so such a target's card names each it may pass. A VP9 card's
+    /// chroma is the most the target sends, a `wlshare` target's 4:4:4, since
+    /// which it is sent is its browser's to say. An RDP target with its
     /// pipeline on passes it in every session, so its card says so; whether with
     /// H.264 is a session's choice, so the card is the lossless one.
     pub fn render_summary(&self) -> String {
