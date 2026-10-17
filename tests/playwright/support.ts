@@ -157,11 +157,14 @@ export function readRemoteClipboard(): string {
 // Adaptive one. An RDP target with its pipeline
 // on (egfx not false) passes it in every session, which is said and not offered.
 // `pipeline` is how the host draws that pipeline, high quality unless asked.
+// `standardView` is how a Standard Mac's screens are shown, one at a time unless
+// Combined Display is asked for, which passes no picture of the Mac's.
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
   passthrough?: "apple-media" | "apple-h264" | "apple-adaptive" | "apple-full";
   pipeline?: "high-quality" | "adaptive-desktop" | "adaptive-region";
+  standardView?: "one" | "combined";
 }
 
 // A picker button reads "<name> <protocol> · <host>", so a target is named by what
@@ -277,6 +280,16 @@ export async function startTarget(
           pipeline === "adaptive-desktop"
             ? /^H\.264 full screen/
             : /^H\.264 region/,
+      })
+      .check({ timeout: LEAVE_TIMEOUT_MS });
+  }
+  // A Standard Mac's screens: one at a time, or Combined Display.
+  const views = item.getByRole("group", { name: "Displays" });
+  const view = choices.standardView ?? "one";
+  if (view !== "one" || (await views.count()) > 0) {
+    await views
+      .getByRole("radio", {
+        name: view === "one" ? /^One at a time/ : /^Combined/,
       })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }

@@ -1892,7 +1892,7 @@ mod tests {
                     passthrough: Some(crate::config::Passthrough::AppleH264),
                     placement: crate::config::Placement::Right,
                     pipeline: crate::config::Pipeline::HighQuality,
-                    whole: false,
+                    standard_view: crate::config::StandardView::One, whole: false,
                 }
             ),
             other => panic!("unexpected: {other:?}"),

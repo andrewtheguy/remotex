@@ -67,12 +67,13 @@ rule as an exception, rather than refusing it or bending the rule unlisted.
   one file read at run time; no fallback browser paths.
 - [Sessions](docs/architecture.md#sessions): one active session per gateway,
   with takeover, and a fresh engine for every `connect`; size, sound, the Mac's
-  passthrough and how an RDP host draws its pipeline chosen
+  passthrough, a Standard Mac's view and how an RDP host draws its pipeline chosen
   at the picker, not in the config, and held for the session's life; an RDP
   host's pipeline passed in every session it is on.
 - [Input and display](docs/architecture.md#input-and-display): the two touch
   layers, the display picker as the remote's, presentation at 100%, density as
-  the wire's word, and the Apple mosaic as the one rescale.
+  the wire's word, and the Apple mosaic as the one rescale, made downward in the
+  gateway for Standard's Combined Display.
 - [Media paths](docs/architecture.md#media-paths): the gateway's own tiles or
   passed untouched, with a rule for each passthrough, a desktop past the ceiling,
   audio, camera and microphone.

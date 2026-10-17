@@ -102,7 +102,18 @@ config key.
   fewer updates, and their refinement once the screen is still. Full is the Mac's
   lossless zlib, every pixel exact, which the Mac sends no faster than the link
   takes, for a LAN. A session started with either is started over, not resumed,
-  when the browser comes back, as a passed RDP pipeline is.
+  when the browser comes back, as a passed RDP pipeline is. Both are greyed
+  under Combined Display (below).
+- **Displays.** On an `ard` target sharing the Mac's physical screens: *One at a
+  time* (beta), the default, starts on the main screen and offers the others in the
+  display menu, in the picture chosen above; *Combined* (alpha) shows every
+  screen at once, as Apple's viewer's Combined Display, and offers no single
+  screen. Combined Display asks the Mac for its Full quality, which the gateway
+  decodes, composes and sends as its tiles at `video_quality`, following the
+  browser's link as any picture coded here does. On a 1x browser a 2x screen is
+  scaled down to 1x by the gateway, so it costs the link a quarter of its own
+  pixels; a 2x browser is sent the Mac's own pixels and draws a 1x screen up
+  itself. Screen Sharing Standard's alone.
   See [A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link).
 - **Graphics.** How an RDP host draws its pipeline. *High quality*, the default,
   is the pipeline's codecs without H.264, for a
@@ -247,19 +258,23 @@ connection with the same error as wrong credentials. See
 [Remote Management access](apple-vnc-889.md#remote-management-access).
 
 - **`subtype = "ard"`** is Screen Sharing's Standard mode: the Mac's physical
-  displays, one or all of them, at their own density. A session is started
-  with the picker's Adaptive (beta), the default, or Full quality (beta), which
-  pass the Mac's own Adaptive or Full-quality picture for the page to decode;
-  the gateway encodes neither. Both have been tried on a virtual Mac alone.
-  It has no resize and no sound; the Mac keeps playing on its own output.
+  displays, one at a time or all of them, at their own density. A session of
+  one screen at a time is started with the picker's Adaptive (beta), the
+  default, or Full quality (beta), which pass the Mac's own Adaptive or
+  Full-quality picture for the page to decode; the gateway encodes neither.
+  Both have been tried on a virtual Mac alone. A session of Combined Display
+  (alpha) is the gateway's tiles of the Mac's Full quality instead, the one
+  `ard` picture `video_quality` reaches. It has no resize and no sound; the Mac
+  keeps playing on its own output.
   - **A Mac with more than one display connected is best given
     `virtual_display = true`** (below), which sizes one display to the browser
-    window. Combined Display, every screen at once, is a last resort here: it
-    is shown at 100%, so it works well only for two small displays side by side
-    that fit one browser window, and anything larger has to be scrolled
-    constantly. Past 3840×2400 in the Mac's own pixels it shows a notice
-    offering one screen at a time, though the page would draw it smaller: a 2x
-    screen beside a 1x one keeps its backing pixels.
+    window. Combined Display, every screen at once, is shown at 100%, so it
+    works well only for two small displays side by side that fit one browser
+    window, and anything larger has to be scrolled constantly. It is counted
+    against the 3840×2400 ceiling by the pixels each screen is sent at, not by
+    the bounds they span: a 1x screen and a 2x one of a laptop's size are well
+    within it, at a 1x browser or a 2x one. Past it the session shows a notice.
+    Tried on a virtual Mac alone.
 - Every Apple subtype carries the Mac's native pasteboard.
 - **`subtype = "ard-high-performance"`** is High Performance mode as Apple's
   viewer has it, and is **experimental**. The Mac disables its physical displays
@@ -307,7 +322,7 @@ connection with the same error as wrong credentials. See
   mode on such a virtual display, with resize and without the media stream or
   sound, the physical displays disabled meanwhile. It is the recommended way to
   reach a Mac with more than one display connected, whose Combined Display is
-  impractical in a browser. Apple's viewer never offers this combination; it
+  impractical in a browser past two small screens. Apple's viewer never offers this combination; it
   was tested on macOS 26 only.
 
 Apple documents none of this protocol. Both modes are reverse engineered and

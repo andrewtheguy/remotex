@@ -187,9 +187,14 @@ site_passwd = ""
 #   rdp with egfx = false            —        shown            —             —
 #   vnc                              —        —                —             —
 #   vnc, wlshare                     yes      shown            —             —
-#   vnc, ard                         —        —                —             —
-#   vnc, ard with virtual_display    yes      —                —             —
+#   vnc, ard                         —        —                shown         —
+#   vnc, ard with virtual_display    yes      —                shown         —
 #   vnc, ard-high-performance        yes      always carried   shown         —
+#
+# A Standard "ard" target on the Mac's physical screens also shows Displays: one
+# screen at a time (beta), in the Mac's own picture passed, or Combined (alpha), every
+# screen at once, which the gateway codes as its tiles from the Mac's Full quality,
+# a screen denser than the browser scaled down there. No other target has it.
 #
 # Size is how the desktop is sized, and the picker shows it before Start. A
 # desktop either keeps one size for the session — the target's `size` below, or
@@ -591,8 +596,9 @@ password = "change-me"
 # paints them, and a change the link would take too long to carry comes first as a
 # coarse JPEG that sharpens to the exact picture once it is still. A `wlshare` target's picture is wlshare's own VP9, passed through.
 # A passed Mac media stream or RDP graphics pipeline keeps the remote's own quality,
-# so the keys are refused on both Mac subtypes, and on RDP apply only to the bitmap
-# path. Every key below is per target, so it belongs *inside* a [[targets]] table
+# so the keys are refused on both Mac subtypes, but for `video_quality` on an "ard"
+# target without `virtual_display`, which is the quality of its Combined Display's
+# tiles, and on RDP apply only to the bitmap path. Every key below is per target, so it belongs *inside* a [[targets]] table
 # and not in a section of their own — uncommented here they would attach to
 # whichever [[targets]] block precedes them, which is the "example" one at the top
 # of this file. There is no global render setting, and every key has a default.

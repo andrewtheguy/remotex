@@ -68,7 +68,19 @@ picture instead is read the same way, with its `standardStart` naming `full`,
 and every record's body inflated in the spec on one zlib stream for the session,
 which must come to each rectangle's pixels. Against a Mac on a virtual display
 it also resizes the window, in each quality, and checks that the picture goes on
-at the new size, decoded, without starting again.
+at the new size, decoded, without starting again. Against a Mac of a 1x and a 2x
+screen it checks that a session of one screen at a time lists the screens alone,
+starts on one, never composes, and goes on decoding across a switch to the other
+and back.
+
+`standard-combined.spec.ts` is a Standard Mac's Combined Display, the gateway's
+tiles of the Mac's Full quality: that the session renders as Combined Display
+tiles, passes nothing, sends `tilesStart` and no display list, is never held, and
+that every TILE record lies on the grid of the last `resize` and is painted. At
+a 1x browser the desktop is one plain composition with no `mosaic`, every tile
+of it sent, gaps included; at a 2x one it is the Mac's own pixels behind a
+two-region `mosaic`, at 2x, held only past the ceiling's area in the screens'
+pixels.
 
 `target-switch.spec.ts` switches one page, without a reload, between an RDP
 host's pipeline and bitmap targets and a Mac's Adaptive and High Performance
@@ -283,6 +295,15 @@ by `REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET`:
 REMOTEX_PLAYWRIGHT_STANDARD_TARGET='mac' \
 REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET='mac-virtual' \
 bunx playwright test '/standard-passthrough\.spec\.ts$'
+```
+
+Its two-screen case, and the Combined Display spec, need an `ard` target on a Mac
+with a 1x screen beside a 2x one, named by
+`REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET`:
+
+```sh
+REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET='mac' \
+bunx playwright test '/standard-(passthrough|combined)\.spec\.ts$'
 ```
 
 The two-display spec needs the same kind of host, in a target with

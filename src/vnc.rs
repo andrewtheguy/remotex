@@ -41,6 +41,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
+use crate::combined::{Composition, Compositor};
 use crate::config::{Choices, Passthrough, RenderPlan, Sizing, StandardQuality, Subtype, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16, host_port};
@@ -734,6 +735,26 @@ struct DesktopState {
     /// are in the one encoding of that quality ([`vnc_apple::encoding`]), and no
     /// tile is coded here.
     standard: Option<StandardQuality>,
+    /// The session shows a Standard Mac's Combined Display, every screen at once,
+    /// in the Mac's Full quality decoded here and coded as the tiles
+    /// ([`crate::config::StandardView::Combined`]). The Mac is kept on that view, and
+    /// the browser is offered no single screen.
+    combined: bool,
+    /// Combined Display as it is composed here for the browser's density
+    /// ([`crate::combined::Composition`]): what the browser is told its desktop
+    /// is, while `size` stays the Mac's framebuffer that rectangles and requests
+    /// are addressed in. `None` wherever the framebuffer is the browser's desktop.
+    composed: Option<Composition>,
+    /// What the picture ceiling counted the last `Resize` by
+    /// ([`VideoSink::counts`]): a layout that counts it otherwise is a resize of
+    /// its own, even of a framebuffer that stayed the same, since the hold is
+    /// decided only at one.
+    counted: Option<u64>,
+    /// A Standard session of one screen at a time has had no layout yet, and the
+    /// Mac may still be on the combined view it opens on, which the session is
+    /// not shown: its first repaint is asked for a pixel, and the whole of it once
+    /// the screen it shows is known.
+    opening: bool,
     /// The browser has been told the screen is not available
     /// ([`ServerMsg::ScreenUnavailable`]) and waits for the stream's first picture
     /// of the display. Raised at connect, by every display change, by a stream
@@ -1108,12 +1129,18 @@ impl DesktopState {
             self.density = Density::Unanswered;
         }
     }
-    /// The size and scale, as a client is told them.
+    /// The size and scale, as a client is told them: the framebuffer's, or the
+    /// composition of it made here.
     fn resize_msg(&self) -> ServerMsg {
-        ServerMsg::Resize {
-            w: self.size.0,
-            h: self.size.1,
-            scale: self.scale,
+        let ((w, h), scale) = self.shown();
+        ServerMsg::Resize { w, h, scale }
+    }
+
+    /// The desktop the browser is shown, in its pixels, and their density.
+    fn shown(&self) -> ((u16, u16), f32) {
+        match &self.composed {
+            Some(composed) => (composed.size(), composed.scale()),
+            None => (self.size, self.scale),
         }
     }
 
@@ -1278,9 +1305,10 @@ impl DesktopState {
     }
 
     /// The region a pixel request asks for: the framebuffer, or
-    /// [`HP_HOLD_REQUEST`] while [`Self::holds_region`].
+    /// [`HP_HOLD_REQUEST`] while [`Self::holds_region`] and while a Standard session
+    /// is [opening](Self::opening).
     fn poll_size(&self) -> (u16, u16) {
-        if self.holds_region() { HP_HOLD_REQUEST } else { self.framebuffer() }
+        if self.holds_region() || self.opening { HP_HOLD_REQUEST } else { self.framebuffer() }
     }
 
     /// Whether the media stream may be offered for the current display: one
@@ -1550,8 +1578,10 @@ struct DisplayState {
 }
 
 impl DisplayState {
-    /// The list entry for every screen at once, which is the state a session
-    /// starts in and the only one a client cannot name by `CGDirectDisplayID`.
+    /// The list entry for every screen at once: *All Displays*, over two virtual
+    /// displays or a wlshare desk's two outputs. A Mac's combined view, which its
+    /// layouts name the same way, is never listed: it is a Standard session of
+    /// its own ([`DesktopState::combined`]).
     ///
     /// `0xffffffff` because that is already the sentinel Apple's own wire uses for
     /// it, in both directions: the `combine_all_displays` request and the
@@ -1732,6 +1762,10 @@ struct Apple {
     /// The media stream's units, on `ard-high-performance`: each virtual
     /// display's, in the Mac's order. Empty on every other session.
     units: Vec<PassedUnits>,
+    /// What composes Combined Display here, with the Mac's framebuffer it is
+    /// drawn from ([`DesktopState::composed`]): built at the first rectangle of
+    /// each composition.
+    compositor: Option<Compositor>,
 }
 
 impl Apple {
@@ -2067,10 +2101,10 @@ pub async fn run(
     // within. Following the window, the gateway asks for every size and holds each
     // under the ceiling, and a remote that answers past it is refused. So is High
     // Performance's, whose virtual display is held under the ceiling too. A
-    // Standard Mac on its physical screens holds as well, as Combined Display over
-    // large ones does until one screen is chosen; its rectangles go on being
-    // passed behind the page's notice all the same, as each is drawn on the ones
-    // before it ([`VideoSink::pass_standard`]).
+    // Standard Mac on its physical screens holds as well, a screen past it or
+    // Combined Display past the ceiling's area; a passed picture's rectangles go
+    // on being passed behind the page's notice all the same, as each is drawn on
+    // the ones before it ([`VideoSink::pass_standard`]).
     let oversize = if choices.resize() || config.media_stream() {
         Oversize::Refuse
     } else {
@@ -2118,6 +2152,13 @@ async fn session(
 
     let Connected { downlink, uplink, width, height, macos, apple, poll, media, passthrough } = connected;
     info!("vnc: connected, desktop {width}x{height} px (macos={macos})");
+    // A Standard Mac on its physical screens is counted, until its first layout
+    // says what it shows, by its framebuffer's area: the most Combined Display's
+    // screens can come to, and the combined view the Mac opens on before one
+    // screen is asked for. So a view its layout will show is not held on the way.
+    if plan.apple_combined || (plan.apple_standard.is_some() && !config.has_virtual_display()) {
+        sink.counts(Some(u64::from(width) * u64::from(height)));
+    }
     if sink
         .msg(ServerMsg::Resize {
             w: width,
@@ -2407,7 +2448,10 @@ async fn connect(
                  Performance session's picture is its media stream"
             );
             let opening = opening_mode(config, choices.size, display);
-            apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, receive, plan.apple_standard)
+            // Combined Display is asked for in the Mac's Full quality, which is
+            // decoded here rather than passed.
+            let picture = plan.apple_standard.or(plan.apple_combined.then_some(StandardQuality::Full));
+            apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, receive, picture)
                 .await
         }
     }
@@ -2822,7 +2866,8 @@ async fn apple_preface(
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
     // How the Mac's picture is passed, on a session with its media stream.
     receive: Option<vnc_apple_media::Receive>,
-    // The quality of the Mac's own picture, on a Standard session that passes it.
+    // The quality of the Mac's own picture, on a Standard session: passed, or on
+    // Combined Display decoded here.
     standard: Option<StandardQuality>,
 ) -> anyhow::Result<Connected> {
     let virtual_display = config.has_virtual_display();
@@ -3077,6 +3122,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         in_update: false,
         media_stream,
         standard,
+        combined: plan.apple_combined,
+        composed: None,
+        counted: sink.counted(),
+        opening: standard.is_some() && !plan.apple_combined && !virtual_display,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
@@ -3142,8 +3191,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
 
     // Kick off the update cycle with one full (non-incremental) request. On the
     // 003.889 wire this is also the second half of the arming pair the preface
-    // began, which is why it is unconditional.
-    send(&uplink, &update_request(false, size)).await?;
+    // began, which is why it is unconditional; for a session still opening, of a
+    // pixel ([`DesktopState::opening`]).
+    let first = if desktop.lock().unwrap().opening { HP_HOLD_REQUEST } else { size };
+    send(&uplink, &update_request(false, first)).await?;
     // The input side's own handle on what the two loops share, for what a
     // display's tab and the picker's choice need of it.
     let shared_here = shared.clone();
@@ -3167,6 +3218,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let mut pressed_keys: HashMap<String, u32> = HashMap::new();
     let buttons = Buttons::new(apple);
     let mut held = HeldMotion::default();
+    // The pointer is between Combined Display's screens, where it was last moved.
+    let mut off_screen = false;
 
     let result = loop {
         tokio::select! {
@@ -3394,10 +3447,21 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         // the position stays on it.
                         let alone = on_leg.is_none() && beside.is_none() && tab.lock().unwrap().is_none();
                         let (x, y) = if alone {
-                            let (w, h) = desktop.lock().unwrap().size;
+                            let ((w, h), _) = desktop.lock().unwrap().shown();
                             (x.clamp(0, i32::from(w.max(1)) - 1), y.clamp(0, i32::from(h.max(1)) - 1))
                         } else {
                             (x, y)
+                        };
+                        // Combined Display composed here is a desktop the Mac knows
+                        // nothing of: a position on it reaches the Mac in its
+                        // screen's pixels, and between screens not at all, as the
+                        // page's mosaic and Apple's viewer have it.
+                        let on_screen = desktop.lock().unwrap().composed.as_ref().map(|c| c.to_framebuffer(x, y));
+                        off_screen = matches!(on_screen, Some(None));
+                        let (x, y) = match on_screen {
+                            Some(Some(at)) => at,
+                            Some(None) => continue,
+                            None => (x, y),
                         };
                         let (x, y) = display.lock().unwrap().apple_pointer(x, y);
                         let (x, y) = {
@@ -3408,6 +3472,12 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                     other => other,
                 };
+                // Between Combined Display's screens a press or a wheel has no
+                // screen to act on. A release still goes, so a drag that ends in a
+                // gap leaves no button held on the Mac.
+                if off_screen && matches!(input, ClientMsg::MouseButton { pressed: true, .. } | ClientMsg::Wheel { .. }) {
+                    continue;
+                }
                 // Motion waits while the uplink is behind — see [`HeldMotion`].
                 // Everything else goes out now, behind whatever was held.
                 let input = if backlog.behind(Backlog::MOTION_LIMIT) {
@@ -3484,6 +3554,16 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                                 break Err(e);
                             }
                         }
+                        drop(out);
+                        // Combined Display over screens of different densities is
+                        // composed for the browser's density, here or by the page,
+                        // and the Mac sends no new layout for a browser's change.
+                        let layout = display.lock().unwrap().apple_layout.clone();
+                        if let Some(layout) = layout.filter(|_| desktop.lock().unwrap().combined)
+                            && let Err(e) = recompose(&shared_here, &layout, &sink).await
+                        {
+                            break Err(e);
+                        }
                         None
                     }
                     _ => None,
@@ -3527,6 +3607,14 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let d = desktop.lock().unwrap();
                         (d.poll_size(), d.resize_msg())
                     };
+                    // Ahead of the resize it describes, as when it was first sent:
+                    // Combined Display a 2x browser composes.
+                    let mosaic = display.lock().unwrap().mosaic.clone();
+                    if let Some(regions) = mosaic
+                        && let Err(e) = sink.msg(ServerMsg::Mosaic { regions, resize: true }).await
+                    {
+                        break Err(e);
+                    }
                     if let Err(e) = sink.msg(resize_msg).await {
                         break Err(e);
                     }
@@ -3684,10 +3772,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         // between them is answered here.
                         hp_select(&shared_here, id, &sink).await
                     } else if apple {
-                        // `COMBINED` is this gateway's own list entry, not a
-                        // screen the Mac named, so it maps back to the
-                        // `combine_all_displays` byte rather than to an id.
-                        let pick = (id != DisplayState::COMBINED).then_some(id);
+                        // A screen the Mac listed: its combined view is never one,
+                        // as a Standard session of one screen at a time lists the
+                        // screens alone, and one of Combined Display lists none.
+                        let pick = Some(id);
                         debug!("vnc: asking the Mac for display {pick:?}");
                         let host_density = desktop.lock().unwrap().host_density;
                         // Held from the decision to the send; see `HostDisplay`.
@@ -5799,6 +5887,9 @@ async fn read_rect<R: AsyncRead + Unpin>(
             sink.pass_standard(x, y, w, h, body).await?;
             return Ok(Rect::from_size(x, y, w, h).map_or(RectEffect::NOTHING, RectEffect::pixels));
         }
+        // The Mac's Full quality, which Combined Display is asked for and decodes
+        // here, to be composed.
+        vnc_apple::ENCODING_ZLIB if desktop.lock().unwrap().combined => payload = Payload::Zlib,
         // A frame of wlshare's VP9, which is the whole desktop: passed to the browser
         // untouched, or dropped while the desktop is past the ceiling, until the list
         // the read loop sends without the encoding brings the desktop again as ZRLE.
@@ -5876,9 +5967,44 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // link anything here.
     let changed = shadow.lock().unwrap().changed(rect, &rgb);
     if let Some((changed, pixels)) = changed {
-        sink.damage(changed, &pixels).await?;
+        let composing = {
+            let d = desktop.lock().unwrap();
+            d.composed.clone().map(|composition| (composition, d.size))
+        };
+        match (composing, apple.as_mut()) {
+            (Some((composition, framebuffer)), Some(apple)) => {
+                compose(apple, composition, framebuffer, changed, &pixels, sink).await?;
+            }
+            _ => sink.damage(changed, &pixels).await?,
+        }
     }
     Ok(RectEffect::pixels(rect))
+}
+
+/// Hand the tiles what a changed rectangle of the Mac's framebuffer changes of
+/// Combined Display as it is composed here ([`DesktopState::composed`]). The first
+/// rectangle of a composition builds what composes it, and paints the gaps between
+/// unequal screens, which the Mac sends nothing of.
+async fn compose(
+    apple: &mut Apple,
+    composition: Composition,
+    framebuffer: (u16, u16),
+    rect: Rect,
+    rgb: &[u8],
+    sink: &VideoSink,
+) -> anyhow::Result<()> {
+    if !apple.compositor.as_ref().is_some_and(|compositor| compositor.draws(&composition, framebuffer)) {
+        for gap in composition.gaps() {
+            let fill = crate::combined::GAP.repeat(usize::from(gap.w()) * usize::from(gap.h()));
+            sink.damage(gap, &fill).await?;
+        }
+        apple.compositor = Some(Compositor::new(composition, framebuffer)?);
+    }
+    let compositor = apple.compositor.as_mut().expect("just built");
+    for (area, pixels) in compositor.compose(rect, rgb)? {
+        sink.damage(area, &pixels).await?;
+    }
+    Ok(())
 }
 
 /// Handle a Cursor rect: `w * h` pixels in the negotiated format, followed by
@@ -6329,6 +6455,19 @@ async fn apply_resize(
     scale: f32,
     sink: &VideoSink,
 ) -> anyhow::Result<bool> {
+    resize_desktop(desktop, shadow, new, scale, None, sink).await
+}
+
+/// [`apply_resize`], for a framebuffer the browser is shown as `composed`, which a
+/// change of alone is a resize of the browser's desktop too ([`DesktopState::composed`]).
+async fn resize_desktop(
+    desktop: &SharedDesktop,
+    shadow: &SharedShadow,
+    new: (u16, u16),
+    scale: f32,
+    composed: Option<Composition>,
+    sink: &VideoSink,
+) -> anyhow::Result<bool> {
     anyhow::ensure!(
         new.0 > 0 && new.1 > 0,
         "server resized the desktop to {}x{}",
@@ -6337,12 +6476,15 @@ async fn apply_resize(
     );
     let (was, resize_msg) = {
         let mut d = desktop.lock().unwrap();
-        if d.size == new && d.scale == scale {
+        let counted = sink.counted();
+        if d.size == new && d.scale == scale && d.composed == composed && d.counted == counted {
             return Ok(false);
         }
         let was = (d.size, d.scale);
         d.size = new;
         d.scale = scale;
+        d.composed = composed;
+        d.counted = counted;
         (was, d.resize_msg())
     };
     // The old pixels describe a framebuffer that no longer exists, and the
@@ -6651,25 +6793,52 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         return Ok(false);
     }
 
-    // The composition goes first: it says how the framebuffer the resize names
-    // is presented, and a browser must not present one layout's pixels through
-    // another's regions. So it says whether that resize is coming, and the
-    // browser holds it until then rather than laying it over the old pixels.
-    let mosaic = if virtual_display { None } else { layout.mosaic() };
-    let resize = {
+    // A layout of a view the session does not show is not presented, and the
+    // view it shows is asked for again, whose layout comes next. A session of one
+    // screen at a time is not shown the combined view the Mac opens on, and is
+    // given the main screen; Combined Display stays on every screen, and a layout
+    // of one, which a login or a lock at the Mac makes, is answered with the
+    // combined view again rather than collapsing the browser's desktop to it.
+    let (combined, host_density) = {
         let d = desktop.lock().unwrap();
-        d.size != layout.backing || d.scale != layout.scale()
+        (d.combined, d.host_density)
     };
-    let mosaic_msg = {
-        let mut state = display.lock().unwrap();
-        (state.mosaic != mosaic).then(|| {
-            state.mosaic.clone_from(&mosaic);
-            ServerMsg::Mosaic { regions: mosaic.unwrap_or_default(), resize }
-        })
-    };
-    if let Some(msg) = mosaic_msg {
-        sink.msg(msg).await?;
+    if !virtual_display && layout.displays.len() > 1 && combined == layout.current.is_some() {
+        let pick = if combined {
+            None
+        } else {
+            let main = layout.displays.iter().find(|display| display.info.main).unwrap_or(&layout.displays[0]);
+            Some(main.info.id)
+        };
+        debug!("vnc: asking the Mac for display {pick:?}, the view this session shows, over {:?}", layout.current);
+        let mut out = uplink.lock().await;
+        let scaling = {
+            let mut state = display.lock().unwrap();
+            state.apple_layout = Some(layout.clone());
+            state.request_apple_scale(pick, host_density)
+        };
+        out.send(&vnc_apple::set_display_message(pick)).await?;
+        if let Some(scale) = scaling {
+            debug!("vnc: asking the Mac for {scale}x server scaling");
+            out.send(&vnc_apple::set_server_scaling(scale)).await?;
+        }
+        // The repaint queued behind the switch, as a display chosen from the menu
+        // asks for it: see the input loop's `SelectDisplay`. A session still
+        // opening asks for it at the answering layout instead.
+        let (size, opening) = {
+            let d = desktop.lock().unwrap();
+            (d.size, d.opening)
+        };
+        if !opening {
+            out.send(&update_request(false, size)).await?;
+        }
+        drop(out);
+        rearm_after_layout(uplink, desktop, false).await?;
+        return Ok(false);
     }
+
+    let composed = present(shared, &layout, virtual_display, sink).await?;
+    let was = desktop.lock().unwrap().size;
     // A session that asked for two virtual displays is sent a framebuffer spanning
     // both, and shows one of them: the desktop is that display, not the span.
     let virtuals = hp_virtuals(desktop, &layout, virtual_display);
@@ -6692,7 +6861,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             _ => (layout.backing, layout.scale()),
         }
     };
-    let resized = apply_resize(desktop, shadow, size, scale, sink).await?;
+    let resized = resize_desktop(desktop, shadow, size, scale, composed, sink).await?;
     if virtual_display {
         // Which leg carries which display changes under a canvas changing
         // display, which reads and sets who is shown each: one at a time.
@@ -6745,7 +6914,14 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // from what was asked for. `current` is a screen id, or `None` for the combined
     // view of all of them — which is what a session starts on, and which
     // [`DisplayState::COMBINED`] is the client-facing name for.
-    let host_density = desktop.lock().unwrap().host_density;
+    //
+    // The whole picture is asked for where nothing else asks for it: by a session
+    // whose first repaint was of a pixel, and after a resize the Mac made no
+    // repaint for, of a framebuffer that stayed the same and was counted again.
+    let repaint = {
+        let mut d = desktop.lock().unwrap();
+        std::mem::take(&mut d.opening) || (resized && d.size == was && !virtual_display)
+    };
     // Held from the decision to the send, as every scale request is, so the Mac
     // receives them in the order they were decided in.
     let mut out = uplink.lock().await;
@@ -6764,49 +6940,40 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     } else {
         let mut state = display.lock().unwrap();
         state.hp_infos.clear();
-        let mut infos = layout.infos();
-        // With more than one screen there is a combined view to go back to, and it
-        // has to be listed or a client that picks a screen can never leave it. With
-        // one screen there is nothing to combine, and the entry would be the same
-        // picture under a second name.
-        if infos.len() > 1 {
-            // The points the screens span together, as Apple's viewer labels the
-            // same entry — not the framebuffer, which is only the union of every
-            // screen while this view is the one selected.
-            let (w, h) = layout.points_spanned();
-            let detail = format!("{w}×{h}");
-            infos.insert(
-                0,
-                DisplayInfo {
-                    id: DisplayState::COMBINED,
-                    label: "Combined Display".into(),
-                    detail,
-                    main: false,
-                    virtual_display: false,
-                    tab: None,
-                },
-            );
-        }
-        let active = layout.current.unwrap_or(DisplayState::COMBINED);
         state.repaint_pixels = layout.repaint_pixels();
-        let changed = state.displays != infos || state.active != active;
-        state.displays = infos;
-        state.active = active;
-        state.listed = true;
+        // The scale for the view the session is on, or for the one it is
+        // switching to.
         let server_scaling = if virtual_display {
             None
         } else {
             state.accept_apple_layout(&layout, host_density)
         };
-        // Sent only on a change, since a client holds no display state of its own
-        // and the checkmark is the only thing telling it what it is looking at. Most
-        // layouts change neither half — one arrives at every login and lock — and
-        // say nothing new.
-        (changed.then(|| state.displays_msg()).flatten(), server_scaling)
+        // Combined Display is the only view of its session, and its screens are
+        // not offered: there is no list to choose from. A session of one screen
+        // lists each, and no combined view, which is a session of its own.
+        if combined {
+            (None, server_scaling)
+        } else {
+            let infos = layout.infos();
+            let active = layout.current.unwrap_or(DisplayState::COMBINED);
+            let changed = state.displays != infos || state.active != active;
+            state.displays = infos;
+            state.active = active;
+            state.listed = true;
+            // Sent only on a change, since a client holds no display state of its
+            // own and the checkmark is the only thing telling it what it is looking
+            // at. Most layouts change neither half — one arrives at every login and
+            // lock — and say nothing new.
+            (changed.then(|| state.displays_msg()).flatten(), server_scaling)
+        }
     };
     if let Some(scale) = server_scaling {
         debug!("vnc: asking the Mac for {scale}x server scaling");
         out.send(&vnc_apple::set_server_scaling(scale)).await?;
+    }
+    if repaint {
+        let size = desktop.lock().unwrap().size;
+        out.send(&update_request(false, size)).await?;
     }
     drop(out);
     if let Some(msg) = msg {
@@ -6823,6 +6990,71 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
 
     rearm_after_layout(uplink, desktop, virtual_display).await?;
     Ok(resized)
+}
+
+/// How the browser is shown `layout`'s framebuffer, at its density: as it is, through
+/// the mosaic it composes, or as Combined Display composed here, which is returned
+/// for the resize. Says the mosaic ahead of the resize it is for, when it changes,
+/// and what the picture ceiling counts.
+async fn present(
+    shared: &Shared,
+    layout: &vnc_apple::Layout,
+    virtual_display: bool,
+    sink: &VideoSink,
+) -> anyhow::Result<Option<Composition>> {
+    let Shared { desktop, display, .. } = shared;
+    // Combined Display over screens of different densities is composed here
+    // where the browser's density is no finer than any screen's, so a denser
+    // screen is resampled down to it, and is otherwise composed by the page from
+    // the Mac's pixels, which enlarges the less dense ones: see
+    // [`crate::combined`].
+    let (combined, host_density) = {
+        let d = desktop.lock().unwrap();
+        (d.combined, d.host_density)
+    };
+    let regions = if virtual_display { None } else { layout.mosaic() };
+    let composed = regions.as_deref().filter(|_| combined).and_then(|regions| Composition::of(regions, host_density));
+    let mosaic = if composed.is_some() { None } else { regions };
+    // Combined Display is counted by the pixels the page is sent of each screen,
+    // as composed here or as the Mac sent them, the gaps between them aside.
+    let counted = (combined && !virtual_display && layout.current.is_none() && layout.displays.len() > 1)
+        .then(|| composed.as_ref().map_or_else(|| layout.repaint_pixels(), Composition::pixels));
+    sink.counts(counted);
+    // The composition goes first: it says how the framebuffer the resize names
+    // is presented, and a browser must not present one layout's pixels through
+    // another's regions. So it says whether that resize is coming, and the
+    // browser holds it until then rather than laying it over the old pixels.
+    let resize = {
+        let d = desktop.lock().unwrap();
+        d.size != layout.backing || d.scale != layout.scale() || d.composed != composed || d.counted != counted
+    };
+    let mosaic_msg = {
+        let mut state = display.lock().unwrap();
+        (state.mosaic != mosaic).then(|| {
+            state.mosaic.clone_from(&mosaic);
+            ServerMsg::Mosaic { regions: mosaic.unwrap_or_default(), resize }
+        })
+    };
+    if let Some(msg) = mosaic_msg {
+        sink.msg(msg).await?;
+    }
+    Ok(composed)
+}
+
+/// Show Combined Display again for the density the browser is now at: composed
+/// here or by the page from `layout`, the last the Mac sent. A changed composition
+/// is a resize of the browser's desktop, which the Mac is asked to repaint whole,
+/// as the pixels composed from what it last sent are gone with the old one.
+async fn recompose(shared: &Shared, layout: &vnc_apple::Layout, sink: &VideoSink) -> anyhow::Result<()> {
+    let composed = present(shared, layout, false, sink).await?;
+    let (size, scale) = {
+        let d = shared.desktop.lock().unwrap();
+        (d.size, d.scale)
+    };
+    if resize_desktop(&shared.desktop, &shared.shadow, size, scale, composed, sink).await? {
+        send(&shared.uplink, &update_request(false, size)).await?;
+    }
+    Ok(())
 }
 
 /// Re-arm the Mac's unasked updates, which every layout drops, and its
@@ -8695,9 +8927,9 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
+        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(with_wlshare_vp9(&rest, walked), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
-        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
+        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -9881,6 +10113,10 @@ mod tests {
             in_update: false,
             media_stream: false,
             standard: None,
+            combined: false,
+            composed: None,
+            counted: None,
+            opening: false,
         }))
     }
 
@@ -9915,7 +10151,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
-            apple_standard: None,
+            apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
             wlshare: true,
@@ -9953,7 +10189,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
-            apple_standard: None,
+            apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
             wlshare: true,
@@ -12592,7 +12828,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -13185,7 +13421,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
-            apple_standard: None,
+            apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
             wlshare: false,
@@ -13227,7 +13463,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
-            apple_standard: None,
+            apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
             wlshare: false,
@@ -13353,16 +13589,14 @@ mod tests {
             Ok(ServerMsg::Resize { w: 3840, h: 2160, scale }) if scale == 2.0
         ));
 
-        // The screens, with the checkmark where the Mac put it, and a way back to
-        // the combined view listed ahead of them.
+        // The screens, with the checkmark where the Mac put it. Combined Display is
+        // a session of its own, and not listed.
         match rx.try_recv().expect("a display list") {
             ServerMsg::Displays { active, displays } => {
                 assert_eq!(active, 11);
-                assert_eq!(displays.len(), 3);
-                assert_eq!(displays[0].id, DisplayState::COMBINED);
-                assert_eq!(displays[0].label, "Combined Display");
-                assert_eq!(displays[1].detail, "1920×1080 at 2x");
-                assert_eq!(displays[2].label, "Display 2");
+                assert_eq!(displays.len(), 2);
+                assert_eq!(displays[0].detail, "1920×1080 at 2x");
+                assert_eq!(displays[1].label, "Display 2");
             }
             other => panic!("expected a display list, got {other:?}"),
         }
@@ -13373,6 +13607,138 @@ mod tests {
         // rectangle in this FramebufferUpdate.
         let mut expected = vnc_apple::set_server_scaling(0.5);
         expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_STANDARD_US, (3840, 2160)));
+        assert_eq!(written(&sent), expected);
+    }
+
+    /// A session of one screen at a time starts on the main one: a layout of the
+    /// combined view, which is what the Mac opens on, asks for it and holds the
+    /// Mac to a pixel of the combined view meanwhile, the answering layout asks
+    /// for the screen whole, and the menu lists the screens alone.
+    #[tokio::test]
+    async fn a_session_of_one_screen_asks_for_the_main_one() {
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((3520, 1080), None, None);
+        desktop.lock().unwrap().opening = true;
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((3520, 1080)));
+        let screens: [TestScreen; 2] = [(22, (1600, 1000), (1600, 1000), 0x00), (11, (1920, 1080), (1920, 1080), 0x01)];
+        let resized = read_display_layout(&mut layout_payload(None, &screens).as_slice(), &shared, false, &sink)
+            .await
+            .unwrap();
+        assert!(!resized, "the combined view is not shown");
+        sink.flush().await;
+        assert!(rx.try_recv().is_err(), "nothing said of the combined view");
+        let mut expected = vnc_apple::set_display_message(Some(11));
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_STANDARD_US, HP_HOLD_REQUEST));
+        assert_eq!(written(&sent), expected, "no pixel of the combined view past one");
+
+        let before = written(&sent).len();
+        read_display_layout(&mut layout_payload(Some(11), &screens).as_slice(), &shared, false, &sink).await.unwrap();
+        let mut expected = update_request(false, (1920, 1080)).to_vec();
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_STANDARD_US, (1920, 1080)));
+        assert_eq!(written(&sent)[before..], expected, "the screen it shows, whole");
+        assert!(!desktop.lock().unwrap().opening);
+        sink.flush().await;
+        let listed = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|msg| match msg {
+                ServerMsg::Displays { displays, .. } => Some(displays),
+                _ => None,
+            })
+            .expect("a display list");
+        assert_eq!(listed.iter().map(|display| display.id).collect::<Vec<_>>(), [22, 11], "no Combined Display");
+    }
+
+    /// Combined Display over a 1x screen and a 2x one is composed here for a 1x
+    /// browser, its 2x screen resampled down: the browser is told a desktop of the
+    /// screens' points, with no mosaic and no list of screens, and a position on it
+    /// reaches the Mac in that screen's pixels. A 2x browser composes the Mac's own
+    /// pixels through the mosaic, the Mac asked to repaint them whole, and a screen
+    /// the Mac sends alone is answered with every screen again.
+    #[tokio::test]
+    async fn combined_display_is_composed_for_the_browsers_density() {
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((100, 100), None, None);
+        desktop.lock().unwrap().combined = true;
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)));
+        let screens: [TestScreen; 2] = [(11, (1280, 800), (1280, 800), 0x01), (22, (1440, 900), (2880, 1800), 0x00)];
+        read_display_layout(&mut layout_payload(None, &screens).as_slice(), &shared, false, &sink).await.unwrap();
+        sink.flush().await;
+        let told: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(matches!(told.as_slice(), [ServerMsg::Resize { w: 2720, h: 900, scale }] if *scale == 1.0), "{told:?}");
+        assert_eq!(desktop.lock().unwrap().size, (4160, 1800), "the Mac's framebuffer, which it is asked in");
+        let at = desktop.lock().unwrap().composed.as_ref().map(|composed| composed.to_framebuffer(2000, 450));
+        assert_eq!(at, Some(Some((2720, 900))));
+
+        let layout = shared.display.lock().unwrap().apple_layout.clone().expect("the layout");
+        desktop.lock().unwrap().host_density = 2.0;
+        let before = written(&sent).len();
+        recompose(&shared, &layout, &sink).await.unwrap();
+        sink.flush().await;
+        let told: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(
+                told.as_slice(),
+                [ServerMsg::Mosaic { regions, resize: true }, ServerMsg::Resize { w: 4160, h: 1800, scale }]
+                    if regions.len() == 2 && *scale == 2.0
+            ),
+            "{told:?}"
+        );
+        assert_eq!(written(&sent)[before..], update_request(false, (4160, 1800)));
+
+        // A screen the Mac sends alone, as at a login, is not shown: the browser
+        // keeps every screen until the Mac answers with them again.
+        let before = written(&sent).len();
+        let resized = read_display_layout(&mut layout_payload(Some(22), &screens).as_slice(), &shared, false, &sink)
+            .await
+            .unwrap();
+        assert!(!resized);
+        sink.flush().await;
+        assert!(rx.try_recv().is_err(), "nothing said of the one screen");
+        assert_eq!(desktop.lock().unwrap().size, (4160, 1800));
+        assert!(written(&sent)[before..].starts_with(&vnc_apple::set_display_message(None)));
+    }
+
+    /// Combined Display over screens of one density is counted by their pixels, not
+    /// by the framebuffer spanning them, which the session was counted by at
+    /// connect: a picture held then is let go at the first layout, though the
+    /// framebuffer stayed the same, and asked for whole.
+    #[tokio::test]
+    async fn combined_display_held_by_its_span_is_let_go_by_its_screens() {
+        let span = (4000, 2560);
+        let (uplink, sent) = test_uplink();
+        let (frame_tx, mut rx) = mpsc::channel(64);
+        let plan = crate::config::RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: true, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
+        let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), Oversize::Hold);
+        sink.counts(Some(u64::from(span.0) * u64::from(span.1)));
+        sink.msg(ServerMsg::Resize { w: span.0, h: span.1, scale: UNSCALED }).await.unwrap();
+        assert!(sink.oversized(), "past the ceiling's area by its span");
+        sink.flush().await;
+        while rx.try_recv().is_ok() {}
+
+        let desktop = shared_desktop(span, None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.combined = true;
+            d.counted = sink.counted();
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow(span));
+        let screens: [TestScreen; 2] = [(11, (2560, 1440), (2560, 1440), 0x01), (22, (1440, 2560), (1440, 2560), 0x00)];
+        let resized = read_display_layout(&mut layout_payload(None, &screens).as_slice(), &shared, false, &sink)
+            .await
+            .unwrap();
+        assert!(resized && !sink.oversized(), "within the ceiling by its screens");
+        sink.flush().await;
+        let told: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(
+                told.as_slice(),
+                [ServerMsg::Resize { w: 4000, h: 2560, .. }, ServerMsg::Oversize { cause: None }]
+            ),
+            "{told:?}"
+        );
+        let mut expected = update_request(false, span).to_vec();
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_STANDARD_US, span));
         assert_eq!(written(&sent), expected);
     }
 
@@ -13394,14 +13760,15 @@ mod tests {
         ];
         let layout = |current| layout_payload(current, &screens);
 
-        // A session opens on the combined view, which is what the Mac sends when
-        // nothing has asked otherwise.
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink)
+        // A session opens on the main screen, which it asks for over the combined
+        // view the Mac opens on.
+        read_display_layout(&mut layout(Some(11)).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
-        assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
+        assert_eq!(shared.display.lock().unwrap().active, 11);
 
-        // Then a screen, then back again. Each move is a layout, never a request.
+        // Then the other screen, then back again. Each move is a layout, never a
+        // request.
         read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
@@ -13409,10 +13776,10 @@ mod tests {
         read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink)
+        read_display_layout(&mut layout(Some(11)).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
-        assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
+        assert_eq!(shared.display.lock().unwrap().active, 11);
 
         sink.flush().await;
         let mut actives = Vec::new();
@@ -13424,6 +13791,6 @@ mod tests {
         // Four layouts, three messages: the repeated one says nothing new. A client
         // holds no display state of its own, so a message it cannot act on is one it
         // would have to ignore.
-        assert_eq!(actives, vec![DisplayState::COMBINED, 22, DisplayState::COMBINED]);
+        assert_eq!(actives, vec![11, 22, 11]);
     }
 }

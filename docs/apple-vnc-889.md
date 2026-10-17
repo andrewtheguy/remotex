@@ -48,7 +48,7 @@ official modes alone.
 | Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for, or two. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
-| Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density Combined Display view is composed in the browser, as Apple's viewer does. |
+| Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density Combined Display view is composed at its points as Apple's viewer composes it: by the gateway for a 1x browser, by the browser for a 2x one. |
 | Picture and sound | `ard` passes the Mac's own picture, Adaptive or Full quality, on every view, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Its ZRLE rectangles are stepped over unread and never shown, so a session that passes the stream builds no video encoder: until the stream is up and across display changes the page says the screen is not available and sends the Mac no input. |
 | Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
@@ -488,24 +488,34 @@ each window drawing one screen out of the same framebuffer.
 least one that is not. Screens that are all HiDPI, whatever their densities, are not
 mixed.
 
-Remotex matches it. For a mixed combined layout, the gateway asks for factor 1.0
-and sends a `ServerMsg::Mosaic`, each screen's rectangle in framebuffer pixels
-and in points, ahead of the `Resize` (flagged so the browser adopts it with that
-framebuffer, not over the one on screen). The browser then:
+Remotex matches it, in the Combined Display session it is chosen for at the
+picker; a session of one screen at a time asks for the main screen over the
+combined view the Mac opens on, and never shows it. For a mixed combined layout
+the gateway asks for factor 1.0, which it takes in the Mac's Full quality and
+decodes. For a browser no denser than any screen, a 1x one, it composes the
+regions itself at that density, each composed pixel the mean of the Mac's pixels
+it covers, over the same grey, maps pointer positions back through them as below,
+and sends the composition as its tiles, a plain desktop with no mosaic: a 2x
+screen costs the link a quarter of its pixels. For a denser browser it sends a
+`ServerMsg::Mosaic`, each screen's rectangle in framebuffer pixels and in points,
+ahead of the `Resize` (flagged so the browser adopts it with that framebuffer,
+not over the one on screen), and the tiles of the Mac's own pixels. The browser
+then:
 - composes the regions at its own density, at medium smoothing, over the same
   grey;
 - maps pointer positions back through the regions, re-mapping the position
   before each press and wheel and dropping them in gaps (a button release still
   goes, so a drag cannot leave a button held).
 
-This is the one place the browser rescales remote pixels (see
-[Input and display](architecture.md#input-and-display)).
+These are the only places remote pixels are rescaled, the gateway's downward
+alone (see [Input and display](architecture.md#input-and-display)).
 
 At factor 1.0 the combined framebuffer is the screens' native pixels side by side:
-a 2x screen beside a 1x one measured 5376×2287, past what a video stream encodes.
-Standard never resizes, so the gateway cannot ask for less. Past the ceiling the
-session is held, as for video: the page shows a notice offering the screens, and
-decodes the Mac's rectangles under it until one screen brings the picture back.
+a 2x screen beside a 1x one measured 5376×2287. Standard never resizes, so the
+gateway cannot ask for less, and the picture ceiling counts Combined Display by
+the pixels each screen is sent at, not by the bounds they span: past 3840×2400's
+area the session is held with a notice, which offers no screen, as the session
+shows them all.
 
 ### The High Performance virtual display
 

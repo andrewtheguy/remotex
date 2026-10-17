@@ -25,8 +25,9 @@
 //! scale the framebuffer to the browser's display density, so a 2x 2880x1800
 //! screen viewed from a 1x display arrives as 1440x900 instead of being shrunk in
 //! the browser. Because density is per screen, the *combined* view of a
-//! mixed-density Mac has no single scale; it is composed in the browser from the
-//! regions [`Layout::mosaic`] names, as Apple's viewer composes it.
+//! mixed-density Mac has no single scale; it is composed from the regions
+//! [`Layout::mosaic`] names, as Apple's viewer composes it: in the gateway for a 1x
+//! browser ([`crate::combined`]), in the browser for a 2x one.
 //!
 //! **A virtual display in High Performance mode**:
 //! [`set_display_configuration`] asks for one virtual display at the configured
@@ -179,7 +180,8 @@ pub const ENCODING_ZLIB: i32 = 6;
 
 /// What a session that passes the Mac's Full-quality picture advertises:
 /// [`ENCODINGS`] with zlib ahead of ZRLE, as Apple's viewer's Full list has them,
-/// so the Mac sends zlib alone, which the page inflates. ZRLE is the one it keeps
+/// so the Mac sends zlib alone, which the page inflates, or on Combined Display
+/// the gateway, to compose. ZRLE is the one it keeps
 /// as the lossless codec, and arriving all the same ends the session, as in
 /// [`ADAPTIVE_ENCODINGS`].
 pub const FULL_ENCODINGS: &[i32] = &[

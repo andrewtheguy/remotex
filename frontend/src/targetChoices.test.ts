@@ -54,6 +54,7 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     passthroughs: [],
     placement: false,
     pipeline: false,
+    standardView: false,
     ...offers,
   };
 }
@@ -75,6 +76,7 @@ const HIGH_PERFORMANCE = target({
 const STANDARD = target({
   subtype: "ard",
   passthroughs: ["apple-adaptive", "apple-full"],
+  standardView: true,
 });
 
 const SIZED = { w: 1920, h: 1080 };
@@ -203,6 +205,7 @@ test("only what the target's type offers has a row", () => {
     passthrough: "apple-adaptive",
     placement: "right",
     pipeline: "high-quality",
+    standardView: "one",
   });
   assert.equal(standard.blocked, null);
 });
@@ -240,6 +243,43 @@ test("a Standard Mac's picture is its Adaptive or Full-quality picture passed", 
   assert.equal(full.blocked, null);
 });
 
+test("a Standard Mac's screens are one at a time or Combined Display", () => {
+  const one = targetOptions(STANDARD, undefined, ABLE);
+  assert.deepEqual(
+    one.views?.map((view) => view.value),
+    ["one", "combined"],
+  );
+  assert.match(one.views?.[0].label ?? "", /^One at a time \(beta\)/);
+  assert.match(one.views?.[1].label ?? "", /^Combined \(alpha\)/);
+  assert.equal(one.choices.standardView, "one", "until Combined is chosen");
+  // Combined Display passes none of the Mac's pictures, which are greyed under
+  // it and come back when one screen at a time is chosen again.
+  const combined = targetOptions(
+    STANDARD,
+    { standardView: "combined", passthrough: "apple-full" },
+    ABLE,
+  );
+  assert.equal(combined.choices.standardView, "combined");
+  assert.equal(combined.choices.passthrough, null);
+  assert.deepEqual(pictures(combined), [
+    ["apple-adaptive", true],
+    ["apple-full", true],
+  ]);
+  assert.equal(combined.blocked, null);
+  assert.equal(
+    targetOptions(STANDARD, { passthrough: "apple-full" }, ABLE).choices
+      .passthrough,
+    "apple-full",
+  );
+  // Screen Sharing Standard's alone: no other target has the row, and a
+  // Combined remembered for it is not sent.
+  for (const other of [RDP, HIGH_PERFORMANCE, target({})]) {
+    const options = targetOptions(other, { standardView: "combined" }, ABLE);
+    assert.equal(options.views, null);
+    assert.equal(options.choices.standardView, "one");
+  }
+});
+
 test("a Mac's picture is its HEVC passed or its H.264 passed", () => {
   const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
   assert.deepEqual(pictures(options), [
@@ -272,6 +312,7 @@ test("no sound is taken until somebody ticks it", () => {
     passthrough: null,
     placement: "right",
     pipeline: "high-quality",
+    standardView: "one",
   });
   assert.equal(rdp.sound, false);
   assert.equal(rdp.soundRow?.checked, false);
@@ -286,6 +327,7 @@ test("what was chosen last time is what Start sends", () => {
     passthrough: null,
     placement: "right",
     pipeline: "high-quality",
+    standardView: "one",
   });
   assert.equal(options.sound, true);
   assert.equal(options.soundRow?.checked, true);
@@ -311,6 +353,7 @@ test("what was chosen last time is what Start sends", () => {
     passthrough: null,
     placement: "right",
     pipeline: "high-quality",
+    standardView: "one",
   });
   // Nor is something this page never wrote there.
   const stale = targetOptions(RDP, { audio: true as never }, ABLE);

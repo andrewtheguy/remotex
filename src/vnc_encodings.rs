@@ -1,7 +1,8 @@
 //! The RFB pixel encodings, decoded to packed RGB888.
 //!
-//! Two of them: ZRLE, the one encoding every target is asked for, and Raw, which
-//! RFB lets a server send whatever the list says. Both return the rectangle's
+//! Three of them: ZRLE, the one encoding every target but a Mac's Combined Display
+//! is asked for, zlib, which that view is asked for as the Mac's Full quality, and
+//! Raw, which RFB lets a server send whatever the list says. All three return the rectangle's
 //! pixels in the one format the tile path takes — `w * h * 3`, no padding, no
 //! stride — so [`crate::vnc`]'s rectangle reader has one bounds check, one shadow
 //! comparison, one crop and one sink call. Nothing here knows about tiles, sinks or
@@ -18,8 +19,8 @@
 //!
 //! ## What is deliberately absent
 //!
-//! Every other encoding. CopyRect, RRE, Hextile and zlib are what a server falls
-//! back to without ZRLE, and the servers this gateway is used with all have it;
+//! Every other encoding. CopyRect, RRE and Hextile are what a server falls back to
+//! without ZRLE, and the servers this gateway is used with all have it;
 //! Tight and TightPNG are vendor encodings; JPEG and H.264 are lossy. Advertising
 //! an encoding is a promise to decode it, so none of them is listed, and a
 //! rectangle in one ends the session.
@@ -64,6 +65,10 @@ pub enum Payload {
     /// A `u32` length, then that much of the connection's deflate stream, holding
     /// 64x64 tiles that are run-length encoded, palettised, or both (encoding 16).
     Zrle,
+    /// A `u32` length, then that much of the connection's own deflate stream,
+    /// inflating to `w * h` pixels in the forced wire format (encoding 6): a Mac's
+    /// Full quality.
+    Zlib,
 }
 
 impl Payload {
@@ -72,6 +77,7 @@ impl Payload {
         match self {
             Payload::Raw => "raw",
             Payload::Zrle => "zrle",
+            Payload::Zlib => "zlib",
         }
     }
 }
@@ -88,6 +94,10 @@ pub struct Decoders {
     /// A ZRLE rectangle has been stepped over uninflated ([`Self::step_over`]), so
     /// ZRLE's stream has a gap no later chunk can be inflated across.
     zrle_gap: bool,
+    /// zlib's inflate stream, a stream of its own beside ZRLE's, likewise for the
+    /// connection, and whether it has a gap as ZRLE's may.
+    zlib: Option<Inflater>,
+    zlib_gap: bool,
     /// Which encodings have already been announced in the log.
     seen: Vec<Payload>,
 }
@@ -111,16 +121,18 @@ impl Decoders {
         match payload {
             Payload::Raw => raw(reader, w, h).await,
             Payload::Zrle => self.zrle(reader, w, h).await,
+            Payload::Zlib => self.zlib(reader, w, h).await,
         }
     }
 
     /// Read past one rectangle's payload for a session that shows none of them,
     /// producing no pixels.
     ///
-    /// Both are stepped over by their length alone, and ZRLE's stream is left
-    /// uninflated: since its chunks deflate across the connection, no ZRLE
-    /// rectangle can be decoded after one has been stepped over, and one that is
-    /// ends the session rather than inflating garbage.
+    /// Raw is stepped over by its geometry. Both compressed ones, ZRLE and zlib,
+    /// are stepped over by their length alone, and their stream is left
+    /// uninflated: since each one's chunks deflate across the connection, no
+    /// rectangle in that encoding can be decoded after one has been stepped over,
+    /// and one that is ends the session rather than inflating garbage.
     pub async fn step_over<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut R,
@@ -136,7 +148,32 @@ impl Decoders {
                 self.zrle_gap = true;
                 discard(reader, u64::from(len)).await
             }
+            Payload::Zlib => {
+                let len = zlib_length(reader, w, h).await?;
+                self.zlib_gap = true;
+                discard(reader, u64::from(len)).await
+            }
         }
+    }
+
+    /// Encoding 6: the rectangle's pixels, in the forced wire format, as one chunk
+    /// of the connection's deflate stream.
+    async fn zlib<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: &mut R,
+        w: u16,
+        h: u16,
+    ) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(
+            !self.zlib_gap,
+            "a zlib rect to decode after one was stepped over, which its stream cannot inflate across"
+        );
+        let len = zlib_length(reader, w, h).await?;
+        let mut chunk = vec![0u8; len as usize];
+        reader.read_exact(&mut chunk).await?;
+        let pixels = usize::from(w) * usize::from(h) * BPP;
+        let inflated = self.zlib.get_or_insert_with(|| Inflater::new("zlib")).exact(&chunk, pixels)?;
+        Ok(bgrx_to_rgb(&inflated))
     }
 
     /// Encoding 16: 64x64 tiles inside a deflate stream, each tile run-length
@@ -190,6 +227,20 @@ async fn zrle_length<R: AsyncRead + Unpin>(reader: &mut R, w: u16, h: u16) -> an
         u64::from(len) <= ceiling as u64,
         "a zrle rect claims {len} compressed bytes for {w}x{h}, past the {ceiling} \
          its tiles could need even uncompressed"
+    );
+    Ok(len)
+}
+
+/// A zlib rectangle's compressed length, held to what deflate could need for its
+/// pixels stored uncompressed.
+async fn zlib_length<R: AsyncRead + Unpin>(reader: &mut R, w: u16, h: u16) -> anyhow::Result<u32> {
+    let pixels = usize::from(w) * usize::from(h) * BPP;
+    let len = reader.read_u32().await?;
+    let ceiling = (pixels + pixels / 64 + 1024).min(MAX_COMPRESSED);
+    anyhow::ensure!(
+        u64::from(len) <= ceiling as u64,
+        "a zlib rect claims {len} compressed bytes for {w}x{h}, past the {ceiling} \
+         its pixels could need even uncompressed"
     );
     Ok(len)
 }
@@ -635,6 +686,26 @@ mod tests {
         // Two pixels: pure red and pure blue in BGRX order.
         let bgrx = [0, 0, 255, 0, 255, 0, 0, 0];
         assert_eq!(bgrx_to_rgb(&bgrx), vec![255, 0, 0, 0, 0, 255]);
+    }
+
+    #[tokio::test]
+    async fn zlib_rectangles_inflate_on_one_stream_to_rgb() {
+        use std::io::Write as _;
+        let mut deflate = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut wire = Vec::new();
+        for pixels in [bgrx(2), [0x01, 0x02, 0x03, 0x00].repeat(3)] {
+            deflate.write_all(&pixels).unwrap();
+            deflate.flush().unwrap();
+            let chunk = std::mem::take(deflate.get_mut());
+            wire.extend((chunk.len() as u32).to_be_bytes());
+            wire.extend(chunk);
+        }
+        let mut decoders = Decoders::default();
+        let mut reader = wire.as_slice();
+        let first = decoders.decode(&mut reader, Payload::Zlib, 2, 1).await.unwrap();
+        assert_eq!(first, vec![0x10, 0x20, 0x30, 0x10, 0x20, 0x30]);
+        let second = decoders.decode(&mut reader, Payload::Zlib, 3, 1).await.unwrap();
+        assert_eq!(second, [0x03, 0x02, 0x01].repeat(3), "the second chunk continues the first's stream");
     }
 
     #[tokio::test]
