@@ -26,7 +26,8 @@ stream of the whole desktop, at 4:4:4 and at the quality the target's render
 plan resolves to. wlshare, reached as `subtype = "wlshare"`, instead codes that
 resolved VP9 stream itself for the gateway to pass through unchanged. A
 VNC desktop too large for that stream, in a session that does not resize it, has no
-picture: the session stays up and the page offers the remote's displays — see
+picture, a Standard Mac's own included: the session stays up and the page offers
+the remote's displays — see
 [past the ceiling](#past-the-ceiling). A
 Mac is reached
 over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
@@ -412,10 +413,11 @@ A desktop past the video ceiling has no picture. On VNC started without resize
 the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
-cropped picture. See [Past the ceiling](#past-the-ceiling). A Standard Mac's
-picture is its own and no video, so it has no ceiling to be past: the page
-paints the Mac's rectangles at whatever size its screens come to, all of them
-on Combined Display.
+cropped picture. See [Past the ceiling](#past-the-ceiling). A Standard Mac on
+its physical screens is held there too, though its picture is its own: Combined
+Display over large screens shows the notice until one screen is chosen. Its
+rectangles are still passed while it is held, and the page decodes them under
+the notice, since each is drawn on the ones before it.
 
 #### wlshare's VP9 and the `wlshare` subtype
 
@@ -584,8 +586,10 @@ virtual display and Combined Display alike.
   its changes per update and reads it off the screen as it sends it, so any wait
   between updates has a moving window's strips read off different moments. Do
   not add a request per update or an interval above zero.
-- **No ceiling.** The picture is no video, so the video ceiling does not hold
-  it, whatever its size or however many screens Combined Display spans. See
+- **The ceiling, as for video.** A desktop past it is held, Combined Display
+  over large screens among them, and the page offers its screens. The
+  rectangles go on being passed and decoded under the notice: dropping one
+  would spoil every picture drawn on it. See
   [A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through).
 
 #### RDP's graphics pipeline
@@ -815,19 +819,18 @@ trip that pins the difference, through the archive's own decoder.
 
 A desktop past the picture ceiling is one a video stream will not encode
 (`video::check_picture`). The gateway sizes every desktop it asks for under it, so
-only a remote it cannot size gets there: a plain VNC server, or a wlshare one on
-a physical output, whose desktop is simply that large. A Mac in Standard mode,
-whose Combined Display comes to 5376×2287 over a 2x screen beside a 1x one, is
-not one: its picture is its own and no video.
+only a remote it cannot size gets there: a plain VNC server, a wlshare one on
+a physical output, whose desktop is simply that large, or a Mac in Standard
+mode, whose Combined Display comes to 5376×2287 over a 2x screen beside a 1x
+one.
 
 Such a desktop has no picture. `Oversize` in `src/encode.rs` is the source's side
 of it, fixed when the engine starts:
 
 | Source | `Oversize` | Past the ceiling |
 |---|---|---|
-| VNC (plain, wlshare) started without resize | `Hold` | the session stays up without a picture |
+| VNC (plain, wlshare, Apple Standard) started without resize | `Hold` | the session stays up without a picture; Standard's rectangles are still passed, decoded under the notice |
 | VNC started with resize, Apple High Performance, RDP | `Refuse` | the session ends: "a video stream will not encode a W×H picture" |
-| Apple Standard | `Refuse` | never reached: no video, so the page paints it at any size |
 
 Resize refuses because it is the gateway sizing the remote: every size it asks
 for is under the ceiling, and a remote that answers past it has refused what it
@@ -845,7 +848,8 @@ output, is how such a desktop gets back; with no list, it says that
 nothing can be shown until the remote's desktop is smaller. A choice is a
 `selectDisplay` like the menu's, and the notice comes down only at a `Resize`
 without a cause. The remote repaints that desktop in full, as after any resize,
-and its stream starts from an announcement and a keyframe.
+and its stream starts from an announcement and a keyframe. A Standard Mac's
+picture needs neither: the page has gone on decoding it under the notice.
 
 #### wlshare's stream, passed through
 

@@ -194,6 +194,11 @@ test("the video row waits for the format, then names it and whose stream it is",
     videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "size"),
     "Not in use: the desktop is past what video carries",
   );
+  // Held, a Mac's own picture is still decoded, under the notice.
+  assert.equal(
+    videoLabel({ decode: "", passthrough: true, standard: "full" }, "size"),
+    "Not in use: the Mac's Full-quality picture is decoded by this page",
+  );
 });
 
 test("the Render row waits for the target, then names its dial", () => {

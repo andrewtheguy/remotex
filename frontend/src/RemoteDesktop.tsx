@@ -26,7 +26,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 };
 
 // The notice over a desktop with no picture, offering every display but the one
-// being sent, which is the one held: past what video carries. A click sends a `selectDisplay` and nothing else: the
+// being sent, which is the one held: past the picture ceiling. A click sends a `selectDisplay` and nothing else: the
 // notice comes down when the gateway says the desktop has a picture again.
 function OversizeNotice({
   size,
@@ -45,7 +45,7 @@ function OversizeNotice({
       <span className="status">Too large to show</span>
       <span className="status-hint">
         The remote desktop is {size.w}×{size.h} pixels, past the largest picture
-        a video stream carries.
+        this page shows.
       </span>
       {others.length > 0 ? (
         <>
@@ -139,8 +139,9 @@ function SessionCovers({
         </div>
       )}
 
-      {/* A desktop past what video carries: no picture comes, and the session stays
-          up for the one way out, a smaller desktop from the remote. Choosing one of
+      {/* A desktop past the picture ceiling: no picture is shown, and the session
+          stays up for the one way out, a smaller desktop from the remote. A
+          Standard Mac's own picture goes on being decoded under the notice. Choosing one of
           its displays is that way where it lists them, so they are offered here and
           not only in the menu. It takes the pointer, since the remote
           under it is not on screen. */}

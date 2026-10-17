@@ -32,6 +32,7 @@ import { expect, type Page, test, type Worker } from "@playwright/test";
 
 import { fakeOwnDecoder } from "./ownDecoder";
 import {
+  faults,
   leaveSession,
   logInAndConnectTo,
   returnToPicker,
@@ -162,7 +163,7 @@ async function session(
     timeout: 30_000,
   });
   await expectPainted(seen, from, start);
-  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(faults(page)).toHaveCount(0);
 }
 
 

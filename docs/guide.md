@@ -256,8 +256,9 @@ connection with the same error as wrong credentials. See
   displays, one or all of them, at their own density. A session is started
   with the picker's Adaptive (beta), the default, or Full quality (beta), which
   pass the Mac's own Adaptive or Full-quality picture for the page to decode;
-  the gateway encodes neither. Both have been tried on a virtual Mac alone, and show Combined Display
-  whole at any size. It has no resize and
+  the gateway encodes neither. Both have been tried on a virtual Mac alone.
+  Combined Display past 4K, as over large screens, shows a notice offering
+  one screen at a time. It has no resize and
   no sound; the Mac keeps playing on its own output.
 - Every Apple subtype carries the Mac's native pasteboard.
 - **`subtype = "ard-high-performance"`** is High Performance mode as Apple's

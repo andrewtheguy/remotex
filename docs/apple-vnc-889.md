@@ -503,9 +503,9 @@ This is the one place the browser rescales remote pixels (see
 
 At factor 1.0 the combined framebuffer is the screens' native pixels side by side:
 a 2x screen beside a 1x one measured 5376×2287, past what a video stream encodes.
-Standard never resizes, so the gateway cannot ask for less. The picture is the
-Mac's own, passed, which is no video and has no ceiling: the page composes it at
-whatever size the screens come to, over any number of them.
+Standard never resizes, so the gateway cannot ask for less. Past the ceiling the
+session is held, as for video: the page shows a notice offering the screens, and
+decodes the Mac's rectangles under it until one screen brings the picture back.
 
 ### The High Performance virtual display
 

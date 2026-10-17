@@ -176,12 +176,17 @@ export interface VideoStreamInfo {
  * which decoder that is, the browser's own or one of the
  * page's in WebAssembly, or what the row is waiting for before the stream's format has
  * arrived. While the desktop is held, past what a video stream encodes, there is
- * no picture, whatever decoder was built before.
+ * no picture, whatever decoder was built before; a Mac's own picture is still
+ * decoded by this page, under the notice.
  */
 export function videoLabel(
   stream: VideoStreamInfo | null,
   held: HoldCause | null,
 ): string {
+  if (stream?.standard) {
+    const picture = stream.standard === "full" ? "Full-quality" : "Adaptive";
+    return `Not in use: the Mac's ${picture} picture is decoded by this page`;
+  }
   if (held === "size") {
     return "Not in use: the desktop is past what video carries";
   }
@@ -190,10 +195,6 @@ export function videoLabel(
   }
   if (stream.composed) {
     return "Not in use: the host's graphics pipeline is composed by this browser";
-  }
-  if (stream.standard) {
-    const picture = stream.standard === "full" ? "Full-quality" : "Adaptive";
-    return `Not in use: the Mac's ${picture} picture is decoded by this page`;
   }
   const whose = stream.passthrough
     ? "passthrough from the remote"

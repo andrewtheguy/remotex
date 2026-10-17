@@ -302,7 +302,9 @@ pub enum Oversize {
     /// The picture stops until a `Resize` brings the desktop within the ceiling,
     /// which only the remote can do: [`VideoSink::damage`] drops what it is handed
     /// while [`VideoSink::oversized`] says so, and the browser is told
-    /// ([`ServerMsg::Oversize`]).
+    /// ([`ServerMsg::Oversize`]). A Standard Mac's own rectangles are passed all
+    /// the same, for the page to decode behind its notice: each is drawn on the
+    /// ones before it, so one dropped would spoil the picture after the hold.
     Hold,
 }
 
@@ -973,12 +975,12 @@ impl VideoSink {
                 if oversized {
                     self.shared.passing.store(false, Ordering::Relaxed);
                     info!(
-                        "{}: a {w}x{h} desktop is past what a video stream encodes; the \
+                        "{}: a {w}x{h} desktop is past the picture ceiling; the \
                          picture is held until the remote sends another",
                         self.engine
                     );
                 } else {
-                    info!("{}: a {w}x{h} desktop goes to the browser as video again", self.engine);
+                    info!("{}: a {w}x{h} desktop is within the ceiling, and its picture shown again", self.engine);
                     self.reset_render();
                 }
             }
@@ -1731,6 +1733,21 @@ mod tests {
 
         assert!(frame_rx.try_recv().is_err(), "an oversize desktop sent a picture");
         assert!(sink.due_at().await.is_none(), "an oversize desktop is owed a frame");
+    }
+
+    /// A Standard Mac's own rectangles are passed while its desktop is held: the
+    /// page decodes them behind its notice, so the picture is whole when one
+    /// screen is chosen.
+    #[tokio::test]
+    async fn a_held_standard_picture_is_still_passed() {
+        let (sink, mut rx) = holding_sink(5376, 2288).await;
+        assert!(sink.oversized());
+        sink.standard_start(StandardQuality::Full).await.unwrap();
+        sink.pass_standard(5000, 2000, 64, 16, vec![1; 16]).await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut rx, 2).await;
+        assert!(matches!(out[0], ServerMsg::StandardStart { .. }));
+        assert!(matches!(&out[1], ServerMsg::Standard(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (5000, 2000)));
     }
 
     /// Within the ceiling a source that holds is video like any other, and a source

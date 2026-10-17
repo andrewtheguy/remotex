@@ -33,6 +33,7 @@ import { expect, type Page, test, type Worker } from "@playwright/test";
 
 import {
   chooseDisplay,
+  faults,
   leaveSession,
   logInAndConnectTo,
   returnToPicker,
@@ -141,6 +142,8 @@ interface Session {
   displays?: { active: number; displays: { id: number; label: string }[] };
   /** Every `mosaic`'s regions, in arrival order: empty ends a composition. */
   mosaics: { pixels: MosaicRect; points: MosaicRect }[][];
+  /** The last `oversize`'s cause: why the desktop is held, or null. */
+  oversize?: string | null;
   connected?: { render: string; passthrough: string | null };
   /** The last size the display socket announced, in pixels. */
   size?: { w: number; h: number };
@@ -186,7 +189,8 @@ async function inflated(zlib: NonNullable<Session["zlib"]>): Promise<void> {
     .toBe(zlib.want);
 }
 
-/// Keep the display list and the compositions, whichever socket brought them.
+/// Keep the display list, the compositions and whether the desktop is held,
+/// whichever socket brought them.
 function noteDisplays(
   seen: Session,
   message: { type: string; [key: string]: unknown },
@@ -195,7 +199,15 @@ function noteDisplays(
     seen.displays = message as unknown as NonNullable<Session["displays"]>;
   } else if (message.type === "mosaic") {
     seen.mosaics.push(message.regions as Session["mosaics"][number]);
+  } else if (message.type === "oversize") {
+    seen.oversize = message.cause as string | null;
   }
+}
+
+/// Whether a picture of this size is past the ceiling (`video::within_ceiling`):
+/// a long side past 3840 or a short side past 2400.
+function pastCeiling({ w, h }: { w: number; h: number }): boolean {
+  return Math.max(w, h) > 3840 || Math.min(w, h) > 2400;
 }
 
 /// Watch the session socket, and the display socket that carries its picture.
@@ -388,7 +400,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     );
 
     // A rectangle that did not decode says so where the desktop is.
-    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(faults(page)).toHaveCount(0);
 
     // And the session card says what the picture is.
     await page.getByRole("button", { name: "Open menu" }).click();
@@ -438,7 +450,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     expect(seen.unannounced).toBe(0);
     expect(seen.batches[0]?.sequence).toBe(1);
     expect(rects(seen)[0]?.kind).toBe("tables");
-    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(faults(page)).toHaveCount(0);
 
     await returnToPicker(page);
   });
@@ -499,7 +511,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
       )
       .toBe(true);
     expect(seen.unannounced).toBe(0);
-    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(faults(page)).toHaveCount(0);
 
     await returnToPicker(page);
   });
@@ -556,7 +568,7 @@ test.describe("a Standard Mac whose Full-quality picture is passed", () => {
       await inflated(zlib);
     }
 
-    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(faults(page)).toHaveCount(0);
     await page.getByRole("button", { name: "Open menu" }).click();
     await page.getByRole("button", { name: "Info", exact: true }).click();
     const card = page.getByRole("dialog", { name: "Info" });
@@ -627,20 +639,38 @@ test.describe("a Standard Mac on Combined Display over screens of two densities"
         await shows(COMBINED);
       }
       // Two densities: composed of both screens' regions, which tile the
-      // framebuffer the resize announced, and no video ceiling holds it.
+      // framebuffer the resize announced.
       const regions = seen.mosaics.at(-1) ?? [];
       expect(regions, "a composition of both screens").toHaveLength(2);
       const right = Math.max(...regions.map((r) => r.pixels.x + r.pixels.w));
       const bottom = Math.max(...regions.map((r) => r.pixels.y + r.pixels.h));
       expect(seen.size).toEqual({ w: right, h: bottom });
+      // Past the ceiling it is held, as video is: the notice offers the screens,
+      // and the picture goes on being painted under it.
+      const held = pastCeiling(seen.size ?? { w: 0, h: 0 });
+      const notice = page
+        .getByRole("alert")
+        .filter({ hasText: "Too large to show" });
+      await expect
+        .poll(() => seen.oversize, { message: "held past the ceiling alone" })
+        .toBe(held ? "size" : null);
+      await expect(notice).toHaveCount(held ? 1 : 0);
 
-      // One screen ends the composition, and Combined Display brings it back.
-      await choose(screen?.id ?? 0);
+      // One screen ends the composition and the hold, chosen from the notice
+      // where there is one, and Combined Display brings both back.
+      if (held) {
+        await notice.getByRole("button", { name: label(screen?.id ?? 0) }).click();
+        await shows(screen?.id ?? 0);
+      } else {
+        await choose(screen?.id ?? 0);
+      }
       expect(seen.mosaics.at(-1), "a screen presented whole").toEqual([]);
+      await expect.poll(() => seen.oversize).toBe(null);
+      await expect(page.getByRole("alert")).toHaveCount(0);
       await choose(COMBINED);
       expect(seen.mosaics.at(-1)).toHaveLength(2);
+      await expect.poll(() => seen.oversize).toBe(held ? "size" : null);
 
-      expect(seen.controlTypes).not.toContain("oversize");
       expect(seen.controlTypes).not.toContain("videoFormat");
       expect(seen.outside, "rectangles off the framebuffer").toEqual([]);
       for (const batch of seen.batches) {
@@ -655,7 +685,6 @@ test.describe("a Standard Mac on Combined Display over screens of two densities"
       if (zlib) {
         await inflated(zlib);
       }
-      await expect(page.getByRole("alert")).toHaveCount(0);
 
       await returnToPicker(page);
     });

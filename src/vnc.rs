@@ -2070,9 +2070,11 @@ pub async fn run(
     // within. Following the window, the gateway asks for every size and holds each
     // under the ceiling, and a remote that answers past it is refused. So is High
     // Performance's, whose virtual display is held under the ceiling too. A
-    // Standard Mac's own picture is no video, so it has no ceiling to be held at:
-    // it is painted at whatever size the Mac's screens come to.
-    let oversize = if choices.resize() || config.apple() {
+    // Standard Mac on its physical screens holds as well, as Combined Display over
+    // large ones does until one screen is chosen; its rectangles go on being
+    // passed behind the page's notice all the same, as each is drawn on the ones
+    // before it ([`VideoSink::pass_standard`]).
+    let oversize = if choices.resize() || config.media_stream() {
         Oversize::Refuse
     } else {
         Oversize::Hold
