@@ -1864,7 +1864,10 @@ Authentication and desktop ownership are separate:
    the gateway holds an engine's picture for up to five seconds for the display's
    socket of a page whose session socket is attached, since a passed stream's
    opening is the part no repaint replaces. A display socket that attaches after
-   its picture lost anything is repainted. The page closes its session socket
+   its picture lost anything, or a session socket that comes back to the running
+   engine, owes the page a repaint, asked once the page has both sockets
+   (`State::repaint_if_owed`), so a reload, which replaces both, is repainted once
+   rather than for each. The page closes its session socket
    when its display socket drops, and the reattach brings both back. `/ws/display?display=2`
    is the second display shown in a tab of its own, *All Displays* over two
    virtual displays (alpha); see

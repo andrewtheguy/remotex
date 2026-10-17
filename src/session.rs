@@ -606,9 +606,13 @@ struct State {
     /// The displays the running engine shows in tabs of their own, from the last
     /// [`ServerMsg::Displays`] it sent ([`crate::protocol::DisplayInfo::tab`]).
     tabs: Vec<u32>,
-    /// The first display's picture has lost messages since its socket last had
-    /// all of them, so the next socket for it is owed a [`ClientMsg::Refresh`].
-    display_lost: bool,
+    /// The running engine owes the page a [`ClientMsg::Refresh`]: its first
+    /// display's picture lost messages since its socket last had all of them, or
+    /// the session socket came back to it, which is owed the display list and the
+    /// rest a refresh sends it. Asked once the page has both sockets
+    /// ([`Self::repaint_if_owed`]), so a reload, which replaces both, is repainted
+    /// once rather than for each.
+    repaint_owed: bool,
     /// The pump may hold the first display's picture for its socket
     /// ([`DISPLAY_ATTACH_GRACE`]): set when either of a page's sockets attaches,
     /// cleared when a wait runs out.
@@ -642,6 +646,19 @@ struct State {
 }
 
 impl State {
+    /// Ask the running engine for the repaint it owes ([`Self::repaint_owed`]), once
+    /// the page has its session socket and its first display's socket both.
+    fn repaint_if_owed(&mut self) {
+        if !(self.repaint_owed && self.client.is_some() && self.displays.contains_key(&FIRST_DISPLAY)) {
+            return;
+        }
+        if let Some(engine) = &self.engine {
+            info!("session: the page has both its sockets; requesting a repaint");
+            let _ = engine.input_tx.send(ClientMsg::Refresh);
+        }
+        self.repaint_owed = false;
+    }
+
     /// The picker, numbering every engine started so far as not running: said
     /// under the lock that ended the last of them, so no engine it numbers can
     /// still be.
@@ -952,7 +969,8 @@ impl SessionManager {
     ///
     /// A session reaches an attach only as its owner's: a claim by any other
     /// browser has ended it ([`Self::claim`]). The owner reattaching resumes the
-    /// running engine and is asked to [`ClientMsg::Refresh`] for a repaint — the
+    /// running engine and is owed a [`ClientMsg::Refresh`] for a repaint, asked
+    /// once its first display's socket is attached too — the
     /// one path that resumes rather than starts over, because it is the same
     /// client on the same target, back from a dropped connection. It resumes
     /// only while the running engine is still one this attachment can be given:
@@ -1031,10 +1049,10 @@ impl SessionManager {
             let message = ConnectError::Beyond(passthrough).to_string();
             let _ = event_tx.try_send(AttachEvent::Msg(ServerMsg::Error { message }));
         }
+        let resumed = st.selected.is_some() && st.engine.is_some();
         let status = match (&st.selected, &st.engine) {
             (Some(selected), Some(engine)) => {
-                info!("session: reattached to the running engine, requesting a repaint");
-                let _ = engine.input_tx.send(ClientMsg::Refresh);
+                info!("session: reattached to the running engine");
                 Some(selected.connected(&engine.plan))
             }
             // A session whose engine was ended above to be started over. Start it
@@ -1044,6 +1062,7 @@ impl SessionManager {
             (None, _) => Some(st.picker()),
         };
         let reconnect = status.is_none();
+        st.repaint_owed |= resumed;
         if let Some(status) = status {
             let _ = event_tx.try_send(AttachEvent::Msg(status));
         }
@@ -1053,6 +1072,7 @@ impl SessionManager {
             Some(ClientSlot { attach_id: id, event_tx, superseded: Arc::clone(&superseded), decoders });
         // This page's display socket is on its way, if it is not here already.
         st.display_wait = true;
+        st.repaint_if_owed();
         (id, events, superseded, reconnect)
         };
         let attachment = Attachment { id, events, superseded };
@@ -1102,8 +1122,9 @@ impl SessionManager {
     /// The first display is accepted in every session state, like the audio socket:
     /// the page holding the session keeps it open beside its session socket, and the
     /// picture of whichever engine is running arrives on it. Its attach asks the
-    /// engine for a repaint when the picture has lost anything since its last
-    /// socket. Another display is accepted only while the engine shows it in a tab
+    /// engine for the repaint it owes, when the picture has lost anything since its
+    /// last socket or the session socket came back, once the session socket is
+    /// attached too. Another display is accepted only while the engine shows it in a tab
     /// of its own, and the engine is handed where its picture goes. A newer socket
     /// for the same display replaces this one.
     ///
@@ -1140,7 +1161,7 @@ impl SessionManager {
             info!("session: superseding the socket of display {display}");
             if display == FIRST_DISPLAY {
                 if st.engine.is_some() {
-                    st.display_lost = true;
+                    st.repaint_owed = true;
                 }
             } else if !same_tab(&old) {
                 let _ = old.close.send(DisplayLetGo::Taken);
@@ -1154,12 +1175,6 @@ impl SessionManager {
             // A fresh socket starts unmeasured: whatever the last one's link looked
             // like, this one has not shown its own yet.
             self.feedback.reset();
-            if std::mem::take(&mut st.display_lost)
-                && let Some(engine) = &st.engine
-            {
-                info!("session: the first display's socket attached; requesting a repaint");
-                let _ = engine.input_tx.send(ClientMsg::Refresh);
-            }
             st.display_wait = true;
             self.display_attached.send_modify(|count| *count = count.wrapping_add(1));
             Arc::clone(&self.feedback)
@@ -1202,6 +1217,7 @@ impl SessionManager {
         });
         st.displays.insert(display, DisplaySlot { id, tab: opener.map(str::to_owned), event_tx, clipboard, close: close_tx });
         info!("session: display {display}'s socket attached");
+        st.repaint_if_owed();
         Ok(DisplayAttachment { id, display, events, evicted, feedback })
     }
 
@@ -1218,7 +1234,7 @@ impl SessionManager {
         info!("session: display {display}'s socket went away");
         if display == FIRST_DISPLAY {
             if st.engine.is_some() {
-                st.display_lost = true;
+                st.repaint_owed = true;
             }
             // No socket, no lag: an engine must not spend the wait for the next
             // one coarsening quality against the measurements of one that is gone.
@@ -1780,7 +1796,7 @@ impl SessionManager {
         };
         let (ended_tx, ended) = oneshot::channel();
         // A fresh engine's picture has lost nothing yet.
-        st.display_lost = false;
+        st.repaint_owed = false;
         st.engine = Some(EngineSlot {
             input_tx,
             generation,
@@ -2021,7 +2037,7 @@ impl SessionManager {
                             }
                             // No socket for it: dropped, and repainted for the next.
                             None => {
-                                st.display_lost = true;
+                                st.repaint_owed = true;
                                 Route::Drop
                             }
                         }
@@ -3146,10 +3162,11 @@ mod tests {
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         assert!(hooks.try_recv().is_err(), "no second engine while one runs");
-        assert!(matches!(input_rx.recv().await, Some(ClientMsg::Refresh)));
-        // The display's next socket is repainted: its picture lost a frame.
+        // The page is repainted once it has its display's socket too, and once: its
+        // picture lost a frame, and its session socket came back.
+        assert!(input_rx.try_recv().is_err(), "a repaint went ahead of the display's socket");
         let mut display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
-        assert!(matches!(input_rx.recv().await, Some(ClientMsg::Refresh)));
+        assert_eq!(drain(&mut input_rx), ["Refresh"]);
         frame_tx
             .send(ServerMsg::Resize { w: 30, h: 40, scale: UNSCALED })
             .await
@@ -3427,6 +3444,7 @@ mod tests {
         tokio::time::advance(REATTACH_GRACE_PERIOD / 2).await;
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
+        let _display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
 
         tokio::time::advance(REATTACH_GRACE_PERIOD).await;
@@ -3448,8 +3466,10 @@ mod tests {
         assert!(input_rx.is_closed(), "heartbeat expiry left the engine running");
     }
 
+    /// The owner reattaching resumes the running engine, which is asked for one
+    /// repaint once the page has both its sockets, whichever comes back first.
     #[tokio::test]
-    async fn reattach_asks_the_running_engine_for_a_refresh() {
+    async fn reattach_asks_the_running_engine_for_one_refresh_once_both_sockets_are_back() {
         let (mgr, hooks) = manager_with_fake_engine();
         let token = mgr.claim(false, None, "login").unwrap();
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
@@ -3466,10 +3486,26 @@ mod tests {
         mgr.forward_input(att.id, ClientMsg::MouseMove { x: 1, y: 2 });
         assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::MouseMove { x: 1, y: 2 })));
 
+        let display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        assert!(input_rx.try_recv().is_err(), "a display socket beside the session asked for a repaint");
+
+        // A reload: both sockets go, the session's comes back first.
+        mgr.detach_display(display.id);
         mgr.detach(att.id);
         let token = mgr.claim(false, Some(&token), "login").unwrap();
+        let att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        assert!(input_rx.try_recv().is_err(), "a repaint went ahead of the display's socket");
+        let display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        assert_eq!(drain(&mut input_rx), ["Refresh"]);
+
+        // Again, the display's first.
+        mgr.detach_display(display.id);
+        mgr.detach(att.id);
+        let _display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        assert!(input_rx.try_recv().is_err(), "a repaint went ahead of the session's socket");
+        let token = mgr.claim(false, Some(&token), "login").unwrap();
         let _att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
-        assert!(matches!(input_rx.try_recv(), Ok(ClientMsg::Refresh)));
+        assert_eq!(drain(&mut input_rx), ["Refresh"]);
     }
 
     fn key(code: &str, pressed: bool) -> ClientMsg {
@@ -3516,10 +3552,11 @@ mod tests {
             ["ControlLeft false", "Left false", "touch 0 Cancel 5,6"],
         );
 
-        // The reattach resumes the engine with nothing left to release.
+        // The reattach resumes the engine with nothing left to release, and its
+        // repaint waits for the page's display socket.
         let token = mgr.claim(false, Some(&token), "login").unwrap();
         let _att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
-        assert_eq!(drain(&mut input_rx), ["Refresh"]);
+        assert!(drain(&mut input_rx).is_empty());
     }
 
     #[tokio::test]
@@ -3536,7 +3573,7 @@ mod tests {
         drain(&mut input_rx);
         // A reload attaches before the old socket is noticed gone.
         let _new = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
-        assert_eq!(drain(&mut input_rx), ["ShiftLeft false", "Refresh"]);
+        assert_eq!(drain(&mut input_rx), ["ShiftLeft false"]);
         // The old socket's late keyup is dropped, and there is nothing to repeat.
         mgr.forward_input(att.id, key("ShiftLeft", false));
         mgr.detach(att.id);
