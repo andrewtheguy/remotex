@@ -2,7 +2,7 @@
 //!
 //! Three of them: ZRLE, the one encoding every target but a Mac's Combined Display
 //! is asked for, zlib, which that view is asked for as the Mac's Full quality, and
-//! Raw, which RFB lets a server send whatever the list says. Both return the rectangle's
+//! Raw, which RFB lets a server send whatever the list says. All three return the rectangle's
 //! pixels in the one format the tile path takes — `w * h * 3`, no padding, no
 //! stride — so [`crate::vnc`]'s rectangle reader has one bounds check, one shadow
 //! comparison, one crop and one sink call. Nothing here knows about tiles, sinks or
@@ -128,10 +128,11 @@ impl Decoders {
     /// Read past one rectangle's payload for a session that shows none of them,
     /// producing no pixels.
     ///
-    /// Both are stepped over by their length alone, and ZRLE's stream is left
-    /// uninflated: since its chunks deflate across the connection, no ZRLE
-    /// rectangle can be decoded after one has been stepped over, and one that is
-    /// ends the session rather than inflating garbage.
+    /// Raw is stepped over by its geometry. Both compressed ones, ZRLE and zlib,
+    /// are stepped over by their length alone, and their stream is left
+    /// uninflated: since each one's chunks deflate across the connection, no
+    /// rectangle in that encoding can be decoded after one has been stepped over,
+    /// and one that is ends the session rather than inflating garbage.
     pub async fn step_over<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut R,

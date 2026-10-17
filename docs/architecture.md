@@ -589,7 +589,8 @@ never switched to or from mid-session.
   (`frontend/wasm/vnc`), the tiles in a decoder written there and the zlib
   on miniz_oxide's inflater, onto a framebuffer of its own and paints the canvas
   where each drew. Do not add a decoder of the tiles to the gateway, or
-  transcode either: the zlib decoded there is Combined Display's alone.
+  transcode either: the gateway decodes zlib for Combined Display alone
+  ([below](#a-standard-macs-combined-display)).
 - **Never dropped, never resumed.** A rectangle is drawn on what the ones
   before it left: for Adaptive, copies of tiles on the framebuffer, cached tiles
   by index, the last full update's coefficients refined; for Full, the window of
