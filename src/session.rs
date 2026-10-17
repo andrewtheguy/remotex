@@ -479,6 +479,11 @@ struct ClientSlot {
     /// before this browser has sent a message at all. Both engine starts read it
     /// from the slot they have just checked is this attachment's.
     decoders: Decoders,
+    /// A first display's socket has been paired with this one
+    /// ([`DisplaySlot::page`]). Its page closes this socket whenever that one
+    /// closes, so it is paired once, and a display socket that comes after is a
+    /// later page's.
+    paired: bool,
 }
 
 /// The dedicated audio WebSocket, while one is open.
@@ -529,6 +534,11 @@ struct DisplaySlot {
     id: u64,
     /// The tab that opened it, by the name it gave ([`DisplayTab::id`]).
     tab: Option<String>,
+    /// The first display's: the session socket its page opened it beside, by its
+    /// [`ClientSlot::attach_id`], once that socket has attached too. A page opens the
+    /// two together, either landing first, and a session socket always comes with a
+    /// display socket of its own, so one already paired is an earlier page's.
+    page: Option<u64>,
     /// The first display's messages arrive here from the pump; another display's
     /// from the engine's [`DisplayFeed`], through a forwarder.
     event_tx: mpsc::Sender<AttachEvent>,
@@ -649,7 +659,8 @@ impl State {
     /// Ask the running engine for the repaint it owes ([`Self::repaint_owed`]), once
     /// the page has its session socket and its first display's socket both.
     fn repaint_if_owed(&mut self) {
-        if !(self.repaint_owed && self.client.is_some() && self.displays.contains_key(&FIRST_DISPLAY)) {
+        let page = self.client.as_ref().map(|client| client.attach_id);
+        if !(self.repaint_owed && page.is_some() && self.displays.get(&FIRST_DISPLAY).is_some_and(|slot| slot.page == page)) {
             return;
         }
         if let Some(engine) = &self.engine {
@@ -1069,7 +1080,15 @@ impl SessionManager {
 
         let superseded = Arc::new(tokio::sync::Notify::new());
         st.client =
-            Some(ClientSlot { attach_id: id, event_tx, superseded: Arc::clone(&superseded), decoders });
+            Some(ClientSlot { attach_id: id, event_tx, superseded: Arc::clone(&superseded), decoders, paired: false });
+        // A display socket that came first, waiting for its session socket, is this
+        // page's.
+        if let Some(slot) = st.displays.get_mut(&FIRST_DISPLAY).filter(|slot| slot.page.is_none()) {
+            slot.page = Some(id);
+            if let Some(client) = &mut st.client {
+                client.paired = true;
+            }
+        }
         // This page's display socket is on its way, if it is not here already.
         st.display_wait = true;
         st.repaint_if_owed();
@@ -1157,6 +1176,16 @@ impl SessionManager {
         {
             return Err(DisplayRefused::InUse(display));
         }
+        // The first display's socket is the page's whose session socket has none
+        // yet: the one attached, unless that one has had its own, when this waits
+        // for its page's.
+        let page = match &mut st.client {
+            Some(client) if display == FIRST_DISPLAY && !client.paired => {
+                client.paired = true;
+                Some(client.attach_id)
+            }
+            _ => None,
+        };
         if let Some(old) = st.displays.remove(&display) {
             info!("session: superseding the socket of display {display}");
             if display == FIRST_DISPLAY {
@@ -1215,7 +1244,7 @@ impl SessionManager {
             });
             clipboard
         });
-        st.displays.insert(display, DisplaySlot { id, tab: opener.map(str::to_owned), event_tx, clipboard, close: close_tx });
+        st.displays.insert(display, DisplaySlot { id, tab: opener.map(str::to_owned), page, event_tx, clipboard, close: close_tx });
         info!("session: display {display}'s socket attached");
         st.repaint_if_owed();
         Ok(DisplayAttachment { id, display, events, evicted, feedback })
@@ -3504,6 +3533,27 @@ mod tests {
         let _display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         assert!(input_rx.try_recv().is_err(), "a repaint went ahead of the session's socket");
         let token = mgr.claim(false, Some(&token), "login").unwrap();
+        let _att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        assert_eq!(drain(&mut input_rx), ["Refresh"]);
+
+        // A reload that lands before the last page's sockets are noticed gone: the
+        // display socket still attached is that page's, not the new one's.
+        let _att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        assert!(drain(&mut input_rx).is_empty(), "a repaint went to the last page's display socket");
+        let _display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        assert_eq!(drain(&mut input_rx), ["Refresh"]);
+
+        // And its display's socket first, beside the last page's session socket.
+        let display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        assert!(drain(&mut input_rx).is_empty(), "a repaint went ahead of the session's socket");
+        let _att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
+        assert_eq!(drain(&mut input_rx), ["Refresh"]);
+
+        // The last page's display socket noticed gone and its session socket not:
+        // the new display's socket is not that session socket's.
+        mgr.detach_display(display.id);
+        let _display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
+        assert!(drain(&mut input_rx).is_empty(), "a repaint went to the last page's session socket");
         let _att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         assert_eq!(drain(&mut input_rx), ["Refresh"]);
     }
