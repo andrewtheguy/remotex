@@ -139,9 +139,10 @@ export interface Choices {
   audio: Sound;
   /**
    * The stream of the target's to pass, where which is a choice: a Mac's HEVC,
-   * its H.264 or its Adaptive picture. Null for a picture encoded by the
-   * gateway, and on a target with no such choice: one whose picture the gateway
-   * encodes, or that passes a stream in every session, which is not named.
+   * its H.264 or its own picture, Adaptive or Full. Null for a picture encoded
+   * by the gateway, and on a target with no such choice: one whose picture the
+   * gateway encodes, or that passes a stream in every session, which is not
+   * named.
    */
   passthrough: Passthrough | null;
   placement: Placement;
@@ -313,7 +314,7 @@ const RDP_GRAPHICS: PassedNote & { blocked: string } = {
  *   has either.
  * - The H.264 is never greyed: no browser is asked whether it decodes it.
  * - Nor are the Mac's Standard pictures, which every page decodes in
- *   WebAssembly (adaptivePicture.ts).
+ *   WebAssembly (standardPicture.ts).
  */
 function pictureOptions(
   target: TargetInfo,

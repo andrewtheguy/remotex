@@ -102,7 +102,7 @@ export type PainterCommand =
   /** An RDP host's graphics pipeline starts, and this worker composes it. */
   | { type: "graphicsStart" }
   /** A Mac's own picture starts, in `quality`, and this worker decodes it. */
-  | { type: "adaptiveStart"; quality: StandardQuality }
+  | { type: "standardStart"; quality: StandardQuality }
   /** The part of the pipeline's picture this page's display is, to show. */
   | { type: "graphicsView"; part: PicturePart }
   /**
@@ -347,8 +347,8 @@ export function createPainterWorker(
         case "graphicsStart":
           queued(() => painter?.startGraphics());
           break;
-        case "adaptiveStart":
-          queued(() => painter?.startAdaptive(command.quality));
+        case "standardStart":
+          queued(() => painter?.startStandard(command.quality));
           break;
         case "graphicsView":
           queued(() => painter?.setGraphicsView(command.part));

@@ -31,7 +31,7 @@ use screen_vp9::walk::SETTLE_IDLE;
 
 use crate::config::{RenderPlan, StandardQuality};
 use crate::feedback::LinkFeedback;
-use crate::protocol::{AdaptiveUnit, GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
+use crate::protocol::{StandardUnit, GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
 use crate::shadow::Rect;
 use crate::video;
@@ -77,7 +77,7 @@ const ENCODE_DEPTH: usize = 16;
 const QUEUE_BUDGET: u32 = 512 * 1024;
 
 /// How many bytes of a Mac's own rectangles, Adaptive or Full, may be passed
-/// and not yet painted by the browser ([`VideoSink::pass_adaptive`]).
+/// and not yet painted by the browser ([`VideoSink::pass_standard`]).
 ///
 /// The Mac decides what to send by its own connection: the refinement after a
 /// full update waits for the motion when the connection is slow ("What a Mac
@@ -90,7 +90,7 @@ const QUEUE_BUDGET: u32 = 512 * 1024;
 ///
 /// The size of the receive buffer an RDP host's passed pipeline is held behind,
 /// which the connection to the Mac has too.
-const ADAPTIVE_AHEAD: u32 = 32 * 1024;
+const STANDARD_AHEAD: u32 = 32 * 1024;
 
 /// How often the order task wakes to look for a quiet stream to settle. It has to
 /// be its own timer rather than something the next frame does, because a screen
@@ -257,9 +257,9 @@ struct Shared {
     stalled_micros: AtomicU64,
     /// The bound on encoded bytes queued towards the browser — see [`QUEUE_BUDGET`].
     budget: Arc<Semaphore>,
-    /// The bound on a Mac's Adaptive rectangles passed and not yet painted — see
-    /// [`ADAPTIVE_AHEAD`].
-    adaptive_ahead: Arc<Semaphore>,
+    /// The bound on a Mac's own rectangles passed and not yet painted — see
+    /// [`STANDARD_AHEAD`].
+    standard_ahead: Arc<Semaphore>,
     /// What the last round came to, which the next is taken at.
     round_bytes: AtomicU64,
     /// How long the engine has waited on the budget since the last round was
@@ -302,7 +302,7 @@ impl Shared {
             waited_micros: AtomicU64::new(0),
             stalled_micros: AtomicU64::new(0),
             budget: Arc::new(Semaphore::new(QUEUE_BUDGET as usize)),
-            adaptive_ahead: Arc::new(Semaphore::new(ADAPTIVE_AHEAD as usize)),
+            standard_ahead: Arc::new(Semaphore::new(STANDARD_AHEAD as usize)),
             round_bytes: AtomicU64::new(0),
             held_micros: AtomicU64::new(0),
         }
@@ -737,11 +737,11 @@ impl VideoSink {
     }
 
     /// A Mac's own picture starts here, from nothing, in `quality`, and is the
-    /// picture from now on ([`Self::pass_adaptive`]): said ahead of the Mac's first
+    /// picture from now on ([`Self::pass_standard`]): said ahead of the Mac's first
     /// rectangle.
-    pub async fn adaptive_start(&self, quality: StandardQuality) -> anyhow::Result<()> {
+    pub async fn standard_start(&self, quality: StandardQuality) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
-        self.push(Pending::Msg(ServerMsg::AdaptiveStart { engine: 0, quality })).await
+        self.push(Pending::Msg(ServerMsg::StandardStart { engine: 0, quality })).await
     }
 
     /// Queue one of a Mac's rectangles in its own picture as the next record,
@@ -754,17 +754,17 @@ impl VideoSink {
     /// session that starts.
     ///
     /// What paces the Mac is the browser's painting: a rectangle waits here while
-    /// [`ADAPTIVE_AHEAD`] of the ones before it are passed and not yet painted, and
+    /// [`STANDARD_AHEAD`] of the ones before it are passed and not yet painted, and
     /// while it waits the engine reads nothing more of the Mac's connection,
     /// which backs up, so the Mac codes for the link the browser is on.
-    pub async fn pass_adaptive(&self, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> anyhow::Result<()> {
+    pub async fn pass_standard(&self, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
         let bytes = data.len();
         let started = Instant::now();
         // One larger than the whole bound waits for every rectangle before it, and
         // holds the next until it is painted.
-        let ahead = u32::try_from(bytes).unwrap_or(u32::MAX).clamp(1, ADAPTIVE_AHEAD);
-        let ahead = Arc::clone(&self.shared.adaptive_ahead)
+        let ahead = u32::try_from(bytes).unwrap_or(u32::MAX).clamp(1, STANDARD_AHEAD);
+        let ahead = Arc::clone(&self.shared.standard_ahead)
             .acquire_many_owned(ahead)
             .await
             .expect("the bound is never closed");
@@ -774,8 +774,8 @@ impl VideoSink {
         self.shared.feedback.handed(tokio::time::Instant::now());
         self.shared.units.fetch_add(1, Ordering::Relaxed);
         self.shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-        let unit = AdaptiveUnit { x, y, w, h, data, held, painted };
-        self.push(Pending::Msg(ServerMsg::Adaptive(unit))).await
+        let unit = StandardUnit { x, y, w, h, data, held, painted };
+        self.push(Pending::Msg(ServerMsg::Standard(unit))).await
     }
 
     /// Whether the picture is the remote's stream passed through ([`Self::pass`]).
@@ -1312,27 +1312,27 @@ mod tests {
 
     /// A Mac's Adaptive rectangles go out in order behind the message that starts
     /// them, and a rectangle waits while the ones passed before it, as many as
-    /// [`ADAPTIVE_AHEAD`] allows, are not yet painted: the engine is held, and with
+    /// [`STANDARD_AHEAD`] allows, are not yet painted: the engine is held, and with
     /// it the Mac, by the browser's painting.
     #[tokio::test]
-    async fn adaptive_rectangles_wait_for_the_ones_before_them_to_be_painted() {
+    async fn standard_rectangles_wait_for_the_ones_before_them_to_be_painted() {
         let (sink, mut rx) = video_sink(64, 32).await;
-        sink.adaptive_start(StandardQuality::Adaptive).await.unwrap();
-        sink.pass_adaptive(0, 0, 64, 16, vec![1; 16 * 1024]).await.unwrap();
-        sink.pass_adaptive(0, 16, 64, 16, vec![2; 16 * 1024]).await.unwrap();
+        sink.standard_start(StandardQuality::Adaptive).await.unwrap();
+        sink.pass_standard(0, 0, 64, 16, vec![1; 16 * 1024]).await.unwrap();
+        sink.pass_standard(0, 16, 64, 16, vec![2; 16 * 1024]).await.unwrap();
         assert!(sink.passing());
         assert!(sink.due_at().await.is_none(), "there is nothing to come back and encode");
         sink.flush().await;
         let out = drain(&mut rx, 3).await;
-        assert!(matches!(out[0], ServerMsg::AdaptiveStart { .. }));
-        assert!(matches!(&out[1], ServerMsg::Adaptive(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (0, 0)));
-        assert!(matches!(&out[2], ServerMsg::Adaptive(unit) if unit.data[0] == 2 && (unit.x, unit.y) == (0, 16)));
+        assert!(matches!(out[0], ServerMsg::StandardStart { .. }));
+        assert!(matches!(&out[1], ServerMsg::Standard(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (0, 0)));
+        assert!(matches!(&out[2], ServerMsg::Standard(unit) if unit.data[0] == 2 && (unit.x, unit.y) == (0, 16)));
 
-        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_adaptive(0, 0, 8, 8, vec![3; 8])).await;
+        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_standard(0, 0, 8, 8, vec![3; 8])).await;
         assert!(waiting.is_err(), "two unpainted rectangles fill the bound, so the next waits");
         let mut out = out.into_iter();
         drop(out.nth(1));
-        tokio::time::timeout(Duration::from_secs(1), sink.pass_adaptive(0, 0, 8, 8, vec![3; 8]))
+        tokio::time::timeout(Duration::from_secs(1), sink.pass_standard(0, 0, 8, 8, vec![3; 8]))
             .await
             .expect("painting the first made room")
             .unwrap();
@@ -1343,13 +1343,13 @@ mod tests {
         sink.flush().await;
         let small = drain(&mut rx, 1).await;
         drop(small);
-        sink.pass_adaptive(0, 0, 64, 32, vec![4; 64 * 1024]).await.unwrap();
+        sink.pass_standard(0, 0, 64, 32, vec![4; 64 * 1024]).await.unwrap();
         sink.flush().await;
         let large = drain(&mut rx, 1).await;
-        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_adaptive(0, 0, 8, 8, vec![5; 8])).await;
+        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_standard(0, 0, 8, 8, vec![5; 8])).await;
         assert!(waiting.is_err());
         drop(large);
-        tokio::time::timeout(Duration::from_secs(1), sink.pass_adaptive(0, 0, 8, 8, vec![5; 8]))
+        tokio::time::timeout(Duration::from_secs(1), sink.pass_standard(0, 0, 8, 8, vec![5; 8]))
             .await
             .expect("painting the large one made room")
             .unwrap();

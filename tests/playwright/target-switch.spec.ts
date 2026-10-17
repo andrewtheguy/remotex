@@ -1,7 +1,7 @@
 // Switching between a Mac's and an RDP host's targets on one page, without a
 // reload, and what each session's end lets go of (frontend/src/desktopPainter.ts):
 // a session that loaded a module of the paint worker's own, the pipeline's
-// compositor or the Adaptive picture's decoder, ends that worker and the next
+// compositor or the decoder of a Mac's own picture, ends that worker and the next
 // session paints in another; any other session keeps it, and ends its VP9 and HEVC
 // decode workers.
 //
@@ -116,11 +116,11 @@ function watch(page: Page): Watched {
 
 /// How a session's picture starts: the control message that announces it.
 type Start =
-  | { control: "graphicsStart" | "adaptiveStart" }
+  | { control: "graphicsStart" | "standardStart" }
   | { control: "videoFormat"; decode: RegExp };
 
 const PIPELINE: Start = { control: "graphicsStart" };
-const ADAPTIVE: Start = { control: "adaptiveStart" };
+const STANDARD: Start = { control: "standardStart" };
 const VP9: Start = { control: "videoFormat", decode: /^vp09\.01\./ };
 const HEVC: Start = { control: "videoFormat", decode: /^hev1\./ };
 
@@ -230,7 +230,7 @@ test.describe("a Mac's and an RDP host's targets on one page", () => {
 
     // The Adaptive picture is decoded in that same worker, whose end it then is.
     await returnToPicker(page);
-    await session(page, seen, mac, ADAPTIVE, {
+    await session(page, seen, mac, STANDARD, {
       passthrough: "apple-adaptive",
     });
     expect(seen.painters).toHaveLength(2);

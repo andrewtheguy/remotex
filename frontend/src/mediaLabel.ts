@@ -160,7 +160,7 @@ export interface VideoStreamInfo {
   // (`graphicsStart`). No decoder is configured and `decode` names nothing.
   composed?: boolean;
   // Not a stream either: a Mac's own picture in this quality, decoded by this
-  // page (`adaptiveStart`). No decoder is configured and `decode` names nothing.
+  // page (`standardStart`). No decoder is configured and `decode` names nothing.
   standard?: StandardQuality;
   // Decoded by one of the page's WebAssembly decoders (softwareDecoder.ts) and
   // not by the browser's own: the VP9 where the browser's own does not take it,

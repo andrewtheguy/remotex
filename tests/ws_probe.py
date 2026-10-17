@@ -90,7 +90,7 @@ def batch_records(frame: bytes, inflater=None) -> int:
     """Print one screen batch's records and return how many there were.
 
     Parsed here rather than trusted from anywhere: a VIDEO record is
-    ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``, and an ADAPTIVE one
+    ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``, and a STANDARD one
     ``0x05 | u16 x | u16 y | u16 w | u16 h | u32 len | body``. Given the session's
     ``inflater``, a Full-quality one's body is inflated on the session's one zlib
     stream, and must come to its rectangle's pixels, four bytes each."""
@@ -923,7 +923,7 @@ async def main() -> int:
         if args.tab:
             print(f"  [2] {tab_frames} binary frames")
         if args.records:
-            print(f"  {video_units} video and adaptive records")
+            print(f"  {video_units} video and standard records")
         if args.audio:
             print(f"  {audio_frames} audio frames; format={audio_format}")
             if audio_error is not None:

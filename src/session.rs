@@ -1008,8 +1008,8 @@ impl SessionManager {
         // A passed stream drawn against what the page holds has no resume, whatever
         // the browser says ([`Passthrough::resumes`]): an RDP host's pipeline is
         // drawn against its client's surfaces, cache slots and each codec's caches,
-        // and answers even a repaint out of them, and a Mac's Adaptive picture
-        // against the page's framebuffer, coefficients and tile cache. A page that
+        // and answers even a repaint out of them, and a Mac's own picture
+        // against the page's framebuffer and its decoder's state. A page that
         // comes back holding none of it cannot be made whole by the engine that is
         // running. It is given one that starts.
         if st.engine.as_ref().is_some_and(|engine| !engine.plan.resumes()) {
@@ -2868,7 +2868,7 @@ mod tests {
     /// drawn on what the page holds. And a picture of it that cannot reach a page
     /// still attached ends the session, said, rather than going on broken.
     #[tokio::test(start_paused = true)]
-    async fn a_passed_adaptive_picture_is_started_over_and_never_repainted() {
+    async fn a_passed_standard_picture_is_started_over_and_never_repainted() {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner = Box::new(
             move |_target, _choices, plan, _display, input_rx, frame_tx, _audio, _camera, _feedback| {
@@ -2903,7 +2903,7 @@ mod tests {
         expect_passed_mac(&mut back.events).await;
 
         // No display socket comes for the picture.
-        frame_tx.send(ServerMsg::AdaptiveStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
+        frame_tx.send(ServerMsg::StandardStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
         tokio::time::sleep(DISPLAY_ATTACH_GRACE * 2).await;
         match recv(&mut back.events).await {
             AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
@@ -2961,7 +2961,7 @@ mod tests {
         }
         let (input_rx, frame_tx) = hook_rx.try_recv().expect("engine spawned on connect");
         drop(mgr.attach_display("login", FIRST_DISPLAY, None).unwrap());
-        frame_tx.send(ServerMsg::AdaptiveStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
+        frame_tx.send(ServerMsg::StandardStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
             other => panic!("expected the error, got {other:?}"),
@@ -2979,7 +2979,7 @@ mod tests {
     /// ended, nothing of it reaches the page after, and the new display socket is
     /// the fresh engine's.
     #[tokio::test]
-    async fn a_display_socket_back_before_its_reattach_still_starts_an_adaptive_picture_over() {
+    async fn a_display_socket_back_before_its_reattach_still_starts_a_standard_picture_over() {
         let (hook_tx, hook_rx) = std_mpsc::channel();
         let spawner: EngineSpawner = Box::new(
             move |_target, _choices, plan, _display, input_rx, frame_tx, _audio, _camera, _feedback| {
@@ -3008,7 +3008,7 @@ mod tests {
         // The page comes back, its display socket first. A repaint is asked of the
         // running engine, which an Adaptive one does not answer, and what it draws
         // meanwhile reaches the socket: the page holds no picture before an
-        // `adaptiveStart`, and drops it.
+        // `standardStart`, and drops it.
         let mut display = mgr.attach_display("login", FIRST_DISPLAY, None).unwrap();
         assert!(matches!(old_input.recv().await, Some(ClientMsg::Refresh)));
         old_frames.send(resize(1)).await.unwrap();
@@ -3045,12 +3045,12 @@ mod tests {
 
         // The display socket that came back first is the fresh engine's.
         frames.send(resize(3)).await.unwrap();
-        frames.send(ServerMsg::AdaptiveStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
+        frames.send(ServerMsg::StandardStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
         assert!(matches!(
             recv(&mut display.events).await,
             AttachEvent::Msg(ServerMsg::Resize { w: 3, .. })
         ));
-        assert!(matches!(recv(&mut display.events).await, AttachEvent::Msg(ServerMsg::AdaptiveStart { .. })));
+        assert!(matches!(recv(&mut display.events).await, AttachEvent::Msg(ServerMsg::StandardStart { .. })));
         assert!(display.events.try_recv().is_err(), "nothing of the engine that was ended");
         assert!(hook_rx.try_recv().is_err(), "one fresh engine");
     }

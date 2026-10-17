@@ -3,11 +3,11 @@
 // own 8×8 tiles, or its zlib, passed for the page to decode.
 //
 // Everything asserted is decided by the system and not by a machine's timing: the
-// render the gateway resolved, the order of `adaptiveStart` and the records
+// render the gateway resolved, the order of `standardStart` and the records
 // behind it, the records' own framing, that the first is the Mac's quantization
 // tables, the acknowledgment the page sends once its paint worker has decoded a
 // batch, and the DOM's account of a rectangle that did not decode. Nothing here
-// looks at a pixel. An ADAPTIVE record is a header this file parses for itself
+// looks at a pixel. A STANDARD record is a header this file parses for itself
 // around a body as the Mac sent it: an Adaptive body's first byte says what it
 // is, and a Full-quality body is inflated here on the one zlib stream the
 // session's bodies share, which must come to each rectangle's pixels.
@@ -20,12 +20,12 @@
 //     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52888/ \
 //     REMOTEX_PLAYWRIGHT_USERNAME=admin \
 //     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET=macvmstandard \
-//     bunx playwright test '/adaptive-passthrough\.spec\.ts$'
+//     REMOTEX_PLAYWRIGHT_STANDARD_TARGET=macvmstandard \
+//     bunx playwright test '/standard-passthrough\.spec\.ts$'
 //
 // The resize case needs a target whose desktop follows the window, an `ard`
 // target with `virtual_display = true`, named by
-// REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET.
+// REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET.
 import { constants, createInflate, type Inflate } from "node:zlib";
 import { expect, type Page, test, type Worker } from "@playwright/test";
 
@@ -42,14 +42,14 @@ const ADAPTIVE = { passthrough: "apple-adaptive" } as const;
 const FULL = { passthrough: "apple-full" } as const;
 
 /// The opt-in, and the target name in one, as the other live specs have it.
-const ADAPTIVE_TARGET = process.env.REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET;
-const RESIZE_TARGET = process.env.REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET;
+const STANDARD_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_TARGET;
+const RESIZE_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
-const OP_ADAPTIVE = 0x05;
-const ADAPTIVE_HEADER_LEN = 13;
+const OP_STANDARD = 0x05;
+const STANDARD_HEADER_LEN = 13;
 /// What a body's first byte says it is (docs/apple-vnc-889.md).
 const KINDS = ["full", "partial", "tables"] as const;
 /// The quantization tables are exactly this long.
@@ -84,18 +84,18 @@ function parseBatch(payload: Buffer): Batch {
   let badOp: number | undefined;
   while (at < payload.length) {
     const op = payload.readUInt8(at);
-    if (op !== OP_ADAPTIVE) {
+    if (op !== OP_STANDARD) {
       badOp = op;
       exact = false;
       break;
     }
-    if (at + ADAPTIVE_HEADER_LEN > payload.length) {
+    if (at + STANDARD_HEADER_LEN > payload.length) {
       exact = false;
       break;
     }
     const field = (i: number) => payload.readUInt16LE(at + 1 + 2 * i);
     const length = payload.readUInt32LE(at + 9);
-    const start = at + ADAPTIVE_HEADER_LEN;
+    const start = at + STANDARD_HEADER_LEN;
     if (length === 0 || start + length > payload.length) {
       exact = false;
       break;
@@ -130,13 +130,13 @@ interface Session {
   batches: Batch[];
   /** Binary frames that were not batches. */
   badKinds: number[];
-  /** Rectangles that arrived before their socket's `adaptiveStart`. */
+  /** Rectangles that arrived before their socket's `standardStart`. */
   unannounced: number;
   /** Rectangles that fall outside the size announced before them. */
   outside: Rect[];
   /** The sequences the page acknowledged, as it sent them. */
   acknowledged: number[];
-  /** The quality the display socket's last `adaptiveStart` named. */
+  /** The quality the display socket's last `standardStart` named. */
   quality?: string;
   /**
    * A Full-quality picture inflated here: the bytes its rectangles' pixels
@@ -209,7 +209,7 @@ function watchSession(page: Page): Session {
           return;
         }
         seen.controlTypes.push(message.type);
-        if (message.type === "adaptiveStart") {
+        if (message.type === "standardStart") {
           started = true;
           seen.quality = message.quality;
           if (message.quality === "full") {
@@ -262,8 +262,8 @@ const rects = (seen: Session): Rect[] => seen.batches.flatMap((b) => b.rects);
 
 test.describe("a Standard Mac whose Adaptive picture is passed", () => {
   test.skip(
-    !ADAPTIVE_TARGET,
-    "set REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET=<target> against a gateway with a live Mac",
+    !STANDARD_TARGET,
+    "set REMOTEX_PLAYWRIGHT_STANDARD_TARGET=<target> against a gateway with a live Mac",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
@@ -275,7 +275,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     page,
   }) => {
     const seen = watchSession(page);
-    await logInAndConnectTo(page, ADAPTIVE_TARGET ?? "", "", {
+    await logInAndConnectTo(page, STANDARD_TARGET ?? "", "", {
       passthrough: "apple-adaptive",
     });
 
@@ -297,7 +297,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     expect(seen.badKinds, "binary frames that were not batches").toEqual([]);
     expect(
       seen.unannounced,
-      "rectangles that arrived before their socket's adaptiveStart",
+      "rectangles that arrived before their socket's standardStart",
     ).toBe(0);
     expect(
       seen.controlTypes,
@@ -306,7 +306,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     expect(
       seen.controlTypes.indexOf("resize"),
       "the framebuffer's size is announced ahead of the picture drawn on it",
-    ).toBeLessThan(seen.controlTypes.indexOf("adaptiveStart"));
+    ).toBeLessThan(seen.controlTypes.indexOf("standardStart"));
 
     // The Mac's tables come before its first picture, and are exactly a table each.
     const first = rects(seen)[0];
@@ -314,7 +314,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     expect(first?.length).toBe(TABLES_LEN);
     for (const batch of seen.batches) {
       expect(batch.flags, "reserved frame flags must be zero").toBe(0);
-      expect(batch.badOp, "every record must be an ADAPTIVE record").toBe(
+      expect(batch.badOp, "every record must be a STANDARD record").toBe(
         undefined,
       );
       expect(batch.exact, "records must exactly fill the frame").toBe(true);
@@ -357,7 +357,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     page,
   }) => {
     const seen = watchSession(page);
-    await logInAndConnectTo(page, ADAPTIVE_TARGET ?? "", "", {
+    await logInAndConnectTo(page, STANDARD_TARGET ?? "", "", {
       passthrough: "apple-adaptive",
     });
     await expect
@@ -385,7 +385,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
       .toBe(true);
     const after = seen.controlTypes.slice(before);
     expect(after).toContain("connected");
-    expect(after).toContain("adaptiveStart");
+    expect(after).toContain("standardStart");
     expect(seen.unannounced).toBe(0);
     expect(seen.batches[0]?.sequence).toBe(1);
     expect(rects(seen)[0]?.kind).toBe("tables");
@@ -407,7 +407,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
       }
     });
     const seen = watchSession(page);
-    await logInAndConnectTo(page, ADAPTIVE_TARGET ?? "", "", ADAPTIVE);
+    await logInAndConnectTo(page, STANDARD_TARGET ?? "", "", ADAPTIVE);
     await expect
       .poll(() => seen.acknowledged.length, { timeout: 20_000 })
       .toBeGreaterThan(0);
@@ -426,7 +426,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     const firstAcknowledgedCount = firstAcknowledged.length;
     const firstControl = seen.controlTypes.length;
 
-    await startTarget(page, ADAPTIVE_TARGET ?? "", ADAPTIVE);
+    await startTarget(page, STANDARD_TARGET ?? "", ADAPTIVE);
     await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
       timeout: 20_000,
     });
@@ -441,7 +441,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
     await expect
       .poll(
         () =>
-          seen.controlTypes.slice(firstControl).includes("adaptiveStart") &&
+          seen.controlTypes.slice(firstControl).includes("standardStart") &&
           seen.acknowledged.length >
             (seen.acknowledged === firstAcknowledged
               ? firstAcknowledgedCount
@@ -458,8 +458,8 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
 
 test.describe("a Standard Mac whose Full-quality picture is passed", () => {
   test.skip(
-    !ADAPTIVE_TARGET,
-    "set REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET=<target> against a gateway with a live Mac",
+    !STANDARD_TARGET,
+    "set REMOTEX_PLAYWRIGHT_STANDARD_TARGET=<target> against a gateway with a live Mac",
   );
 
   test.afterEach(async ({ page }) => {
@@ -470,7 +470,7 @@ test.describe("a Standard Mac whose Full-quality picture is passed", () => {
     page,
   }) => {
     const seen = watchSession(page);
-    await logInAndConnectTo(page, ADAPTIVE_TARGET ?? "", "", FULL);
+    await logInAndConnectTo(page, STANDARD_TARGET ?? "", "", FULL);
     await expect
       .poll(() => seen.acknowledged.length, { timeout: 20_000 })
       .toBeGreaterThan(0);
@@ -485,7 +485,7 @@ test.describe("a Standard Mac whose Full-quality picture is passed", () => {
     expect(seen.controlTypes).not.toContain("videoFormat");
     for (const batch of seen.batches) {
       expect(batch.flags, "reserved frame flags must be zero").toBe(0);
-      expect(batch.badOp, "every record must be an ADAPTIVE record").toBe(
+      expect(batch.badOp, "every record must be a STANDARD record").toBe(
         undefined,
       );
       expect(batch.exact, "records must exactly fill the frame").toBe(true);
@@ -524,7 +524,7 @@ test.describe("a Standard Mac whose Full-quality picture is passed", () => {
 test.describe("a Mac's virtual display whose Adaptive picture is passed", () => {
   test.skip(
     !RESIZE_TARGET,
-    "set REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET=<target> against a gateway with a live Mac on a virtual display",
+    "set REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET=<target> against a gateway with a live Mac on a virtual display",
   );
 
   test.afterEach(async ({ page }) => {
@@ -588,7 +588,7 @@ test.describe("a Mac's virtual display whose Adaptive picture is passed", () => 
       "rectangles off the framebuffer the last resize announced",
     ).toEqual([]);
     expect(
-      seen.controlTypes.filter((type) => type === "adaptiveStart"),
+      seen.controlTypes.filter((type) => type === "standardStart"),
       "a resize goes on with the picture rather than starting it again",
     ).toHaveLength(1);
     expect(seen.acknowledged).toEqual(
@@ -638,7 +638,7 @@ test.describe("a Mac's virtual display whose Adaptive picture is passed", () => 
     expect(seen.unannounced).toBe(0);
     expect(seen.outside).toEqual([]);
     expect(
-      seen.controlTypes.filter((type) => type === "adaptiveStart"),
+      seen.controlTypes.filter((type) => type === "standardStart"),
     ).toHaveLength(1);
     const zlib = seen.zlib;
     expect(zlib).toBeDefined();

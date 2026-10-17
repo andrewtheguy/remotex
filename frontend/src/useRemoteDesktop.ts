@@ -1440,7 +1440,7 @@ export function useRemoteDesktop(
       if (
         (msg.type === "videoFormat" ||
           msg.type === "graphicsStart" ||
-          msg.type === "adaptiveStart") &&
+          msg.type === "standardStart") &&
         msg.engine <= endedEngines
       ) {
         return;
@@ -2294,10 +2294,10 @@ export function useRemoteDesktop(
           setVideoStream({ decode: "", passthrough: true, composed: true });
           setHostPicture({ exact: true, codecs: [] });
           break;
-        case "adaptiveStart":
+        case "standardStart":
           // Queued the same way: the picture's first rectangle must find a
           // decoder with nothing in it.
-          painter()?.startAdaptive(msg.quality);
+          painter()?.startStandard(msg.quality);
           setVideoStream({
             decode: "",
             passthrough: true,

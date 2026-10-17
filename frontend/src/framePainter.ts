@@ -1,9 +1,4 @@
 import {
-  type AdaptiveFactory,
-  type AdaptivePicture,
-  loadAdaptive,
-} from "./adaptivePicture.ts";
-import {
   createRelaySink,
   createRelaySource,
   openRelayPort,
@@ -20,10 +15,10 @@ import type { GraphicsPicture, PicturePart } from "./egfxPicture.ts";
 import { createEgfxVideo, type EgfxVideo } from "./egfxVideo.ts";
 import type { PlanesPicture } from "./planesPicture.ts";
 import {
-  type AdaptiveMsg,
   type BatchRecord,
   decodeBatchFrame,
   type GraphicsMsg,
+  type StandardMsg,
   type StandardQuality,
   stripRows,
   type VideoMsg,
@@ -31,13 +26,18 @@ import {
 import { type DecodedPicture, isSoftwarePlanes } from "./softwareDecoder.ts";
 import type { PageDecoding } from "./softwareSupport.ts";
 import {
+  loadStandard,
+  type StandardFactory,
+  type StandardPicture,
+} from "./standardPicture.ts";
+import {
   createDesktopVideo,
   type DesktopVideo,
   type VideoFormat,
 } from "./videoDecoder.ts";
 
 // The browser SPA's batch draw loop: each batch's records — access units, runs
-// of an RDP host's graphics pipeline and a Mac's Adaptive rectangles — decoded or
+// of an RDP host's graphics pipeline and a Mac's own rectangles — decoded or
 // composed in wire order and drawn onto the canvas. The decoder lives here rather than beside each caller:
 // it belongs to exactly one attachment, and `clear` is the one place that ends it.
 
@@ -74,12 +74,12 @@ export interface FramePainter {
    */
   startGraphics(): void;
   /**
-   * Adopt an `adaptiveStart`: a Mac's own picture begins, from nothing, in
-   * `quality`, and the ADAPTIVE records after it are the picture, decoded here
+   * Adopt a `standardStart`: a Mac's own picture begins, from nothing, in
+   * `quality`, and the STANDARD records after it are the picture, decoded here
    * and painted on the desktop's canvas. Whatever decoder or compositor stood
    * before is done with.
    */
-  startAdaptive(quality: StandardQuality): void;
+  startStandard(quality: StandardQuality): void;
   /**
    * Adopt a `graphicsView` on the page that composes the pipeline: the part of
    * its picture this display is, shown from now, by this pipeline and the next.
@@ -130,7 +130,7 @@ export function createFramePainter(options: {
    * Where a Mac's own pictures come from: their WebAssembly module, loaded
    * once. Injectable for a test, as the compositor's is.
    */
-  loadAdaptive?: () => Promise<AdaptiveFactory>;
+  loadStandard?: () => Promise<StandardFactory>;
   /**
    * Where a pipeline's picture comes from: the WebGL canvas the page shows it on
    * (egfxPicture.ts). A painter given none composes no pipeline.
@@ -196,17 +196,17 @@ export function createFramePainter(options: {
     });
   const makeRelay = options.makeRelay ?? openRelayPort;
 
-  // A Mac's own picture, from its `adaptiveStart`: `picture` is null until
+  // A Mac's own picture, from its `standardStart`: `picture` is null until
   // the module has loaded, and for good once `broken`, as a pipeline's
   // compositor is: a rectangle it could not draw, or one it was never given,
   // leaves a framebuffer the Mac's next rectangles are not drawn against.
-  interface Adaptive {
-    picture: AdaptivePicture | null;
+  interface Standard {
+    picture: StandardPicture | null;
     broken: boolean;
     ready: Promise<void>;
   }
-  let adaptive: Adaptive | null = null;
-  const loadAdaptivePicture = options.loadAdaptive ?? (() => loadAdaptive());
+  let standard: Standard | null = null;
+  const loadStandardPicture = options.loadStandard ?? (() => loadStandard());
   // The desktop's size in pixels, from the last resize: what a Mac's own
   // picture's framebuffer is, the resize coming ahead of the picture's start.
   let framebuffer: { w: number; h: number } | null = null;
@@ -259,13 +259,13 @@ export function createFramePainter(options: {
     source?.reset();
   };
 
-  const releaseAdaptive = () => {
-    if (adaptive) {
-      adaptive.broken = true;
-      adaptive.picture?.close();
-      adaptive.picture = null;
+  const releaseStandard = () => {
+    if (standard) {
+      standard.broken = true;
+      standard.picture?.close();
+      standard.picture = null;
     }
-    adaptive = null;
+    standard = null;
   };
 
   // A tab's mirror, given back, and its picture no longer shown.
@@ -342,7 +342,7 @@ export function createFramePainter(options: {
 
   const releaseVideo = () => {
     releasePipeline();
-    releaseAdaptive();
+    releaseStandard();
     releaseMirror();
     releasePlanes();
     releaseStrips();
@@ -397,7 +397,7 @@ export function createFramePainter(options: {
   // rectangle that did not decode, or a batch that never arrived whole, leaves a
   // framebuffer the Mac's next rectangles are not drawn against, and no repaint
   // brings a running session back to it. What it last drew stays on the canvas.
-  const endAdaptive = (broken: Adaptive, why: string) => {
+  const endStandard = (broken: Standard, why: string) => {
     if (broken.broken) {
       return;
     }
@@ -415,14 +415,14 @@ export function createFramePainter(options: {
   // the rectangles before it left, so the module's load is waited for in place,
   // and one for a picture that has been replaced, broken or never started is
   // dropped.
-  const paintAdaptive = async (record: AdaptiveMsg, born: number) => {
-    const current = adaptive;
+  const paintStandard = async (record: StandardMsg, born: number) => {
+    const current = standard;
     if (!current) {
       return;
     }
     await current.ready;
     const { picture } = current;
-    if (generation !== born || current !== adaptive || !picture) {
+    if (generation !== born || current !== standard || !picture) {
       return;
     }
     let drew: boolean;
@@ -435,7 +435,7 @@ export function createFramePainter(options: {
         record.data,
       );
     } catch (error) {
-      endAdaptive(current, describe(error));
+      endStandard(current, describe(error));
       return;
     }
     const image = picture.image();
@@ -456,8 +456,8 @@ export function createFramePainter(options: {
       endPipeline(pipeline, "a batch of its commands arrived malformed");
       return;
     }
-    if (adaptive) {
-      endAdaptive(adaptive, "a batch of its rectangles arrived malformed");
+    if (standard) {
+      endStandard(standard, "a batch of its rectangles arrived malformed");
       return;
     }
     releaseStrips();
@@ -753,8 +753,8 @@ export function createFramePainter(options: {
           await compose(record, born);
           continue;
         }
-        if (record.kind === "adaptive") {
-          await paintAdaptive(record, born);
+        if (record.kind === "standard") {
+          await paintStandard(record, born);
           continue;
         }
         show(record, await decodes[i], born);
@@ -811,14 +811,14 @@ export function createFramePainter(options: {
         });
       pipeline = starting;
     },
-    startAdaptive(quality) {
+    startStandard(quality) {
       releaseVideo();
-      const starting: Adaptive = {
+      const starting: Standard = {
         picture: null,
         broken: false,
         ready: Promise.resolve(),
       };
-      starting.ready = loadAdaptivePicture()
+      starting.ready = loadStandardPicture()
         .then((make) => {
           // Replaced or cleared while the module loaded: nothing to make one for.
           if (!starting.broken) {
@@ -830,13 +830,13 @@ export function createFramePainter(options: {
         })
         .catch((error: unknown) => {
           if (!starting.broken) {
-            endAdaptive(
+            endStandard(
               starting,
               `its decoder did not load: ${describe(error)}`,
             );
           }
         });
-      adaptive = starting;
+      standard = starting;
     },
     setGraphicsView(part) {
       graphicsPart = part;
@@ -898,8 +898,8 @@ export function createFramePainter(options: {
       // A Mac's own picture's framebuffer starts over at the new size, black as
       // the canvas is, and the Mac repaints it.
       framebuffer = { w, h };
-      if (adaptive?.picture && !adaptive.broken) {
-        adaptive.picture.resize(w, h);
+      if (standard?.picture && !standard.broken) {
+        standard.picture.resize(w, h);
       }
       if (mirror) {
         try {
@@ -925,10 +925,10 @@ export function createFramePainter(options: {
     },
     setVideoFormat(format) {
       // A stream takes the picture from whatever passed picture was painted:
-      // a pipeline, the Mac's Adaptive picture, or in a tab the mirror of the
+      // a pipeline, the Mac's own picture, or in a tab the mirror of the
       // session page's picture, which shows the display no more.
       releasePipeline();
-      releaseAdaptive();
+      releaseStandard();
       releaseMirror();
       if (refused !== null && format.decode !== refused) {
         // Not the configuration that was refused, so the refusal no longer stands —

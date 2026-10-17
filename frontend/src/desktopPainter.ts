@@ -21,7 +21,7 @@
 // A session's end is where what its picture alone loaded is let go, since a
 // WebAssembly memory grows and never shrinks and only ending the worker that holds
 // it gives it back (`endSession`). The compositor of an RDP host's pipeline and the
-// decoder of a Mac's Adaptive picture are modules of this worker's own, so a
+// decoder of a Mac's own picture are modules of this worker's own, so a
 // session that loaded either ends the worker, and the page mounts new canvases for
 // the next one. Otherwise the worker is kept, and its decode workers, the VP9's
 // and the HEVC's, go.
@@ -87,7 +87,7 @@ export interface DesktopPainter {
   /** An RDP host's graphics pipeline starts, for the worker to compose. */
   startGraphics(): void;
   /** A Mac's own picture starts, in `quality`, for the worker to decode. */
-  startAdaptive(quality: StandardQuality): void;
+  startStandard(quality: StandardQuality): void;
   /** The part of the pipeline's picture this page's display is (`graphicsView`). */
   setGraphicsView(part: PicturePart): void;
   /**
@@ -183,7 +183,7 @@ export function desktopPainterFor(
   const post = (command: PainterCommand, transfer: Transferable[] = []) =>
     worker.postMessage(command, transfer);
   // Whether a session has loaded a module of this worker's own: the pipeline's
-  // compositor or the Adaptive picture's decoder.
+  // compositor or the decoder of a Mac's own picture.
   let ownModule = false;
   const offscreen = canvas.transferControlToOffscreen();
   const offscreenGraphics = graphics.transferControlToOffscreen();
@@ -230,9 +230,9 @@ export function desktopPainterFor(
       ownModule = true;
       post({ type: "graphicsStart" });
     },
-    startAdaptive(quality) {
+    startStandard(quality) {
       ownModule = true;
-      post({ type: "adaptiveStart", quality });
+      post({ type: "standardStart", quality });
     },
     setGraphicsView(part) {
       post({ type: "graphicsView", part });

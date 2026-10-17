@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { constants, deflateSync } from "node:zlib";
-import { loadAdaptive } from "./adaptivePicture.ts";
+import { loadStandard } from "./standardPicture.ts";
 
 const module = readFileSync(
   new URL("../wasm/vnc/pkg/remotex_vnc_bg.wasm", import.meta.url),
@@ -25,7 +25,7 @@ const TABLES = Uint8Array.from([2, ...new Array(128).fill(1)]);
 const WHITE_TILE = Uint8Array.from([0, 3, 5, 0, 0, 8, 0x03, 0x68, 0x6d]);
 
 test("a rectangle draws on the framebuffer, where it is and nowhere else", async () => {
-  const make = await loadAdaptive(module);
+  const make = await loadStandard(module);
   const picture = make("adaptive");
   assert.equal(
     picture.pixels(),
@@ -53,7 +53,7 @@ test("a rectangle draws on the framebuffer, where it is and nowhere else", async
 });
 
 test("a rectangle that does not decode is refused with the reason", async () => {
-  const make = await loadAdaptive(module);
+  const make = await loadStandard(module);
   const picture = make("adaptive");
   picture.resize(8, 8);
   assert.throws(
@@ -77,7 +77,7 @@ function zlibRect(pixels: [number, number, number][]): Uint8Array {
 }
 
 test("a Full-quality rectangle inflates onto the framebuffer in R, G, B, A", async () => {
-  const make = await loadAdaptive(module);
+  const make = await loadStandard(module);
   const picture = make("full");
   picture.resize(4, 2);
   const rect = zlibRect([
@@ -102,7 +102,7 @@ test("a Full-quality rectangle inflates onto the framebuffer in R, G, B, A", asy
 });
 
 test("a Full-quality body that is not its rectangle's pixels is refused", async () => {
-  const make = await loadAdaptive(module);
+  const make = await loadStandard(module);
   const picture = make("full");
   picture.resize(4, 4);
   assert.throws(

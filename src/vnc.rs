@@ -186,7 +186,7 @@ const MAX_WLSHARE_VP9_FRAME: u32 = 64 << 20;
 /// The most a rectangle of a Mac's own picture, Adaptive or Full, is read as, past
 /// which it is refused: the ceiling wlshare's frames have, under the 100,000,000 bytes Apple's
 /// viewer allows one.
-const MAX_ADAPTIVE_BODY: u32 = 64 << 20;
+const MAX_STANDARD_BODY: u32 = 64 << 20;
 
 /// The receive buffer of the connection to a Mac whose own picture is passed,
 /// in bytes: small, so a browser that takes the picture more slowly than the Mac
@@ -194,7 +194,7 @@ const MAX_ADAPTIVE_BODY: u32 = 64 << 20;
 /// for the connection it finds: its refinement waits for a still screen when
 /// the connection is slow ("What a Mac sends a viewer that lists them" in
 /// docs/apple-vnc-889.md), and a large buffer here would show it a fast one.
-const ADAPTIVE_RECEIVE_BUFFER: usize = 32 * 1024;
+const STANDARD_RECEIVE_BUFFER: usize = 32 * 1024;
 /// The longest a passed stream's fence echo is held for the browser's delivery of
 /// what came before it ([`VideoSink::fence_hold`]). A client that is not drawing
 /// acknowledges nothing, and the wait its oldest batch shows grows without bound,
@@ -2133,7 +2133,7 @@ async fn session(
     }
     // Ahead of the Mac's first rectangle, which nothing has been asked for yet.
     if let Some(quality) = plan.apple_standard
-        && sink.adaptive_start(quality).await.is_err()
+        && sink.standard_start(quality).await.is_err()
     {
         return; // browser already gone
     }
@@ -2320,7 +2320,7 @@ async fn connect(
     let dialect = Dialect::of(config.subtype);
     if plan.apple_standard.is_some() {
         socket2::SockRef::from(&stream)
-            .set_recv_buffer_size(ADAPTIVE_RECEIVE_BUFFER)
+            .set_recv_buffer_size(STANDARD_RECEIVE_BUFFER)
             .map_err(|e| anyhow::Error::new(e).context("setting the receive buffer of the connection to the Mac"))?;
     }
     // Where the connection runs, for High Performance's media stream: the Mac
@@ -5820,8 +5820,8 @@ async fn read_rect<R: AsyncRead + Unpin>(
         passed if desktop.lock().unwrap().standard.map(vnc_apple::encoding) == Some(passed) => {
             let len = reader.read_u32().await?;
             anyhow::ensure!(
-                len <= MAX_ADAPTIVE_BODY,
-                "the Mac sent a {len}-byte rectangle, past the {MAX_ADAPTIVE_BODY} bytes one is read as"
+                len <= MAX_STANDARD_BODY,
+                "the Mac sent a {len}-byte rectangle, past the {MAX_STANDARD_BODY} bytes one is read as"
             );
             let mut body = vec![0u8; len as usize];
             reader.read_exact(&mut body).await?;
@@ -5833,7 +5833,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 size.0,
                 size.1
             );
-            sink.pass_adaptive(x, y, w, h, body).await?;
+            sink.pass_standard(x, y, w, h, body).await?;
             return Ok(Rect::from_size(x, y, w, h).map_or(RectEffect::NOTHING, RectEffect::pixels));
         }
         // A frame of wlshare's VP9, which is the whole desktop: passed to the browser
@@ -8607,7 +8607,7 @@ mod tests {
         let effect = read_rect(&mut wire.as_slice(), &shared, &mut apple, &mut decoders, &sink).await.unwrap();
         assert_eq!(effect.pixels, Rect::from_size(8, 0, 16, 24));
         match forwarded(&sink, &mut rx).await {
-            Some(ServerMsg::Adaptive(unit)) => {
+            Some(ServerMsg::Standard(unit)) => {
                 assert_eq!((unit.x, unit.y, unit.w, unit.h), (8, 0, 16, 24));
                 assert_eq!(unit.data, [0, 3, 5, 0, 6]);
             }
@@ -8618,7 +8618,7 @@ mod tests {
         let wire = rect((0, 0, 0, 0), vnc_apple::ENCODING_ADAPTIVE, &[2; 129]);
         let effect = read_rect(&mut wire.as_slice(), &shared, &mut apple, &mut decoders, &sink).await.unwrap();
         assert_eq!(effect.pixels, None);
-        assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Adaptive(unit)) if unit.data.len() == 129));
+        assert!(matches!(forwarded(&sink, &mut rx).await, Some(ServerMsg::Standard(unit)) if unit.data.len() == 129));
 
         let wire = rect((56, 0, 16, 8), vnc_apple::ENCODING_ADAPTIVE, &[0]);
         let err = read_rect(&mut wire.as_slice(), &shared, &mut apple, &mut decoders, &sink).await.unwrap_err();
@@ -8658,7 +8658,7 @@ mod tests {
         let effect = read_rect(&mut wire.as_slice(), &shared, &mut apple, &mut decoders, &sink).await.unwrap();
         assert_eq!(effect.pixels, Rect::from_size(8, 4, 16, 8));
         match forwarded(&sink, &mut rx).await {
-            Some(ServerMsg::Adaptive(unit)) => {
+            Some(ServerMsg::Standard(unit)) => {
                 assert_eq!((unit.x, unit.y, unit.w, unit.h), (8, 4, 16, 8));
                 assert_eq!(unit.data, [0x78, 0x9c, 1, 2], "deflated still");
             }

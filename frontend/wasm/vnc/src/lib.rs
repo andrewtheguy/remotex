@@ -1,5 +1,5 @@
 //! The page's decoder for a Mac's own picture, bound for the painter
-//! (`frontend/src/adaptivePicture.ts`): its Adaptive quality's 8×8 tiles
+//! (`frontend/src/standardPicture.ts`): its Adaptive quality's 8×8 tiles
 //! ([`decoder`]) or its Full quality's zlib ([`zlib`]).
 
 pub mod decoder;
@@ -9,7 +9,7 @@ use wasm_bindgen::prelude::*;
 
 /// One session's picture, in the one quality it was started with.
 #[wasm_bindgen]
-pub struct Adaptive {
+pub struct Standard {
     picture: Picture,
 }
 
@@ -19,13 +19,13 @@ enum Picture {
 }
 
 #[wasm_bindgen]
-impl Adaptive {
+impl Standard {
     /// A picture of the Mac's Full quality where `full`, otherwise of its
     /// Adaptive quality.
     #[wasm_bindgen(constructor)]
-    pub fn new(full: bool) -> Adaptive {
+    pub fn new(full: bool) -> Standard {
         let picture = if full { Picture::Zlib(zlib::Decoder::new()) } else { Picture::Tiles(Box::default()) };
-        Adaptive { picture }
+        Standard { picture }
     }
 
     /// A black framebuffer of the desktop's new size.

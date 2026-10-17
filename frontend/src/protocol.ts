@@ -306,11 +306,11 @@ export type ControlMsg =
   // records after it are the picture: this page composes them. Whatever it held of
   // a pipeline or a video stream before is done with. `engine` as a format's.
   | { type: "graphicsStart"; engine: number }
-  // A Mac's own picture starts here, from nothing, in `quality`, and the ADAPTIVE
-  // records after it are the picture: this page decodes them (adaptivePicture.ts),
+  // A Mac's own picture starts here, from nothing, in `quality`, and the STANDARD
+  // records after it are the picture: this page decodes them (standardPicture.ts),
   // the Adaptive quality's 8x8 tiles or the Full quality's zlib. Whatever it held
   // of a video stream before is done with. `engine` as a format's.
-  | { type: "adaptiveStart"; engine: number; quality: StandardQuality }
+  | { type: "standardStart"; engine: number; quality: StandardQuality }
   // The part of a passed pipeline's picture this display is, in the picture's
   // pixels: the host draws its virtual displays as one span, and this names one
   // display's column of it, `w` by `h` from `x`, `y`. Only a session started with
@@ -461,11 +461,11 @@ export type StandardQuality = "adaptive" | "full";
 
 // One of a Mac's rectangles in its own picture, as the Mac sent it: where it
 // is on the framebuffer, in pixels, and its body, for this page to decode
-// (adaptivePicture.ts). It means something only after every record before it,
-// from the `adaptiveStart` that began the picture: each is drawn on what the
-// ones before it left. See `AdaptiveUnit` in src/protocol.rs for the contract.
-export interface AdaptiveMsg {
-  kind: "adaptive";
+// (standardPicture.ts). It means something only after every record before it,
+// from the `standardStart` that began the picture: each is drawn on what the
+// ones before it left. See `StandardUnit` in src/protocol.rs for the contract.
+export interface StandardMsg {
+  kind: "standard";
   x: number;
   y: number;
   w: number;
@@ -473,7 +473,7 @@ export interface AdaptiveMsg {
   data: Uint8Array;
 }
 
-export type BatchRecord = VideoMsg | GraphicsMsg | AdaptiveMsg;
+export type BatchRecord = VideoMsg | GraphicsMsg | StandardMsg;
 
 // Why a desktop has no picture: see `oversize`.
 export type HoldCause = "size" | "screens";
@@ -491,8 +491,8 @@ const OP_VIDEO = 0x03;
 const VIDEO_HEADER_LEN = 10;
 const OP_GRAPHICS = 0x04;
 const GRAPHICS_HEADER_LEN = 5;
-const OP_ADAPTIVE = 0x05;
-const ADAPTIVE_HEADER_LEN = 13;
+const OP_STANDARD = 0x05;
+const STANDARD_HEADER_LEN = 13;
 // A VIDEO record's flags: a decoder that has seen nothing before it can start here;
 // the unit is one strip of the picture, its number in two bits, and whether it is the
 // first sent of its frame. Any other bit means a gateway newer than this client, and
@@ -516,7 +516,7 @@ const VIDEO_STRIP_FLAGS = VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS;
 //
 //   VIDEO (op 0x03):     u8 flags | u16 w | u16 h | u32 len | payload[len]
 //   GRAPHICS (op 0x04):  u32 len | message[len]
-//   ADAPTIVE (op 0x05):  u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
+//   STANDARD (op 0x05):  u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
@@ -567,8 +567,8 @@ function decodeRecord(
   switch (view.getUint8(at)) {
     case OP_GRAPHICS:
       return decodeGraphics(view, buf, at);
-    case OP_ADAPTIVE:
-      return decodeAdaptive(view, buf, at);
+    case OP_STANDARD:
+      return decodeStandard(view, buf, at);
     default:
       return decodeVideo(view, buf, at);
   }
@@ -594,24 +594,24 @@ function decodeGraphics(
   };
 }
 
-function decodeAdaptive(
+function decodeStandard(
   view: DataView,
   buf: ArrayBuffer,
   at: number,
-): { record: AdaptiveMsg; next: number } | null {
-  if (at + ADAPTIVE_HEADER_LEN > buf.byteLength) {
+): { record: StandardMsg; next: number } | null {
+  if (at + STANDARD_HEADER_LEN > buf.byteLength) {
     return null;
   }
   const field = (i: number) => view.getUint16(at + 1 + 2 * i, true);
   const len = view.getUint32(at + 9, true);
-  const start = at + ADAPTIVE_HEADER_LEN;
+  const start = at + STANDARD_HEADER_LEN;
   // A rectangle with no body is one the gateway never sends.
   if (len === 0 || start + len > buf.byteLength) {
     return null;
   }
   return {
     record: {
-      kind: "adaptive",
+      kind: "standard",
       x: field(0),
       y: field(1),
       w: field(2),

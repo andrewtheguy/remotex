@@ -553,9 +553,9 @@ starts has. A session that names none is the VP9.
   (encoding 6). The Mac sends one codec, the first of its own it knows in the
   list, so it sends that one alone; a rectangle in another encoding ends the
   session.
-- **Passed as it came.** Each rectangle goes to the page as an `ADAPTIVE` record,
+- **Passed as it came.** Each rectangle goes to the page as a `STANDARD` record,
   where the Mac put it and its body as the Mac sent it, behind an
-  `adaptiveStart` that names the quality. The gateway decodes none of them and
+  `standardStart` that names the quality. The gateway decodes none of them and
   builds no VP9 encoder; the page decodes them in its own module
   (`frontend/wasm/vnc`), the tiles in a decoder written there and the zlib
   on miniz_oxide's inflater, onto a framebuffer of its own and paints the canvas
@@ -708,7 +708,7 @@ itself. Which passed streams follow the browser's link, and how, is in
 
 The engines never see the config keys. They and the session's choices collapse
 to one `RenderPlan` (`quality`, `adaptive`, `apple_media`, `apple_h264`,
-`apple_adaptive`, `rdp_graphics`, `rdp_h264`, `native_vp9`) at the config boundary in
+`apple_standard`, `rdp_graphics`, `rdp_h264`, `native_vp9`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
@@ -1207,18 +1207,18 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   tiles or zlib ahead of ZRLE, and the read loop takes a rectangle in that one
   encoding (`vnc_apple::encoding`) as a `u32` length and that body, refused past
   64 MiB or off the framebuffer, and hands it to the sink
-  (`VideoSink::pass_adaptive`) without a look inside: both encodings frame a
-  rectangle the same way. `adaptiveStart` names the quality and goes out ahead
+  (`VideoSink::pass_standard`) without a look inside: both encodings frame a
+  rectangle the same way. `standardStart` names the quality and goes out ahead
   of the Mac's first rectangle, behind the first `resize`, so the page has its
   framebuffer's size and its decoder before the picture starts. Any other
   framebuffer encoding in such a session ends it, since nothing here could
   decode it onto the page's picture.
 - **Paced by the page's painting.** Every rectangle takes its size, up to
-  `ADAPTIVE_AHEAD` (32 KiB), from a bound of its own, and gives it back when the
+  `STANDARD_AHEAD` (32 KiB), from a bound of its own, and gives it back when the
   page acknowledges the batch it rode in (a `Painted` in the record, as a
   pipeline's frame has). One that cannot have it waits, and the read loop with
   it, so the Mac's connection fills; its receive buffer is held at 32 KiB
-  (`ADAPTIVE_RECEIVE_BUFFER`) so what the Mac sends next stays at the Mac. The
+  (`STANDARD_RECEIVE_BUFFER`) so what the Mac sends next stays at the Mac. The
   queue budget and the paint window alone did not do this: a burst of
   rectangles passed the window together into the kernel's send buffer, and
   against a 300 kbit/s browser the picture ran 5.7 s behind on average, 12.5 s
@@ -1235,8 +1235,8 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   replacing the engine. A display message the session layer cannot deliver to a
   page still attached ends the session with an error rather than leaving it
   broken.
-- **In the page.** `framePainter.ts` makes an `AdaptivePicture`
-  (`adaptivePicture.ts`) at `adaptiveStart`, sizes its framebuffer at every
+- **In the page.** `framePainter.ts` makes a `StandardPicture`
+  (`standardPicture.ts`) at `standardStart`, sizes its framebuffer at every
   `resize`, decodes each record in wire order and puts the rectangle it drew
   onto the canvas from the module's memory (`putImageData` with the dirty
   rectangle), where Combined Display's mosaic composes it like any other
@@ -2162,7 +2162,7 @@ u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
 VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
 GRAPHICS op 0x04: u32 len | message[len]
-ADAPTIVE op 0x05: u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
+STANDARD op 0x05: u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
 ```
 
 One frame carries every record ready at once, so a backlog does not cost one
@@ -2179,9 +2179,9 @@ is one message of that pipeline as the host sent it, in its bulk compression,
 which means something only after every message before it from the
 `graphicsStart` that began the pipeline. One of no length is rejected. A session
 that passes a Mac's [own picture](#a-standard-macs-own-picture-passed-through)
-sends `ADAPTIVE` records instead: one of the Mac's rectangles, where it lies on the
+sends `STANDARD` records instead: one of the Mac's rectangles, where it lies on the
 framebuffer and its body as the Mac sent it, its 8×8 tiles or its zlib as the
-`adaptiveStart` that began the picture says (`quality`, `adaptive` or `full`),
+`standardStart` that began the picture says (`quality`, `adaptive` or `full`),
 meaning something only after every record before it from that start. One of no
 length is rejected too.
 
