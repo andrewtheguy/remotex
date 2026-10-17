@@ -207,7 +207,7 @@ whose bitmap updates are encoded as VP9 in the gateway.
   `frontend/wasm/flac` is the lossless sound's decoder, the page's
   alone: the gateway's FLAC is libFLAC and shares no code with it, so it has no
   crate under `crates/`. It has no threads, needs no shared memory, and builds
-  on stable. `frontend/wasm/adaptive` is the decoder of a Mac's Adaptive
+  on stable. `frontend/wasm/vnc` is the decoder of a Mac's own
   picture, the page's alone on the same terms: the gateway passes the Mac's
   rectangles and decodes none of them. `frontend/wasm/vp9` is the software VP9 decoder, for the
   gateway's 4:4:4 stream in a page whose browser's own decoder does not take it
@@ -557,7 +557,7 @@ starts has. A session that names none is the VP9.
   where the Mac put it and its body as the Mac sent it, behind an
   `adaptiveStart` that names the quality. The gateway decodes none of them and
   builds no VP9 encoder; the page decodes them in its own module
-  (`frontend/wasm/adaptive`), the tiles in a decoder written there and the zlib
+  (`frontend/wasm/vnc`), the tiles in a decoder written there and the zlib
   on miniz_oxide's inflater, onto a framebuffer of its own and paints the canvas
   where each drew, through the mosaic where Combined Display needs one. Do not
   add a decoder of either to the gateway, or transcode them.
@@ -1245,7 +1245,7 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   kept, as the Mac does. A rectangle that does not
   decode, or a batch that arrived malformed, ends the picture with the reason
   on the page, the last picture left where it is.
-- **The decoders.** `frontend/wasm/adaptive` decodes the tiles as Apple's
+- **The decoders.** `frontend/wasm/vnc` decodes the tiles as Apple's
   viewer does, read from it, to the reference library's integer inverse
   transform and its YCbCr. Against a virtual Mac's captures of a still screen, a
   panning one and both on links of 500 kbit/s and 2 Mbit/s, every one of their
@@ -1510,7 +1510,7 @@ SIMD128 and threads.
 
 A third stream is decoded in the page in every session that passes it, since no
 browser's decoder takes it: a Standard Mac's Adaptive or Full-quality picture, in
-`frontend/wasm/adaptive`, with no threads
+`frontend/wasm/vnc`, with no threads
 ([A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through)).
 
 **Each stream is each page's to decode however it can.** Every browser is sent

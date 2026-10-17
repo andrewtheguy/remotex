@@ -54,7 +54,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remotex-adaptive"
+name = "remotex-vnc"
 version = "0.0.0"
 dependencies = [
  "miniz_oxide",

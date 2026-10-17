@@ -1,5 +1,5 @@
 // The page's decoder for a Mac's own picture, through its binding: the
-// decoders' own tests (wasm/adaptive) check what each tile command draws and how
+// decoders' own tests (wasm/vnc) check what each tile command draws and how
 // the zlib stream runs across rectangles, and these that a rectangle of either
 // quality reaches the framebuffer the canvas is painted from, and that one that
 // does not decode says so and keeps what it drew.
@@ -12,7 +12,7 @@ import { constants, deflateSync } from "node:zlib";
 import { loadAdaptive } from "./adaptivePicture.ts";
 
 const module = readFileSync(
-  new URL("../wasm/adaptive/pkg/remotex_adaptive_bg.wasm", import.meta.url),
+  new URL("../wasm/vnc/pkg/remotex_vnc_bg.wasm", import.meta.url),
 );
 
 // The quantization tables, each entry 1: the rectangle of no area the Mac sends

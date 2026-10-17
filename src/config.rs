@@ -270,7 +270,7 @@ pub enum Passthrough {
     /// ALPHA. A Standard Mac's picture as Apple's viewer's Adaptive quality has it:
     /// the Mac's 8×8 tiles (`0x3f3`), which it codes coarsely first and refines
     /// as the connection lets it, for the page to decode
-    /// (`frontend/wasm/adaptive`). Offered by `ard` beside the VP9 encoded here
+    /// (`frontend/wasm/vnc`). Offered by `ard` beside the VP9 encoded here
     /// from the Mac's ZRLE, which a session that names neither is.
     ///
     /// Every rectangle is drawn against what the ones before it left, the page's
@@ -281,7 +281,7 @@ pub enum Passthrough {
     AppleAdaptive,
     /// ALPHA. A Standard Mac's picture as Apple's viewer's Full quality has it:
     /// RFB's zlib (encoding 6), the Mac's pixels deflated as one stream across the
-    /// session, lossless, for the page to inflate (`frontend/wasm/adaptive`).
+    /// session, lossless, for the page to inflate (`frontend/wasm/vnc`).
     /// Offered by `ard` beside the VP9 and the Adaptive picture.
     ///
     /// Every rectangle continues the stream the ones before it deflated, so a

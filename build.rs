@@ -78,13 +78,13 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "frontend/wasm/flac/.cargo/config.toml",
         "frontend/wasm/flac/rust-toolchain.toml",
         "frontend/wasm/flac/src",
-        // The page's decoder for a Mac's Adaptive picture, a module of its own
-        // (frontend/wasm/adaptive), the same way.
-        "frontend/wasm/adaptive/Cargo.toml",
-        "frontend/wasm/adaptive/Cargo.lock",
-        "frontend/wasm/adaptive/.cargo/config.toml",
-        "frontend/wasm/adaptive/rust-toolchain.toml",
-        "frontend/wasm/adaptive/src",
+        // The page's decoder for a Mac's own picture, Adaptive or Full, a module
+        // of its own (frontend/wasm/vnc), the same way.
+        "frontend/wasm/vnc/Cargo.toml",
+        "frontend/wasm/vnc/Cargo.lock",
+        "frontend/wasm/vnc/.cargo/config.toml",
+        "frontend/wasm/vnc/rust-toolchain.toml",
+        "frontend/wasm/vnc/src",
         // The page's software VP9 decoder, which is not built here: the release
         // of andrewtheguy/vp9-wasm the pin names, unpacked beside it by the
         // script.

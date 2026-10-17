@@ -1,13 +1,10 @@
-import init, {
-  Adaptive,
-  type InitInput,
-} from "../wasm/adaptive/pkg/remotex_adaptive.js";
+import init, { Adaptive, type InitInput } from "../wasm/vnc/pkg/remotex_vnc.js";
 import type { StandardQuality } from "./protocol.ts";
 
 // A Mac's own picture, decoded in the page: the rectangles of a session started
 // with Standard's Adaptive or Full quality, which the gateway passes as the Mac
 // sent them, the Adaptive quality's 8x8 tiles or the Full quality's zlib, drawn
-// onto a framebuffer of the module's own (wasm/adaptive). Each rectangle is drawn
+// onto a framebuffer of the module's own (wasm/vnc). Each rectangle is drawn
 // on what the ones before it left, so one picture is fed every record of its
 // session, in order, and the canvas is painted from its framebuffer where each
 // rectangle drew.
