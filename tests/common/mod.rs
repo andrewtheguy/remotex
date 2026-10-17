@@ -351,6 +351,50 @@ pub fn batch_units(frame: &[u8]) -> Vec<BatchUnit> {
     records
 }
 
+/// One `STANDARD` record parsed out of a batch frame: one of a Mac's rectangles in
+/// its own picture, its body as the Mac sent it.
+#[allow(dead_code)]
+pub struct StandardRect {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub body: Vec<u8>,
+}
+
+/// Parse a server -> client binary frame into its `STANDARD` records, checking the
+/// envelope as [`batch_units`] does.
+#[allow(dead_code)]
+pub fn standard_rects(frame: &[u8]) -> Vec<StandardRect> {
+    use remotex::protocol::batch;
+
+    assert!(frame.len() >= batch::HEADER_LEN, "frame is shorter than a batch header");
+    assert_eq!(frame[0], batch::FRAME_KIND, "unexpected frame kind");
+    assert_eq!(frame[1], 0, "flags must be zero");
+    let count = u16::from_le_bytes([frame[2], frame[3]]);
+
+    let mut at = batch::HEADER_LEN;
+    let mut records = Vec::new();
+    while at < frame.len() {
+        let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
+        assert_eq!(frame[at], batch::OP_STANDARD, "unknown record op {}", frame[at]);
+        let len = u32::from_le_bytes(frame[at + 9..at + 13].try_into().unwrap()) as usize;
+        let start = at + batch::STANDARD_HEADER_LEN;
+        assert!(len > 0, "a STANDARD record with no body");
+        records.push(StandardRect {
+            x: le(1),
+            y: le(3),
+            w: le(5),
+            h: le(7),
+            body: frame[start..start + len].to_vec(),
+        });
+        at = start + len;
+    }
+    assert_eq!(at, frame.len(), "records must exactly fill the frame");
+    assert_eq!(records.len(), usize::from(count), "the header's count must match the records present");
+    records
+}
+
 /// Let the gateway log during an opted-in e2e run.
 ///
 /// The point is the per-attachment wire totals (`ws: outbound totals:`,

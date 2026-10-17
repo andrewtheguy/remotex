@@ -1455,12 +1455,12 @@ mod tests {
             serde_json::to_string(&TargetInfo::of(target, false)).unwrap()
         };
 
-        // Standard mode offers its picture, VP9 coded here with libvpx alone or the
-        // Mac's Adaptive picture: physical displays, which no session sizes, and no
-        // sound.
+        // Standard mode offers the Mac's Adaptive or Full-quality picture, and no
+        // VP9 to choose an encoder for: physical displays, which no session sizes,
+        // and no sound.
         assert_eq!(
             entry("mac"),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":["apple-adaptive"],"placement":false,"pipeline":false,"vp9":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":["apple-adaptive","apple-full"],"placement":false,"pipeline":false,"vp9":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.

@@ -29,9 +29,9 @@ use screen_vp9::walk::{LAG_CLEAR, QualityWalk};
 #[cfg(test)]
 use screen_vp9::walk::SETTLE_IDLE;
 
-use crate::config::RenderPlan;
+use crate::config::{RenderPlan, StandardQuality};
 use crate::feedback::LinkFeedback;
-use crate::protocol::{AdaptiveUnit, GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
+use crate::protocol::{StandardUnit, GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
 use crate::shadow::Rect;
 use crate::video;
@@ -76,12 +76,14 @@ const ENCODE_DEPTH: usize = 16;
 /// behind at 4 Mbit/s; an unthrottled link 100 ms away carried what it did before.
 const QUEUE_BUDGET: u32 = 512 * 1024;
 
-/// How many bytes of a Mac's Adaptive rectangles may be passed and not yet
-/// painted by the browser ([`VideoSink::pass_adaptive`]).
+/// The fewest bytes of a Mac's own rectangles, Adaptive or Full, that may be
+/// passed and not yet painted by the browser ([`VideoSink::pass_standard`]),
+/// however slowly the browser paints ([`PaintWindow`]).
 ///
 /// The Mac decides what to send by its own connection: the refinement after a
 /// full update waits for the motion when the connection is slow ("What a Mac
-/// sends a viewer that lists them" in docs/apple-vnc-889.md). The queue budget
+/// sends a viewer that lists them" in docs/apple-vnc-889.md), and its zlib is
+/// sent no faster than the connection takes it. The queue budget
 /// cannot show it a slow browser: a burst of rectangles passes the paint window
 /// together and waits in the kernel's send buffer, and against a 300 kbit/s
 /// browser the picture ran 5.7 s behind, the Mac refining throughout. Held to
@@ -89,7 +91,38 @@ const QUEUE_BUDGET: u32 = 512 * 1024;
 ///
 /// The size of the receive buffer an RDP host's passed pipeline is held behind,
 /// which the connection to the Mac has too.
-const ADAPTIVE_AHEAD: u32 = 32 * 1024;
+const STANDARD_AHEAD: u64 = 32 * 1024;
+
+/// The most bytes of a Mac's own rectangles that may be passed and not yet
+/// painted, however fast the browser paints.
+const STANDARD_AHEAD_MOST: u64 = 16 * 1024 * 1024;
+
+/// How many times what the browser paints in its shortest round trip a Mac's own
+/// rectangles may be ahead of its painting, between [`STANDARD_AHEAD`] and
+/// [`STANDARD_AHEAD_MOST`].
+///
+/// A fixed bound held a fast browser to one rectangle a paint round trip: a
+/// Full-quality rectangle is larger than [`STANDARD_AHEAD`] alone, and a lossless
+/// Combined Display of a 1x and a 2x screen went to a page 39 ms away at 1.6 MB/s
+/// while the Mac would send 20. Twice what a round trip carries lets each round
+/// carry twice the last, until the link or the painting is what holds it; then
+/// the rate stops growing, and the bound holds about one round trip's painting
+/// queued, where a bound in time would queue that long behind a page whose
+/// painting is what is slow.
+const STANDARD_AHEAD_GAIN: f64 = 2.0;
+
+/// How long a sample of the browser's painting rate counts towards the bound:
+/// the fastest within it is the rate, so a still screen's few small rectangles
+/// do not narrow it while the screen moves.
+const STANDARD_RATE_SPAN: Duration = Duration::from_secs(1);
+
+/// The largest rectangle whose round trip counts towards the shortest: one small
+/// enough that its own time on the link is not the trip. Twice what even a
+/// 300 kbit/s link carries in that time is under [`STANDARD_AHEAD`], so a slow
+/// link's bound stays at its floor; a large one's trip, a session's opening full
+/// update on such a link taking seconds, would widen it by as much.
+const STANDARD_TRIP_BYTES: u64 = 4 * 1024;
+
 
 /// How often the order task wakes to look for a quiet stream to settle. It has to
 /// be its own timer rather than something the next frame does, because a screen
@@ -141,6 +174,119 @@ struct Video {
     due_at: Option<tokio::time::Instant>,
 }
 
+/// How many bytes of a Mac's own rectangles may be passed and not yet painted by
+/// the browser: [`STANDARD_AHEAD_GAIN`] times what it paints in the shortest round
+/// trip of the session, at the fastest rate it painted them within
+/// [`STANDARD_RATE_SPAN`], and never fewer than [`STANDARD_AHEAD`] or more than
+/// [`STANDARD_AHEAD_MOST`]. A rectangle larger than the bound waits for every one
+/// before it and holds the next until it is painted itself.
+///
+/// The shortest round trip is the session's, of a rectangle no larger than
+/// [`STANDARD_TRIP_BYTES`], not a recent one's: under motion a slow link's queue
+/// never empties, and a recent shortest would come to the queue's own length and
+/// double the bound at each, the lag the floor keeps out. One that only falls
+/// can at worst hold the bound to its floor, and so does none.
+///
+/// Both are sampled at each rectangle's painting: its round trip is the time from
+/// its passing to its painting, and the rate what the browser painted since the
+/// last painting before it was passed, over that time. Counted from that painting
+/// rather than from its passing, so the rectangles of a batch painted together
+/// do not each read as all of it painted in the trip of the last.
+///
+/// Pure state with the clock passed in.
+#[derive(Debug, Default)]
+struct PaintWindow {
+    /// Bytes of the bound taken by rectangles passed and not yet painted.
+    ahead: u64,
+    /// Bytes painted so far, which a rectangle's sample counts from.
+    painted: u64,
+    /// When the last of them was painted.
+    painted_at: Option<Instant>,
+    /// The recent rates, in bytes a second, with when each was sampled.
+    rates: std::collections::VecDeque<(Instant, f64)>,
+    /// The shortest round trip so far of a rectangle no larger than
+    /// [`STANDARD_TRIP_BYTES`].
+    shortest: Option<Duration>,
+}
+
+/// One rectangle's place in a [`PaintWindow`], given back when it is painted.
+#[derive(Debug)]
+struct PaintTicket {
+    /// What it took of the bound.
+    taken: u64,
+    /// Its own size.
+    bytes: u64,
+    passed: Instant,
+    /// [`PaintWindow::painted`] when it was passed, and when that was painted: its
+    /// passing, where nothing had been.
+    painted_before: (u64, Instant),
+}
+
+impl PaintWindow {
+    /// The bound at `now`.
+    fn bound(&mut self, now: Instant) -> u64 {
+        while self.rates.front().is_some_and(|(at, _)| now.duration_since(*at) > STANDARD_RATE_SPAN) {
+            self.rates.pop_front();
+        }
+        let rate = self.rates.iter().map(|(_, rate)| *rate).fold(0.0, f64::max);
+        let trip = self.shortest.unwrap_or_default();
+        // In range by the clamp, so the cast cannot truncate anything kept.
+        ((STANDARD_AHEAD_GAIN * rate * trip.as_secs_f64()) as u64).clamp(STANDARD_AHEAD, STANDARD_AHEAD_MOST)
+    }
+
+    /// A rectangle of `bytes` is to be passed: its ticket where there is room.
+    fn take(&mut self, bytes: u64, now: Instant) -> Option<PaintTicket> {
+        let bound = self.bound(now);
+        let taken = bytes.clamp(1, bound);
+        (self.ahead + taken <= bound).then(|| {
+            self.ahead += taken;
+            PaintTicket { taken, bytes, passed: now, painted_before: (self.painted, self.painted_at.unwrap_or(now)) }
+        })
+    }
+
+    /// The rectangle `ticket` was given for is painted.
+    fn painted(&mut self, ticket: PaintTicket, now: Instant) {
+        self.ahead -= ticket.taken;
+        self.painted += ticket.bytes;
+        self.painted_at = Some(now);
+        let trip = now.duration_since(ticket.passed).max(Duration::from_millis(1));
+        let (before, since) = ticket.painted_before;
+        let span = now.duration_since(since).max(trip);
+        self.rates.push_back((now, (self.painted - before) as f64 / span.as_secs_f64()));
+        if ticket.bytes <= STANDARD_TRIP_BYTES {
+            self.shortest = Some(self.shortest.map_or(trip, |shortest| shortest.min(trip)));
+        }
+    }
+}
+
+/// A [`PaintWindow`] the sink waits on and a painting gives room back to.
+#[derive(Debug, Default)]
+struct StandardAhead {
+    window: Mutex<PaintWindow>,
+    room: Notify,
+}
+
+impl StandardAhead {
+    async fn acquire(&self, bytes: u64) -> PaintTicket {
+        loop {
+            // Enabled before the look, so a painting between the two is not missed.
+            let room = self.room.notified();
+            tokio::pin!(room);
+            room.as_mut().enable();
+            if let Some(ticket) = self.window.lock().unwrap().take(bytes, Instant::now()) {
+                return ticket;
+            }
+            room.await;
+        }
+    }
+
+    /// Never waits: a [`Painted`] runs it wherever it is dropped.
+    fn release(&self, ticket: PaintTicket) {
+        self.window.lock().unwrap().painted(ticket, Instant::now());
+        self.room.notify_waiters();
+    }
+}
+
 /// What a source's desktop too large for a video stream ([`video::within_ceiling`])
 /// comes to.
 ///
@@ -156,8 +302,9 @@ pub enum Oversize {
     /// The picture stops until a `Resize` brings the desktop within the ceiling,
     /// which only the remote can do: [`VideoSink::damage`] drops what it is handed
     /// while [`VideoSink::oversized`] says so, and the browser is told
-    /// ([`ServerMsg::Oversize`]). A source that holds is also held over too many
-    /// screens when its engine says so ([`VideoSink::hold_screens`]).
+    /// ([`ServerMsg::Oversize`]). A Standard Mac's own rectangles are passed all
+    /// the same, for the page to decode behind its notice: each is drawn on the
+    /// ones before it, so one dropped would spoil the picture after the hold.
     Hold,
 }
 
@@ -188,10 +335,6 @@ struct Shared {
     /// Whether the desktop's picture is held — see [`Oversize`]. Decided by each
     /// `Resize` ([`VideoSink::msg`]).
     oversized: AtomicBool,
-    /// Whether the desktop spans more screens than one view shows, which holds its
-    /// picture whatever its size. Set by the engine ahead of the `Resize` it comes
-    /// with ([`VideoSink::hold_screens`]).
-    too_many_screens: AtomicBool,
     /// Why the order task gave up, so the engine's next push can report it rather
     /// than a bare closed channel. The error itself, so the cause chain survives
     /// the hop from the task to the push. See [`VideoSink::closed`].
@@ -256,9 +399,9 @@ struct Shared {
     stalled_micros: AtomicU64,
     /// The bound on encoded bytes queued towards the browser — see [`QUEUE_BUDGET`].
     budget: Arc<Semaphore>,
-    /// The bound on a Mac's Adaptive rectangles passed and not yet painted — see
-    /// [`ADAPTIVE_AHEAD`].
-    adaptive_ahead: Arc<Semaphore>,
+    /// The bound on a Mac's own rectangles passed and not yet painted — see
+    /// [`PaintWindow`].
+    standard_ahead: Arc<StandardAhead>,
     /// What the last round came to, which the next is taken at.
     round_bytes: AtomicU64,
     /// How long the engine has waited on the budget since the last round was
@@ -274,7 +417,6 @@ impl Shared {
         Self {
             oversize,
             oversized: AtomicBool::new(false),
-            too_many_screens: AtomicBool::new(false),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
                 stream: DesktopStream::new(quality),
@@ -301,7 +443,7 @@ impl Shared {
             waited_micros: AtomicU64::new(0),
             stalled_micros: AtomicU64::new(0),
             budget: Arc::new(Semaphore::new(QUEUE_BUDGET as usize)),
-            adaptive_ahead: Arc::new(Semaphore::new(ADAPTIVE_AHEAD as usize)),
+            standard_ahead: Arc::new(StandardAhead::default()),
             round_bytes: AtomicU64::new(0),
             held_micros: AtomicU64::new(0),
         }
@@ -367,20 +509,11 @@ impl VideoSink {
     }
 
     /// Whether the desktop's picture is held ([`Oversize::Hold`]): past the video
-    /// ceiling, or over too many screens. Then [`Self::damage`] and [`Self::frame`]
+    /// ceiling. Then [`Self::damage`] and [`Self::frame`]
     /// do nothing, and a frame the remote coded itself is not to be passed either.
     /// Changes only with a `Resize` through [`Self::msg`].
     pub fn oversized(&self) -> bool {
         self.shared.oversized.load(Ordering::Relaxed)
-    }
-
-    /// Say whether the desktop the next `Resize` describes spans more screens than
-    /// one view shows: a Mac's Combined Display over more than
-    /// [`crate::vnc_apple::MAX_COMBINED_SCREENS`]. Read at that `Resize` and every
-    /// one after it, a reattach's included, on a source that holds; a count that
-    /// changes always changes the combined desktop's size with it.
-    pub fn hold_screens(&self, too_many: bool) {
-        self.shared.too_many_screens.store(too_many, Ordering::Relaxed);
     }
 
     /// One remote frame has ended: encode everything [`Self::damage`] has blitted
@@ -735,14 +868,15 @@ impl VideoSink {
         self.push(Pending::Msg(ServerMsg::Graphics(GraphicsUnit { data: wrapped, frame, held }))).await
     }
 
-    /// A Mac's Adaptive picture starts here, from nothing, and is the picture from
-    /// now on ([`Self::pass_adaptive`]): said ahead of the Mac's first rectangle.
-    pub async fn adaptive_start(&self) -> anyhow::Result<()> {
+    /// A Mac's own picture starts here, from nothing, in `quality`, and is the
+    /// picture from now on ([`Self::pass_standard`]): said ahead of the Mac's first
+    /// rectangle.
+    pub async fn standard_start(&self, quality: StandardQuality) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
-        self.push(Pending::Msg(ServerMsg::AdaptiveStart { engine: 0 })).await
+        self.push(Pending::Msg(ServerMsg::StandardStart { engine: 0, quality })).await
     }
 
-    /// Queue one of a Mac's rectangles in its Adaptive picture as the next record,
+    /// Queue one of a Mac's rectangles in its own picture as the next record,
     /// untouched: where it is and its body as the Mac sent it, for the page to
     /// decode.
     ///
@@ -752,28 +886,24 @@ impl VideoSink {
     /// session that starts.
     ///
     /// What paces the Mac is the browser's painting: a rectangle waits here while
-    /// [`ADAPTIVE_AHEAD`] of the ones before it are passed and not yet painted, and
-    /// while it waits the engine reads nothing more of the Mac's connection,
-    /// which backs up, so the Mac codes for the link the browser is on.
-    pub async fn pass_adaptive(&self, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> anyhow::Result<()> {
+    /// as much of the ones before it as the browser paints in
+    /// twice its shortest round trip is passed and not yet painted ([`PaintWindow`]),
+    /// and while it waits the engine reads nothing more of the Mac's connection,
+    /// which backs up, so the Mac sends as few updates as the browser's link takes.
+    pub async fn pass_standard(&self, x: u16, y: u16, w: u16, h: u16, data: Vec<u8>) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
         let bytes = data.len();
         let started = Instant::now();
-        // One larger than the whole bound waits for every rectangle before it, and
-        // holds the next until it is painted.
-        let ahead = u32::try_from(bytes).unwrap_or(u32::MAX).clamp(1, ADAPTIVE_AHEAD);
-        let ahead = Arc::clone(&self.shared.adaptive_ahead)
-            .acquire_many_owned(ahead)
-            .await
-            .expect("the bound is never closed");
+        let ticket = self.shared.standard_ahead.acquire(bytes as u64).await;
         self.shared.stalled_micros.fetch_add(micros(started), Ordering::Relaxed);
-        let painted = Painted::new(move || drop(ahead));
+        let ahead = Arc::clone(&self.shared.standard_ahead);
+        let painted = Painted::new(move || ahead.release(ticket));
         let held = self.hold(bytes).await;
         self.shared.feedback.handed(tokio::time::Instant::now());
         self.shared.units.fetch_add(1, Ordering::Relaxed);
         self.shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-        let unit = AdaptiveUnit { x, y, w, h, data, held, painted };
-        self.push(Pending::Msg(ServerMsg::Adaptive(unit))).await
+        let unit = StandardUnit { x, y, w, h, data, held, painted };
+        self.push(Pending::Msg(ServerMsg::Standard(unit))).await
     }
 
     /// Whether the picture is the remote's stream passed through ([`Self::pass`]).
@@ -826,8 +956,8 @@ impl VideoSink {
     /// session with the message attached.
     ///
     /// A resize is also where the picture is held or resumed, for a source that holds
-    /// it ([`Oversize::Hold`]): past the ceiling or over too many screens there is
-    /// none, and otherwise video. Back from a hold, the remote repaints the resized
+    /// it ([`Oversize::Hold`]): past the ceiling there is none, and otherwise
+    /// video. Back from a hold, the remote repaints the resized
     /// desktop in full as after any resize, and the stream starts over from a
     /// keyframe as a browser that attached would.
     pub async fn msg(&self, msg: ServerMsg) -> anyhow::Result<()> {
@@ -835,9 +965,6 @@ impl VideoSink {
             let (w, h) = (*w, *h);
             let cause = match self.shared.oversize {
                 Oversize::Refuse => None,
-                Oversize::Hold if self.shared.too_many_screens.load(Ordering::Relaxed) => {
-                    Some(HoldCause::Screens)
-                }
                 Oversize::Hold if !video::within_ceiling((u32::from(w), u32::from(h))) => {
                     Some(HoldCause::Size)
                 }
@@ -845,19 +972,15 @@ impl VideoSink {
             };
             let oversized = cause.is_some();
             if self.shared.oversized.swap(oversized, Ordering::Relaxed) != oversized {
-                if let Some(cause) = cause {
+                if oversized {
                     self.shared.passing.store(false, Ordering::Relaxed);
-                    let why = match cause {
-                        HoldCause::Size => "is past what a video stream encodes",
-                        HoldCause::Screens => "spans more screens than one view shows",
-                    };
                     info!(
-                        "{}: a {w}x{h} desktop {why}; the picture is held until the \
-                         remote sends another",
+                        "{}: a {w}x{h} desktop is past the picture ceiling; the \
+                         picture is held until the remote sends another",
                         self.engine
                     );
                 } else {
-                    info!("{}: a {w}x{h} desktop goes to the browser as video again", self.engine);
+                    info!("{}: a {w}x{h} desktop is within the ceiling, and its picture shown again", self.engine);
                     self.reset_render();
                 }
             }
@@ -1237,7 +1360,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1310,47 +1433,116 @@ mod tests {
 
     /// A Mac's Adaptive rectangles go out in order behind the message that starts
     /// them, and a rectangle waits while the ones passed before it, as many as
-    /// [`ADAPTIVE_AHEAD`] allows, are not yet painted: the engine is held, and with
+    /// the [`PaintWindow`] allows, are not yet painted: the engine is held, and with
     /// it the Mac, by the browser's painting.
     #[tokio::test]
-    async fn adaptive_rectangles_wait_for_the_ones_before_them_to_be_painted() {
+    async fn standard_rectangles_wait_for_the_ones_before_them_to_be_painted() {
         let (sink, mut rx) = video_sink(64, 32).await;
-        sink.adaptive_start().await.unwrap();
-        sink.pass_adaptive(0, 0, 64, 16, vec![1; 16 * 1024]).await.unwrap();
-        sink.pass_adaptive(0, 16, 64, 16, vec![2; 16 * 1024]).await.unwrap();
+        sink.standard_start(StandardQuality::Adaptive).await.unwrap();
+        sink.pass_standard(0, 0, 64, 16, vec![1; 16 * 1024]).await.unwrap();
+        sink.pass_standard(0, 16, 64, 16, vec![2; 16 * 1024]).await.unwrap();
         assert!(sink.passing());
         assert!(sink.due_at().await.is_none(), "there is nothing to come back and encode");
         sink.flush().await;
         let out = drain(&mut rx, 3).await;
-        assert!(matches!(out[0], ServerMsg::AdaptiveStart { .. }));
-        assert!(matches!(&out[1], ServerMsg::Adaptive(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (0, 0)));
-        assert!(matches!(&out[2], ServerMsg::Adaptive(unit) if unit.data[0] == 2 && (unit.x, unit.y) == (0, 16)));
+        assert!(matches!(out[0], ServerMsg::StandardStart { .. }));
+        assert!(matches!(&out[1], ServerMsg::Standard(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (0, 0)));
+        assert!(matches!(&out[2], ServerMsg::Standard(unit) if unit.data[0] == 2 && (unit.x, unit.y) == (0, 16)));
 
-        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_adaptive(0, 0, 8, 8, vec![3; 8])).await;
+        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_standard(0, 0, 8, 8, vec![3; 8])).await;
         assert!(waiting.is_err(), "two unpainted rectangles fill the bound, so the next waits");
         let mut out = out.into_iter();
         drop(out.nth(1));
-        tokio::time::timeout(Duration::from_secs(1), sink.pass_adaptive(0, 0, 8, 8, vec![3; 8]))
+        tokio::time::timeout(Duration::from_secs(1), sink.pass_standard(0, 0, 8, 8, vec![3; 8]))
             .await
             .expect("painting the first made room")
             .unwrap();
 
-        // One larger than the whole bound waits for everything before it, and
+        // One larger than the widest bound waits for everything before it, and
         // holds the next until it is painted itself.
         drop(out);
         sink.flush().await;
         let small = drain(&mut rx, 1).await;
         drop(small);
-        sink.pass_adaptive(0, 0, 64, 32, vec![4; 64 * 1024]).await.unwrap();
+        sink.pass_standard(0, 0, 64, 32, vec![4; STANDARD_AHEAD_MOST as usize + 1]).await.unwrap();
         sink.flush().await;
         let large = drain(&mut rx, 1).await;
-        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_adaptive(0, 0, 8, 8, vec![5; 8])).await;
+        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_standard(0, 0, 8, 8, vec![5; 8])).await;
         assert!(waiting.is_err());
         drop(large);
-        tokio::time::timeout(Duration::from_secs(1), sink.pass_adaptive(0, 0, 8, 8, vec![5; 8]))
+        tokio::time::timeout(Duration::from_secs(1), sink.pass_standard(0, 0, 8, 8, vec![5; 8]))
             .await
             .expect("painting the large one made room")
             .unwrap();
+    }
+
+    /// The bound follows how fast the browser paints: no wider than the floor for
+    /// a slow one, wider each round for a fast one up to the ceiling, and back to
+    /// the floor once nothing has been painted for a while.
+    #[test]
+    fn the_paint_window_follows_the_rate_the_browser_paints_at() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut window = PaintWindow::default();
+        assert_eq!(window.bound(at(0)), STANDARD_AHEAD);
+
+        // A large rectangle's trip is mostly its own time on the link, and says
+        // nothing of how far away the page is: the floor holds.
+        let ticket = window.take(64 * 1024, at(0)).unwrap();
+        window.painted(ticket, at(20));
+        assert_eq!(window.bound(at(20)), STANDARD_AHEAD);
+
+        // A rectangle as large as the bound waits for the one before it.
+        let first = window.take(4 * 1024, at(500)).unwrap();
+        assert!(window.take(STANDARD_AHEAD, at(500)).is_none());
+        window.painted(first, at(510));
+        // A page 10 ms away that paints all it is given: each round carries the
+        // whole bound, and the next is twice that, up to the ceiling.
+        let mut bound = window.bound(at(510));
+        for round in 0..20 {
+            let now = at(510 + round * 10);
+            let ticket = window.take(bound, now).expect("room for the whole bound");
+            window.painted(ticket, now + Duration::from_millis(10));
+            let wider = window.bound(now + Duration::from_millis(10));
+            assert_eq!(wider, (bound * 2).min(STANDARD_AHEAD_MOST), "round {round}");
+            bound = wider;
+        }
+        assert_eq!(bound, STANDARD_AHEAD_MOST);
+        // A larger one than the ceiling takes all of it, alone.
+        let huge = window.take(STANDARD_AHEAD_MOST * 2, at(800)).unwrap();
+        assert!(window.take(1, at(800)).is_none());
+        window.painted(huge, at(900));
+
+        // A second with nothing painted, and the floor again.
+        assert_eq!(window.bound(at(2000)), STANDARD_AHEAD);
+    }
+
+    /// A 300 kbit/s link kept full for a minute: its queue never empties, every
+    /// trip after the first is the queue's length, and the bound stays at its
+    /// floor throughout.
+    #[test]
+    fn a_slow_link_kept_full_holds_the_paint_window_at_its_floor() {
+        let start = Instant::now();
+        let at = |seconds: f64| start + Duration::from_secs_f64(seconds);
+        let rate = 300_000.0 / 8.0;
+        let mut window = PaintWindow::default();
+        // The opening: a full update, then the tables, alone on the link.
+        let mut clock = 0.0;
+        for bytes in [100 * 1024, 129] {
+            let ticket = window.take(bytes, at(clock)).unwrap();
+            clock += bytes as f64 / rate;
+            window.painted(ticket, at(clock));
+        }
+        let mut queue = std::collections::VecDeque::new();
+        while clock < 60.0 {
+            while let Some(ticket) = window.take(8 * 1024, at(clock)) {
+                queue.push_back(ticket);
+            }
+            let ticket = queue.pop_front().expect("the bound holds one");
+            clock += ticket.bytes as f64 / rate;
+            window.painted(ticket, at(clock));
+            assert_eq!(window.bound(at(clock)), STANDARD_AHEAD, "at {clock:.1} s");
+        }
     }
 
     /// The opening byte of a profile 1 VP9 frame — the 4:4:4 every stream is:
@@ -1543,6 +1735,21 @@ mod tests {
         assert!(sink.due_at().await.is_none(), "an oversize desktop is owed a frame");
     }
 
+    /// A Standard Mac's own rectangles are passed while its desktop is held: the
+    /// page decodes them behind its notice, so the picture is whole when one
+    /// screen is chosen.
+    #[tokio::test]
+    async fn a_held_standard_picture_is_still_passed() {
+        let (sink, mut rx) = holding_sink(5376, 2288).await;
+        assert!(sink.oversized());
+        sink.standard_start(StandardQuality::Full).await.unwrap();
+        sink.pass_standard(5000, 2000, 64, 16, vec![1; 16]).await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut rx, 2).await;
+        assert!(matches!(out[0], ServerMsg::StandardStart { .. }));
+        assert!(matches!(&out[1], ServerMsg::Standard(unit) if unit.data[0] == 1 && (unit.x, unit.y) == (5000, 2000)));
+    }
+
     /// Within the ceiling a source that holds is video like any other, and a source
     /// that refuses past the ceiling fails as it always has.
     #[tokio::test]
@@ -1591,32 +1798,6 @@ mod tests {
         assert!(matches!(out[2], ServerMsg::Resize { w: 1280, .. }), "a held desktop sent a picture");
         assert!(matches!(out[3], ServerMsg::Oversize { cause: None }));
         assert!(matches!(out[4], ServerMsg::VideoFormat { .. }), "video came back unannounced");
-        assert!(matches!(&out[5], ServerMsg::Video(unit) if unit.keyframe));
-    }
-
-    /// Too many screens hold a desktop well within the ceiling, and say so as their
-    /// own cause; a desktop the engine says is back to few enough is video again.
-    #[tokio::test]
-    async fn too_many_screens_hold_a_desktop_of_any_size() {
-        let (sink, mut frame_rx) = holding_sink(1280, 800).await;
-        sink.hold_screens(true);
-        sink.msg(ServerMsg::Resize { w: 3840, h: 800, scale: UNSCALED }).await.unwrap();
-        assert!(sink.oversized());
-        let area = rect(0, 0, 64, 64);
-        sink.damage(area, &rgb(64, 64, 1)).await.unwrap();
-        sink.frame().await.unwrap();
-        sink.hold_screens(false);
-        sink.msg(ServerMsg::Resize { w: 1280, h: 800, scale: UNSCALED }).await.unwrap();
-        sink.damage(area, &rgb(64, 64, 2)).await.unwrap();
-        sink.frame().await.unwrap();
-        sink.flush().await;
-
-        let out = drain(&mut frame_rx, 6).await;
-        assert!(matches!(out[0], ServerMsg::Resize { w: 3840, .. }));
-        assert!(matches!(out[1], ServerMsg::Oversize { cause: Some(HoldCause::Screens) }));
-        assert!(matches!(out[2], ServerMsg::Resize { w: 1280, .. }), "a held desktop sent a picture");
-        assert!(matches!(out[3], ServerMsg::Oversize { cause: None }));
-        assert!(matches!(out[4], ServerMsg::VideoFormat { .. }));
         assert!(matches!(&out[5], ServerMsg::Video(unit) if unit.keyframe));
     }
 
@@ -2002,7 +2183,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2129,7 +2310,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_adaptive: false, rdp_graphics: false, rdp_h264: false, native_vp9: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, native_vp9: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

@@ -52,26 +52,29 @@ a batch whose commands draw with H.264 is acknowledged: the acknowledgment follo
 the decode of every access unit in the batch, and a decoder that gave no picture
 says so in the DOM instead.
 
-`adaptive-passthrough.spec.ts` is a Standard Mac's Adaptive picture passed for
-the page to decode, read from the same socket: that `adaptiveStart` follows the
-`resize` and comes ahead of the first `ADAPTIVE` record, that the Mac's
+`standard-passthrough.spec.ts` is a Standard Mac's Adaptive picture passed for
+the page to decode, read from the same socket: that `standardStart` follows the
+`resize` and comes ahead of the first `STANDARD` record, that the Mac's
 quantization tables come first, that every record is framed by its own header
 and lies on the framebuffer the last `resize` announced, that the page
 acknowledges each batch once its paint worker has decoded it, that a page
 that comes back is given the picture from its start, and that a session's end
 ends the paint worker that loaded the decoder, the next session decoding in one
 of its own. A rectangle that did not
-decode says so in the DOM. Against a Mac on a virtual display it also resizes
-the window, and checks that the picture goes on at the new size, decoded,
-without starting again.
+decode says so in the DOM. A session started with the Mac's Full-quality
+picture instead is read the same way, with its `standardStart` naming `full`,
+and every record's body inflated in the spec on one zlib stream for the session,
+which must come to each rectangle's pixels. Against a Mac on a virtual display
+it also resizes the window, in each quality, and checks that the picture goes on
+at the new size, decoded, without starting again.
 
 `target-switch.spec.ts` switches one page, without a reload, between an RDP
 host's pipeline and bitmap targets and a Mac's VP9, Adaptive and High
 Performance pictures, with the browser's own decoder made to refuse the VP9 and
 the HEVC: that each session's picture starts and is acknowledged, that a session
-that loaded the compositor or the Adaptive decoder ends its paint worker and any
-other keeps it, and, by how often each module's file is fetched, that a kept
-worker ends its VP9 and HEVC decode workers.
+that loaded the compositor or the decoder of a Mac's own picture ends its paint
+worker and any other keeps it, and, by how often each module's file is fetched,
+that a kept worker ends its VP9 and HEVC decode workers.
 
 `egfx-two-displays.spec.ts` is the same pipeline passed over two virtual
 displays, read from both displays' sockets of one browser: that each socket
@@ -283,15 +286,15 @@ REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET='win-h264' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
-The Adaptive spec needs a live Mac in an `ard` target, named by
-`REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET`. Its resize case needs one whose
+The Standard passthrough spec needs a live Mac in an `ard` target, named by
+`REMOTEX_PLAYWRIGHT_STANDARD_TARGET`. Its resize case needs one whose
 desktop follows the window, an `ard` target with `virtual_display = true`, named
-by `REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET`:
+by `REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET`:
 
 ```sh
-REMOTEX_PLAYWRIGHT_ADAPTIVE_TARGET='mac' \
-REMOTEX_PLAYWRIGHT_ADAPTIVE_RESIZE_TARGET='mac-virtual' \
-bunx playwright test '/adaptive-passthrough\.spec\.ts$'
+REMOTEX_PLAYWRIGHT_STANDARD_TARGET='mac' \
+REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET='mac-virtual' \
+bunx playwright test '/standard-passthrough\.spec\.ts$'
 ```
 
 The two-display spec needs the same kind of host, in a target with

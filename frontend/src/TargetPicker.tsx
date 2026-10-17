@@ -397,9 +397,8 @@ export default function TargetPicker({
 }
 
 // How a Mac's picture reaches this browser: which of its own streams is passed
-// through, or on a Standard Mac whether VP9 from the gateway is instead. One
-// that cannot be had here is greyed, with the reason. Nothing on a target with
-// no such choice.
+// through. One that cannot be had here is greyed, with the reason. Nothing on a
+// target with no such choice.
 function PictureChoice({
   target,
   pictures,
@@ -421,7 +420,7 @@ function PictureChoice({
       <legend>Picture</legend>
       {pictures.map((picture) => (
         <label
-          key={picture.value ?? "vp9"}
+          key={picture.value}
           className={`picker-option${picture.disabled ? " picker-option-unavailable" : ""}`}
         >
           <input

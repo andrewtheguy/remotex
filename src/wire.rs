@@ -2,7 +2,7 @@
 //! messages flush the pending batch to preserve ordering against the records
 //! around them, and batches are bounded.
 
-use crate::protocol::{self, AdaptiveUnit, GraphicsUnit, ServerMsg, VideoUnit, WireFrame, batch};
+use crate::protocol::{self, StandardUnit, GraphicsUnit, ServerMsg, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead.
@@ -74,7 +74,7 @@ impl Wire {
                 // one message, not the whole attachment.
                 None => match msg {
                     ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames)?,
-                    ServerMsg::Adaptive(unit) => self.push(Record::Adaptive(unit), &mut frames)?,
+                    ServerMsg::Standard(unit) => self.push(Record::Standard(unit), &mut frames)?,
                     // A frame's last run is its batch's last record: the browser
                     // shows a batch once it has drawn all of it, and acknowledges
                     // it then, which is this frame's acknowledgement to the host.
@@ -149,8 +149,8 @@ impl Wire {
                     painted.extend(unit.frame);
                     unit.held
                 }
-                Record::Adaptive(unit) => {
-                    self.totals.adaptive(unit.record_len());
+                Record::Standard(unit) => {
+                    self.totals.standard(unit.record_len());
                     unit.write_record(&mut frame);
                     painted.push(unit.painted);
                     unit.held
@@ -168,7 +168,7 @@ impl Wire {
 enum Record {
     Video(VideoUnit),
     Graphics(GraphicsUnit),
-    Adaptive(AdaptiveUnit),
+    Standard(StandardUnit),
 }
 
 impl Record {
@@ -176,7 +176,7 @@ impl Record {
         match self {
             Record::Video(unit) => unit.record_len(),
             Record::Graphics(unit) => unit.record_len(),
-            Record::Adaptive(unit) => unit.record_len(),
+            Record::Standard(unit) => unit.record_len(),
         }
     }
 }
@@ -195,9 +195,9 @@ pub struct Totals {
     /// Runs of a passed graphics pipeline and their record bytes.
     pub graphics: u64,
     pub graphics_bytes: u64,
-    /// A Mac's passed Adaptive rectangles and their record bytes.
-    pub adaptive: u64,
-    pub adaptive_bytes: u64,
+    /// A Standard Mac's passed rectangles, Adaptive or Full, and their record bytes.
+    pub standard: u64,
+    pub standard_bytes: u64,
     /// Audio packets and their binary-frame bytes. On a separate socket, so on any
     /// one `Wire` these and the video counters are mutually exclusive.
     pub audio_frames: u64,
@@ -233,9 +233,9 @@ impl Totals {
         self.graphics_bytes += len as u64;
     }
 
-    fn adaptive(&mut self, len: usize) {
-        self.adaptive += 1;
-        self.adaptive_bytes += len as u64;
+    fn standard(&mut self, len: usize) {
+        self.standard += 1;
+        self.standard_bytes += len as u64;
     }
 
     fn text(&mut self, len: usize) {
@@ -249,7 +249,7 @@ impl std::fmt::Display for Totals {
         write!(
             f,
             "{} binary frames / {} bytes carrying {} video records / {} bytes \
-             and {} graphics records / {} bytes and {} adaptive records / {} bytes, \
+             and {} graphics records / {} bytes and {} standard records / {} bytes, \
              {} text frames / {} bytes, largest binary {} bytes, \
              {} audio frames / {} bytes carrying {} audio packets",
             self.binary_frames,
@@ -258,8 +258,8 @@ impl std::fmt::Display for Totals {
             self.video_bytes,
             self.graphics,
             self.graphics_bytes,
-            self.adaptive,
-            self.adaptive_bytes,
+            self.standard,
+            self.standard_bytes,
             self.text_frames,
             self.text_bytes,
             self.largest_binary,
@@ -551,9 +551,9 @@ mod tests {
     /// A rectangle of a Mac's Adaptive picture is a record in its place, behind the
     /// message that starts the picture: where it is, then its body, whole.
     #[test]
-    fn adaptive_rectangles_are_records_in_their_place() {
+    fn standard_rectangles_are_records_in_their_place() {
         let rect = |seed: u8, x: u16, len: usize| {
-            ServerMsg::Adaptive(crate::protocol::AdaptiveUnit {
+            ServerMsg::Standard(crate::protocol::StandardUnit {
                 x,
                 y: 8,
                 w: 16,
@@ -564,11 +564,11 @@ mod tests {
             })
         };
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![ServerMsg::AdaptiveStart { engine: 0 }, rect(1, 0, 3), rect(2, 64, 900)]).unwrap();
+        let frames = wire.encode(vec![ServerMsg::StandardStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }, rect(1, 0, 3), rect(2, 64, 900)]).unwrap();
         let WireFrame::Text(text) = &frames[0] else {
             panic!("the start goes out first, as text: {:?}", frames[0]);
         };
-        assert_eq!(text, r#"{"type":"adaptiveStart","engine":0}"#);
+        assert_eq!(text, r#"{"type":"standardStart","engine":0,"quality":"adaptive"}"#);
 
         // Parsed by hand: op, four u16 of geometry, a length, then the body.
         let frames = binary(&frames);
@@ -578,7 +578,7 @@ mod tests {
         let mut at = batch::HEADER_LEN;
         let mut seen = Vec::new();
         for _ in 0..2 {
-            assert_eq!(frame[at], 0x05, "an ADAPTIVE record");
+            assert_eq!(frame[at], 0x05, "a STANDARD record");
             let field = |i: usize| u16::from_le_bytes([frame[at + 1 + 2 * i], frame[at + 2 + 2 * i]]);
             let geometry = (field(0), field(1), field(2), field(3));
             let len = u32::from_le_bytes(frame[at + 9..at + 13].try_into().unwrap()) as usize;
@@ -589,7 +589,7 @@ mod tests {
         }
         assert_eq!(at, frame.len(), "records must exactly fill the frame");
         assert_eq!(seen, vec![((0, 8, 16, 24), 1, 3), ((64, 8, 16, 24), 2, 900)]);
-        assert_eq!((wire.totals.adaptive, wire.totals.adaptive_bytes), (2, 3 + 900 + 2 * 13));
+        assert_eq!((wire.totals.standard, wire.totals.standard_bytes), (2, 3 + 900 + 2 * 13));
     }
 
     /// The run that ends a frame ends its batch, which carries what that frame is

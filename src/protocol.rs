@@ -9,6 +9,8 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::config::StandardQuality;
+
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
 /// Text over this is refused, not truncated: a truncated paste looks exactly
@@ -423,7 +425,7 @@ pub enum ClientMsg {
 ///
 /// 0x03 VIDEO     u8 flags | u16 w | u16 h | u32 len | payload[len]
 /// 0x04 GRAPHICS  u32 len | commands[len]
-/// 0x05 ADAPTIVE  u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
+/// 0x05 STANDARD  u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
 /// ```
 ///
 /// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
@@ -435,8 +437,8 @@ pub enum ClientMsg {
 /// A `GRAPHICS` record is a run of an RDP host's graphics pipeline commands, as the host sent
 /// them — see [`GraphicsUnit`]. A receiver rejects one with no payload.
 ///
-/// An `ADAPTIVE` record is one of a Mac's rectangles in its Adaptive picture, as the Mac sent
-/// it — see [`AdaptiveUnit`]. A receiver rejects one with no body.
+/// A `STANDARD` record is one of a Mac's rectangles in its own picture, as the Mac sent
+/// it — see [`StandardUnit`]. A receiver rejects one with no body.
 ///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
@@ -445,7 +447,7 @@ pub mod batch {
 
     pub const OP_VIDEO: u8 = 0x03;
     pub const OP_GRAPHICS: u8 = 0x04;
-    pub const OP_ADAPTIVE: u8 = 0x05;
+    pub const OP_STANDARD: u8 = 0x05;
 
     /// Bytes a `VIDEO` record costs besides its payload.
     pub const VIDEO_HEADER_LEN: usize = 10;
@@ -453,8 +455,8 @@ pub mod batch {
     /// Bytes a `GRAPHICS` record costs besides its commands.
     pub const GRAPHICS_HEADER_LEN: usize = 5;
 
-    /// Bytes an `ADAPTIVE` record costs besides its body.
-    pub const ADAPTIVE_HEADER_LEN: usize = 13;
+    /// Bytes a `STANDARD` record costs besides its body.
+    pub const STANDARD_HEADER_LEN: usize = 13;
 
     /// A `VIDEO` record's flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
@@ -846,27 +848,34 @@ impl GraphicsUnit {
     }
 }
 
-/// One of a Mac's rectangles in its Adaptive picture (Standard mode's Adaptive
-/// quality), carried as an `ADAPTIVE` record inside a [`batch`] frame: where the
+/// One of a Mac's rectangles in its own picture (Standard mode's Adaptive or Full
+/// quality), carried as a `STANDARD` record inside a [`batch`] frame: where the
 /// Mac said it is, and its body as the Mac sent it, the bytes after its `u32`
-/// length — Apple's 8×8 tiles (`0x3f3`), which docs/apple-vnc-889.md describes.
+/// length. Which encoding the bodies are is the quality
+/// [`ServerMsg::StandardStart`] names: Apple's 8×8 tiles (`0x3f3`) for Adaptive,
+/// which docs/apple-vnc-889.md describes, and RFB's zlib for Full.
 ///
 /// The contract every client implements:
 ///
-/// - [`ServerMsg::AdaptiveStart`] arrives first, and says the picture starts from
-///   nothing: no quantization tables, no tile coded and no cache entry. A
-///   rectangle is drawn on what the rectangles before it left, by copies, by
-///   cached tiles and by refining the last full update's coefficients, so a
-///   client decodes every record, in order, from that message on, and one that
-///   has missed any cannot go on.
+/// - [`ServerMsg::StandardStart`] arrives first, and says the picture starts from
+///   nothing: for Adaptive, no quantization tables, no tile coded and no cache
+///   entry, and for Full, a deflate stream not yet begun. A rectangle is drawn on
+///   what the rectangles before it left: an Adaptive one by copies, by cached
+///   tiles and by refining the last full update's coefficients, a Full one by
+///   continuing the one deflate stream they share. So a client decodes every
+///   record, in order, from that message on, and one that has missed any cannot
+///   go on.
 /// - The framebuffer is the size [`ServerMsg::Resize`] last said, in pixels, and
-///   a resize leaves it black with no tile coded, the tables and the cache kept.
-/// - A record of zero area at 0,0 carries the quantization tables.
+///   a resize leaves it black: for Adaptive with no tile coded, the tables and
+///   the cache kept, and for Full with the deflate stream kept.
+/// - An Adaptive record of zero area at 0,0 carries the quantization tables.
+/// - A Full record's body inflates to its rectangle's pixels, row after row, each
+///   four bytes of the pixel format the gateway set: blue, green, red, unused.
 /// - A client acknowledges a batch when it has drawn it and not before: the
 ///   gateway reads the Mac's next rectangles as the client paints, which is what
 ///   the Mac sees of the client's link.
 #[derive(Debug, Clone)]
-pub struct AdaptiveUnit {
+pub struct StandardUnit {
     pub x: u16,
     pub y: u16,
     pub w: u16,
@@ -876,19 +885,19 @@ pub struct AdaptiveUnit {
     /// This payload's share of the queue budget — see [`Held`].
     pub held: Held,
     /// What the engine is owed once the browser has painted the rectangle: room
-    /// to read the Mac's next — see [`crate::encode::VideoSink::pass_adaptive`].
+    /// to read the Mac's next — see [`crate::encode::VideoSink::pass_standard`].
     pub painted: Painted,
 }
 
-impl AdaptiveUnit {
+impl StandardUnit {
     /// What this rectangle will cost inside a batch, its body included.
     pub fn record_len(&self) -> usize {
-        batch::ADAPTIVE_HEADER_LEN + self.data.len()
+        batch::STANDARD_HEADER_LEN + self.data.len()
     }
 
-    /// Append this rectangle as an `ADAPTIVE` record.
+    /// Append this rectangle as a `STANDARD` record.
     pub fn write_record(&self, out: &mut Vec<u8>) {
-        out.push(batch::OP_ADAPTIVE);
+        out.push(batch::OP_STANDARD);
         for value in [self.x, self.y, self.w, self.h] {
             out.extend_from_slice(&value.to_le_bytes());
         }
@@ -1036,9 +1045,6 @@ pub struct DisplayInfo {
 pub enum HoldCause {
     /// Past what a video stream encodes ([`crate::video::within_ceiling`]).
     Size,
-    /// A Mac's Combined Display over more than
-    /// [`crate::vnc_apple::MAX_COMBINED_SCREENS`] screens, whatever its size.
-    Screens,
 }
 
 /// A rectangle in whole pixels or points, origin at the top left.
@@ -1079,14 +1085,14 @@ pub enum ServerMsg {
     /// held of a pipeline or a video stream before it is done with. `engine` is the
     /// engine that sent it ([`ServerMsg::stamped`]).
     GraphicsStart { engine: u64 },
-    /// One of a Mac's rectangles in its Adaptive picture, passed for the browser to
+    /// One of a Mac's rectangles in its own picture, passed for the browser to
     /// decode. A binary record like [`ServerMsg::Video`], ordered the same way.
-    Adaptive(AdaptiveUnit),
-    /// A Mac's Adaptive picture starts here, from nothing: the picture is what the
-    /// [`ServerMsg::Adaptive`] records after this draw, and whatever a client held
-    /// of a video stream before it is done with. `engine` is the engine that sent it
-    /// ([`ServerMsg::stamped`]).
-    AdaptiveStart { engine: u64 },
+    Standard(StandardUnit),
+    /// A Mac's own picture starts here, from nothing, in `quality`: the picture is
+    /// what the [`ServerMsg::Standard`] records after this draw, and whatever a
+    /// client held of a video stream before it is done with. `engine` is the
+    /// engine that sent it ([`ServerMsg::stamped`]).
+    StandardStart { engine: u64, quality: StandardQuality },
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1185,7 +1191,7 @@ pub enum ServerMsg {
     /// remote pixels, and only here, because the Mac cannot render one
     /// framebuffer at two densities.
     ///
-    /// Sent ahead of the [`ServerMsg::Resize`] it describes, and replayed with it.
+    /// Sent ahead of the [`ServerMsg::Resize`] it describes.
     /// `resize` says one follows: the browser then holds the regions and adopts
     /// them with that framebuffer, never over the one still on screen. Without it
     /// the layout changed around the same framebuffer, which is recomposed at
@@ -1256,13 +1262,12 @@ pub enum ServerMsg {
     /// on reattach while it holds.
     PictureWithheld { active: bool },
     /// Why the desktop the `Resize` before this describes has no picture, or `None`
-    /// when it has one: past what a video stream encodes, or a Mac's Combined Display
-    /// over more screens than one view shows. No picture follows until a `Resize`
-    /// without a cause. Sent after every `Resize` of a source that holds the
-    /// session open for that — see [`crate::encode::Oversize`] — and never by one
-    /// that refuses it. The browser says so over the desktop, and offers the
-    /// remote's displays where it lists them, since choosing one is how a Mac on
-    /// Combined Display gets back.
+    /// when it has one: past what a video stream encodes. No picture follows until
+    /// a `Resize` without a cause. Sent after every `Resize` of a source that holds
+    /// the session open for that — see [`crate::encode::Oversize`] — and never by
+    /// one that refuses it. The browser says so over the desktop, and offers the
+    /// remote's displays where it lists them, since choosing a smaller one is how
+    /// such a desktop gets back.
     Oversize { cause: Option<HoldCause> },
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
@@ -1421,7 +1426,7 @@ enum ControlMsg<'a> {
     Picker { engines: u64 },
     GraphicsStart { engine: u64 },
     GraphicsView { x: u16, y: u16, w: u16, h: u16 },
-    AdaptiveStart { engine: u64 },
+    StandardStart { engine: u64, quality: StandardQuality },
     Connected {
         name: &'a str,
         protocol: &'a str,
@@ -1505,13 +1510,13 @@ struct WireDisplay<'a> {
 
 impl ServerMsg {
     /// This message with `engine`, the engine that sent it, written into a picture
-    /// start: a format, or a pipeline's or an Adaptive picture's start. An engine
+    /// start: a format, or a pipeline's or a Mac's own picture's start. An engine
     /// does not know which it is, so it sends 0 there, and the session layer's
     /// pump, which does, writes it in on the way to the display socket. The page
     /// drops a start whose engine a `Picker` has since numbered ended.
     pub fn stamped(mut self, engine: u64) -> Self {
         if let ServerMsg::GraphicsStart { engine: slot }
-        | ServerMsg::AdaptiveStart { engine: slot }
+        | ServerMsg::StandardStart { engine: slot, .. }
         | ServerMsg::VideoFormat { engine: slot, .. } = &mut self
         {
             *slot = engine;
@@ -1530,8 +1535,8 @@ impl ServerMsg {
                 | ServerMsg::Graphics(_)
                 | ServerMsg::GraphicsStart { .. }
                 | ServerMsg::GraphicsView { .. }
-                | ServerMsg::Adaptive(_)
-                | ServerMsg::AdaptiveStart { .. }
+                | ServerMsg::Standard(_)
+                | ServerMsg::StandardStart { .. }
                 | ServerMsg::VideoFormat { .. }
                 | ServerMsg::Resize { .. }
                 | ServerMsg::Cursor(_)
@@ -1556,13 +1561,15 @@ impl ServerMsg {
         Some(match self {
             ServerMsg::Video(_)
             | ServerMsg::Graphics(_)
-            | ServerMsg::Adaptive(_)
+            | ServerMsg::Standard(_)
             | ServerMsg::Audio(_)
             | ServerMsg::AudioGap => {
                 return None;
             }
             ServerMsg::GraphicsStart { engine } => control(&ControlMsg::GraphicsStart { engine: *engine }),
-            ServerMsg::AdaptiveStart { engine } => control(&ControlMsg::AdaptiveStart { engine: *engine }),
+            ServerMsg::StandardStart { engine, quality } => {
+                control(&ControlMsg::StandardStart { engine: *engine, quality: *quality })
+            }
             ServerMsg::GraphicsView { x, y, w, h } => {
                 control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
             }
@@ -2193,7 +2200,7 @@ mod tests {
                 None => panic!("pictureWithheld must be a text frame"),
             }
         }
-        for (cause, wire) in [(None, "null"), (Some(HoldCause::Size), r#""size""#), (Some(HoldCause::Screens), r#""screens""#)] {
+        for (cause, wire) in [(None, "null"), (Some(HoldCause::Size), r#""size""#)] {
             match (ServerMsg::Oversize { cause }).text_frame() {
                 Some(json) => assert_eq!(json, format!(r#"{{"type":"oversize","cause":{wire}}}"#)),
                 None => panic!("oversize must be a text frame"),

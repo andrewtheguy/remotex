@@ -36,7 +36,7 @@ import { createGraphicsPicture, type PicturePart } from "./egfxPicture.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { createPlanesPicture } from "./planesPicture.ts";
-import { binaryFrameKind } from "./protocol.ts";
+import { binaryFrameKind, type StandardQuality } from "./protocol.ts";
 import { endDecodeWorker } from "./softwareDecoder.ts";
 import type { PageDecoding } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
@@ -101,8 +101,8 @@ export type PainterCommand =
   | { type: "videoFormat"; format: VideoFormat }
   /** An RDP host's graphics pipeline starts, and this worker composes it. */
   | { type: "graphicsStart" }
-  /** A Mac's Adaptive picture starts, and this worker decodes it. */
-  | { type: "adaptiveStart" }
+  /** A Mac's own picture starts, in `quality`, and this worker decodes it. */
+  | { type: "standardStart"; quality: StandardQuality }
   /** The part of the pipeline's picture this page's display is, to show. */
   | { type: "graphicsView"; part: PicturePart }
   /**
@@ -347,8 +347,8 @@ export function createPainterWorker(
         case "graphicsStart":
           queued(() => painter?.startGraphics());
           break;
-        case "adaptiveStart":
-          queued(() => painter?.startAdaptive());
+        case "standardStart":
+          queued(() => painter?.startStandard(command.quality));
           break;
         case "graphicsView":
           queued(() => painter?.setGraphicsView(command.part));

@@ -1,22 +1,21 @@
-import init, {
-  Adaptive,
-  type InitInput,
-} from "../wasm/adaptive/pkg/remotex_adaptive.js";
+import init, { type InitInput, Standard } from "../wasm/vnc/pkg/remotex_vnc.js";
+import type { StandardQuality } from "./protocol.ts";
 
-// A Mac's Adaptive picture, decoded in the page: the rectangles of a session
-// started with Standard's Adaptive quality, which the gateway passes as the Mac
-// sent them, drawn onto a framebuffer of the module's own (wasm/adaptive). Each
-// rectangle is drawn on what the ones before it left, so one picture is fed every
-// record of its session, in order, and the canvas is painted from its
-// framebuffer where each rectangle drew.
+// A Mac's own picture, decoded in the page: the rectangles of a session started
+// with Standard's Adaptive or Full quality, which the gateway passes as the Mac
+// sent them, the Adaptive quality's 8x8 tiles or the Full quality's zlib, drawn
+// onto a framebuffer of the module's own (wasm/vnc). Each rectangle is drawn
+// on what the ones before it left, so one picture is fed every record of its
+// session, in order, and the canvas is painted from its framebuffer where each
+// rectangle drew.
 
 /** One session's picture. */
-export interface AdaptivePicture {
+export interface StandardPicture {
   /** A black framebuffer of the desktop's new size, in pixels. */
   resize(w: number, h: number): void;
   /**
-   * Decode one rectangle onto the framebuffer: true when it drew, false for the
-   * quantization tables, which draw nothing. Throws for one that does not decode,
+   * Decode one rectangle onto the framebuffer: true when it drew, false for one
+   * that draws nothing, such as the Adaptive quality's quantization tables. Throws for one that does not decode,
    * whose pixels the framebuffer keeps as far as they were drawn.
    */
   decode(x: number, y: number, w: number, h: number, body: Uint8Array): boolean;
@@ -30,19 +29,19 @@ export interface AdaptivePicture {
   close(): void;
 }
 
-export type AdaptiveFactory = () => AdaptivePicture;
+export type StandardFactory = (quality: StandardQuality) => StandardPicture;
 
-let loaded: Promise<AdaptiveFactory> | null = null;
+let loaded: Promise<StandardFactory> | null = null;
 
 /**
  * Load the module, once a page: `source` is its bytes for a test, and otherwise
  * the bundle's own copy is fetched. A load that fails is tried again by the next
  * caller.
  */
-export function loadAdaptive(source?: InitInput): Promise<AdaptiveFactory> {
+export function loadStandard(source?: InitInput): Promise<StandardFactory> {
   loaded ??= init(source === undefined ? undefined : { module_or_path: source })
-    .then(({ memory }) => (): AdaptivePicture => {
-      const adaptive = new Adaptive();
+    .then(({ memory }) => (quality: StandardQuality): StandardPicture => {
+      const standard = new Standard(quality === "full");
       let width = 0;
       let height = 0;
       // A view goes with the memory it was made of, which a growth replaces.
@@ -58,7 +57,7 @@ export function loadAdaptive(source?: InitInput): Promise<AdaptiveFactory> {
             buffer: memory.buffer,
             pixels: new Uint8ClampedArray(
               memory.buffer,
-              adaptive.pixels(),
+              standard.pixels(),
               width * height * 4,
             ),
           };
@@ -68,14 +67,14 @@ export function loadAdaptive(source?: InitInput): Promise<AdaptiveFactory> {
       };
       return {
         resize(w, h) {
-          adaptive.resize(w, h);
+          standard.resize(w, h);
           width = w;
           height = h;
           view = null;
           image = null;
         },
         decode(x, y, w, h, body) {
-          return adaptive.decode(x, y, w, h, body);
+          return standard.decode(x, y, w, h, body);
         },
         pixels,
         image() {
@@ -91,7 +90,7 @@ export function loadAdaptive(source?: InitInput): Promise<AdaptiveFactory> {
           return image;
         },
         close() {
-          adaptive.free();
+          standard.free();
         },
       };
     })

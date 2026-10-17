@@ -152,13 +152,15 @@ export function readRemoteClipboard(): string {
 //
 // `passthrough` is which of a High Performance Mac's streams is passed, its HEVC
 // or its H.264, the one choice of its picture; without it the picker's own pick
-// stands, the HEVC where this browser can take it. An RDP target with its pipeline
+// stands, the HEVC where this browser can take it. On a Standard Mac it is one of
+// the Mac's own pictures, Adaptive or Full quality, the picker's own pick the
+// Adaptive one. An RDP target with its pipeline
 // on (egfx not false) passes it in every session, which is said and not offered.
 // `pipeline` is how the host draws that pipeline, high quality unless asked.
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
-  passthrough?: "apple-media" | "apple-h264" | "apple-adaptive";
+  passthrough?: "apple-media" | "apple-h264" | "apple-adaptive" | "apple-full";
   pipeline?: "high-quality" | "adaptive-desktop" | "adaptive-region";
 }
 
@@ -283,7 +285,8 @@ export async function startTarget(
     const names = {
       "apple-media": /^HEVC, passed through/,
       "apple-h264": /^H\.264, passed through/,
-      "apple-adaptive": /^Adaptive \(alpha\), passed through/,
+      "apple-adaptive": /^Adaptive \(beta\), passed through/,
+      "apple-full": /^Full quality \(beta\), passed through/,
     };
     await item
       .getByRole("group", { name: "Picture" })
@@ -357,6 +360,14 @@ export async function logIn(page: Page, search = ""): Promise<void> {
 export async function openClipboardPanel(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Open menu" }).click();
   await page.getByRole("button", { name: "Clipboard", exact: true }).click();
+}
+
+/// The page's alerts but the notice over a desktop past the picture ceiling, a
+/// Standard Mac's Combined Display past it in the Mac's own pixels among them:
+/// a session opens behind it on such a Mac, and the Combined Display case checks
+/// the hold.
+export function faults(page: Page) {
+  return page.getByRole("alert").filter({ hasNotText: "Too large to show" });
 }
 
 // Hand the session back to the picker, so the next spec starts where this one

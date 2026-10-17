@@ -64,8 +64,8 @@ config key.
 | `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — | — |
 | `vnc` | no | none | — | — | — |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — | libvpx or native |
-| `vnc`, `ard` | no | none | VP9, or the Mac's Adaptive picture passed (alpha) | — | — |
-| `vnc`, `ard` with `virtual_display` | yes | none | VP9, or the Mac's Adaptive picture passed (alpha) | — | — |
+| `vnc`, `ard` | no | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — | — |
+| `vnc`, `ard` with `virtual_display` | yes | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — | — |
 | `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — | — |
 
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
@@ -94,13 +94,15 @@ config key.
   cannot compose the pipeline cannot start the target. A passed RDP pipeline
   follows the browser's link: the Windows host draws fewer and smaller frames
   for a browser that falls behind. A Mac's passed stream does not: the Mac sends
-  at its own rate, little on a still screen and much with motion. For a slow
-  link with much motion, an `ard` target follows the link, with its VP9 or with
-  the Mac's Adaptive picture. On an `ard` target the Picture group is *VP9*,
-  the default, or *Adaptive (alpha)*: the Mac's own Adaptive quality, as Apple's
-  viewer has it, which the Mac codes coarse first and sharpens as the link
-  allows, and which this page decodes. A session started with it is started over,
-  not resumed, when the browser comes back, as a passed RDP pipeline is.
+  at its own rate, little on a still screen and much with motion. On an `ard`
+  target the Picture group is *Adaptive (beta)*, the default, or *Full quality
+  (beta)*, the two qualities of Apple's viewer's menu, which this page decodes.
+  Adaptive is the Mac's 8×8 tiles, each changed area a coarse pass and its
+  refinement after it, at the same precision on any link: a slower link gets
+  fewer updates, and their refinement once the screen is still. Full is the Mac's
+  lossless zlib, every pixel exact, which the Mac sends no faster than the link
+  takes, for a LAN. A session started with either is started over, not resumed,
+  when the browser comes back, as a passed RDP pipeline is.
   See [A passed stream and the browser's link](architecture.md#a-passed-stream-and-the-browsers-link).
 - **Graphics.** How an RDP host draws its pipeline. *High quality*, the default,
   is the pipeline's codecs without H.264, for a
@@ -251,12 +253,19 @@ connection with the same error as wrong credentials. See
 [Remote Management access](apple-vnc-889.md#remote-management-access).
 
 - **`subtype = "ard"`** is Screen Sharing's Standard mode: the Mac's physical
-  displays, one or all of them, at their own density. Its lossless ZRLE source
-  is decoded by the gateway and encoded as VP9, adaptive by default, unless the
-  session is started with the picker's Adaptive (alpha), which passes the Mac's
-  own Adaptive picture for the page to decode; that has been tried on a virtual
-  Mac alone, and shows Combined Display whole at any size. It has no resize and
-  no sound; the Mac keeps playing on its own output.
+  displays, one or all of them, at their own density. A session is started
+  with the picker's Adaptive (beta), the default, or Full quality (beta), which
+  pass the Mac's own Adaptive or Full-quality picture for the page to decode;
+  the gateway encodes neither. Both have been tried on a virtual Mac alone.
+  It has no resize and no sound; the Mac keeps playing on its own output.
+  - **A Mac with more than one display connected is best given
+    `virtual_display = true`** (below), which sizes one display to the browser
+    window. Combined Display, every screen at once, is a last resort here: it
+    is shown at 100%, so it works well only for two small displays side by side
+    that fit one browser window, and anything larger has to be scrolled
+    constantly. Past 3840×2400 in the Mac's own pixels it shows a notice
+    offering one screen at a time, though the page would draw it smaller: a 2x
+    screen beside a 1x one keeps its backing pixels.
 - Every Apple subtype carries the Mac's native pasteboard.
 - **`subtype = "ard-high-performance"`** is High Performance mode as Apple's
   viewer has it, and is **experimental**. The Mac disables its physical displays
@@ -302,8 +311,10 @@ connection with the same error as wrong credentials. See
     the sound, the session continues without audio and the menu says why.
 - **Unofficial:** `virtual_display = true` on an `ard` target opens Standard
   mode on such a virtual display, with resize and without the media stream or
-  sound. Apple's viewer never offers this combination; it was tested on macOS 26
-  only.
+  sound, the physical displays disabled meanwhile. It is the recommended way to
+  reach a Mac with more than one display connected, whose Combined Display is
+  impractical in a browser. Apple's viewer never offers this combination; it
+  was tested on macOS 26 only.
 
 Apple documents none of this protocol. Both modes are reverse engineered and
 only as correct as the Macs they were measured against, and a macOS update is

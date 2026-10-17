@@ -2836,7 +2836,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
-            apple_adaptive: false,
+            apple_standard: None,
             rdp_graphics: false,
             rdp_h264: false,
             native_vp9: false,

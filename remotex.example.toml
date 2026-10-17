@@ -481,11 +481,13 @@ password = "change-me"
 # Macs they have been measured against. A macOS update is free to change any of it.
 #
 # `subtype = "ard"` is Standard screen sharing: the Mac's physical display list and
-# native pasteboard, with one framebuffer holding every attached display at once,
-# sent as ZRLE rectangles and encoded here as VP9. A session started with the
-# picker's Adaptive (ALPHA) asks for Apple's Adaptive quality instead, the Mac's
-# own 8x8 tiles, which are passed for the page to decode and which the Mac fits to
-# the browser's link; no key selects it, and the video keys do not reach it.
+# native pasteboard, with one framebuffer holding every attached display at once.
+# The picker must choose Adaptive or Full quality (both BETA), and the gateway
+# encodes neither. Adaptive asks for Apple's Adaptive quality, the Mac's own 8x8
+# tiles, which are passed for the page to decode, paced by the browser's link.
+# Full quality asks for Apple's Full quality, the Mac's lossless zlib, passed for
+# the page to inflate, for a LAN. No key selects either, and the video keys are
+# refused on the target.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"
@@ -500,7 +502,7 @@ password = "change-me"
 # at its density, the physical displays disabled meanwhile, and in a session
 # started with resize replaced from every viewport report — and everything else
 # is `ard`'s:
-# the picture, ZRLE or Adaptive, the native pasteboard, no sound, no media stream offered and
+# the picture, Adaptive or Full quality, the native pasteboard, no sound, no media stream offered and
 # no decoders needed, so it runs in every build. Apple's own viewer never offers
 # a virtual display without the media stream, so nothing but remotex has
 # exercised the Mac's side of this; it was tested against macOS 26 only, and a

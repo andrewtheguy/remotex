@@ -715,9 +715,13 @@ export function useRemoteDesktop(
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
   // Why the desktop has no picture, from `oversize`: past what a video stream
-  // encodes, or Combined Display over too many screens. Null in the picker and at
+  // encodes. Null in the picker and at
   // every `connected`, until the gateway says otherwise.
   const [oversize, setOversize] = useState<HoldCause | null>(null);
+  // The desktop held, in the pixels the remote sends, which the ceiling is
+  // counted in: a Mac's Combined Display over mixed densities is shown smaller
+  // than that (`size`), each screen at its points.
+  const [heldPixels, setHeldPixels] = useState<RemoteSize | null>(null);
   // Whether it is held, which is what input and focus follow.
   const held = oversize !== null;
   // What this session is speaking, from `connected`: the protocol and the target's
@@ -1128,6 +1132,17 @@ export function useRemoteDesktop(
       number,
       { size: RemoteSize; view: MosaicView | null }
     >();
+    // The queued resize whose presentation ends a hold: the `oversize` without a
+    // cause comes behind the resize that brought the desktop within, and the
+    // notice stays up until that size is on the canvas, or the held desktop,
+    // which a Mac's own picture goes on painting under it, would show for a
+    // moment with input mapped to it.
+    let releaseAt: number | null = null;
+    const release = () => {
+      releaseAt = null;
+      setOversize(null);
+      setHeldPixels(null);
+    };
     // The regions of the last `mosaic`, and the framebuffer the last `resize`
     // named: what a composition is recomputed from when either changes, or when
     // this window moves to a display of another density.
@@ -1166,6 +1181,9 @@ export function useRemoteDesktop(
         if (applied) {
           pendingResizes.delete(seq);
           presentResize(applied.size, applied.view);
+          if (releaseAt !== null && seq >= releaseAt) {
+            release();
+          }
         }
       },
       onReached: (seq) => {
@@ -1211,6 +1229,7 @@ export function useRemoteDesktop(
       // ending; letting it land later would resurrect that desktop's size
       // under the next one's overlay.
       pendingResizes.clear();
+      releaseAt = null;
       // Pointer ownership is per-engine: the next target may well composite
       // its own cursor, so drop back to the X until it says otherwise. A
       // reattach to the same engine gets the shape replayed.
@@ -1440,7 +1459,7 @@ export function useRemoteDesktop(
       if (
         (msg.type === "videoFormat" ||
           msg.type === "graphicsStart" ||
-          msg.type === "adaptiveStart") &&
+          msg.type === "standardStart") &&
         msg.engine <= endedEngines
       ) {
         return;
@@ -2106,6 +2125,7 @@ export function useRemoteDesktop(
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
       setOversize(null);
+      setHeldPixels(null);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
       // The two Apple subtypes are the Macs; `remoteOs` says the same once the
       // desktop is up, and the first report goes out before then.
@@ -2168,6 +2188,7 @@ export function useRemoteDesktop(
       setVideoError(null);
       setRenderPlan("");
       setOversize(null);
+      setHeldPixels(null);
       // Back to the default rather than left as the last target's answer: the
       // next one may not report at all, and inheriting "the remote is a Mac"
       // would silently stop translating Command for a Windows guest.
@@ -2294,11 +2315,15 @@ export function useRemoteDesktop(
           setVideoStream({ decode: "", passthrough: true, composed: true });
           setHostPicture({ exact: true, codecs: [] });
           break;
-        case "adaptiveStart":
+        case "standardStart":
           // Queued the same way: the picture's first rectangle must find a
           // decoder with nothing in it.
-          painter()?.startAdaptive();
-          setVideoStream({ decode: "", passthrough: true, adaptive: true });
+          painter()?.startStandard(msg.quality);
+          setVideoStream({
+            decode: "",
+            passthrough: true,
+            standard: msg.quality,
+          });
           break;
         case "hostPicture":
           setHostPicture({ exact: msg.exact, codecs: msg.codecs });
@@ -2364,7 +2389,15 @@ export function useRemoteDesktop(
           setPictureWithheld(msg.active);
           break;
         case "oversize":
-          setOversize(msg.cause);
+          if (msg.cause) {
+            releaseAt = null;
+            setOversize(msg.cause);
+            setHeldPixels(framebufferSize);
+          } else if (pendingResizes.size > 0) {
+            releaseAt = resizeSeq;
+          } else {
+            release();
+          }
           break;
         case "picker":
           // No target selected (idle attach, switch-target, a takeover, or an
@@ -3312,6 +3345,7 @@ export function useRemoteDesktop(
     hostScale,
     renderPlan,
     oversize,
+    heldPixels,
     connection,
     canAudio,
     audioEnabled,

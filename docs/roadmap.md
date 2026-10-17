@@ -119,6 +119,23 @@ first. A refresh, like a keyframe, comes at most once a second.
 Fixing that does not take it out of alpha by itself. It also needs more testing
 than it has had before it is offered as anything else.
 
+### Combined Display's ceiling counted in what the page shows
+
+A Standard Mac's desktop is held past the picture ceiling, counted in the pixels
+the Mac sends ([A desktop past the ceiling](architecture.md#a-desktop-past-the-ceiling)).
+Over a 2x screen beside a 1x one, Combined Display keeps the 2x screen's backing
+pixels, and the page's mosaic draws each screen at its points, so what it would
+show can be under the ceiling while the Mac's framebuffer is past it: the virtual
+Mac's two screens come to 4160×1800 and are held, where a 1x browser would show
+2720×900.
+
+The plan is to count the ceiling in the picture the page shows. It is not a
+change to the check alone: the gateway would need the composed size, which
+follows from the screens' layout and the density the browser draws at, so one
+held at 2x may not be at 1x; and the page would decode a framebuffer past the
+ceiling off screen to compose it, which is the memory a phone may not have. It is
+held back as much work for little: one screen at a time is already shown.
+
 ### A touchpad's scroll as a gesture on a Mac
 
 A Mac is sent a scroll as a distance on both axes, with no gesture around it
@@ -137,26 +154,6 @@ whether the phases alone make the horizontal axis feel right, are still to be
 tested, on a physical Mac.
 
 ## Under consideration
-
-### Two streams for Standard's Combined Display
-
-Standard's Combined Display over two screens is one framebuffer of both, which is
-often past the video ceiling at factor 1.0 (5376×2287 over a 2x screen beside a
-1x one), and then has no picture: the page offers one screen instead
-([past the ceiling](architecture.md#past-the-ceiling)). The plan is to carry that
-view as two streams, one per screen, each its own VP9 stream within the ceiling,
-for the page to lay out by the mosaic's regions as it composes one framebuffer
-today. How the Mac's rectangles split between the two, how the queue and the
-paint window order two chains, and how each stream starts over are the work.
-
-Two screens is the limit, as it is today: All Displays over three or more is held
-with the notice whatever its size. A session that passes the Mac's Adaptive
-picture is no video and has neither limit
-([A Mac's Adaptive picture](architecture.md#a-macs-adaptive-picture)).
-
-High Performance is not part of this. Its All Displays is not one framebuffer:
-each of its virtual displays is a stream of its own already, the second shown in
-a browser tab ([two virtual displays](apple-vnc-889.md#two-virtual-displays)).
 
 ### Verifying an RDP host's certificate
 
@@ -291,7 +288,8 @@ only to encode it again, beside a pipeline that already gives an exact picture
 under the host's Lossless policy
 ([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy))
 and the host's own Adaptive H.264 for a slow link. On a Mac, Standard mode's
-Adaptive quality, the Mac's own codecs, covers the same ground
+Adaptive quality, the Mac's own codecs, covers a slow link with fewer updates
+rather than coarser ones
 ([Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)).
 
 ### `THINCLIENT` in the graphics capability advertise

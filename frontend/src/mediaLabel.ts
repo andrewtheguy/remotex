@@ -14,7 +14,7 @@
 // console.
 
 import { NO_AUDIO_DECODER } from "./preflight.ts";
-import type { HoldCause } from "./protocol.ts";
+import type { HoldCause, StandardQuality } from "./protocol.ts";
 
 /**
  * Why this browser cannot play a session's sound at all (useRemoteDesktop): it
@@ -159,9 +159,9 @@ export interface VideoStreamInfo {
   // Not a stream at all: an RDP host's graphics pipeline, composed here
   // (`graphicsStart`). No decoder is configured and `decode` names nothing.
   composed?: boolean;
-  // Not a stream either: a Mac's Adaptive picture, decoded by this page
-  // (`adaptiveStart`). No decoder is configured and `decode` names nothing.
-  adaptive?: boolean;
+  // Not a stream either: a Mac's own picture in this quality, decoded by this
+  // page (`standardStart`). No decoder is configured and `decode` names nothing.
+  standard?: StandardQuality;
   // Decoded by one of the page's WebAssembly decoders (softwareDecoder.ts) and
   // not by the browser's own: the VP9 where the browser's own does not take it,
   // and a Mac's HEVC where the gateway said so with the format.
@@ -175,28 +175,26 @@ export interface VideoStreamInfo {
  * stream it decodes, in how many strips where its pictures come in strips, and
  * which decoder that is, the browser's own or one of the
  * page's in WebAssembly, or what the row is waiting for before the stream's format has
- * arrived. While the desktop is held — past what a video stream encodes, or All
- * Displays over too many screens — there is no picture, whatever decoder was
- * built before.
+ * arrived. While the desktop is held, past what a video stream encodes, there is
+ * no picture, whatever decoder was built before; a Mac's own picture is still
+ * decoded by this page, under the notice.
  */
 export function videoLabel(
   stream: VideoStreamInfo | null,
   held: HoldCause | null,
 ): string {
+  if (stream?.standard) {
+    const picture = stream.standard === "full" ? "Full-quality" : "Adaptive";
+    return `Not in use: the Mac's ${picture} picture is decoded by this page`;
+  }
   if (held === "size") {
     return "Not in use: the desktop is past what video carries";
-  }
-  if (held === "screens") {
-    return "Not in use: Combined Display spans more than two screens";
   }
   if (!stream) {
     return "Waiting for the video format";
   }
   if (stream.composed) {
     return "Not in use: the host's graphics pipeline is composed by this browser";
-  }
-  if (stream.adaptive) {
-    return "Not in use: the Mac's Adaptive picture is decoded by this page";
   }
   const whose = stream.passthrough
     ? "passthrough from the remote"

@@ -183,12 +183,21 @@ test("the video row waits for the format, then names it and whose stream it is",
     "vp09.01.40.08 · encoded by the gateway · decoded by this page's WebAssembly decoder",
   );
   assert.equal(
+    videoLabel({ decode: "", passthrough: true, standard: "adaptive" }, null),
+    "Not in use: the Mac's Adaptive picture is decoded by this page",
+  );
+  assert.equal(
+    videoLabel({ decode: "", passthrough: true, standard: "full" }, null),
+    "Not in use: the Mac's Full-quality picture is decoded by this page",
+  );
+  assert.equal(
     videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "size"),
     "Not in use: the desktop is past what video carries",
   );
+  // Held, a Mac's own picture is still decoded, under the notice.
   assert.equal(
-    videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "screens"),
-    "Not in use: Combined Display spans more than two screens",
+    videoLabel({ decode: "", passthrough: true, standard: "full" }, "size"),
+    "Not in use: the Mac's Full-quality picture is decoded by this page",
   );
 });
 
