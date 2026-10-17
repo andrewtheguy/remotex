@@ -152,7 +152,7 @@ and a host that does not draw one ends the session
 Screen Sharing's Standard mode (`ard`, including the unofficial
 `virtual_display = true`) shows the Mac's screens one at a time or, on its
 physical screens, all at once as Combined Display, as the session was started at
-the picker. One at a time, it passes the Mac's own picture, in the quality the
+the picker. One at a time (beta), it passes the Mac's own picture, in the quality the
 session was started with, Adaptive (beta) or Full quality (beta): the Mac is
 asked for its quality of that name, as Apple's viewer asks for it, and its
 rectangles are passed for the page to decode, on one screen and on the virtual
@@ -1991,7 +1991,7 @@ and `GET /api/targets` carries it:
 | `rdp` with `egfx = false` | no | shown | hidden | hidden |
 | `vnc` | no | hidden | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden |
-| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive or Full-quality picture, passed (beta), greyed under Combined Display; and as Displays: one at a time or Combined (alpha) | hidden |
+| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive or Full-quality picture, passed (beta), greyed under Combined Display; and as Displays: one at a time (beta) or Combined (alpha) | hidden |
 | `vnc`, `ard` with `virtual_display` | yes | hidden | shown, as for `ard` | hidden |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden |
 

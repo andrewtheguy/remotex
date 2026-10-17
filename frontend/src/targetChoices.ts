@@ -472,7 +472,7 @@ function soundRow(
 const VIEWS: ViewOption[] = [
   {
     value: "one",
-    label: "One at a time",
+    label: "One at a time (beta)",
     note: "The main screen first, the others in the display menu, in the picture chosen below.",
   },
   {

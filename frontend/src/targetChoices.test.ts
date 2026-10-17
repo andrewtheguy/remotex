@@ -249,6 +249,8 @@ test("a Standard Mac's screens are one at a time or Combined Display", () => {
     one.views?.map((view) => view.value),
     ["one", "combined"],
   );
+  assert.match(one.views?.[0].label ?? "", /^One at a time \(beta\)/);
+  assert.match(one.views?.[1].label ?? "", /^Combined \(alpha\)/);
   assert.equal(one.choices.standardView, "one", "until Combined is chosen");
   // Combined Display passes none of the Mac's pictures, which are greyed under
   // it and come back when one screen at a time is chosen again.

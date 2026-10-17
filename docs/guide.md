@@ -105,7 +105,7 @@ config key.
   when the browser comes back, as a passed RDP pipeline is. Both are greyed
   under Combined Display (below).
 - **Displays.** On an `ard` target sharing the Mac's physical screens: *One at a
-  time*, the default, starts on the main screen and offers the others in the
+  time* (beta), the default, starts on the main screen and offers the others in the
   display menu, in the picture chosen above; *Combined* (alpha) shows every
   screen at once, as Apple's viewer's Combined Display, and offers no single
   screen. Combined Display asks the Mac for its Full quality, which the gateway

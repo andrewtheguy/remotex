@@ -192,7 +192,7 @@ site_passwd = ""
 #   vnc, ard-high-performance        yes      always carried   shown         —
 #
 # A Standard "ard" target on the Mac's physical screens also shows Displays: one
-# screen at a time, in the Mac's own picture passed, or Combined (alpha), every
+# screen at a time (beta), in the Mac's own picture passed, or Combined (alpha), every
 # screen at once, which the gateway codes as its tiles from the Mac's Full quality,
 # a screen denser than the browser scaled down there. No other target has it.
 #
