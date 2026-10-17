@@ -435,6 +435,9 @@ struct Shared {
     /// Whether the desktop's picture is held — see [`Oversize`]. Decided by each
     /// `Resize` ([`VideoSink::msg`]).
     oversized: AtomicBool,
+    /// The pixels the ceiling counts the desktop by where it is not the `Resize`'s
+    /// bounds — see [`VideoSink::counts`].
+    counted: Mutex<Option<u64>>,
     /// Why the order task gave up, so the engine's next push can report it rather
     /// than a bare closed channel. The error itself, so the cause chain survives
     /// the hop from the task to the push. See [`VideoSink::closed`].
@@ -515,6 +518,7 @@ impl Shared {
         Self {
             oversize,
             oversized: AtomicBool::new(false),
+            counted: Mutex::default(),
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video { tiles: Tiles::new(quality), due_at: None }),
             round_returned: Arc::new(Notify::new()),
@@ -603,6 +607,16 @@ impl VideoSink {
             self.reset_render();
         }
         self.shared.video.lock().await.tiles.blit(rect, rgb)
+    }
+
+    /// Say the picture ceiling counts the desktops the `Resize`s from here name by
+    /// `pixels` against its area ([`video::within_area`]), or by their bounds for
+    /// `None`: a Standard Mac's Combined Display, counted by the sum of what the
+    /// page is sent of each screen, the gaps between them aside
+    /// ([`crate::combined`]). From the next `Resize` on, for the hold and for the
+    /// tiles alike.
+    pub fn counts(&self, pixels: Option<u64>) {
+        *self.shared.counted.lock().unwrap() = pixels;
     }
 
     /// Whether the desktop's picture is held ([`Oversize::Hold`]): past the picture
@@ -996,11 +1010,15 @@ impl VideoSink {
     pub async fn msg(&self, msg: ServerMsg) -> anyhow::Result<()> {
         if let ServerMsg::Resize { w, h, .. } = &msg {
             let (w, h) = (*w, *h);
+            let counted = *self.shared.counted.lock().unwrap();
+            let within = match counted {
+                Some(pixels) => video::within_area(pixels),
+                None => video::within_ceiling((u32::from(w), u32::from(h))),
+            };
+            let pixels = counted.unwrap_or(u64::from(w) * u64::from(h));
             let cause = match self.shared.oversize {
                 Oversize::Refuse => None,
-                Oversize::Hold if !video::within_ceiling((u32::from(w), u32::from(h))) => {
-                    Some(HoldCause::Size)
-                }
+                Oversize::Hold if !within => Some(HoldCause::Size),
                 Oversize::Hold => None,
             };
             let oversized = cause.is_some();
@@ -1008,16 +1026,20 @@ impl VideoSink {
                 if oversized {
                     self.shared.passing.store(false, Ordering::Relaxed);
                     info!(
-                        "{}: a {w}x{h} desktop is past the picture ceiling; the \
-                         picture is held until the remote sends another",
+                        "{}: a {w}x{h} desktop of {pixels} pixels is past the picture ceiling; \
+                         the picture is held until the remote sends another",
                         self.engine
                     );
                 } else {
-                    info!("{}: a {w}x{h} desktop is within the ceiling, and its picture shown again", self.engine);
+                    info!(
+                        "{}: a {w}x{h} desktop of {pixels} pixels is within the ceiling, and \
+                         its picture shown again",
+                        self.engine
+                    );
                     self.reset_render();
                 }
             }
-            self.shared.video.lock().await.tiles.want(w, h);
+            self.shared.video.lock().await.tiles.want(w, h, counted);
             if self.shared.oversize == Oversize::Hold {
                 self.push(Pending::Msg(msg)).await?;
                 return self.push(Pending::Msg(ServerMsg::Oversize { cause })).await;
@@ -1030,7 +1052,7 @@ impl VideoSink {
     /// channel, for an engine test that reads the channel and never sent one.
     #[cfg(test)]
     pub(crate) fn presize(&self, w: u16, h: u16) {
-        self.shared.video.try_lock().expect("a fresh sink").tiles.want(w, h);
+        self.shared.video.try_lock().expect("a fresh sink").tiles.want(w, h, None);
     }
 
     /// Shut the picture down: deliver what is still in flight, then log what it cost.
@@ -1412,7 +1434,7 @@ mod tests {
         }
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
 
     /// A `wlshare` target's plan for a browser that decodes 4:4:4, whose stream wlshare
     /// passes at that chroma.

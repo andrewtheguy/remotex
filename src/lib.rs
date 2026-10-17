@@ -8,6 +8,7 @@ pub mod assets;
 pub mod audio;
 pub mod auth;
 pub mod camera;
+pub mod combined;
 pub mod cli;
 pub mod config;
 #[cfg(feature = "embedded-gateway")]

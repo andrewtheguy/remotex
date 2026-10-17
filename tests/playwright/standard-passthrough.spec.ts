@@ -25,9 +25,9 @@
 //
 // The resize case needs a target whose desktop follows the window, an `ard`
 // target with `virtual_display = true`, named by
-// REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET. The Combined Display case needs an
-// `ard` target on a Mac with two screens of different densities, a 1x one
-// beside a 2x one, named by REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET.
+// REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET. The two-screen case needs an `ard`
+// target on a Mac with two screens of different densities, a 1x one beside a 2x
+// one, named by REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET.
 import { constants, createInflate, type Inflate } from "node:zlib";
 import { expect, type Page, test, type Worker } from "@playwright/test";
 
@@ -49,7 +49,8 @@ const FULL = { passthrough: "apple-full" } as const;
 const STANDARD_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_TARGET;
 const RESIZE_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET;
 const COMBINED_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET;
-/// The display list's id for Combined Display, the gateway's own entry.
+/// The id the Mac's combined view is named by on the wire, which a session of
+/// one screen at a time never lists.
 const COMBINED = 0xffffffff;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
@@ -202,12 +203,6 @@ function noteDisplays(
   } else if (message.type === "oversize") {
     seen.oversize = message.cause as string | null;
   }
-}
-
-/// Whether a picture of this size is past the ceiling (`video::within_ceiling`):
-/// a long side past 3840 or a short side past 2400.
-function pastCeiling({ w, h }: { w: number; h: number }): boolean {
-  return Math.max(w, h) > 3840 || Math.min(w, h) > 2400;
 }
 
 /// Watch the session socket, and the display socket that carries its picture.
@@ -581,8 +576,10 @@ test.describe("a Standard Mac whose Full-quality picture is passed", () => {
 });
 
 // Ahead of the virtual display's cases: for a while after a session on the
-// virtual display, the Mac lists one screen and no Combined Display.
-test.describe("a Standard Mac on Combined Display over screens of two densities", () => {
+// virtual display, the Mac lists one screen. Combined Display is a session of its
+// own (standard-combined.spec.ts), so a session of one screen at a time lists the
+// screens alone, starts on the main one and never composes.
+test.describe("a Standard Mac of two screens shown one at a time", () => {
   test.skip(
     !COMBINED_TARGET,
     "set REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET=<target> against a gateway with a live Mac of a 1x and a 2x screen",
@@ -596,7 +593,7 @@ test.describe("a Standard Mac on Combined Display over screens of two densities"
     ["Adaptive", ADAPTIVE],
     ["Full-quality", FULL],
   ] as const) {
-    test(`passes its ${name} picture composed of both screens, and through a switch to one screen and back`, async ({
+    test(`passes its ${name} picture of the main screen, and of the other once chosen`, async ({
       page,
     }) => {
       test.setTimeout(120_000);
@@ -604,15 +601,17 @@ test.describe("a Standard Mac on Combined Display over screens of two densities"
       await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", choices);
       await expect
         .poll(() => seen.displays?.displays.length ?? 0, {
-          message: "Combined Display and two screens",
+          message: "two screens",
           timeout: 20_000,
         })
-        .toBe(3);
+        .toBe(2);
+      expect(
+        seen.displays?.displays.map((display) => display.id),
+        "no Combined Display entry",
+      ).not.toContain(COMBINED);
       const label = (id: number) =>
         seen.displays?.displays.find((display) => display.id === id)?.label ??
         "";
-      const screen = seen.displays?.displays.find((d) => d.id !== COMBINED);
-      expect(screen).toBeDefined();
 
       // The view the Mac names, then batches painted after it.
       const shows = async (id: number) => {
@@ -627,63 +626,32 @@ test.describe("a Standard Mac on Combined Display over screens of two densities"
           })
           .toBeGreaterThan(painted);
       };
-      const choose = async (id: number) => {
-        const shown = label(seen.displays?.active ?? COMBINED);
-        await chooseDisplay(page, shown, label(id));
-        await shows(id);
-      };
-
-      if (seen.displays?.active !== COMBINED) {
-        await choose(COMBINED);
-      } else {
-        await shows(COMBINED);
-      }
-      // Two densities: composed of both screens' regions, which tile the
-      // framebuffer the resize announced.
-      const regions = seen.mosaics.at(-1) ?? [];
-      expect(regions, "a composition of both screens").toHaveLength(2);
-      const right = Math.max(...regions.map((r) => r.pixels.x + r.pixels.w));
-      const bottom = Math.max(...regions.map((r) => r.pixels.y + r.pixels.h));
-      expect(seen.size).toEqual({ w: right, h: bottom });
-      // Past the ceiling it is held, as video is: the notice offers the screens,
-      // and the picture goes on being painted under it.
-      const held = pastCeiling(seen.size ?? { w: 0, h: 0 });
-      const notice = page
-        .getByRole("alert")
-        .filter({ hasText: "Too large to show" });
+      // The session starts on a screen, never on the combined view.
       await expect
-        .poll(() => seen.oversize, { message: "held past the ceiling alone" })
-        .toBe(held ? "size" : null);
-      await expect(notice).toHaveCount(held ? 1 : 0);
-      if (held) {
-        // In the Mac's pixels, which the ceiling counts, not the mosaic's.
-        await expect(notice).toContainText(
-          `${seen.size?.w}×${seen.size?.h} pixels as the remote sends it`,
-        );
-      }
+        .poll(() => seen.displays?.active ?? COMBINED, { timeout: 20_000 })
+        .not.toBe(COMBINED);
+      const first = seen.displays?.active ?? 0;
+      await shows(first);
+      const other =
+        seen.displays?.displays.find((display) => display.id !== first)?.id ??
+        0;
+      await chooseDisplay(page, label(first), label(other));
+      await shows(other);
+      await chooseDisplay(page, label(other), label(first));
+      await shows(first);
 
-      // One screen ends the composition and the hold, chosen from the notice
-      // where there is one, and Combined Display brings both back.
-      if (held) {
-        await notice.getByRole("button", { name: label(screen?.id ?? 0) }).click();
-        await shows(screen?.id ?? 0);
-      } else {
-        await choose(screen?.id ?? 0);
-      }
-      expect(seen.mosaics.at(-1), "a screen presented whole").toEqual([]);
+      expect(
+        seen.mosaics.every((regions) => regions.length === 0),
+        "a screen presented whole",
+      ).toBe(true);
       await expect.poll(() => seen.oversize).toBe(null);
-      await expect(page.getByRole("alert")).toHaveCount(0);
-      await choose(COMBINED);
-      expect(seen.mosaics.at(-1)).toHaveLength(2);
-      await expect.poll(() => seen.oversize).toBe(held ? "size" : null);
-
       expect(seen.controlTypes).not.toContain("videoFormat");
       expect(seen.outside, "rectangles off the framebuffer").toEqual([]);
       for (const batch of seen.batches) {
         expect(batch.badOp).toBe(undefined);
         expect(batch.exact).toBe(true);
       }
-      // Full quality's one stream runs on through every view.
+      // Full quality's one stream runs on through every screen.
       const zlib = seen.zlib;
       if (choices === FULL) {
         expect(zlib, "a Full-quality picture's stream").toBeDefined();

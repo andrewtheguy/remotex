@@ -46,6 +46,17 @@ pub fn within_ceiling((w, h): (u32, u32)) -> bool {
     long <= u32::from(MAX_LONG_SIDE) && short <= u32::from(MAX_SHORT_SIDE)
 }
 
+/// The most pixels a picture counted by its screens may have: the ceiling's own
+/// area, for a Standard Mac's Combined Display, whose screens are counted by what
+/// the page is sent of each rather than by the bounds they span
+/// ([`crate::combined::Composition::pixels`]).
+pub const MAX_PIXELS: u64 = MAX_LONG_SIDE as u64 * MAX_SHORT_SIDE as u64;
+
+/// Whether a picture counted as `pixels` is under the ceiling: [`MAX_PIXELS`].
+pub fn within_area(pixels: u64) -> bool {
+    pixels <= MAX_PIXELS
+}
+
 /// `pixels` held under the ceiling, the way High Performance holds a virtual
 /// display under the Mac's: each axis clamped, the orientation kept, so a
 /// landscape desktop is held to 3840×2400 and a portrait one to 2400×3840.
@@ -85,6 +96,12 @@ impl Mirror {
     /// The desktop this mirror is for.
     pub fn size(&self) -> (u16, u16) {
         self.size
+    }
+
+    /// Its pixels, packed RGB888 row by row: what a composition is averaged from
+    /// ([`crate::combined::Compositor`]).
+    pub fn rgb(&self) -> &[u8] {
+        &self.rgb
     }
 
     /// Copy `rgb` — packed RGB888 for `rect` — into the mirror.
@@ -155,6 +172,16 @@ pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
          remote knows its own size, so check-config cannot catch this — give this \
          target a remote that can be asked for a smaller desktop: in a session started \
          with resize the gateway holds every size it asks for under this ceiling"
+    );
+    Ok(())
+}
+
+/// Refuse a picture counted past the ceiling's area ([`within_area`]).
+pub fn check_area(pixels: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        within_area(pixels),
+        "the gateway will not show {pixels} pixels of a Mac's screens at once: the ceiling \
+         is {MAX_PIXELS}, a {MAX_LONG_SIDE}x{MAX_SHORT_SIDE} picture's"
     );
     Ok(())
 }

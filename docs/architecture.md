@@ -150,12 +150,17 @@ and a host that does not draw one ends the session
 #### A Mac's Standard Screen Sharing
 
 Screen Sharing's Standard mode (`ard`, including the unofficial
-`virtual_display = true`) passes the Mac's own picture, in the quality the
-session was started with at the picker, Adaptive (beta) or Full quality
-(beta): the Mac is asked for its quality of that name, as Apple's viewer asks
-for it, and its rectangles are passed for the page to decode, on one screen, on
-the virtual display and on Combined Display alike. Nothing of it is encoded
-here. The Adaptive picture is a coarse pass of each changed area and its
+`virtual_display = true`) shows the Mac's screens one at a time or, on its
+physical screens, all at once as Combined Display, as the session was started at
+the picker. One at a time, it passes the Mac's own picture, in the quality the
+session was started with, Adaptive (beta) or Full quality (beta): the Mac is
+asked for its quality of that name, as Apple's viewer asks for it, and its
+rectangles are passed for the page to decode, on one screen and on the virtual
+display alike. Nothing of it is encoded here. Combined Display (alpha) is the one
+Standard picture coded here: the Mac is asked for its Full quality, which the
+gateway decodes, composes and sends as [the tiles](#the-tiles), at
+`video_quality`; see [A Standard Mac's Combined Display](#a-standard-macs-combined-display).
+No other target has a combined view. The Adaptive picture is a coarse pass of each changed area and its
 refinement after it, at the same precision on any link: the Mac sends fewer
 updates on a slower link, and refines them once the screen is still, and the
 page's painting is the link it finds; the Full-quality picture is lossless zlib, which only goes slower on a slow link,
@@ -287,7 +292,8 @@ whose bitmap updates are sent as tiles by the gateway.
   socket carries no picture: the tab is painted from the picture the session's
   page composes, handed across the browser
   ([RDP's graphics pipeline](#rdps-graphics-pipeline)).
-- Size, sound, which of the Mac's streams is passed if any and how an RDP
+- Size, sound, which of the Mac's streams is passed if any, whether a Standard
+  Mac's screens are shown one at a time or as Combined Display, and how an RDP
   host draws its pipeline are
   chosen under the target at the picker and carried by `connect`; they are not
   config keys, and the gateway holds the session to them. An RDP host's pipeline
@@ -332,6 +338,15 @@ whose bitmap updates are sent as tiles by the gateway.
   over screens of different densities: the gateway sends a `mosaic` and the
   browser composes each screen at its points (`frontend/src/mosaic.ts`). Do not
   extend it to another engine, view or density.
+  - Exception: that composition is made in the gateway where the browser's
+    density is no finer than any screen's, a denser screen resampled down to it
+    per region (`src/combined.rs`), so a 2x screen shown on a 1x browser is
+    carried at the pixels the browser shows rather than at four times them. A
+    less dense screen is never enlarged there: the page's mosaic still draws it
+    up. The trade-off is a resample in the gateway, the page's at the same
+    arithmetic, for a quarter of the bytes on the link. Screen Sharing
+    Standard's Combined Display session alone. See
+    [A Standard Mac's Combined Display](#a-standard-macs-combined-display).
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
   pixel density, not a fit factor. A session started with resize has the window
   continuously driving the remote size, and any other keeps the size it opened
@@ -415,15 +430,17 @@ the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
 cropped picture. See [Past the ceiling](#past-the-ceiling). A Standard Mac on
-its physical screens is held there too, though its picture is its own. The
-ceiling is counted in the pixels the Mac sends, not in what the page draws of
-them: Combined Display over a 2x screen beside a 1x one keeps the 2x screen's
-backing pixels, so the virtual Mac's 1280×800 and 1440×900-point screens come to
-4160×1800 and are held, though the page's mosaic would show them at 2720×900 in
-a 1x browser. The notice stays up until one screen is chosen
-([roadmap](roadmap.md#combined-displays-ceiling-counted-in-what-the-page-shows)).
-Its rectangles are still passed while it is held, and the page decodes them
-under the notice, since each is drawn on the ones before it.
+its physical screens is held there too, though its picture is its own, and its
+rectangles are still passed while it is held, the page decoding them under the
+notice, since each is drawn on the ones before it. Combined Display is counted
+by its screens, not by the bounds they span: the sum of the pixels the page is
+sent of each, as composed in the gateway or as the Mac sent them, against the
+ceiling's area, 3840×2400 (`video::MAX_PIXELS`). The virtual Mac's 1280×800 1x
+screen and 1440×900-point 2x one come to 1280×800 + 1440×900 pixels in a 1x
+browser and 1280×800 + 2880×1800 in a 2x one, within it either way. Until the
+first layout names the screens, a Standard Mac is counted by its framebuffer's
+area, the most they can come to, so a view its layout will show is not held on
+the way to it.
 
 #### wlshare's VP9 and the `wlshare` subtype
 
@@ -546,14 +563,18 @@ or add a key or a choice that selects the stream or its chroma. See
 
 #### A Standard Mac's own picture
 
-An `ard` target's picture is the Mac's own, chosen at the picker of two, in
-this order: its Adaptive picture passed (beta) and its Full-quality picture
-passed (beta), the two qualities of Apple's viewer's menu. The Adaptive one is
-taken until the other is chosen, and neither is greyed: the page decodes them in
-WebAssembly, which every page that starts has. A session that names neither is
-refused, since nothing of a Standard Mac's is coded here: do not add tiles of it,
-for a view or a link. It is one picture on every view, one screen, the
-virtual display and Combined Display alike.
+An `ard` target's screens shown one at a time have the Mac's own picture,
+chosen at the picker of two, in this order: its Adaptive picture passed (beta)
+and its Full-quality picture passed (beta), the two qualities of Apple's viewer's
+menu. The Adaptive one is taken until the other is chosen, and neither is
+greyed: the page decodes them in WebAssembly, which every page that starts has.
+A session of one screen at a time that names neither is refused, since nothing of
+it is coded here: do not add tiles of it, for a screen or a link. It is one
+picture on one screen and on the virtual display alike. Such a session starts on
+the main screen, asked for over the combined view the Mac opens on, which is
+never shown, and its display menu lists the screens alone: Combined Display is a
+session of its own ([A Standard Mac's Combined Display](#a-standard-macs-combined-display)),
+never switched to or from mid-session.
 
 - **What is asked.** The session lists the encoding of its quality ahead of
   ZRLE, as Apple's viewer's menu lists it ahead of its other codecs
@@ -567,8 +588,8 @@ virtual display and Combined Display alike.
   codes no tile; the page decodes them in its own module
   (`frontend/wasm/vnc`), the tiles in a decoder written there and the zlib
   on miniz_oxide's inflater, onto a framebuffer of its own and paints the canvas
-  where each drew, through the mosaic where Combined Display needs one. Do not
-  add a decoder of either to the gateway, or transcode them.
+  where each drew. Do not add a decoder of the tiles to the gateway, or
+  transcode either: the zlib decoded there is Combined Display's alone.
 - **Never dropped, never resumed.** A rectangle is drawn on what the ones
   before it left: for Adaptive, copies of tiles on the framebuffer, cached tiles
   by index, the last full update's coefficients refined; for Full, the window of
@@ -591,13 +612,48 @@ virtual display and Combined Display alike.
   its changes per update and reads it off the screen as it sends it, so any wait
   between updates has a moving window's strips read off different moments. Do
   not add a request per update or an interval above zero.
-- **The ceiling, as for video, in the Mac's pixels.** A desktop whose pixels
-  as the Mac sends them are past it is held, and the page offers its screens:
-  Combined Display over mixed densities among them, though the mosaic would
-  draw it smaller. The
-  rectangles go on being passed and decoded under the notice: dropping one
-  would spoil every picture drawn on it. See
+- **The ceiling, as for video, in the Mac's pixels.** A screen whose pixels
+  as the Mac sends them are past it is held, and the page offers the other
+  screens. The rectangles go on being passed and decoded under the notice:
+  dropping one would spoil every picture drawn on it. See
   [A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through).
+
+#### A Standard Mac's Combined Display
+
+An `ard` target on the Mac's physical screens offers, beside one screen at a
+time, Combined Display (alpha): every screen at once, as Apple's viewer's
+Combined Display has them, chosen at the picker's Displays row and held for the
+session. It is Screen Sharing Standard's alone; no other target has a combined
+view, and nothing here is reached by any other engine. Under it the picker greys
+the Mac's pictures, as it passes neither.
+
+- **The Mac's Full quality, decoded here.** The session lists zlib ahead of ZRLE,
+  as a Full-quality session does, and the gateway inflates it on the
+  connection's one stream (`vnc_encodings`, `Payload::Zlib`): lossless from the
+  Mac to the gateway, which is the leg on a LAN.
+- **Composed here, or by the page.** Over screens of one density the Mac scales
+  the framebuffer to the browser's density, as for one screen, and it is the
+  desktop. Over screens of different densities, where the browser's density is
+  no finer than any screen's, a 1x browser, the gateway composes every screen at
+  its points at that density (`src/combined.rs`): a denser screen is resampled
+  down, each composed pixel the mean of the Mac's pixels it covers, as the page's
+  medium interpolation draws it, recomposed per changed rectangle from a copy of
+  the Mac's framebuffer, and the gaps between unequal screens filled with the
+  page's gap colour. The browser is sent that as one plain desktop, with no
+  mosaic, and a position on it reaches the Mac in its screen's pixels, nothing
+  between screens but a release, as the page's mosaic has it. A browser denser
+  than a screen, a 2x one, is sent the Mac's own pixels with the `mosaic` it
+  composes them by, since a screen is never enlarged in the gateway. A browser
+  that changes density is composed for again, and the Mac asked to repaint.
+- **The tiles, as any picture coded here.** What is composed goes to
+  [the tiles](#the-tiles) at `video_quality`, unchanged: paced by the page's
+  painting, coarse first on a slow link, made exact once still. The session
+  resumes for a browser that comes back, the `mosaic` resent ahead of its resize.
+- **Kept on every screen.** A layout of one screen is answered with the
+  combined view again, and the display menu offers no screen.
+- **Counted by its screens.** The ceiling counts the sum of the pixels the page
+  is sent of each screen, against its area
+  ([A desktop past the ceiling](#a-desktop-past-the-ceiling)).
 
 #### RDP's graphics pipeline
 
@@ -706,7 +762,9 @@ resize has no picture until the remote sends a smaller one — see
 A target's picture keys are per target, and every one has a default:
 
 - `video_quality` (1–100, default 90) is the JPEG quality of a changed tile of many
-  colours coded here, and the ceiling wlshare's VP9 holds to.
+  colours coded here, a Standard Mac's Combined Display's among them, and the
+  ceiling wlshare's VP9 holds to. A Mac's picture passed has no use for it, so it
+  is refused on `ard-high-performance` and on `ard` with `virtual_display`.
 - `render_adaptive` (on unless a target writes `false`), a `wlshare` target's
   alone, lets wlshare's VP9 walk its quality on the browser's link — see
   [wlshare's stream, passed through](#wlshares-stream-passed-through). The tiles
@@ -844,8 +902,11 @@ A desktop past the picture ceiling is one the gateway will not show
 (`video::check_picture`). The gateway sizes every desktop it asks for under it, so
 only a remote it cannot size gets there: a plain VNC server, a wlshare one on
 a physical output, whose desktop is simply that large, or a Mac in Standard
-mode, whose Combined Display comes to 5376×2287 over a 2x screen beside a 1x
-one.
+mode, on a screen past it or on Combined Display. Combined Display is counted by
+its screens' pixels as the page is sent them, against the ceiling's area,
+3840×2400 (`video::within_area`), and not by the bounds they span: a 1x screen
+beside a 2x one spans 4160 pixels across and is within it
+(`VideoSink::counts`, which the tiles' own check follows).
 
 Such a desktop has no picture. `Oversize` in `src/encode.rs` is the source's side
 of it, fixed when the engine starts:
@@ -1257,7 +1318,7 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   Mac sent about one and a half updates a second where an unpaced link took
   seventy. A bound of 32 KiB alone held a fast page to one rectangle a round
   trip, since a Full-quality rectangle is larger: against a page acknowledging at
-  once 40 ms away, Full quality's Combined Display of a 1x and a 2x screen came
+  once 40 ms away, Full quality's view of a 1x and a 2x screen together came
   at 6.8 MB/s held to it, 15.0 MB/s held to the painting, and 17.6 MB/s unpaced,
   the round trip the same. Below about 260 kbit/s the bound is its floor.
 - **Started over, never repainted.** The plan does not resume
@@ -1274,8 +1335,7 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   (`standardPicture.ts`) at `standardStart`, sizes its framebuffer at every
   `resize`, decodes each record in wire order and puts the rectangle it drew
   onto the canvas from the module's memory (`putImageData` with the dirty
-  rectangle), where Combined Display's mosaic composes it like any other
-  picture. A resize leaves the framebuffer black, for Adaptive with no tile
+  rectangle). A resize leaves the framebuffer black, for Adaptive with no tile
   coded, the tables and the tile cache kept, and for Full with the zlib stream
   kept, as the Mac does. A rectangle that does not
   decode, or a batch that arrived malformed, ends the picture with the reason
@@ -1911,7 +1971,8 @@ instead of a reconnect.
 
 These things about a session are chosen by whoever starts it, before it starts:
 how the desktop is sized, whether the remote's sound is taken and as what,
-which of a Mac's own streams is passed through if any, where a second virtual display
+which of a Mac's own streams is passed through if any, whether a Standard Mac's
+screens are shown one at a time or as Combined Display, where a second virtual display
 sits, how an RDP host draws its graphics pipeline, and whether a Mac's
 passed HEVC is decoded by the page's
 own software decoder ([Decoded in the page](#decoded-in-the-page)), which is the
@@ -1930,7 +1991,7 @@ and `GET /api/targets` carries it:
 | `rdp` with `egfx = false` | no | shown | hidden | hidden |
 | `vnc` | no | hidden | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden |
-| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive or Full-quality picture, passed (beta) | hidden |
+| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive or Full-quality picture, passed (beta), greyed under Combined Display; and as Displays: one at a time or Combined (alpha) | hidden |
 | `vnc`, `ard` with `virtual_display` | yes | hidden | shown, as for `ard` | hidden |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden |
 
@@ -2775,8 +2836,9 @@ configuration, which always names both. The sound is the session's, on the first
 tab. See [Two virtual displays](apple-vnc-889.md#two-virtual-displays).
 
 Where the list is sent, the checkmark moves only when the remote comes back naming
-the screen it is now sending — never on the click. On a Mac the engine prepends a
-*Combined Display* entry of its own so a client that picks a screen can get back; see
+the screen it is now sending — never on the click. A Standard Mac shown one screen
+at a time lists its screens alone, and one on Combined Display sends no list:
+the view is the session's, chosen at the picker; see
 [`apple-vnc-889.md`](apple-vnc-889.md). wlshare captures one output for a
 connection and has no combined view to offer, so its list is the compositor's
 outputs; see [Switching outputs over VNC with wlshare](wlshare-outputs.md).
@@ -3027,15 +3089,18 @@ authoritative. Its pixels pass through unchanged, and its effective density
 (`native density × viewer scale`) is the `Resize.scale`.
 
 Combined Display over screens of *different* densities is the one view no factor can
-render. There the gateway asks for 1.0, as Apple's viewer does, and sends a
-`ServerMsg::Mosaic` ahead of the `Resize`: each screen's rectangle in the
-framebuffer and in points. The paint worker keeps the framebuffer off screen and
-draws every screen at its points at the browser's own density, and the page maps
-pointer positions back through the same regions (`frontend/src/mosaic.ts`). It is
-the only place the browser rescales remote pixels. See
+render. There the gateway asks for 1.0, as Apple's viewer does. For a browser no
+denser than any screen, a 1x one, it composes every screen at its points at that
+density itself (`src/combined.rs`) and the browser is sent one plain desktop at
+it, its positions mapped back to the Mac's pixels in the gateway. For a denser
+browser it sends a `ServerMsg::Mosaic` ahead of the `Resize`: each screen's
+rectangle in the framebuffer and in points. The paint worker keeps the
+framebuffer off screen and draws every screen at its points at the browser's own
+density, and the page maps pointer positions back through the same regions
+(`frontend/src/mosaic.ts`). These are the only places remote pixels are
+rescaled, the gateway's downward alone. See
+[A Standard Mac's Combined Display](#a-standard-macs-combined-display) and
 [Apple RFB 003.889, as measured](apple-vnc-889.md#combined-display-over-mixed-densities).
-Taken at factor 1.0, that combined framebuffer is large — a 2x screen beside a 1x
-one measured 5376×2287 — and is passed and painted at that size like any other.
 
 **RFB 003.889** is Apple's own protocol revision, and both Apple subtypes speak
 it, as Apple's viewer answers every Mac before choosing a mode after ServerInit.

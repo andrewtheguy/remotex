@@ -21,6 +21,7 @@ import {
   type SoundRow,
   type TargetInfo,
   targetOptions,
+  type ViewOption,
 } from "./targetChoices.ts";
 import { sizeFollows } from "./useRemoteDesktop.ts";
 
@@ -319,6 +320,19 @@ export default function TargetPicker({
                         }
                       />
                     )}
+                    {/* How a Standard Mac's screens are shown: Screen
+                        Sharing Standard's alone. */}
+                    <ViewChoice
+                      target={t.name}
+                      views={options.views}
+                      chosen={options.choices.standardView}
+                      locked={pendingTarget !== null}
+                      choose={(view) =>
+                        setRemembered((was) =>
+                          rememberChoice(was, t.name, "standardView", view),
+                        )
+                      }
+                    />
                     {/* How a Mac's picture reaches this browser, where the
                         target has one to choose. */}
                     <PictureChoice
@@ -379,6 +393,46 @@ export default function TargetPicker({
         <AppVersion className="app-version" />
       </div>
     </div>
+  );
+}
+
+// How a Standard Mac's screens are shown: one at a time or Combined Display.
+// Screen Sharing Standard's alone; nothing on any other target.
+function ViewChoice({
+  target,
+  views,
+  chosen,
+  locked,
+  choose,
+}: {
+  target: string;
+  views: ViewOption[] | null;
+  chosen: Choices["standardView"];
+  locked: boolean;
+  choose: (view: ViewOption["value"]) => void;
+}) {
+  if (!views) {
+    return null;
+  }
+  return (
+    <fieldset className="picker-choice">
+      <legend>Displays</legend>
+      {views.map((view) => (
+        <label key={view.value} className="picker-option">
+          <input
+            type="radio"
+            name={`picker-view-${target}`}
+            checked={chosen === view.value}
+            disabled={locked}
+            onChange={() => choose(view.value)}
+          />
+          <span className="picker-option-text">
+            <span>{view.label}</span>
+            <span className="picker-option-note">{view.note}</span>
+          </span>
+        </label>
+      ))}
+    </fieldset>
   );
 }
 

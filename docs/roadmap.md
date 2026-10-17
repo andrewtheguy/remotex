@@ -104,23 +104,6 @@ first. A refresh, like a keyframe, comes at most once a second.
 Fixing that does not take it out of alpha by itself. It also needs more testing
 than it has had before it is offered as anything else.
 
-### Combined Display's ceiling counted in what the page shows
-
-A Standard Mac's desktop is held past the picture ceiling, counted in the pixels
-the Mac sends ([A desktop past the ceiling](architecture.md#a-desktop-past-the-ceiling)).
-Over a 2x screen beside a 1x one, Combined Display keeps the 2x screen's backing
-pixels, and the page's mosaic draws each screen at its points, so what it would
-show can be under the ceiling while the Mac's framebuffer is past it: the virtual
-Mac's two screens come to 4160×1800 and are held, where a 1x browser would show
-2720×900.
-
-The plan is to count the ceiling in the picture the page shows. It is not a
-change to the check alone: the gateway would need the composed size, which
-follows from the screens' layout and the density the browser draws at, so one
-held at 2x may not be at 1x; and the page would decode a framebuffer past the
-ceiling off screen to compose it, which is the memory a phone may not have. It is
-held back as much work for little: one screen at a time is already shown.
-
 ### A touchpad's scroll as a gesture on a Mac
 
 A Mac is sent a scroll as a distance on both axes, with no gesture around it

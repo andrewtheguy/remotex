@@ -21,9 +21,14 @@
 //   HEVC, or its H.264, in that order: see `pictureOptions`. The first this
 //   browser can take is taken until another is chosen. The H.264 is never
 //   greyed: no browser is asked whether it decodes it.
-// - A Standard Mac's picture is one of the Mac's own, passed through (beta), as
-//   Apple's viewer's quality menu has them, Adaptive or Full, which this page
-//   decodes: the Adaptive one until another is chosen, and neither greyed.
+// - A Standard Mac's screens are shown one at a time or all at once, as Combined
+//   Display: see `VIEWS`. Screen Sharing Standard's alone; no other target has a
+//   combined view. One at a time until Combined is chosen.
+// - A Standard Mac's picture shown one screen at a time is one of the Mac's own,
+//   passed through (beta), as Apple's viewer's quality menu has them, Adaptive or
+//   Full, which this page decodes: the Adaptive one until another is chosen, and
+//   neither greyed. Combined Display passes neither: the gateway codes it from the
+//   Mac's Full quality, so both are greyed under it.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
 //   or lossless: see `soundRow`. In a browser with no audio decoder only the
 //   lossless one plays, which the page decodes itself, so ticking takes it.
@@ -86,6 +91,11 @@ export interface TargetInfo {
   placement: boolean;
   /** Whether how the host draws the graphics pipeline is a choice. */
   pipeline: boolean;
+  /**
+   * Whether a Standard Mac's screens are shown one at a time or as Combined
+   * Display: Screen Sharing Standard's alone.
+   */
+  standardView: boolean;
 }
 
 /** A desktop size in points. */
@@ -120,6 +130,12 @@ export type Placement = "right" | "left" | "top" | "bottom";
  */
 export type Pipeline = "high-quality" | "adaptive-desktop" | "adaptive-region";
 
+/**
+ * How a Standard Mac's screens are shown, as `connect` names it: one at a time, its
+ * own picture passed, or all at once as Combined Display, which the gateway codes.
+ */
+export type StandardView = "one" | "combined";
+
 /** What `connect` carries. */
 export interface Choices {
   size: Sizing;
@@ -133,6 +149,7 @@ export interface Choices {
   passthrough: Passthrough | null;
   placement: Placement;
   pipeline: Pipeline;
+  standardView: StandardView;
 }
 
 /** What this browser can do with a target. */
@@ -214,6 +231,13 @@ export interface PipelineRow {
   h264: PipelineOption<Exclude<Pipeline, "high-quality">>[];
 }
 
+/** One way a Standard Mac's screens can be shown. */
+export interface ViewOption {
+  value: StandardView;
+  label: string;
+  note: string;
+}
+
 /** One place the second display can sit. */
 export interface PlacementOption {
   value: Placement;
@@ -253,6 +277,8 @@ export interface TargetOptions {
   placements: PlacementOption[] | null;
   /** How the host draws the pipeline, as a choice: null where it is none. */
   pipelineRow: PipelineRow | null;
+  /** How a Standard Mac's screens are shown, as a choice: null elsewhere. */
+  views: ViewOption[] | null;
   /** The target's stream where it is passed in every session: null otherwise. */
   passed: PassedNote | null;
   /**
@@ -440,6 +466,26 @@ function soundRow(
   };
 }
 
+// A Standard Mac's screens: one at a time, the Mac's own picture passed, or every
+// screen at once as Combined Display, which the gateway codes from the Mac's Full
+// quality, a screen denser than this display scaled down to it there.
+const VIEWS: ViewOption[] = [
+  {
+    value: "one",
+    label: "One at a time",
+    note: "The main screen first, the others in the display menu, in the picture chosen below.",
+  },
+  {
+    value: "combined",
+    label: "Combined (alpha)",
+    note: "Every screen at once, as Apple's viewer's Combined Display: the Mac's Full quality, sent as tiles by the gateway, which fit it to the link. Best for two screens that fit one window.",
+  },
+];
+
+// Why a Standard Mac's own picture is no choice under Combined Display.
+const COMBINED_PICTURE =
+  "Not with Combined Display, which the gateway codes from the Mac's Full quality.";
+
 // The second display against the first: the edge of the first a window dragged
 // over arrives on the second from. The right is where it has always been.
 const PLACEMENTS: PlacementOption[] = [
@@ -509,6 +555,39 @@ function pipelineRow(
 }
 
 /**
+ * `target`'s screens and picture as the picker shows them: one at a time or
+ * Combined Display on a Standard Mac, the remembered one where it is offered, and
+ * the Mac's pictures, greyed under Combined Display, which passes none.
+ */
+function viewRows(
+  target: TargetInfo,
+  remembered: StandardView | undefined,
+  abilities: Abilities,
+): {
+  views: ViewOption[] | null;
+  standardView: StandardView;
+  pictures: PictureOption[] | null;
+} {
+  const views = target.standardView ? VIEWS : null;
+  const standardView =
+    views?.find((option) => option.value === remembered)?.value ?? "one";
+  const offered = target.passthroughs.some(
+    (passthrough) => passthrough !== "rdp-graphics",
+  )
+    ? pictureOptions(target, abilities)
+    : null;
+  const pictures =
+    standardView === "combined" && offered
+      ? offered.map((option) => ({
+          ...option,
+          note: COMBINED_PICTURE,
+          disabled: true,
+        }))
+      : offered;
+  return { views, standardView, pictures };
+}
+
+/**
  * The options under `target`, from what was `remembered` for it and what this
  * browser can do. A size the operator configured is the size until somebody
  * chooses another, and no remote's sound starts playing until somebody asks.
@@ -537,11 +616,11 @@ export function targetOptions(
     : null;
   const blocked =
     always && !abilities.rdpGraphics ? RDP_GRAPHICS.blocked : null;
-  const pictures = target.passthroughs.some(
-    (passthrough) => passthrough !== "rdp-graphics",
-  )
-    ? pictureOptions(target, abilities)
-    : null;
+  const { views, standardView, pictures } = viewRows(
+    target,
+    remembered?.standardView,
+    abilities,
+  );
   // What was chosen last time, where it can be had here, and otherwise the
   // first that can: the H.264 and a Standard Mac's pictures always can.
   const able = pictures?.filter((option) => !option.disabled) ?? [];
@@ -557,12 +636,14 @@ export function targetOptions(
       placements?.find((option) => option.value === remembered?.placement)
         ?.value ?? "right",
     pipeline: drawn.pipeline,
+    standardView,
   };
   return {
     sizes,
     soundRow: sound.row,
     placements,
     pipelineRow: drawn.row,
+    views,
     passed,
     pictures,
     choices,

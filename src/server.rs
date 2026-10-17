@@ -685,6 +685,10 @@ struct TargetInfo {
     /// Whether how the host draws the graphics pipeline, high quality or adaptive
     /// H.264, is a choice.
     pipeline: bool,
+    /// Whether a Standard Mac's screens are shown one at a time or as Combined
+    /// Display is a choice: Screen Sharing Standard's alone.
+    #[serde(rename = "standardView")]
+    standard_view: bool,
 }
 
 /// A desktop size in points, as the picker shows it before Start.
@@ -718,6 +722,7 @@ impl TargetInfo {
             passthroughs: offers.passthrough,
             placement: offers.placement,
             pipeline: offers.pipeline,
+            standard_view: offers.standard_view,
         }
     }
 }
@@ -1456,13 +1461,13 @@ mod tests {
         // and no sound.
         assert_eq!(
             entry("mac"),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":["apple-adaptive","apple-full"],"placement":false,"pipeline":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":["apple-adaptive","apple-full"],"placement":false,"pipeline":false,"standardView":true}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win"),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"placement":false,"pipeline":true}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"placement":false,"pipeline":true,"standardView":false}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // picture is, in either codec, and is always passed, so it has no VP9 to
@@ -1470,14 +1475,14 @@ mod tests {
         let fast = entry("fast");
         assert!(
             fast.ends_with(
-                r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"placement":false,"pipeline":false}"#
+                r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"placement":false,"pipeline":false,"standardView":false}"#
             ),
             "{fast}"
         );
         // Where the second display sits is offered by a host asked for two.
-        assert!(entry("two").ends_with(r#""placement":true,"pipeline":true}"#));
+        assert!(entry("two").ends_with(r#""placement":true,"pipeline":true,"standardView":false}"#));
         // wlshare's picture is no choice.
-        assert!(entry("sway").ends_with(r#""pipeline":false}"#));
+        assert!(entry("sway").ends_with(r#""pipeline":false,"standardView":false}"#));
         // The page's HEVC decoder is a choice where the gateway has it and the
         // target has a Mac's picture to pass.
         assert!(entry("fast").contains(r#""software":false,"#));
