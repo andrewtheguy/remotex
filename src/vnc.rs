@@ -2404,8 +2404,7 @@ async fn connect(
                  Performance session's picture is its media stream"
             );
             let opening = opening_mode(config, choices.size, display);
-            let encodings = vnc_apple::encodings(plan.apple_standard);
-            apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, receive, encodings)
+            apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, receive, plan.apple_standard)
                 .await
         }
     }
@@ -2821,9 +2820,8 @@ async fn apple_preface(
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
     // How the Mac's picture is passed, on a session with its media stream.
     receive: Option<vnc_apple_media::Receive>,
-    // What the Mac is asked for: [`vnc_apple::ENCODINGS`], or with its 8×8 tiles or
-    // zlib ahead of ZRLE for a session that passes its own picture.
-    encodings: &[i32],
+    // The quality of the Mac's own picture, on a Standard session that passes it.
+    standard: Option<StandardQuality>,
 ) -> anyhow::Result<Connected> {
     let virtual_display = config.has_virtual_display();
     let media_stream = config.media_stream();
@@ -2901,13 +2899,13 @@ async fn apple_preface(
     // The same list in both modes: the display layout that names the Mac's screens,
     // or the one virtual display, and ZRLE for their pixels, or the tiles or zlib
     // of its own picture.
-    uplink.send(&set_encodings(encodings)).await?;
+    uplink.send(&set_encodings(vnc_apple::encodings(standard))).await?;
     if virtual_display {
         // Arm the server's sender. Cursor shapes above all depend on it across a
         // login or lock, which is why the full region is re-sent on every layout
         // too, and which is when Standard on the physical displays first arms it.
         uplink
-            .send(&vnc_apple::auto_framebuffer_update(push_interval_us(media_stream), server.size()))
+            .send(&vnc_apple::auto_framebuffer_update(push_interval_us(media_stream, standard), server.size()))
             .await?;
     }
 
@@ -3057,7 +3055,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         following: false,
         declared: None,
         repaint_owed: false,
-        push_interval_us: push_interval_us(media_stream),
+        push_interval_us: push_interval_us(media_stream, standard),
         hp,
         hp_displays,
         virtuals: Vec::new(),
@@ -4385,10 +4383,16 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // fence is echoed.
     let mut held_fences: VecDeque<(tokio::time::Instant, bool, Vec<u8>)> = VecDeque::new();
     let mut cycle = UpdateCycle::new();
-    // A Standard session's pushes follow what its updates cost to take. High
-    // Performance's picture is the media stream, and its pixel region is held to
-    // one pixel, so there is no cost here to follow.
-    let mut push_pace = (apple.is_some() && media.is_none()).then(vnc_apple::PushPace::default);
+    // A Standard session that passes the Mac's own picture is pushed to as Apple's
+    // viewer is, back to back and never asked between updates, so the strips of a
+    // moving window go out from one screen ([`vnc_apple::PUSH_INTERVAL_STANDARD_US`]).
+    let passes_standard = desktop.lock().unwrap().standard.is_some();
+    // The VP9 encoded here from a Standard session's ZRLE has its pushes follow
+    // what its updates cost to take. High Performance's picture is the media
+    // stream, and its pixel region is held to one pixel, so there is no cost here
+    // to follow.
+    let mut push_pace =
+        (apple.is_some() && media.is_none() && !passes_standard).then(vnc_apple::PushPace::default);
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
         // video stream still hands over pixels the mirror is holding when the remote
@@ -4708,8 +4712,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // one thing that has to stop — it is the round trip per frame this
                 // removes. Non-incremental requests are unaffected and still go where
                 // they went: this gateway needs a full repaint that no amount of
-                // waiting for damage will produce, on a reattach or a resize.
-                let poll = poll && !continuous;
+                // waiting for damage will produce, on a reattach or a resize. A
+                // Standard session that passes the Mac's own picture asks for none
+                // either: each request has the Mac send a strip of a later screen.
+                let poll = poll && !continuous && !passes_standard;
                 if hp_holding {
                     send(uplink, &update_request(true, HP_HOLD_REQUEST)).await?;
                 } else if full_repaint_owed {
@@ -7337,10 +7343,17 @@ fn set_encodings(encodings: &[i32]) -> Vec<u8> {
 }
 
 /// The interval a session first arms the Mac's unasked updates with: High
-/// Performance's, whose pixels are never shown, or a Standard
-/// session's one video frame, which [`vnc_apple::PushPace`] then moves.
-fn push_interval_us(media_stream: bool) -> u32 {
-    if media_stream { vnc_apple::PUSH_INTERVAL_MEDIA_US } else { vnc_apple::PUSH_INTERVAL_US }
+/// Performance's, whose pixels are never shown, a Standard session's that passes
+/// the Mac's own picture, or one video frame of the VP9 encoded here, which
+/// [`vnc_apple::PushPace`] then moves.
+fn push_interval_us(media_stream: bool, standard: Option<StandardQuality>) -> u32 {
+    if media_stream {
+        vnc_apple::PUSH_INTERVAL_MEDIA_US
+    } else if standard.is_some() {
+        vnc_apple::PUSH_INTERVAL_STANDARD_US
+    } else {
+        vnc_apple::PUSH_INTERVAL_US
+    }
 }
 
 /// FramebufferUpdateRequest for the whole desktop.
@@ -12354,6 +12367,34 @@ mod tests {
             };
             assert_eq!(written(&sent), expected, "continuous = {continuous}");
         }
+    }
+
+    /// A Standard session asks the Mac for another update after each one, unless
+    /// it passes the Mac's own picture: that is left to the pushes, as Apple's
+    /// viewer leaves it, since each request has the Mac read its next strip off a
+    /// later screen.
+    #[tokio::test]
+    async fn a_passed_standard_picture_is_never_asked_for_between_updates() {
+        for standard in [None, Some(StandardQuality::Adaptive), Some(StandardQuality::Full)] {
+            let wire = [0u8, 0, 0, 0].repeat(2); // two empty FramebufferUpdates
+            let (uplink, sent) = test_uplink();
+            let (sink, _rx) = test_sink();
+            let desktop = shared_desktop((2, 2), None, None);
+            desktop.lock().unwrap().standard = standard;
+            let shared = test_shared(uplink, desktop, test_shadow((2, 2)));
+            let _ = read_loop(std::io::Cursor::new(wire), shared, true, Some(Apple::default()), sink).await;
+
+            let expected = if standard.is_some() { Vec::new() } else { update_request(true, (2, 2)).repeat(2) };
+            assert_eq!(written(&sent), expected, "{standard:?}");
+        }
+    }
+
+    #[test]
+    fn a_passed_standard_picture_is_pushed_back_to_back() {
+        assert_eq!(push_interval_us(false, Some(StandardQuality::Full)), 0);
+        assert_eq!(push_interval_us(false, Some(StandardQuality::Adaptive)), 0);
+        assert_eq!(push_interval_us(false, None), vnc_apple::PUSH_INTERVAL_US);
+        assert_eq!(push_interval_us(true, None), vnc_apple::PUSH_INTERVAL_MEDIA_US);
     }
 
     /// A second `EndOfContinuousUpdates` is the acknowledgement of a disable, and

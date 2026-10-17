@@ -750,8 +750,9 @@ compensation.
 **`AutoFrameBufferUpdate` (`0x09`) makes the Mac push while the screen changes.**
 Its body is a `u16` version (1), a `u32` interval in microseconds and the armed
 rectangle.
-- **A still screen gets nothing unrequested,** armed or not, so a client that stops
-  polling paints one frame and freezes. Remotex keeps polling.
+- **A still screen gets nothing unrequested,** armed or not. Armed, the next
+  change is pushed however long the screen was still: a virtual Mac armed at 0
+  and never asked again pushed a change after four seconds of a still screen.
 - **A changing screen is pushed as fast as the Mac captures it** when the interval
   is 0. A YouTube video playing on a 1920×1080 virtual display drew 60–90 updates
   a second, 15–33 MB/s of zlib, for two requests. Unarmed, the same screen drew
@@ -772,10 +773,27 @@ rectangle.
   window drew 2–9 updates a second with the Mac silent for a second at a time,
   where the same scroll on a virtual display drew 20–30. With the interval at 0
   the physical display is smooth.
-- **Remotex arms with 33,333 or more.** 33,333 is one frame of its video stream:
+- **Each update carries one rectangle, read off the screen as it is sent.** The
+  daemon keeps the rectangles the screen changed in, merging one into another
+  only where their union is hardly larger than the two, and sends the first of
+  them in each update, read off the screen at that moment. A moving window
+  changes in many strips at each capture, a minimising one in a staircase of
+  them. Pushed at 0, the strips of one capture follow one another within a few
+  milliseconds and show one moment of the animation. Any wait between updates,
+  an interval above 0 or a request per update, has each strip read off a later
+  capture: at 33,333 with a request after each update, a virtual Mac sent one
+  band every 17 ms, and the minimising window was a stack of bands from
+  different moments of the genie. There is no frame boundary on the wire for a
+  client to put them back together.
+- **A Standard session that passes the Mac's own picture is armed as Apple's
+  viewer arms one.** Adaptive and Full quality arm 0 and send no request after
+  an update, so the page paints the strips as the Mac reads them. The Mac's own
+  throttle paces them, held by the page's paint acknowledgments while it falls
+  behind.
+- **Remotex arms the VP9 it encodes with 33,333 or more.** 33,333 is one frame of its video stream:
   it shows no more than a frame in that time however often the Mac pushes, and
   the gap after each update is when the Mac reads its input (below). A Standard
-  session widens the gap as it falls behind. It arms again with what an update
+  session encoded here widens the gap as it falls behind. It arms again with what an update
   costs it to take — the time to read it, decode it and hand it to the video
   stream, the browser's link included where that holds the stream — smoothed over
   a few updates, up to 1,000,000, and comes back to 33,333 as the cost falls. It

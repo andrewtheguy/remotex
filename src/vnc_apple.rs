@@ -321,6 +321,22 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
 /// push comes, and at a second a scroll arrives a frame a second.
 pub const PUSH_INTERVAL_US: u32 = 33_333;
 
+/// The interval a Standard session that passes the Mac's own picture arms
+/// ([`StandardQuality`]), in microseconds: zero, what Apple's viewer arms, with
+/// no request after each update either, as Apple's viewer sends none.
+///
+/// The Mac sends one rectangle of the changes it holds per update and reads that
+/// rectangle off the screen as it sends it, and a moving window comes in strips.
+/// Pushed back to back, a capture's strips go out together, each read off the
+/// screen of the same moment. Any wait between updates, the gap an interval above
+/// zero leaves or a request per update, has each strip read off a later screen,
+/// and a minimising window is a stack of bands from different moments of its
+/// animation. The page paints each update as it comes, so nothing on this side
+/// puts them back together. The pace is the Mac's own: it holds its updates
+/// while more is queued on the connection than its estimate of the link allows,
+/// and the connection backs up whenever the page's paint acknowledgments lag.
+pub const PUSH_INTERVAL_STANDARD_US: u32 = 0;
+
 /// The interval a High Performance session arms, in microseconds. Its picture is
 /// the media stream and the Mac's pixel updates are stepped over undecoded, so
 /// there is nothing to gain from more of them: one a second keeps the arming,
