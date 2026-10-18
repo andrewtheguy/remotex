@@ -1423,9 +1423,16 @@ async fn expect_standard(ws: &mut Ws, quality: Option<&str>) -> Vec<common::Stan
 }
 
 /// [`expect_standard`], for the fake Mac's: rectangles over its corner of the
-/// desktop, each body exactly as the fake sent it.
+/// desktop, each body exactly as the fake sent it. A session of one screen at a
+/// time opens on a pixel of the combined view, asked for until the screen's
+/// layout comes, and the Mac's answer to it is passed like any rectangle, ahead
+/// of the screen whole.
 async fn expect_fake_standard(ws: &mut Ws, quality: Option<&str>) {
-    for rect in expect_standard(ws, quality).await {
+    let mut rects = expect_standard(ws, quality).await;
+    while rects.iter().all(|rect| (rect.x, rect.y, rect.w, rect.h) == (0, 0, 1, 1)) {
+        rects = expect_standard(ws, None).await;
+    }
+    for rect in rects {
         assert_eq!((rect.x, rect.y, rect.w, rect.h), (0, 0, MAC_DESKTOP, MAC_DESKTOP));
         assert_eq!(rect.body, fake_standard_body(rect.body[0]), "the body as the Mac sent it");
     }
