@@ -32,20 +32,25 @@ side.
 > when you upgrade. The page and the gateway are one release too: a tab left
 > open across an upgrade names both versions and asks to be reloaded.
 
-## Demos with windows connecting to mac
+## Demo
 
-### One Remote Virtual Display
+### Windows -> Mac with One Remote Virtual Display
 
 https://github.com/user-attachments/assets/ccd81a84-9ef1-4b0b-a5a6-01c8fbc1b41c
 
 
 
-### Two Remote Virtual Displays
+### Windows -> Mac with Two Remote Virtual Displays
 
 https://github.com/user-attachments/assets/596640b5-9b35-45c3-a875-87934d1c0c0f
 
+### iOS -> Windows
 
+https://github.com/user-attachments/assets/4d9fe60d-8585-477b-bf1b-349105ececc6
 
+### iOS -> Mac
+
+https://github.com/user-attachments/assets/1b5dfc6f-8510-490b-bd88-d4c52c48b0a5
 
 ## Features
 
