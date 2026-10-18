@@ -91,8 +91,8 @@ config key.
 - **Passthrough.** Sends the remote's own stream to the browser as it came
   instead of tiles coded by the gateway. A High Performance Mac's picture is
   always passed, and which stream is the choice: its HEVC, greyed where the
-  browser cannot take it, or its H.264, which is offered to every browser and
-  needs no HEVC decoder in the page. On an `rdp` target with the
+  browser cannot take it, or its H.264, which is offered to every browser with
+  a `VideoDecoder` and needs no HEVC decoder in the page. On an `rdp` target with the
   pipeline on it is no choice: the picker says it is always passed, with no box
   to tick, and a browser that
   cannot compose the pipeline cannot start the target. A passed RDP pipeline

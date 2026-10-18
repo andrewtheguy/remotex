@@ -16,8 +16,9 @@
 //
 // The **decoders** are not refusals. A browser without a `VideoDecoder`, or whose
 // decoder refuses a codec, starts, and what needs the decoder is greyed at the
-// picker with the reason (targetChoices.ts): wlshare's VP9 and a High Performance
-// Mac's H.264 by their own questions (videoCodecs.ts), the Mac's HEVC where the
+// picker with the reason (targetChoices.ts): wlshare's VP9 by its own question and
+// a High Performance Mac's H.264 where there is no `VideoDecoder` (videoCodecs.ts),
+// the Mac's HEVC where the
 // page cannot decode it either (appleMedia.ts), and an RDP host's H.264
 // (rdpH264.ts). The gateway's tiles, a Standard Mac's Adaptive picture and an RDP
 // host's pipeline without H.264 are decoded by the page and need none of it. The

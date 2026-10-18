@@ -1,8 +1,10 @@
 // Whether this browser's own `VideoDecoder` takes the two pictures a target sends
 // with nothing of this page's to stand in: wlshare's VP9 at 4:2:0 and a High
-// Performance Mac's H.264. Asked once, before the client mounts, beside the
-// questions about VP9 at 4:4:4 (nativeVp9.ts), the Mac's HEVC (appleMedia.ts) and
-// an RDP host's H.264 (rdpH264.ts).
+// Performance Mac's H.264. The VP9 is asked once, before the client mounts, beside
+// the questions about VP9 at 4:4:4 (nativeVp9.ts), the Mac's HEVC (appleMedia.ts)
+// and an RDP host's H.264 (rdpH264.ts). The H.264 is not asked: a browser with a
+// `VideoDecoder` and no H.264 is too unlikely to grey for, so having one is the
+// answer, and a decoder that refuses the Mac's says so in the session.
 //
 // A browser without a `VideoDecoder` at all starts like any other: everything it
 // cannot decode is greyed at the picker with the reason, and what it can — the
@@ -11,10 +13,11 @@
 // for it, and the picker greys by them (targetChoices.ts): the Mac's H.264, and a
 // `wlshare` target, whose VP9 is its picture in every session.
 //
-// A doubt reads as no, as the other questions read one: a picture this browser's
-// decoder then refuses has nothing to fall back on, so only a definite "yes"
-// offers it, and anything that throws, a missing `VideoDecoder` among them, reads
-// as "no". The gateway is not told: it is sent no choice the picker greys.
+// A doubt about the VP9 reads as no, as the other questions read one: a picture
+// this browser's decoder then refuses has nothing to fall back on, so only a
+// definite "yes" offers it, and anything that throws, a missing `VideoDecoder`
+// among them, reads as "no". The gateway is not told: it is sent no choice the
+// picker greys.
 
 /**
  * wlshare's VP9 at 4:2:0, profile 0, level 4.0, eight bits, BT.601 studio swing —
@@ -23,13 +26,6 @@
  * asked about.
  */
 const VP9_PROBE = "vp09.00.40.08.01.06.06.06.00";
-
-/**
- * The Mac's H.264 for a strip of a 1600×1000 display, as its sequence parameter
- * set names it (`StreamParams` in src/vnc_apple_media.rs) — High profile, level
- * 3.2. Strips are what a session is sent, but for a display too low for them.
- */
-const APPLE_H264_PROBE = "avc1.640020";
 
 let answers: { vp9: boolean; appleH264: boolean } | null = null;
 
@@ -47,11 +43,10 @@ export async function askVideoCodecs(): Promise<void> {
   if (answers !== null) {
     return;
   }
-  const [vp9, appleH264] = await Promise.all([
-    decodes(VP9_PROBE),
-    decodes(APPLE_H264_PROBE),
-  ]);
-  answers = { vp9, appleH264 };
+  answers = {
+    vp9: await decodes(VP9_PROBE),
+    appleH264: typeof VideoDecoder !== "undefined",
+  };
 }
 
 function answered(): { vp9: boolean; appleH264: boolean } {
@@ -69,7 +64,7 @@ export function decodesVp9(): boolean {
   return answered().vp9;
 }
 
-/** Whether it takes a High Performance Mac's H.264, on the same terms. */
+/** Whether it has a `VideoDecoder`, which is taken to decode the Mac's H.264. */
 export function decodesAppleH264(): boolean {
   return answered().appleH264;
 }

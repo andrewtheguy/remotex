@@ -266,9 +266,10 @@ whose bitmap updates are sent as tiles by the gateway.
 - The page requires a secure context and refuses startup in
   `frontend/src/preflight.ts` without one. A browser without `VideoDecoder`, or
   whose decoder refuses a codec, starts, and what needs it is greyed at the
-  picker with the reason: wlshare's VP9 and a High Performance Mac's H.264 by
-  their own questions (`frontend/src/videoCodecs.ts`), beside the HEVC's and the
-  RDP pipeline's H.264's. The tiles, a Standard Mac's Adaptive picture and a
+  picker with the reason: wlshare's VP9 by its own question, and a High
+  Performance Mac's H.264 where there is no `VideoDecoder`, with no question
+  asked of one (`frontend/src/videoCodecs.ts`), beside the HEVC's and the RDP
+  pipeline's H.264's. The tiles, a Standard Mac's Adaptive picture and a
   pipeline without H.264 need none. A browser without `AudioDecoder`
   starts and plays FLAC, which the page decodes itself, save on an iPhone or
   an iPad, which greys FLAC to keep its WebAssembly down (below) and so has no
@@ -427,8 +428,8 @@ The other two say which passthrough the browser
 can take. The Mac's greys its HEVC at the picker, where a browser that says
 no starts the target passed as H.264; the pipeline's, which is no choice, disables
 Start for an RDP target with the pipeline on. No question is asked about a
-Mac's H.264: it is offered to every browser, and one that does not decode it
-finds out from its decoder, in the session. Nor about a Standard Mac's Adaptive
+Mac's H.264: it is offered to every browser with a `VideoDecoder`, and one
+whose decoder does not take it finds out from that decoder, in the session. Nor about a Standard Mac's Adaptive
 picture, which every page decodes in WebAssembly. Both refuse a `connect` whose
 session would pass what the browser cannot take, and end the session of an
 owner that comes back answering no, which lands on the picker
@@ -2080,8 +2081,8 @@ and `GET /api/targets` carries it:
 - **Offered but unavailable is greyed, with the reason.** The Mac's HEVC
   is greyed wherever the browser cannot take it: one that does not decode the
   Mac's HEVC, or a gateway with no HEVC decoder archive to serve a browser that
-  needs it. The Mac's H.264 is greyed where the browser's own decoder refuses
-  it, and a High Performance Mac neither of whose pictures it takes cannot
+  needs it. The Mac's H.264 is greyed where the browser has no `VideoDecoder`,
+  which is taken to decode it unasked, and a High Performance Mac neither of whose pictures it takes cannot
   start, with the reason. A Standard Mac's own pictures are never greyed. A
   `wlshare` target, whose VP9 is its picture in every session, cannot start in a
   browser whose decoder refuses it. `/api/targets` says which streams a target can pass, as

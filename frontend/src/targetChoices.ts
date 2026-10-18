@@ -167,8 +167,9 @@ export interface Abilities {
   /** Whether it decodes the H.264 an RDP host may draw with (rdpH264.ts). */
   rdpH264: boolean;
   /**
-   * Whether its own decoder takes a High Performance Mac's H.264, and wlshare's
-   * VP9 at 4:2:0 (videoCodecs.ts): no for a browser with no `VideoDecoder`.
+   * Whether it has a `VideoDecoder`, taken to decode a High Performance Mac's
+   * H.264 without asking, and whether that decoder takes wlshare's VP9 at 4:2:0
+   * (videoCodecs.ts).
    */
   appleH264: boolean;
   vp9: boolean;
@@ -343,8 +344,8 @@ function noHevc(target: TargetInfo): string {
  *   the page decodes it itself, which it then does (softwareDecoder.ts). The
  *   socket states both answers, and the gateway passes the picture to a page that
  *   has either.
- * - The H.264 is greyed in a browser whose own decoder does not take it: no
- *   page decoder stands in for it.
+ * - The H.264 is greyed in a browser with no `VideoDecoder`: no page decoder
+ *   stands in for it. Any that has one is taken to decode it, unasked.
  * - The Mac's Adaptive picture is never greyed, which every page decodes in WebAssembly
  *   (standardPicture.ts), nor the gateway's tiles, images every page decodes.
  */
@@ -367,7 +368,7 @@ function pictureOptions(
       label: "H.264, passed through",
       note: abilities.appleH264
         ? "The Mac's own picture in 4:2:0."
-        : "This browser does not decode the Mac's H.264.",
+        : "This browser has no video decoder for the Mac's H.264.",
       disabled: !abilities.appleH264,
     },
     "apple-adaptive": {

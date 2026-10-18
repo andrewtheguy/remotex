@@ -497,7 +497,7 @@ test("a Mac's H.264 this browser cannot take is greyed, with the reason", () => 
   ]);
   assert.match(
     options.pictures?.[1].note ?? "",
-    /does not decode the Mac's H.264/,
+    /no video decoder for the Mac's H.264/,
   );
   assert.equal(
     options.choices.passthrough,
