@@ -35,12 +35,13 @@ side.
 ## Demo
 
 ### Windows -> Mac with One Remote Virtual Display
-
 https://github.com/user-attachments/assets/ccd81a84-9ef1-4b0b-a5a6-01c8fbc1b41c
 
 
 
 ### Windows -> Mac with Two Remote Virtual Displays
+
+- Windows -> Mac with Two Remote Virtual Displays in the first half together with another new tab running connection to another windows RDP instance on a new tab on the second half.
 
 https://github.com/user-attachments/assets/596640b5-9b35-45c3-a875-87934d1c0c0f
 
