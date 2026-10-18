@@ -25,10 +25,11 @@
 const VP9_PROBE = "vp09.00.40.08.01.06.06.06.00";
 
 /**
- * The Mac's H.264 for a 1600×1000 display, as its sequence parameter set names it
- * (`StreamParams` in src/vnc_apple_media.rs) — High profile, level 4.0.
+ * The Mac's H.264 for a strip of a 1600×1000 display, as its sequence parameter
+ * set names it (`StreamParams` in src/vnc_apple_media.rs) — High profile, level
+ * 3.2. Strips are what a session is sent, but for a display too low for them.
  */
-const APPLE_H264_PROBE = "avc1.640028";
+const APPLE_H264_PROBE = "avc1.640020";
 
 let answers: { vp9: boolean; appleH264: boolean } | null = null;
 

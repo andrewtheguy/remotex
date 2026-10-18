@@ -36,10 +36,10 @@ test("each picture is asked about as it arrives, and answered for", async () => 
     return { supported: codec.startsWith("vp09") };
   });
   await askVideoCodecs();
-  // wlshare's 4:2:0 VP9 and the Mac's High profile H.264, as the gateway names
-  // them.
+  // wlshare's 4:2:0 VP9 and the Mac's High profile H.264 in strips, as the
+  // gateway names them.
   assert.deepEqual(asked.sort(), [
-    "avc1.640028",
+    "avc1.640020",
     "vp09.00.40.08.01.06.06.06.00",
   ]);
   assert.equal(decodesVp9(), true);
