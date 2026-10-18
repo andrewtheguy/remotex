@@ -796,8 +796,10 @@ video_quality / render_adaptive, and the session's choices
 
 Every size an engine whose picture is a passed stream asks a remote for is held
 under the picture ceiling (`video::fit_ceiling`: a long side of 3840 and a short
-side of 2400), and a configured `size` past it is refused at config load, an
-`rdp` target with `egfx = false` aside. A remote the gateway cannot size can
+side of 2400), and a configured `size` past it is refused at config load. An
+`rdp` target with `egfx = false` is instead held to the 8192 a side a Windows
+host opens (MS-RDPBCGR 3.3.5.3.3), which it would clamp a larger size to, and a
+configured `size` past that is refused. A remote the gateway cannot size can
 still answer past it; what happens then is
 [past the ceiling](#past-the-ceiling).
 
@@ -2680,7 +2682,7 @@ gateway cannot ask it for a smaller desktop: a `wlshare` one
 [holds the session](#past-the-ceiling) without a picture, and any other stream's
 source reaches the ceiling's refusal. An RDP session with `egfx = false` has no
 ceiling: its tiles are coded here at any size, it asks for the window whole, and
-its configured `size` may be any.
+its configured `size` may be any the host opens, up to 8192 a side.
 
 High Performance paces what the window asks for. A second
 `SetDisplayConfiguration` overlapping the first, or a region of the old size
