@@ -39,7 +39,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remotex-vnc"
+name = "remotex-apple-adaptive"
 version = "0.0.0"
 dependencies = [
  "wasm-bindgen",

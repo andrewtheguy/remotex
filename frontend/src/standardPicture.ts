@@ -1,11 +1,14 @@
-import init, { type InitInput, Standard } from "../wasm/vnc/pkg/remotex_vnc.js";
+import init, {
+  type InitInput,
+  Standard,
+} from "../wasm/apple-adaptive/pkg/remotex_apple_adaptive.js";
 
 // A Mac's Adaptive picture, decoded in the page: the rectangles of a session
 // started with Standard's Adaptive quality, which the gateway passes as the Mac
 // sent them, its own 8x8 tiles, drawn onto a framebuffer of the module's own
-// (wasm/vnc). Each rectangle is drawn on what the ones before it left, so one
-// picture is fed every record of its session, in order, and the canvas is
-// painted from its framebuffer where each rectangle drew. The Mac's Full
+// (wasm/apple-adaptive). Each rectangle is drawn on what the ones before it
+// left, so one picture is fed every record of its session, in order, and the
+// canvas is painted from its framebuffer where each rectangle drew. The Mac's Full
 // quality never comes here: the gateway inflates it and sends its tiles.
 
 /** One session's picture. */

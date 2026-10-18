@@ -977,7 +977,7 @@ picker's Adaptive, whose page decodes it. This is read from the Mac's encoders
 and the viewer's decoders, and
 [what the Mac sends](#what-a-mac-sends-a-viewer-that-lists-them) from a probe's
 captures of a virtual Mac, every rectangle of which remotex's decoder
-(`frontend/wasm/vnc`) decodes with each stream ending on its mark.
+(`frontend/wasm/apple-adaptive`) decodes with each stream ending on its mark.
 
 **The Mac sends one codec.** Of the encodings a `SetEncodings` lists, it takes
 the first of zlib, ZRLE, `0x3e8`–`0x3ea` and `0x3f3` as the one it codes every

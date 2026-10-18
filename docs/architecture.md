@@ -221,7 +221,7 @@ whose bitmap updates are sent as tiles by the gateway.
   `frontend/wasm/flac` is the lossless sound's decoder, the page's
   alone: the gateway's FLAC is libFLAC and shares no code with it, so it has no
   crate under `crates/`. It has no threads, needs no shared memory, and builds
-  on stable. `frontend/wasm/vnc` is the decoder of a Mac's own
+  on stable. `frontend/wasm/apple-adaptive` is the decoder of a Mac's own
   picture, the page's alone on the same terms: the gateway passes the Mac's
   rectangles and decodes none of them. There is no VP9 module: every VP9 is
   sent at a chroma the browser's own decoder takes
@@ -616,7 +616,7 @@ switched to or from mid-session.
 - **The Adaptive picture, passed as it came.** Each rectangle goes to the page
   as a `STANDARD` record, where the Mac put it and its body as the Mac sent it,
   behind a `standardStart`. The gateway decodes none of them and codes no tile;
-  the page decodes them in its own module (`frontend/wasm/vnc`), a decoder of
+  the page decodes them in its own module (`frontend/wasm/apple-adaptive`), a decoder of
   Apple's codec written there, onto a framebuffer of its own and paints the
   canvas where each drew. Do not add a decoder of the tiles to the gateway, or
   transcode them: Apple's codec is the one reason this picture is passed.
@@ -1380,7 +1380,7 @@ Adaptive picture's framing, and nothing else of it needed passing.
   tables and the tile cache kept, as the Mac does. A rectangle that does not
   decode, or a batch that arrived malformed, ends the picture with the reason
   on the page, the last picture left where it is.
-- **The decoder.** `frontend/wasm/vnc` decodes the tiles as Apple's
+- **The decoder.** `frontend/wasm/apple-adaptive` decodes the tiles as Apple's
   viewer does, read from it, to the reference library's integer inverse
   transform and its YCbCr. Against a virtual Mac's captures of a still screen, a
   panning one and both on links of 500 kbit/s and 2 Mbit/s, every one of their
@@ -1641,7 +1641,7 @@ takes ([the codec](#the-codec)).
 
 A third stream is decoded in the page in every session that passes it, since no
 browser's decoder takes it: a Standard Mac's Adaptive picture, in
-`frontend/wasm/vnc`, with no threads
+`frontend/wasm/apple-adaptive`, with no threads
 ([A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through)).
 
 **The HEVC is each page's to decode however it can.** The page asks its own

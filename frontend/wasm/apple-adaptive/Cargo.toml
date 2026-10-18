@@ -14,7 +14,7 @@
 # `wasm32-unknown-unknown` alone, with the profile and the lockfile here. The
 # `rlib` is for its native tests.
 [package]
-name = "remotex-vnc"
+name = "remotex-apple-adaptive"
 version = "0.0.0"
 license = "MIT"
 edition = "2024"

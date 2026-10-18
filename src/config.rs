@@ -288,7 +288,7 @@ pub enum Passthrough {
     /// BETA. A Standard Mac's picture as Apple's viewer's Adaptive quality has it:
     /// the Mac's 8×8 tiles (`0x3f3`), which it codes coarsely first and refines
     /// as the connection lets it, for the page to decode
-    /// (`frontend/wasm/vnc`). Offered by `ard`, and the one picture of a Standard
+    /// (`frontend/wasm/apple-adaptive`). Offered by `ard`, and the one picture of a Standard
     /// Mac's that is passed: it is Apple's own format, which nothing here decodes.
     /// A session that does not choose it is sent the Mac's Full quality, plain
     /// RFB zlib, inflated here and coded as the tiles
