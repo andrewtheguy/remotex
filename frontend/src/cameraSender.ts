@@ -156,10 +156,10 @@ export async function startCameraSender(
   url: string,
   callbacks: CameraSenderCallbacks,
 ): Promise<CameraSender> {
-  // Named refusals before anything is opened. WebCodecs is the client's entry
-  // condition (preflight.ts), but that gate checks the *decoders* this page
-  // cannot run without; the encoder and the track processor are checked here,
-  // where a browser without them costs one feature instead of the page.
+  // Named refusals before anything is opened. The encoder and the track
+  // processor are checked here, where a browser without them costs one feature
+  // instead of the page, as a missing decoder costs the pictures that need it
+  // (videoCodecs.ts).
   if (typeof VideoEncoder === "undefined") {
     throw new Error("this browser has no VideoEncoder");
   }

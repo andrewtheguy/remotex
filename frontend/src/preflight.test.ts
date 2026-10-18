@@ -1,11 +1,11 @@
 // The gate every other file in this client depends on not having to check.
 //
 // Worth its own test precisely because nothing else tests it: once this returns true
-// the rest of the client assumes a secure context and a WebCodecs video decoder
-// everywhere, with no branch left to exercise. If it ever returned true without them
-// the failure would surface as the clipboard, the keyboard and the picture going
-// missing separately, which is the state this exists to make impossible. The audio
-// decoder is the one it lets through, and answers about instead (`decodesAudio`).
+// the rest of the client assumes a secure context everywhere, with no branch left to
+// exercise. If it ever returned true without one the failure would surface as the
+// clipboard, the keyboard and the picture going missing separately, which is the
+// state this exists to make impossible. The decoders it lets through: what needs
+// one is greyed at the picker instead (videoCodecs.ts, `decodesAudio`).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -102,19 +102,17 @@ test("an insecure context refuses, and says where and how", () => {
   assert.equal(root.children[0]?.className, "boot-refusal");
 });
 
-test("a missing video decoder refuses, and says so", () => {
+test("a missing video decoder starts the client", () => {
+  // The gateway's tiles need none, and what does is greyed at the picker.
   for (const audio of [class {}, undefined]) {
     capable();
     globals.VideoDecoder = undefined;
     globals.AudioDecoder = audio;
     const root = element("div");
+    root.children = [element("existing")];
 
-    assert.equal(startupPermitted(asRoot(root)), false);
-    const rendered = text(root);
-    assert.match(rendered, /WebCodecs video decoder/);
-    // Not the origin: the address is the one thing that is fine here, and naming
-    // it sends the reader to fix the deployment instead of the browser.
-    assert.ok(!rendered.includes("http://10.0.0.4:52380"));
+    assert.equal(startupPermitted(asRoot(root)), true);
+    assert.equal(root.children.length, 1);
   }
 });
 
@@ -135,8 +133,7 @@ test("a missing audio decoder starts the client, and is answered for", () => {
 
 test("an insecure context is the reason given, even with no decoders either", () => {
   // WebCodecs is itself secure-context gated, so this is not a contrived pairing —
-  // it is what every insecure origin looks like. Telling that reader to install a
-  // different browser would be telling them to fix the wrong thing.
+  // it is what every insecure origin looks like.
   capable();
   globals.window.isSecureContext = false;
   globals.VideoDecoder = undefined;

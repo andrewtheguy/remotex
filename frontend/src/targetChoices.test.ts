@@ -19,6 +19,8 @@ const ABLE: Abilities = {
   appleMedia: true,
   rdpGraphics: true,
   rdpH264: true,
+  appleH264: true,
+  vp9: true,
   audio: true,
   lossless: true,
   runsHevc: true,
@@ -28,6 +30,8 @@ const UNABLE: Abilities = {
   appleMedia: false,
   rdpGraphics: false,
   rdpH264: false,
+  appleH264: false,
+  vp9: false,
   audio: false,
   lossless: true,
   runsHevc: false,
@@ -462,12 +466,11 @@ test("a browser held to little WebAssembly is offered no lossless sound", () => 
 
 test("a Mac's HEVC this browser cannot take is greyed, with the reason", () => {
   // Remembered from a browser that could: still not sent from one that cannot.
-  // The H.264 is what is left, which no browser is asked about: the target
-  // always starts.
+  // The H.264 is what is left, and the target starts with it.
   const options = targetOptions(
     HIGH_PERFORMANCE,
     { passthrough: "apple-media" },
-    UNABLE,
+    { ...UNABLE, appleH264: true },
   );
   assert.deepEqual(pictures(options), [
     ["apple-media", true],
@@ -479,6 +482,59 @@ test("a Mac's HEVC this browser cannot take is greyed, with the reason", () => {
     "apple-h264",
     "the first it can have",
   );
+  assert.equal(options.blocked, null);
+});
+
+test("a Mac's H.264 this browser cannot take is greyed, with the reason", () => {
+  const options = targetOptions(
+    HIGH_PERFORMANCE,
+    { passthrough: "apple-h264" },
+    { ...ABLE, appleH264: false },
+  );
+  assert.deepEqual(pictures(options), [
+    ["apple-media", false],
+    ["apple-h264", true],
+  ]);
+  assert.match(
+    options.pictures?.[1].note ?? "",
+    /no video decoder for the Mac's H.264/,
+  );
+  assert.equal(
+    options.choices.passthrough,
+    "apple-media",
+    "the one it can have",
+  );
+  assert.equal(options.blocked, null);
+});
+
+test("a Mac neither of whose pictures this browser takes cannot start", () => {
+  // A browser with no VideoDecoder, on a gateway whose page cannot decode the
+  // HEVC either: the Mac sends nothing else.
+  const options = targetOptions(HIGH_PERFORMANCE, undefined, UNABLE);
+  assert.deepEqual(pictures(options), [
+    ["apple-media", true],
+    ["apple-h264", true],
+  ]);
+  assert.equal(options.choices.passthrough, null);
+  assert.match(options.blocked ?? "", /neither of the Mac's pictures/);
+});
+
+test("a wlshare target needs a browser that decodes its VP9", () => {
+  const wlshare = target({ subtype: "wlshare", resize: true, audio: true });
+  assert.equal(targetOptions(wlshare, undefined, ABLE).blocked, null);
+  const unable = targetOptions(wlshare, undefined, { ...ABLE, vp9: false });
+  assert.match(unable.blocked ?? "", /does not decode VP9/);
+  // A plain target, read through the RFB baseline, is sent the tiles.
+  assert.equal(targetOptions(target({}), undefined, UNABLE).blocked, null);
+});
+
+test("a Standard Mac starts in a browser with no video decoder", () => {
+  // Its Adaptive picture is decoded by the page, and its Full quality is the tiles.
+  const options = targetOptions(STANDARD, undefined, UNABLE);
+  assert.deepEqual(pictures(options), [
+    ["apple-adaptive", false],
+    [null, false],
+  ]);
   assert.equal(options.blocked, null);
 });
 
@@ -633,10 +689,10 @@ test("a Mac's picture only this page decodes can be passed", () => {
   assert.equal(options.choices.passthrough, "apple-media");
 
   // Without the page's HEVC decoder, served or runnable, the HEVC is greyed as
-  // for any browser that cannot take it.
-  for (const [offered, abilities] of [
-    [HIGH_PERFORMANCE, NEEDS_PAGE],
-    [MAC_PAGE, { ...NEEDS_PAGE, runsHevc: false }],
+  // for any browser that cannot take it, with which is missing.
+  for (const [offered, abilities, reason] of [
+    [HIGH_PERFORMANCE, NEEDS_PAGE, /this gateway serves no decoder/],
+    [MAC_PAGE, { ...NEEDS_PAGE, runsHevc: false }, /needs WebGL 2/],
   ] as const) {
     const greyed = targetOptions(
       offered,
@@ -644,6 +700,7 @@ test("a Mac's picture only this page decodes can be passed", () => {
       abilities,
     );
     assert.equal(greyed.pictures?.[0].disabled, true);
+    assert.match(greyed.pictures?.[0].note ?? "", reason);
     assert.equal(greyed.choices.passthrough, "apple-h264");
   }
 });

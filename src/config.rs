@@ -628,7 +628,8 @@ pub struct ScreenUnderMinimum {
 /// What the attached browser said it can take, from its session socket
 /// ([`crate::ws`]): the questions the page asks once at load and states on every
 /// session socket it opens. The first two say which passthrough this browser can
-/// be served (a Mac's H.264 is asked of none, and served to any), which is what the picker greys a choice by, what keeps it from
+/// be served (a Mac's H.264 is served to any: the page greys it where its own decoder
+/// refuses it, and the gateway is not told), which is what the picker greys a choice by, what keeps it from
 /// starting a target that passes in every session, and what ends a session whose
 /// owner comes back unable to take its own ([`TargetConfig::beyond`]). The
 /// last two turn no session away: they decide only how a stream the browser is
@@ -671,7 +672,7 @@ impl Decoders {
     pub fn takes(self, passthrough: Passthrough) -> bool {
         match passthrough {
             Passthrough::AppleMedia => self.apple_media,
-            // No browser is asked: one that does not decode it says so itself.
+            // The gateway is not told: the page greys it where its decoder refuses it.
             Passthrough::AppleH264 => true,
             // The page decodes it in WebAssembly, which every page that starts has.
             Passthrough::AppleAdaptive => true,
@@ -3779,8 +3780,8 @@ mod tests {
         assert_eq!(hp.beyond(passed, takes), None);
         assert_eq!(hp.beyond(passed, declines), Some(Passthrough::AppleMedia));
 
-        // The Mac's H.264 is the other stream to pass, and no browser is asked
-        // whether it decodes it.
+        // The Mac's H.264 is the other stream to pass, and the gateway is not told
+        // whether a browser decodes it.
         assert_eq!(hp.accepts(h264), Ok(()));
         let plan = hp.render_plan(h264, declines);
         assert!(plan.apple_h264 && !plan.apple_media);

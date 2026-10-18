@@ -9,7 +9,7 @@
 // from the page, and asserts the decision that answer calls for
 // (`expectDecodedAsTheBrowserSays`): the browser's own decoder where it says yes,
 // and otherwise the page's where the gateway serves it, and where it does not the
-// Mac's H.264, which no browser is asked about.
+// Mac's H.264, which the faked answer leaves to the browser.
 // It runs in two browsers, a file each, so one machine can see both sides:
 // software-hevc-chrome.spec.ts, the installed Google Chrome (`channel: "chrome"`;
 // Playwright's bundled Chromium has no HEVC decoder at all), and
