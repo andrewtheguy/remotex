@@ -9,7 +9,6 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::config::StandardQuality;
 
 /// Ceiling on one clipboard transfer, in bytes, in either direction.
 ///
@@ -860,29 +859,24 @@ impl GraphicsUnit {
     }
 }
 
-/// One of a Mac's rectangles in its own picture (Standard mode's Adaptive or Full
+/// One of a Mac's rectangles in its Adaptive picture (Standard mode's Adaptive
 /// quality), carried as a `STANDARD` record inside a [`batch`] frame: where the
 /// Mac said it is, and its body as the Mac sent it, the bytes after its `u32`
-/// length. Which encoding the bodies are is the quality
-/// [`ServerMsg::StandardStart`] names: Apple's 8×8 tiles (`0x3f3`) for Adaptive,
-/// which docs/apple-vnc-889.md describes, and RFB's zlib for Full.
+/// length. The bodies are Apple's 8×8 tiles (`0x3f3`), which
+/// docs/apple-vnc-889.md describes. The Mac's Full quality, RFB's zlib, is never
+/// passed: the gateway inflates it and codes it as the tiles ([`TileUnit`]).
 ///
 /// The contract every client implements:
 ///
 /// - [`ServerMsg::StandardStart`] arrives first, and says the picture starts from
-///   nothing: for Adaptive, no quantization tables, no tile coded and no cache
-///   entry, and for Full, a deflate stream not yet begun. A rectangle is drawn on
-///   what the rectangles before it left: an Adaptive one by copies, by cached
-///   tiles and by refining the last full update's coefficients, a Full one by
-///   continuing the one deflate stream they share. So a client decodes every
-///   record, in order, from that message on, and one that has missed any cannot
-///   go on.
+///   nothing: no quantization tables, no tile coded and no cache entry. A
+///   rectangle is drawn on what the rectangles before it left, by copies, by
+///   cached tiles and by refining the last full update's coefficients. So a
+///   client decodes every record, in order, from that message on, and one that
+///   has missed any cannot go on.
 /// - The framebuffer is the size [`ServerMsg::Resize`] last said, in pixels, and
-///   a resize leaves it black: for Adaptive with no tile coded, the tables and
-///   the cache kept, and for Full with the deflate stream kept.
-/// - An Adaptive record of zero area at 0,0 carries the quantization tables.
-/// - A Full record's body inflates to its rectangle's pixels, row after row, each
-///   four bytes of the pixel format the gateway set: blue, green, red, unused.
+///   a resize leaves it black with no tile coded, the tables and the cache kept.
+/// - A record of zero area at 0,0 carries the quantization tables.
 /// - A client acknowledges a batch when it has drawn it and not before: the
 ///   gateway reads the Mac's next rectangles as the client paints, which is what
 ///   the Mac sees of the client's link.
@@ -1148,14 +1142,14 @@ pub enum ServerMsg {
     /// held of a pipeline or a video stream before it is done with. `engine` is the
     /// engine that sent it ([`ServerMsg::stamped`]).
     GraphicsStart { engine: u64 },
-    /// One of a Mac's rectangles in its own picture, passed for the browser to
+    /// One of a Mac's rectangles in its Adaptive picture, passed for the browser to
     /// decode. A binary record like [`ServerMsg::Video`], ordered the same way.
     Standard(StandardUnit),
-    /// A Mac's own picture starts here, from nothing, in `quality`: the picture is
-    /// what the [`ServerMsg::Standard`] records after this draw, and whatever a
-    /// client held of a video stream before it is done with. `engine` is the
-    /// engine that sent it ([`ServerMsg::stamped`]).
-    StandardStart { engine: u64, quality: StandardQuality },
+    /// A Mac's Adaptive picture starts here, from nothing: the picture is what the
+    /// [`ServerMsg::Standard`] records after this draw, and whatever a client held
+    /// of a video stream before it is done with. `engine` is the engine that sent
+    /// it ([`ServerMsg::stamped`]).
+    StandardStart { engine: u64 },
     /// A rectangle of the desktop in the tiles this gateway codes. A binary record like
     /// [`ServerMsg::Video`], ordered the same way.
     Tile(TileUnit),
@@ -1495,7 +1489,7 @@ enum ControlMsg<'a> {
     Picker { engines: u64 },
     GraphicsStart { engine: u64 },
     GraphicsView { x: u16, y: u16, w: u16, h: u16 },
-    StandardStart { engine: u64, quality: StandardQuality },
+    StandardStart { engine: u64 },
     TilesStart { engine: u64 },
     Connected {
         name: &'a str,
@@ -1640,8 +1634,8 @@ impl ServerMsg {
                 return None;
             }
             ServerMsg::GraphicsStart { engine } => control(&ControlMsg::GraphicsStart { engine: *engine }),
-            ServerMsg::StandardStart { engine, quality } => {
-                control(&ControlMsg::StandardStart { engine: *engine, quality: *quality })
+            ServerMsg::StandardStart { engine } => {
+                control(&ControlMsg::StandardStart { engine: *engine })
             }
             ServerMsg::TilesStart { engine } => control(&ControlMsg::TilesStart { engine: *engine }),
             ServerMsg::GraphicsView { x, y, w, h } => {

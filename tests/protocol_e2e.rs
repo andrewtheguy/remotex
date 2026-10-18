@@ -720,8 +720,16 @@ fn fake_mac_read_clipboard(header: &[u8; 15], compressed: &[u8]) -> (u32, String
 /// resizable session now asks for would not fit one record.
 ///
 /// Raw, or in `standard`, the one codec a Standard session's list asks for: a
-/// `u32` length and [`fake_standard_body`], which the gateway passes untouched.
-fn fake_mac_update(shade: u8, (w, h): (u16, u16), standard: Option<i32>) -> Vec<u8> {
+/// `u32` length and either [`fake_standard_body`] for Apple's Adaptive tiles,
+/// which the gateway passes untouched, or the rectangle's pixels deflated on the
+/// connection's one `zlib` stream for the Mac's Full quality, which it inflates.
+fn fake_mac_update(
+    shade: u8,
+    (w, h): (u16, u16),
+    standard: Option<i32>,
+    zlib: &mut flate2::write::ZlibEncoder<Vec<u8>>,
+) -> Vec<u8> {
+    use std::io::Write as _;
     let (w, h) = (w.min(MAC_DESKTOP), h.min(MAC_DESKTOP));
     let mut update = vec![0u8, 0];
     update.extend_from_slice(&1u16.to_be_bytes());
@@ -731,7 +739,13 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16), standard: Option<i32>) -> Vec<
     update.extend_from_slice(&h.to_be_bytes());
     match standard {
         Some(encoding) => {
-            let body = fake_standard_body(shade);
+            let body = if encoding == remotex::vnc_apple::ENCODING_ZLIB {
+                zlib.write_all(&vec![shade; usize::from(w) * usize::from(h) * 4]).unwrap();
+                zlib.flush().unwrap();
+                std::mem::take(zlib.get_mut())
+            } else {
+                fake_standard_body(shade)
+            };
             update.extend_from_slice(&encoding.to_be_bytes());
             update.extend_from_slice(&(body.len() as u32).to_be_bytes());
             update.extend_from_slice(&body);
@@ -747,7 +761,7 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16), standard: Option<i32>) -> Vec<
     update
 }
 
-/// The body of a Standard rectangle from the fake Mac. The gateway decodes none of
+/// The body of an Adaptive rectangle from the fake Mac. The gateway decodes none of
 /// it, so it need not be the codec's: what is checked is that it arrives as sent.
 fn fake_standard_body(shade: u8) -> Vec<u8> {
     vec![shade, 0x3f, 0x3f, 0x06, shade]
@@ -969,8 +983,10 @@ async fn serve_fake_mac_records(
     let mut media_listed = false;
     let mut media_first = false;
     // The Standard codec the encodings last listed, Apple's tiles or zlib, which
-    // the Mac then sends alone; Raw when they list neither.
+    // the Mac then sends alone; Raw when they list neither. The zlib is one
+    // stream for the connection, as the Mac's is.
     let mut standard = None;
+    let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
 
     loop {
         let mut kind = [0u8; 1];
@@ -1059,7 +1075,7 @@ async fn serve_fake_mac_records(
                 shade = shade.wrapping_add(0x10);
                 let pixels = ((points.0 * density).min(rect[2]), (points.1 * density).min(rect[3]));
                 write_half
-                    .write_all(writer.frame(&fake_mac_update(shade, pixels, standard)))
+                    .write_all(writer.frame(&fake_mac_update(shade, pixels, standard, &mut zlib)))
                     .await?;
             }
             // KeyEvent
@@ -1280,9 +1296,10 @@ const MAC_CHOICES: &str = r#"{"size":"window","passthrough":"apple-media"}"#;
 /// A session started with nothing but the window sizing the desktop.
 const RESIZE: &str = r#"{"size":"window"}"#;
 
-/// A Standard session on the virtual display: the window sizing it, and the Mac's
-/// Full-quality zlib passed, one of the two pictures every Standard session names.
-const STANDARD_RESIZE: &str = r#"{"size":"window","passthrough":"apple-full"}"#;
+/// A Standard session on the virtual display: the window sizing it, and no
+/// passthrough named, so the picture is the gateway's tiles of the Mac's Full
+/// quality, inflated here.
+const STANDARD_RESIZE: &str = r#"{"size":"window"}"#;
 
 /// The session socket of a fake-Mac test: a browser that takes the Mac's stream.
 async fn connect_mac_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
@@ -1389,12 +1406,12 @@ async fn expect_frame(ws: &mut Ws) -> Vec<common::BatchRecord> {
     .expect("timed out waiting for a frame")
 }
 
-/// Read from the socket until a batch of a Standard Mac's own picture arrives;
-/// returns its rectangles. With `quality`, the picture starts here, so a
-/// `standardStart` naming it comes first.
-async fn expect_standard(ws: &mut Ws, quality: Option<&str>) -> Vec<common::StandardRect> {
+/// Read from the socket until a batch of a Standard Mac's Adaptive picture
+/// arrives; returns its rectangles. Where the picture `starts` here, a
+/// `standardStart` comes first.
+async fn expect_standard(ws: &mut Ws, starts: bool) -> Vec<common::StandardRect> {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let mut started = quality.is_none();
+        let mut started = !starts;
         while let Some(msg) = ws.display_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
@@ -1407,8 +1424,6 @@ async fn expect_standard(ws: &mut Ws, quality: Option<&str>) -> Vec<common::Stan
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
                     assert!(!text.contains(r#""type":"tilesStart""#), "a Standard picture coded here: {text}");
                     if text.contains(r#""type":"standardStart""#) {
-                        let start: serde_json::Value = serde_json::from_str(&text).unwrap();
-                        assert_eq!(start["quality"].as_str(), quality, "{text}");
                         started = true;
                     }
                 }
@@ -1427,15 +1442,54 @@ async fn expect_standard(ws: &mut Ws, quality: Option<&str>) -> Vec<common::Stan
 /// time opens on a pixel of the combined view, asked for until the screen's
 /// layout comes, and the Mac's answer to it is passed like any rectangle, ahead
 /// of the screen whole.
-async fn expect_fake_standard(ws: &mut Ws, quality: Option<&str>) {
-    let mut rects = expect_standard(ws, quality).await;
+async fn expect_fake_standard(ws: &mut Ws, starts: bool) {
+    let mut rects = expect_standard(ws, starts).await;
     while rects.iter().all(|rect| (rect.x, rect.y, rect.w, rect.h) == (0, 0, 1, 1)) {
-        rects = expect_standard(ws, None).await;
+        rects = expect_standard(ws, false).await;
     }
     for rect in rects {
         assert_eq!((rect.x, rect.y, rect.w, rect.h), (0, 0, MAC_DESKTOP, MAC_DESKTOP));
         assert_eq!(rect.body, fake_standard_body(rect.body[0]), "the body as the Mac sent it");
     }
+}
+
+/// Read from the socket until a batch of the gateway's tiles arrives, every record
+/// of it a tile, acknowledging it as a browser's painter does: the fake Mac's
+/// Full quality, inflated here. No rectangle of the Mac's is passed, and where
+/// the picture `starts` here, its `tilesStart` comes ahead of the first tile.
+async fn expect_fake_tiles(ws: &mut Ws, starts: bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut started = !starts;
+        while let Some(msg) = ws.display_socket().next().await {
+            match msg.expect("websocket receive") {
+                Message::Binary(frame) => {
+                    assert!(started, "a tile before its tilesStart");
+                    let records = common::batch_records(&frame);
+                    assert!(!records.is_empty());
+                    for record in records {
+                        match record {
+                            common::BatchRecord::Tile(tile) => assert!(tile.w > 0 && tile.h > 0, "an empty tile"),
+                            common::BatchRecord::Video(_) => panic!("a passed record in a session of the gateway's tiles"),
+                        }
+                    }
+                    ws.display_socket().send(Message::text(common::paint_ack(&frame))).await.expect("acknowledge a batch");
+                    return;
+                }
+                Message::Text(text) => {
+                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
+                    assert!(!text.contains(r#""type":"standardStart""#), "a Full-quality picture passed: {text}");
+                    if text.contains(r#""type":"tilesStart""#) {
+                        started = true;
+                    }
+                }
+                Message::Close(frame) => panic!("closed while waiting for the tiles: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended while waiting for the tiles");
+    })
+    .await
+    .expect("timed out waiting for the tiles")
 }
 
 async fn next_scroll_request(rx: &mut mpsc::UnboundedReceiver<ScrollRequest>) -> ScrollRequest {
@@ -2237,8 +2291,8 @@ async fn expect_error(ws: &mut Ws) -> String {
 }
 
 /// The unofficial `virtual_display` under `ard`: High Performance's display
-/// request and resizing, on Standard's own picture passed, with no media stream
-/// offered.
+/// request and resizing, on the gateway's tiles of the Mac's Full quality, with
+/// no media stream offered.
 /// The fake is set to refuse any offer, which would end the session — so a session
 /// that opens, resizes and disconnects cleanly is one that never made an offer.
 #[tokio::test]
@@ -2272,23 +2326,22 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
         MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
     );
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
-    let start = expect_control(&mut ws, "standardStart").await;
-    assert_eq!(start["quality"], "full", "{start}");
     let resize = expect_resize_msg(&mut ws).await;
     assert_eq!(resize["w"], MAC_SCREEN_WIDTH, "{resize}");
     assert_eq!(resize["h"], MAC_SCREEN_HEIGHT, "{resize}");
     let msg = expect_displays(&mut ws).await;
     assert_eq!(msg["displays"][0]["virtual"], true, "{msg}");
-    // The picture is the Mac's zlib, passed: a rectangle arrives with no stream
-    // up, where High Performance would still be waiting on its offer.
-    expect_fake_standard(&mut ws, None).await;
+    // The picture is the Mac's zlib, inflated here and sent as tiles behind their
+    // `tilesStart`: they arrive with no stream up, where High Performance would
+    // still be waiting on its offer.
+    expect_fake_tiles(&mut ws, true).await;
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT))
     );
     // The arming pushes the picture, which is never polled for between updates.
-    expect_fake_standard(&mut ws, None).await;
+    expect_fake_tiles(&mut ws, false).await;
     assert!(requests.try_recv().is_err(), "a Standard session polled the Mac");
 
     // A resize is High Performance's: the narrowed arming, the new configuration,
@@ -2302,8 +2355,8 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
     assert_eq!(resize["h"], MAC_WINDOW.1, "{resize}");
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoFramebuffer(MAC_WINDOW));
-    // The same zlib goes on over the resize, not started over.
-    expect_fake_standard(&mut ws, None).await;
+    // The same zlib goes on over the resize, not started over, and inflates here.
+    expect_fake_tiles(&mut ws, false).await;
 
     ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
     expect_picker(&mut ws).await;
@@ -2377,7 +2430,7 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
         MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
     );
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
-    expect_fake_standard(&mut ws, Some("adaptive")).await;
+    expect_fake_standard(&mut ws, true).await;
 
     for (button, bit) in [("right", 0x02), ("middle", 0x04)] {
         for pressed in [true, false] {

@@ -152,9 +152,9 @@ export function readRemoteClipboard(): string {
 //
 // `passthrough` is which of a High Performance Mac's streams is passed, its HEVC
 // or its H.264, the one choice of its picture; without it the picker's own pick
-// stands, the HEVC where this browser can take it. On a Standard Mac it is one of
-// the Mac's own pictures, Adaptive or Full quality, the picker's own pick the
-// Adaptive one. An RDP target with its pipeline
+// stands, the HEVC where this browser can take it. On a Standard Mac it is the
+// Mac's Adaptive picture passed, the picker's own pick, or null for the gateway's
+// tiles of the Mac's Full quality. An RDP target with its pipeline
 // on (egfx not false) passes it in every session, which is said and not offered.
 // `pipeline` is how the host draws that pipeline, high quality unless asked.
 // `standardView` is how a Standard Mac's screens are shown, one at a time unless
@@ -162,7 +162,7 @@ export function readRemoteClipboard(): string {
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
-  passthrough?: "apple-media" | "apple-h264" | "apple-adaptive" | "apple-full";
+  passthrough?: "apple-media" | "apple-h264" | "apple-adaptive" | null;
   pipeline?: "high-quality" | "adaptive-desktop" | "adaptive-region";
   standardView?: "one" | "combined";
 }
@@ -293,17 +293,21 @@ export async function startTarget(
       })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
-  // A Mac's picture: which of its streams is passed, where one is asked for.
-  if (choices.passthrough) {
+  // A Mac's picture: which of its streams is passed, where one is asked for, or
+  // the gateway's tiles of a Standard Mac's Full quality.
+  if (choices.passthrough !== undefined) {
     const names = {
       "apple-media": /^HEVC, passed through/,
       "apple-h264": /^H\.264, passed through/,
-      "apple-adaptive": /^Adaptive \(beta\), passed through/,
-      "apple-full": /^Full quality \(beta\), passed through/,
+      "apple-adaptive": /^Apple's Adaptive \(beta\), passed through/,
     };
+    const name =
+      choices.passthrough === null
+        ? /^Gateway adaptive/
+        : names[choices.passthrough];
     await item
       .getByRole("group", { name: "Picture" })
-      .getByRole("radio", { name: names[choices.passthrough] })
+      .getByRole("radio", { name })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
   await item.getByRole("button", { name: "Start", exact: true }).click();

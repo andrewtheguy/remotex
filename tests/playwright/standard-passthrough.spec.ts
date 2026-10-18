@@ -1,6 +1,7 @@
-// What a session started with a Standard Mac's Adaptive or Full-quality picture
-// puts on the display socket, and what the page says it did with it: the Mac's
-// own 8×8 tiles, or its zlib, passed for the page to decode.
+// What a session started with a Standard Mac's Adaptive picture puts on the
+// display socket, and what the page says it did with it: the Mac's own 8×8
+// tiles, passed for the page to decode. The Mac's Full quality is the gateway's
+// tiles, checked in standard-combined.spec.ts.
 //
 // Everything asserted is decided by the system and not by a machine's timing: the
 // render the gateway resolved, the order of `standardStart` and the records
@@ -8,9 +9,7 @@
 // tables, the acknowledgment the page sends once its paint worker has decoded a
 // batch, and the DOM's account of a rectangle that did not decode. Nothing here
 // looks at a pixel. A STANDARD record is a header this file parses for itself
-// around a body as the Mac sent it: an Adaptive body's first byte says what it
-// is, and a Full-quality body is inflated here on the one zlib stream the
-// session's bodies share, which must come to each rectangle's pixels.
+// around a body as the Mac sent it, whose first byte says what it is.
 //
 // It needs a gateway whose local config names a live Mac as an `ard` target. Keep
 // that gitignored file under `tmp/`, for example `tmp/test_uat.toml`:
@@ -28,7 +27,6 @@
 // REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET. The two-screen case needs an `ard`
 // target on a Mac with two screens of different densities, a 1x one beside a 2x
 // one, named by REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET.
-import { constants, createInflate, type Inflate } from "node:zlib";
 import { expect, type Page, test, type Worker } from "@playwright/test";
 
 import {
@@ -40,10 +38,8 @@ import {
   startTarget,
 } from "./support";
 
-/// What most sessions here are started with: the Mac's Adaptive picture, passed.
+/// What every session here is started with: the Mac's Adaptive picture, passed.
 const ADAPTIVE = { passthrough: "apple-adaptive" } as const;
-/// And the rest: the Mac's Full-quality picture, passed.
-const FULL = { passthrough: "apple-full" } as const;
 
 /// The opt-in, and the target name in one, as the other live specs have it.
 const STANDARD_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_TARGET;
@@ -157,37 +153,6 @@ interface Session {
   outside: Rect[];
   /** The sequences the page acknowledged, as it sent them. */
   acknowledged: number[];
-  /** The quality the display socket's last `standardStart` named. */
-  quality?: string;
-  /**
-   * A Full-quality picture inflated here: the bytes its rectangles' pixels
-   * come to, what the bodies so far inflated to, and the inflater's error if
-   * the stream broke. Each display socket's picture is a stream of its own.
-   */
-  zlib?: {
-    want: number;
-    got: number;
-    error?: string;
-    stream: Inflate;
-    /** No more bodies are fed through, so the count can be checked. */
-    closed?: boolean;
-  };
-}
-
-/// Stop feeding bodies through, as the session goes on sending them, then wait
-/// for all the stream holds to be inflated and counted: the flush answers before
-/// the last of its output has been handed on.
-async function inflated(zlib: NonNullable<Session["zlib"]>): Promise<void> {
-  zlib.closed = true;
-  await new Promise<void>((resolve) =>
-    zlib.stream.flush(constants.Z_SYNC_FLUSH, () => resolve()),
-  );
-  await expect
-    .poll(() => zlib.error ?? zlib.got, {
-      message: "every body inflated to its rectangle's pixels",
-      timeout: 5_000,
-    })
-    .toBe(zlib.want);
 }
 
 /// Keep the display list, the compositions and whether the desktop is held,
@@ -246,7 +211,6 @@ function watchSession(page: Page): Session {
     // acknowledgments are numbered from one, and whose picture starts with it.
     seen.batches = [];
     seen.acknowledged = [];
-    seen.zlib = undefined;
     let started = false;
     ws.on("framesent", ({ payload }) => {
       if (typeof payload !== "string") {
@@ -267,18 +231,6 @@ function watchSession(page: Page): Session {
         noteDisplays(seen, message);
         if (message.type === "standardStart") {
           started = true;
-          seen.quality = message.quality;
-          if (message.quality === "full") {
-            const stream = createInflate();
-            const zlib: NonNullable<Session["zlib"]> = { want: 0, got: 0, stream };
-            stream.on("data", (chunk: Buffer) => {
-              zlib.got += chunk.length;
-            });
-            stream.on("error", (error) => {
-              zlib.error = String(error);
-            });
-            seen.zlib = zlib;
-          }
         }
         if (message.type === "resize") {
           seen.size = { w: message.w, h: message.h };
@@ -295,10 +247,6 @@ function watchSession(page: Page): Session {
         seen.unannounced += batch.rects.length;
       }
       for (const rect of batch.rects) {
-        if (seen.zlib && !seen.zlib.closed && rect.body) {
-          seen.zlib.want += rect.w * rect.h * 4;
-          seen.zlib.stream.write(rect.body);
-        }
         // Read where it arrived: not held past it.
         rect.body = undefined;
       }
@@ -512,69 +460,6 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
   });
 });
 
-test.describe("a Standard Mac whose Full-quality picture is passed", () => {
-  test.skip(
-    !STANDARD_TARGET,
-    "set REMOTEX_PLAYWRIGHT_STANDARD_TARGET=<target> against a gateway with a live Mac",
-  );
-
-  test.afterEach(async ({ page }) => {
-    await leaveSession(page);
-  });
-
-  test("is sent the Mac's zlib, which inflates to its rectangles, and decodes every batch of it", async ({
-    page,
-  }) => {
-    const seen = watchSession(page);
-    await logInAndConnectTo(page, STANDARD_TARGET ?? "", "", FULL);
-    await expect
-      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
-      .toBeGreaterThan(0);
-
-    expect(seen.connected).toEqual({
-      render: "the Mac's Full-quality picture, passed through",
-      passthrough: "apple-full",
-    });
-    expect(seen.quality, "the picture's start names its quality").toBe("full");
-    expect(seen.badKinds, "binary frames that were not batches").toEqual([]);
-    expect(seen.unannounced).toBe(0);
-    expect(seen.controlTypes).not.toContain("videoFormat");
-    for (const batch of seen.batches) {
-      expect(batch.flags, "reserved frame flags must be zero").toBe(0);
-      expect(batch.badOp, "every record must be a STANDARD record").toBe(
-        undefined,
-      );
-      expect(batch.exact, "records must exactly fill the frame").toBe(true);
-      expect(batch.rects.length).toBe(batch.count);
-    }
-    expect(seen.outside, "rectangles off the framebuffer").toEqual([]);
-    const sent = seen.batches.map((batch) => batch.sequence);
-    expect(sent).toEqual(sent.map((_, index) => index + 1));
-    expect(seen.acknowledged).toEqual(
-      seen.acknowledged.map((_, index) => index + 1),
-    );
-
-    // Every body continues one deflate stream, and comes to its rectangle's
-    // pixels, four bytes each.
-    const zlib = seen.zlib;
-    expect(zlib, "a Full-quality picture's stream").toBeDefined();
-    if (zlib) {
-      expect(zlib.want).toBeGreaterThan(0);
-      await inflated(zlib);
-    }
-
-    await expect(faults(page)).toHaveCount(0);
-    await page.getByRole("button", { name: "Open menu" }).click();
-    await page.getByRole("button", { name: "Info", exact: true }).click();
-    const card = page.getByRole("dialog", { name: "Info" });
-    await expect(card).toContainText(
-      "the Mac's Full-quality picture is decoded by this page",
-    );
-    await page.keyboard.press("Escape");
-    await expect(card).toHaveCount(0);
-  });
-});
-
 // Ahead of the virtual display's cases: for a while after a session on the
 // virtual display, the Mac lists one screen. Combined Display is a session of its
 // own (standard-combined.spec.ts), so a session of one screen at a time lists the
@@ -589,16 +474,12 @@ test.describe("a Standard Mac of two screens shown one at a time", () => {
     await leaveSession(page);
   });
 
-  for (const [name, choices] of [
-    ["Adaptive", ADAPTIVE],
-    ["Full-quality", FULL],
-  ] as const) {
-    test(`passes its ${name} picture of the main screen, and of the other once chosen`, async ({
-      page,
-    }) => {
+  test("passes its Adaptive picture of the main screen, and of the other once chosen", async ({
+    page,
+  }) => {
       test.setTimeout(120_000);
       const seen = watchSession(page);
-      await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", choices);
+      await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", ADAPTIVE);
       await expect
         .poll(() => seen.displays?.displays.length ?? 0, {
           message: "two screens",
@@ -651,18 +532,9 @@ test.describe("a Standard Mac of two screens shown one at a time", () => {
         expect(batch.badOp).toBe(undefined);
         expect(batch.exact).toBe(true);
       }
-      // Full quality's one stream runs on through every screen.
-      const zlib = seen.zlib;
-      if (choices === FULL) {
-        expect(zlib, "a Full-quality picture's stream").toBeDefined();
-      }
-      if (zlib) {
-        await inflated(zlib);
-      }
 
       await returnToPicker(page);
-    });
-  }
+  });
 });
 
 test.describe("a Mac's virtual display whose Adaptive picture is passed", () => {
@@ -738,57 +610,6 @@ test.describe("a Mac's virtual display whose Adaptive picture is passed", () => 
     expect(seen.acknowledged).toEqual(
       seen.acknowledged.map((_, index) => index + 1),
     );
-    await expect(page.getByRole("alert")).toHaveCount(0);
-
-    await returnToPicker(page);
-  });
-
-  test("goes on inflating a Full-quality picture at the size a resize brings", async ({
-    page,
-  }) => {
-    const seen = watchSession(page);
-    await logInAndConnectTo(page, RESIZE_TARGET ?? "", "", {
-      ...FULL,
-      resize: true,
-    });
-    await expect
-      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
-      .toBeGreaterThan(0);
-    const before = seen.size;
-    expect(before).toBeDefined();
-
-    const viewport = page.viewportSize();
-    expect(viewport).not.toBeNull();
-    await page.setViewportSize({
-      width: (viewport?.width ?? 1280) - 160,
-      height: (viewport?.height ?? 720) - 120,
-    });
-    await expect
-      .poll(() => seen.size, { timeout: 20_000 })
-      .not.toEqual(before);
-    const resized = seen.batches.length;
-    const acknowledged = seen.acknowledged.length;
-
-    // The stream outlives the resize, as the Mac's does: the rectangles of the
-    // new desktop go on inflating where the old one's left it.
-    await expect
-      .poll(() => seen.batches.length, { timeout: 20_000 })
-      .toBeGreaterThan(resized);
-    await expect
-      .poll(() => seen.acknowledged.length, { timeout: 20_000 })
-      .toBeGreaterThan(acknowledged);
-
-    expect(seen.badKinds).toEqual([]);
-    expect(seen.unannounced).toBe(0);
-    expect(seen.outside).toEqual([]);
-    expect(
-      seen.controlTypes.filter((type) => type === "standardStart"),
-    ).toHaveLength(1);
-    const zlib = seen.zlib;
-    expect(zlib).toBeDefined();
-    if (zlib) {
-      await inflated(zlib);
-    }
     await expect(page.getByRole("alert")).toHaveCount(0);
 
     await returnToPicker(page);

@@ -2311,8 +2311,8 @@ export function useRemoteDesktop(
         case "standardStart":
           // Queued the same way: the picture's first rectangle must find a
           // decoder with nothing in it.
-          painter()?.startStandard(msg.quality);
-          setVideoStream({ decode: "", standard: msg.quality });
+          painter()?.startStandard();
+          setVideoStream({ decode: "", standard: true });
           break;
         case "tilesStart":
           // Queued the same way: the picture's first tile must find no decoder or

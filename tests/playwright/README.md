@@ -63,24 +63,23 @@ acknowledges each batch once its paint worker has decoded it, that a page
 that comes back is given the picture from its start, and that a session's end
 ends the paint worker that loaded the decoder, the next session decoding in one
 of its own. A rectangle that did not
-decode says so in the DOM. A session started with the Mac's Full-quality
-picture instead is read the same way, with its `standardStart` naming `full`,
-and every record's body inflated in the spec on one zlib stream for the session,
-which must come to each rectangle's pixels. Against a Mac on a virtual display
-it also resizes the window, in each quality, and checks that the picture goes on
+decode says so in the DOM. Against a Mac on a virtual display
+it also resizes the window and checks that the picture goes on
 at the new size, decoded, without starting again. Against a Mac of a 1x and a 2x
 screen it checks that a session of one screen at a time lists the screens alone,
 starts on one, never composes, and goes on decoding across a switch to the other
 and back.
 
-`standard-combined.spec.ts` is a Standard Mac's Combined Display, the gateway's
-tiles of the Mac's Full quality: that the session renders as Combined Display
-tiles, passes nothing, sends `tilesStart` and no display list, is never held, and
-that every TILE record lies on the grid of the last `resize` and is painted. At
-a 1x browser the desktop is one plain composition with no `mosaic`, every tile
-of it sent, gaps included; at a 2x one it is the Mac's own pixels behind a
-two-region `mosaic`, at 2x, and never held, since Combined Display has no
-picture ceiling.
+`standard-combined.spec.ts` is the gateway's tiles of a Standard Mac's Full
+quality, which the gateway inflates: on one screen at a time, that the session
+renders as the Mac's Full quality in tiles, passes nothing, sends `tilesStart`,
+is never held, that every TILE record lies on the grid of the last `resize` and
+is painted, and that the whole screen arrives; and on Combined Display, that the
+session renders as Combined Display tiles, sends no display list, and otherwise
+holds the same. At a 1x browser Combined Display is one plain composition with
+no `mosaic`, every tile of it sent, gaps included; at a 2x one it is the Mac's
+own pixels behind a two-region `mosaic`, at 2x, and never held, since a Standard
+Mac's picture has no picture ceiling.
 
 `target-switch.spec.ts` switches one page, without a reload, between an RDP
 host's pipeline and bitmap targets and a Mac's Adaptive and High Performance

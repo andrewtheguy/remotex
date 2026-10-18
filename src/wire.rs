@@ -585,11 +585,11 @@ mod tests {
             })
         };
         let mut wire = Wire::default();
-        let frames = wire.encode(vec![ServerMsg::StandardStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }, rect(1, 0, 3), rect(2, 64, 900)]).unwrap();
+        let frames = wire.encode(vec![ServerMsg::StandardStart { engine: 0 }, rect(1, 0, 3), rect(2, 64, 900)]).unwrap();
         let WireFrame::Text(text) = &frames[0] else {
             panic!("the start goes out first, as text: {:?}", frames[0]);
         };
-        assert_eq!(text, r#"{"type":"standardStart","engine":0,"quality":"adaptive"}"#);
+        assert_eq!(text, r#"{"type":"standardStart","engine":0}"#);
 
         // Parsed by hand: op, four u16 of geometry, a length, then the body.
         let frames = binary(&frames);

@@ -304,11 +304,11 @@ export type ControlMsg =
   // records after it are the picture: this page composes them. Whatever it held of
   // a pipeline or a video stream before is done with. `engine` as a format's.
   | { type: "graphicsStart"; engine: number }
-  // A Mac's own picture starts here, from nothing, in `quality`, and the STANDARD
-  // records after it are the picture: this page decodes them (standardPicture.ts),
-  // the Adaptive quality's 8x8 tiles or the Full quality's zlib. Whatever it held
-  // of a video stream before is done with. `engine` as a format's.
-  | { type: "standardStart"; engine: number; quality: StandardQuality }
+  // A Mac's Adaptive picture starts here, from nothing, and the STANDARD records
+  // after it are the picture: this page decodes them (standardPicture.ts), the
+  // Mac's own 8x8 tiles. Whatever it held of a video stream before is done with.
+  // `engine` as a format's.
+  | { type: "standardStart"; engine: number }
   // The picture is the tiles the gateway codes from here, the whole of it following
   // in TILE records, each an image this page decodes and draws where it says.
   // Whatever it held of a stream, a pipeline or a Mac's own picture before is done
@@ -458,11 +458,7 @@ export interface GraphicsMsg {
   data: Uint8Array;
 }
 
-// Which of a Standard Mac's own pictures a session passes, as Apple's viewer's
-// quality menu names them.
-export type StandardQuality = "adaptive" | "full";
-
-// One of a Mac's rectangles in its own picture, as the Mac sent it: where it
+// One of a Mac's rectangles in its Adaptive picture, as the Mac sent it: where it
 // is on the framebuffer, in pixels, and its body, for this page to decode
 // (standardPicture.ts). It means something only after every record before it,
 // from the `standardStart` that began the picture: each is drawn on what the

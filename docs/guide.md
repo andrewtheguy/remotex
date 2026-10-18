@@ -64,8 +64,8 @@ config key.
 | `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — |
 | `vnc` | no | none | — | — |
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — |
-| `vnc`, `ard` | no | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — |
-| `vnc`, `ard` with `virtual_display` | yes | none | the Mac's Adaptive or Full-quality picture, passed (beta) | — |
+| `vnc`, `ard` | no | none | the Mac's Adaptive picture, passed (beta), or none: the gateway's tiles of the Mac's Full quality | — |
+| `vnc`, `ard` with `virtual_display` | yes | none | as `ard` | — |
 | `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — |
 
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
@@ -95,15 +95,18 @@ config key.
   follows the browser's link: the Windows host draws fewer and smaller frames
   for a browser that falls behind. A Mac's passed stream does not: the Mac sends
   at its own rate, little on a still screen and much with motion. On an `ard`
-  target the Picture group is *Adaptive (beta)*, the default, or *Full quality
-  (beta)*, the two qualities of Apple's viewer's menu, which this page decodes.
-  Adaptive is the Mac's 8×8 tiles, each changed area a coarse pass and its
-  refinement after it, at the same precision on any link: a slower link gets
-  fewer updates, and their refinement once the screen is still. Full is the Mac's
-  lossless zlib, every pixel exact, which the Mac sends no faster than the link
-  takes, for a LAN. A session started with either is started over, not resumed,
-  when the browser comes back, as a passed RDP pipeline is. Both are greyed
-  under Combined Display (below).
+  target the Picture group is *Apple's Adaptive (beta), passed through*, the
+  default, or *Gateway adaptive, settles to lossless*. Apple's Adaptive is the
+  Mac's own 8×8 tiles, which this page decodes: each changed area a coarse pass
+  and its refinement after it, at the same precision on any link, where a slower
+  link gets fewer updates, and their refinement once the screen is still; it
+  never reaches lossless. A session started with it is started over, not
+  resumed, when the browser comes back, as a passed RDP pipeline is. Gateway
+  adaptive is the Mac's lossless Full quality, which the gateway inflates and
+  sends as its tiles at `video_quality`, as it sends any VNC server's desktop:
+  JPEG while a region changes, exact once it has settled, fitted to the link,
+  and resumed when the browser comes back. Apple's Adaptive is greyed under
+  Combined Display (below), which is the gateway's tiles too.
 - **Displays.** On an `ard` target sharing the Mac's physical screens: *One at a
   time* (beta), the default, starts on the main screen and offers the others in the
   display menu, in the picture chosen above; *Combined* (alpha) shows every
@@ -260,12 +263,11 @@ connection with the same error as wrong credentials. See
 - **`subtype = "ard"`** is Screen Sharing's Standard mode: the Mac's physical
   displays, one at a time or all of them, at their own density. A session of
   one screen at a time is started with the picker's Adaptive (beta), the
-  default, or Full quality (beta), which pass the Mac's own Adaptive or
-  Full-quality picture for the page to decode; the gateway encodes neither.
-  Both have been tried on a virtual Mac alone. A session of Combined Display
-  (alpha) is the gateway's tiles of the Mac's Full quality instead, the one
-  `ard` picture `video_quality` reaches. It has no resize and no sound; the Mac
-  keeps playing on its own output.
+  default, which passes the Mac's own Adaptive picture for the page to decode,
+  or Gateway adaptive, the gateway's tiles of the Mac's lossless Full quality,
+  which `video_quality` reaches. Both have been tried on a virtual Mac alone. A
+  session of Combined Display (alpha) is the gateway's tiles of every screen at
+  once. It has no resize and no sound; the Mac keeps playing on its own output.
   - **A Mac with more than one display connected is best given
     `virtual_display = true`** (below), which sizes one display to the browser
     window. Combined Display, every screen at once, is shown at 100%, so it

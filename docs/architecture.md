@@ -84,7 +84,7 @@ camera and microphone, and how its picture reaches the browser.
 |---|---|---|---|---|---|
 | Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; tiles from the gateway on the bitmap path |
 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | the Mac's HEVC or its H.264, passed through |
-| macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | the Mac's Adaptive or Full-quality picture, passed through (beta) |
+| macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | tiles from the gateway of the Mac's lossless Full quality, which settle to lossless; or the Mac's Adaptive picture, passed through (beta) |
 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
 | any other VNC server, not prioritized | `vnc` | one framebuffer at the size the server says, at 1x, never resized from the browser | none | no | tiles from the gateway |
 
@@ -151,20 +151,21 @@ and a host that does not draw one ends the session
 Screen Sharing's Standard mode (`ard`, including the unofficial
 `virtual_display = true`) shows the Mac's screens one at a time or, on its
 physical screens, all at once as Combined Display, as the session was started at
-the picker. One at a time (beta), it passes the Mac's own picture, in the quality the
-session was started with, Adaptive (beta) or Full quality (beta): the Mac is
-asked for its quality of that name, as Apple's viewer asks for it, and its
-rectangles are passed for the page to decode, on one screen and on the virtual
-display alike. Nothing of it is encoded here. Combined Display (alpha) is the one
-Standard picture coded here: the Mac is asked for its Full quality, which the
-gateway decodes, composes and sends as [the tiles](#the-tiles), at
-`video_quality`; see [A Standard Mac's Combined Display](#a-standard-macs-combined-display).
-No other target has a combined view. The Adaptive picture is a coarse pass of each changed area and its
-refinement after it, at the same precision on any link: the Mac sends fewer
-updates on a slower link, and refines them once the screen is still, and the
-page's painting is the link it finds; the Full-quality picture is lossless zlib, which only goes slower on a slow link,
-for a LAN. Both are tested against a virtual Mac alone, from a desktop browser. See
-[A Standard Mac's own picture](#a-standard-macs-own-picture).
+the picker. Its picture is the Mac's Full quality, lossless zlib, which the
+gateway inflates and sends as [the tiles](#the-tiles) at `video_quality`, as it
+sends any VNC server's desktop: JPEG while a region changes and exact once it has
+settled, on one screen, on the virtual display, and on Combined Display (alpha),
+where the gateway composes every screen first; see
+[A Standard Mac's Combined Display](#a-standard-macs-combined-display). No other
+target has a combined view. One screen at a time (beta) can instead be started
+with the Mac's own Adaptive picture, passed (beta): the Mac is asked for Adaptive
+quality as Apple's viewer asks for it, and its rectangles, in Apple's own codec
+that nothing here decodes, are passed for the page to decode. The Adaptive
+picture is a coarse pass of each changed area and its refinement after it, at the
+same precision on any link: the Mac sends fewer updates on a slower link, and
+refines them once the screen is still, and the page's painting is the link it
+finds; it never settles to lossless. Both are tested against a virtual Mac alone,
+from a desktop browser. See [A Standard Mac's picture](#a-standard-macs-picture).
 
 #### wlshare on Linux
 
@@ -379,11 +380,25 @@ A session's picture reaches the browser one of two ways, both ordinary:
 - **Passed untouched**, as the remote made it, for the browser to decode or
   compose: today wlshare's VP9 on a `wlshare` target, a High Performance Mac's
   HEVC or its H.264 in every session, whichever it was started with, a Standard
-  Mac's Adaptive or Full-quality picture in a session started with it, and an RDP host's
+  Mac's Adaptive picture in a session started with it, and an RDP host's
   graphics pipeline in every session of a target with it on, each with its rule
   below. Another stream the user
   asks to pass joins them with a rule of its own; do not refuse it on this
   rule's account.
+
+The goal of either way is a picture that settles to lossless wherever the source
+is lossless: a region that has stopped changing ends up on the page exactly as
+the remote has it, and the link is fitted while it moves, not after. The tiles do
+this for every source they code, a plain VNC server's ZRLE, an RDP host's bitmap
+path and a Standard Mac's Full quality alike, by sending a still JPEG tile again
+as PNG once it has settled. A passed stream does it only where the remote's own
+codec does: an RDP host under its Lossless policy, and a High Performance Mac's
+HEVC as the Mac refines it. So a source whose format is lossless and which the
+gateway can decode is the tiles, and is passed only where its own format is the
+reason to pass it, as wlshare's VP9 is wlshare's own adaptive stream and a Mac's
+Adaptive picture is Apple's own, decodable nowhere here. A Standard Mac's Full
+quality, plain RFB zlib, was passed for a while only because it shared the
+Adaptive picture's framing; it is the tiles now, and do not pass it again.
 
 Whatever the gateway transcodes goes to tiles. A video encoder (VP9, H.264, AV1 or
 any other), a codec probe, or a codec key that selects one is not added as a side
@@ -432,10 +447,11 @@ so, offering the server's outputs; every other source of a stream ends on the
 ceiling's refusal. Do not carry such a desktop some other way, in the gateway or
 the page: rectangles as images, a scaled or a cropped picture. See
 [Past the ceiling](#past-the-ceiling). A picture that is no stream has no
-ceiling: the tiles coded here, of a plain `vnc` server's desktop or an RDP
-host's bitmap path (`egfx = false`), and a Standard Mac's own rectangles, passed
-one by one, are shown at whatever size the remote has, a screen past 4K or a
-Combined Display of several screens included. Do not hold or shrink one of these
+ceiling: the tiles coded here, of a plain `vnc` server's desktop, an RDP
+host's bitmap path (`egfx = false`) or a Standard Mac's Full quality, and a
+Standard Mac's Adaptive rectangles, passed one by one, are shown at whatever size
+the remote has, a screen past 4K or a Combined Display of several screens
+included. Do not hold or shrink one of these
 for its size, and do not hold a layout the bitmap path asks for under the
 ceiling.
 
@@ -558,63 +574,70 @@ or add a key or a choice that selects the stream or its chroma. See
   decoded (`frontend/src/appleMedia.ts`). Keep the choice to that stream. See
   [Apple's media stream, passed through](#apples-media-stream-passed-through).
 
-#### A Standard Mac's own picture
+#### A Standard Mac's picture
 
-An `ard` target's screens shown one at a time have the Mac's own picture,
-chosen at the picker of two, in this order: its Adaptive picture passed (beta)
-and its Full-quality picture passed (beta), the two qualities of Apple's viewer's
-menu. The Adaptive one is taken until the other is chosen, and neither is
-greyed: the page decodes them in WebAssembly, which every page that starts has.
-A session of one screen at a time that names neither is refused, since nothing of
-it is coded here: do not add tiles of it, for a screen or a link. It is one
-picture on one screen and on the virtual display alike. Such a session starts on
-the main screen, asked for over the combined view the Mac opens on, which is
-never shown: until the main screen's layout, the session's first repaint and
-its armed region are of one pixel, and the screen is asked for whole once it is
-the Mac's. Its display menu lists the screens alone: Combined Display is a
-session of its own ([A Standard Mac's Combined Display](#a-standard-macs-combined-display)),
-never switched to or from mid-session.
+An `ard` target's screens shown one at a time have a picture chosen at the
+picker of two, in this order: the Mac's own Adaptive picture passed (beta), and
+the gateway's tiles of the Mac's Full quality, which settle to lossless. The
+Adaptive one is taken until the other is chosen, and neither is greyed: the page
+decodes the Adaptive picture in WebAssembly, which every page that starts has,
+and the tiles are images every page decodes. The tiles name no passthrough: a
+`connect` that names none is the tiles. It is one picture on one screen and on
+the virtual display alike. Such a session starts on the main screen, asked for
+over the combined view the Mac opens on, which is never shown: until the main
+screen's layout, the session's first repaint and its armed region are of one
+pixel, and the screen is asked for whole once it is the Mac's. Its display menu
+lists the screens alone: Combined Display is a session of its own
+([A Standard Mac's Combined Display](#a-standard-macs-combined-display)), never
+switched to or from mid-session.
 
 - **What is asked.** The session lists the encoding of its quality ahead of
   ZRLE, as Apple's viewer's menu lists it ahead of its other codecs
   (`vnc_apple::encodings`): Adaptive's 8×8 tiles (`0x3f3`), or Full's zlib
   (encoding 6). The Mac sends one codec, the first of its own it knows in the
-  list, so it sends that one alone; a rectangle in another encoding ends the
-  session.
-- **Passed as it came.** Each rectangle goes to the page as a `STANDARD` record,
-  where the Mac put it and its body as the Mac sent it, behind an
-  `standardStart` that names the quality. The gateway decodes none of them and
-  codes no tile; the page decodes them in its own module
-  (`frontend/wasm/vnc`), the tiles in a decoder written there and the zlib
-  on miniz_oxide's inflater, onto a framebuffer of its own and paints the canvas
-  where each drew. Do not add a decoder of the tiles to the gateway, or
-  transcode either: the gateway decodes zlib for Combined Display alone
-  ([below](#a-standard-macs-combined-display)).
-- **Never dropped, never resumed.** A rectangle is drawn on what the ones
-  before it left: for Adaptive, copies of tiles on the framebuffer, cached tiles
-  by index, the last full update's coefficients refined; for Full, the window of
-  the one deflate stream the session's rectangles share. So none is dropped, a page whose
-  rectangle did not decode says so and decodes no more of that session, and a
-  browser that comes back is given a session that starts, with the Mac connected
-  again, as a passed graphics pipeline is. A picture the gateway could not get to
-  a page still attached ends the session.
-- **The Mac paced by the page.** The Mac paces itself by the connection it
-  finds: on a slow one it sends fewer Adaptive updates at the same precision,
-  their refinement waits for a still screen, and its zlib
-  goes no faster than the connection. So the gateway reads
+  list, so it sends that one alone. In an Adaptive session a rectangle in
+  another encoding ends the session.
+- **The Full quality, inflated here.** The Mac's Full quality is RFB's own zlib,
+  lossless, which the gateway inflates on the connection's one stream
+  (`vnc_encodings`, `Payload::Zlib`), as it decodes any VNC server's ZRLE, and
+  codes as [the tiles](#the-tiles) at `video_quality`, unchanged: paced by the
+  page's painting, coarse first on a slow link, exact once a region has
+  settled, resumed for a browser that comes back and repainted on a `refresh`.
+  The Mac's connection is read as any VNC server's: the tiles fit the browser's
+  link, and the Mac, whose zlib has nothing to make coarser, is not held. Do
+  not pass the zlib to the page, and do not give the tiles of a Mac a rule the
+  tiles of another server lack.
+- **The Adaptive picture, passed as it came.** Each rectangle goes to the page
+  as a `STANDARD` record, where the Mac put it and its body as the Mac sent it,
+  behind a `standardStart`. The gateway decodes none of them and codes no tile;
+  the page decodes them in its own module (`frontend/wasm/vnc`), a decoder of
+  Apple's codec written there, onto a framebuffer of its own and paints the
+  canvas where each drew. Do not add a decoder of the tiles to the gateway, or
+  transcode them: Apple's codec is the one reason this picture is passed.
+- **Never dropped, never resumed.** An Adaptive rectangle is drawn on what the
+  ones before it left: copies of tiles on the framebuffer, cached tiles by
+  index, the last full update's coefficients refined. So none is dropped, a page
+  whose rectangle did not decode says so and decodes no more of that session, and
+  a browser that comes back is given a session that starts, with the Mac
+  connected again, as a passed graphics pipeline is. A picture the gateway could
+  not get to a page still attached ends the session.
+- **The Mac paced by the page.** In an Adaptive session the Mac paces itself by
+  the connection it finds: on a slow one it sends fewer updates at the same
+  precision, and their refinement waits for a still screen. So the gateway reads
   the Mac's connection only as the page paints: a rectangle waits while twice
   what the page paints in a round trip, and at least 32 KiB, of those passed
   before it are unpainted, behind a small receive buffer on the connection, and
-  the connection backs up instead. Do not let a queue here
-  hide the browser's link from the Mac.
-- **Pushed back to back.** The Mac is armed to push at interval 0 and asked for
-  no update between them, as Apple's viewer arms it: it sends one rectangle of
-  its changes per update and reads it off the screen as it sends it, so any wait
-  between updates has a moving window's strips read off different moments. Do
-  not add a request per update or an interval above zero.
+  the connection backs up instead. Do not let a queue here hide the browser's
+  link from the Mac in such a session.
+- **Pushed back to back.** In either quality the Mac is armed to push at
+  interval 0 and asked for no update between them, as Apple's viewer arms it: it
+  sends one rectangle of its changes per update and reads it off the screen as
+  it sends it, so any wait between updates has a moving window's strips read
+  off different moments. Do not add a request per update or an interval above
+  zero.
 - **No ceiling.** The Mac's rectangles are no stream of the whole desktop, so a
-  screen of any size is passed and shown as the Mac sends it, a 5K one at 2x
-  included. Do not hold or shrink one for its size. See
+  screen of any size is shown as the Mac sends it, a 5K one at 2x included, in
+  tiles or passed. Do not hold or shrink one for its size. See
   [A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through).
 
 #### A Standard Mac's Combined Display
@@ -624,12 +647,12 @@ time, Combined Display (alpha): every screen at once, as Apple's viewer's
 Combined Display has them, chosen at the picker's Displays row and held for the
 session. It is Screen Sharing Standard's alone; no other target has a combined
 view, and nothing here is reached by any other engine. Under it the picker greys
-the Mac's pictures, as it passes neither.
+the Mac's Adaptive picture, as it passes nothing.
 
 - **The Mac's Full quality, decoded here.** The session lists zlib ahead of ZRLE,
-  as a Full-quality session does, and the gateway inflates it on the
-  connection's one stream (`vnc_encodings`, `Payload::Zlib`): lossless from the
-  Mac to the gateway, which is the leg on a LAN.
+  as every Standard session not passing Adaptive does, and the gateway inflates
+  it on the connection's one stream (`vnc_encodings`, `Payload::Zlib`): lossless
+  from the Mac to the gateway, which is the leg on a LAN.
 - **Composed here, or by the page.** Over screens of one density the Mac scales
   the framebuffer to the browser's density, as for one screen, and it is the
   desktop. Over screens of different densities, where the browser's density is
@@ -752,8 +775,8 @@ the engine's own task.
 Each target has one full-desktop picture path. Ordinarily it is the tiles the
 gateway codes, or wlshare's own VP9 stream, passed through. Three paths keep
 another representation the remote made: an `ard-high-performance` session passes
-the Mac's HEVC or its H.264, chosen at the picker, an `ard` session passes the
-Mac's own Adaptive or Full-quality picture, and every session of an RDP target
+the Mac's HEVC or its H.264, chosen at the picker, an `ard` session started with
+it passes the Mac's own Adaptive picture, and every session of an RDP target
 with the pipeline on passes the host's graphics pipeline for the browser to
 compose. A `wlshare` desktop past the picture ceiling in a session started without
 resize has no picture until the server sends a smaller one — see
@@ -1284,25 +1307,29 @@ Safari on a Mac.
 
 #### A Standard Mac's own picture, passed through
 
-BETA. An `ard` session, started with the picker's Adaptive or Full quality, is
-asked for what Apple's viewer's quality of that name asks for, and the Mac's
-rectangles go to the page as the Mac sent them. The gateway decodes none of
-them: the rules are in
-[A Standard Mac's own picture](#a-standard-macs-own-picture), and the encodings in
-[Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)
-and [Full quality's zlib](apple-vnc-889.md#full-qualitys-zlib). The plan says
-which (`RenderPlan::apple_standard`, a `StandardQuality`).
+BETA. An `ard` session started with the picker's Adaptive picture is asked for
+what Apple's viewer's Adaptive quality asks for, and the Mac's rectangles go to
+the page as the Mac sent them. The gateway decodes none of them: the rules are in
+[A Standard Mac's picture](#a-standard-macs-picture), and the encodings in
+[Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings).
+The plan says which quality the Mac is asked for (`RenderPlan::apple_standard`, a
+`StandardQuality`): Adaptive, passed, or Full, the Mac's zlib inflated here for
+the tiles ([Full quality's zlib](apple-vnc-889.md#full-qualitys-zlib)), which
+every session not started with Adaptive is, Combined Display included. Full
+quality was passed too until 2026-10-17, inflated in the page; it rode the
+Adaptive picture's framing, and nothing else of it needed passing.
 
 - **Asked for.** The session lists `vnc_apple::encodings` for its quality, the
-  tiles or zlib ahead of ZRLE, and the read loop takes a rectangle in that one
-  encoding (`vnc_apple::encoding`) as a `u32` length and that body, refused past
-  64 MiB or off the framebuffer, and hands it to the sink
-  (`VideoSink::pass_standard`) without a look inside: both encodings frame a
-  rectangle the same way. `standardStart` names the quality and goes out ahead
-  of the Mac's first rectangle, behind the first `resize`, so the page has its
-  framebuffer's size and its decoder before the picture starts. Any other
-  framebuffer encoding in such a session ends it, since nothing here could
-  decode it onto the page's picture.
+  tiles or zlib ahead of ZRLE. In an Adaptive session the read loop takes a
+  rectangle in Apple's encoding (`vnc_apple::encoding`) as a `u32` length and
+  that body, refused past 64 MiB or off the framebuffer, and hands it to the
+  sink (`VideoSink::pass_standard`) without a look inside. `standardStart` goes
+  out ahead of the Mac's first rectangle, behind the first `resize`, so the
+  page has its framebuffer's size and its decoder before the picture starts.
+  Any other framebuffer encoding in such a session ends it, since nothing here
+  could decode it onto the page's picture. In a Full-quality session the zlib
+  rectangle is read as `Payload::Zlib` and goes the way of any VNC server's
+  rectangle: through the shadow to the tiles, behind a `tilesStart`.
 - **Paced by the page's painting.** Every rectangle takes its size, up to the
   whole bound, from a bound of its own (`PaintWindow`), and gives it back when the
   page acknowledges the batch it rode in (a `Painted` in the record, as a
@@ -1322,15 +1349,16 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   0.66 s behind, 1.4 s at worst, a rectangle's own time on that link, and the
   Mac sent about one and a half updates a second where an unpaced link took
   seventy. A bound of 32 KiB alone held a fast page to one rectangle a round
-  trip, since a Full-quality rectangle is larger: against a page acknowledging at
-  once 40 ms away, Full quality's view of a 1x and a 2x screen together came
-  at 6.8 MB/s held to it, 15.0 MB/s held to the painting, and 17.6 MB/s unpaced,
-  the round trip the same. Below about 260 kbit/s the bound is its floor.
+  trip, measured while Full quality was passed too, whose rectangles are larger:
+  against a page acknowledging at once 40 ms away, Full quality's view of a 1x
+  and a 2x screen together came at 6.8 MB/s held to it, 15.0 MB/s held to the
+  painting, and 17.6 MB/s unpaced, the round trip the same. Below about
+  260 kbit/s the bound is its floor.
 - **Started over, never repainted.** The plan does not resume
   (`Passthrough::resumes`): the engine ends when the page detaches, and a
   reattach starts one, which
   connects the Mac again, and the page is given the picture from its start
-  afresh: Adaptive's tables and first full update, or a new zlib stream. A `refresh` that reaches the engine is not answered, since a
+  afresh: the tables and the first full update. A `refresh` that reaches the engine is not answered, since a
   repaint could not make whole a page that missed a rectangle, and the one
   socket that does replace a page's display socket is its reattach, which is
   replacing the engine. A display message the session layer cannot deliver to a
@@ -1340,19 +1368,15 @@ which (`RenderPlan::apple_standard`, a `StandardQuality`).
   (`standardPicture.ts`) at `standardStart`, sizes its framebuffer at every
   `resize`, decodes each record in wire order and puts the rectangle it drew
   onto the canvas from the module's memory (`putImageData` with the dirty
-  rectangle). A resize leaves the framebuffer black, for Adaptive with no tile
-  coded, the tables and the tile cache kept, and for Full with the zlib stream
-  kept, as the Mac does. A rectangle that does not
+  rectangle). A resize leaves the framebuffer black with no tile coded, the
+  tables and the tile cache kept, as the Mac does. A rectangle that does not
   decode, or a batch that arrived malformed, ends the picture with the reason
   on the page, the last picture left where it is.
-- **The decoders.** `frontend/wasm/vnc` decodes the tiles as Apple's
+- **The decoder.** `frontend/wasm/vnc` decodes the tiles as Apple's
   viewer does, read from it, to the reference library's integer inverse
   transform and its YCbCr. Against a virtual Mac's captures of a still screen, a
   panning one and both on links of 500 kbit/s and 2 Mbit/s, every one of their
-  3,860 rectangles decoded with each stream ending on its mark. It inflates the
-  zlib with miniz_oxide's streaming inflater, one for the session, and refuses a
-  body that does not come to exactly its rectangle's pixels; its pixels are the
-  gateway's format, blue, green, red and an unused byte, turned to R, G, B, A.
+  3,860 rectangles decoded with each stream ending on its mark.
 
 #### RDP's graphics pipeline, passed through
 
@@ -1608,7 +1632,7 @@ and threads. The VP9 has none: it is sent at a chroma the browser's own decoder
 takes ([the codec](#the-codec)).
 
 A third stream is decoded in the page in every session that passes it, since no
-browser's decoder takes it: a Standard Mac's Adaptive or Full-quality picture, in
+browser's decoder takes it: a Standard Mac's Adaptive picture, in
 `frontend/wasm/vnc`, with no threads
 ([A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through)).
 
@@ -1676,7 +1700,7 @@ reading its remote into the mirror, so the damage merges there, and the round th
 painting lets go carries the newest pixels of every tile that changed meanwhile,
 each once. A slower link gets fewer updates of the current picture, each a coarse
 pass that sharpens where it stays, as a Mac's Adaptive picture does for a viewer on
-one ([A Standard Mac's own picture](#a-standard-macs-own-picture)), and what is
+one ([A Standard Mac's own picture](#a-standard-macs-picture)), and what is
 queued is never more than the window holds. The painting that brings the window back
 under its bound wakes the engine (`VideoSink::round_returned`), so a round is never
 left waiting for the next frame boundary. A still JPEG tile's exact picture goes
@@ -1761,8 +1785,7 @@ link is doing. Today three of the five passthroughs are:
 | wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
 | An RDP host's graphics pipeline (passed whenever it is on) | The Windows host: frame rate by acknowledgements; with Adaptive, its H.264's rate control by its network detection, and its Progressive quality by its socket | Frames are acknowledged once the page has composed them; with Adaptive, the detection is answered at the page's pace, and while two large frames wait the host's socket goes unread through a small receive buffer; with High quality, nothing more | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
 | A High Performance Mac's HEVC or H.264 (always passed) | The Mac's rate controller, a target of 20–60 Mbit/s that a still screen comes far under | Nothing: the delay in its rate reports ends at the gateway | None: the video keys are refused on the target |
-| A Standard Mac's Adaptive picture (passed where chosen) | The Mac: how many updates it sends, and whether it refines them while the screen moves | Its connection, read as the page paints, through a small receive buffer | None: the video keys are refused on the target |
-| A Standard Mac's Full-quality picture (passed where chosen) | Nobody: zlib is lossless, and only comes slower on a slow link | Its connection, read as the page paints, through a small receive buffer | None: the video keys are refused on the target |
+| A Standard Mac's Adaptive picture (passed where chosen) | The Mac: how many updates it sends, and whether it refines them while the screen moves | Its connection, read as the page paints, through a small receive buffer | None: `render_adaptive` is refused on the target, and `video_quality` reaches its tiles alone |
 
 - **wlshare** walks its encoder: quality goes down to the floor, then the frame
   rate, and both come back as the link clears, and a desktop it left coarse is
@@ -1812,9 +1835,9 @@ link is doing. Today three of the five passthroughs are:
   least 32 KiB, so the connection backs up as the browser's link
   does, and the Mac sends fewer updates on it, at the same precision, as it
   does for a viewer on one. Measured against a 300 kbit/s browser, the Adaptive picture ran 0.66 s behind
-  on average and the Mac sent about one and a half updates a second. Full
-  quality's zlib has nothing to code coarser: it is paced the same way and
-  only comes slower. See
+  on average and the Mac sent about one and a half updates a second. The Mac's
+  Full quality, which has nothing to code coarser, is the tiles, and its
+  connection is read as any VNC server's. See
   [A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through).
 - **Other VNC servers**, a plain `vnc` target included even when wlshare answers
   it, have no passed stream: their picture is always the tiles coded here, which
@@ -1996,7 +2019,7 @@ and `GET /api/targets` carries it:
 | `rdp` with `egfx = false` | no | shown | hidden | hidden |
 | `vnc` | no | hidden | hidden | hidden |
 | `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden |
-| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive or Full-quality picture, passed (beta), greyed under Combined Display; and as Displays: one at a time (beta) or Combined (alpha) | hidden |
+| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive picture, passed (beta), greyed under Combined Display, or the gateway's tiles of its Full quality; and as Displays: one at a time (beta) or Combined (alpha) | hidden |
 | `vnc`, `ard` with `virtual_display` | yes | hidden | shown, as for `ard` | hidden |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden |
 
@@ -2042,9 +2065,10 @@ and `GET /api/targets` carries it:
   the first that is not greyed until somebody chooses another (`pictureOptions`
   in `frontend/src/targetChoices.ts`). A `connect` that names neither is
   refused: no picture of a High Performance Mac's is coded here. A Standard
-  Mac's Picture group is Adaptive (beta) and Full quality (beta) passed
-  through, which `connect` names as `apple-adaptive` and `apple-full`, the
-  Adaptive one taken first; one that names neither is refused the same way.
+  Mac's Picture group is Apple's Adaptive (beta) passed through, which `connect`
+  names as `apple-adaptive`, taken first, and the gateway's tiles of the Mac's
+  Full quality, which settle to lossless and which `connect` names as no
+  passthrough at all.
 - **Offered but unavailable is greyed, with the reason.** The Mac's HEVC
   is greyed wherever the browser cannot take it: one that does not decode the
   Mac's HEVC, or a gateway with no HEVC decoder archive to serve a browser that

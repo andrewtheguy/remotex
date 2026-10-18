@@ -460,7 +460,7 @@ function PictureChoice({
       <legend>Picture</legend>
       {pictures.map((picture) => (
         <label
-          key={picture.value}
+          key={picture.value ?? "tiles"}
           className={`picker-option${picture.disabled ? " picker-option-unavailable" : ""}`}
         >
           <input

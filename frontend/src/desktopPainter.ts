@@ -29,7 +29,7 @@ import { decodesAppleMedia } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
-import { batchFrameSequence, type StandardQuality } from "./protocol.ts";
+import { batchFrameSequence } from "./protocol.ts";
 import { runnableDecoders } from "./softwareSupport.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
@@ -85,8 +85,8 @@ export interface DesktopPainter {
   setVideoFormat(format: VideoFormat): void;
   /** An RDP host's graphics pipeline starts, for the worker to compose. */
   startGraphics(): void;
-  /** A Mac's own picture starts, in `quality`, for the worker to decode. */
-  startStandard(quality: StandardQuality): void;
+  /** A Mac's Adaptive picture starts, for the worker to decode. */
+  startStandard(): void;
   /** The gateway's tiles start, for the worker to draw. */
   startTiles(): void;
   /** The part of the pipeline's picture this page's display is (`graphicsView`). */
@@ -230,9 +230,9 @@ export function desktopPainterFor(
       ownModule = true;
       post({ type: "graphicsStart" });
     },
-    startStandard(quality) {
+    startStandard() {
       ownModule = true;
-      post({ type: "standardStart", quality });
+      post({ type: "standardStart" });
     },
     startTiles() {
       post({ type: "tilesStart" });

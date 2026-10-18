@@ -174,12 +174,8 @@ test("the video row waits for the format, then names it and its decoder", () => 
     "hev1.4.10.L153.BE.8 · passthrough from the remote · decoded by this page's WebAssembly decoder",
   );
   assert.equal(
-    videoLabel({ decode: "", standard: "adaptive" }, null),
+    videoLabel({ decode: "", standard: true }, null),
     "Not in use: the Mac's Adaptive picture is decoded by this page",
-  );
-  assert.equal(
-    videoLabel({ decode: "", standard: "full" }, null),
-    "Not in use: the Mac's Full-quality picture is decoded by this page",
   );
   // The gateway's tiles are no stream.
   assert.equal(
@@ -192,8 +188,8 @@ test("the video row waits for the format, then names it and its decoder", () => 
   );
   // A Mac's own picture has no ceiling, and is decoded whatever is said of a hold.
   assert.equal(
-    videoLabel({ decode: "", standard: "full" }, "size"),
-    "Not in use: the Mac's Full-quality picture is decoded by this page",
+    videoLabel({ decode: "", standard: true }, "size"),
+    "Not in use: the Mac's Adaptive picture is decoded by this page",
   );
 });
 
