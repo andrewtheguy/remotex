@@ -167,7 +167,11 @@ pub async fn run(
     uplinks: Uplinks,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
+    // The picture ceiling is the graphics pipeline's, a stream of the whole desktop
+    // passed to the browser: every layout is held under it, and a host that answers
+    // past it is refused. The bitmap path's tiles are coded here at any size.
+    let oversize = if config.egfx() { Oversize::Refuse } else { Oversize::Shown };
+    let sink = VideoSink::new("rdp", frame_tx, plan, feedback, oversize);
     session(config, choices, plan, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
@@ -271,7 +275,15 @@ async fn session(
     if let Err(e) = active_loop(
         &session,
         events,
-        Flags { resize, kept, restates: config.egfx(), pass_graphics: plan.rdp_graphics, plan, monitors: narrow(asked) },
+        Flags {
+            resize,
+            kept,
+            restates: config.egfx(),
+            ceiling: config.egfx(),
+            pass_graphics: plan.rdp_graphics,
+            plan,
+            monitors: narrow(asked),
+        },
         applied,
         view,
         input_rx,
@@ -354,8 +366,9 @@ async fn await_desktop(
 
 /// The layout a session opens at: the size it keeps, or following the window the
 /// full resolution of the client's own screen — the same rule every engine
-/// resolves — in points, carried up to the client's density and held under the video
-/// stream's ceiling as every later layout is (see `Layout::held`).
+/// resolves — in points, carried up to the client's density and, with the graphics
+/// pipeline, held under the video stream's ceiling as every later layout is (see
+/// `Layout::held`).
 ///
 /// At the client's density from the handshake rather than 1x and a Display
 /// Control layout after `ServerMsg::Connected`, because a Windows host applies a
@@ -372,7 +385,7 @@ async fn await_desktop(
 fn opening_layout(config: &TargetConfig, sizing: Sizing, display: Option<HostDisplay>) -> Layout {
     let (width, height) = config.opening_size(sizing, display);
     let density = display.map_or(Density::One, |screen| Density::from_host(screen.scale));
-    Layout::points(u32::from(width), u32::from(height)).at_density(density).held()
+    Layout::points(u32::from(width), u32::from(height)).at_density(density).held(config.egfx())
 }
 
 /// Everything the RDP client needs to open this target's session.
@@ -446,6 +459,10 @@ struct Flags {
     /// whenever the pipeline is ([`connect_config`]). A session without the
     /// pipeline keeps the density it connected at.
     restates: bool,
+    /// Whether every layout is held under the video stream's picture ceiling
+    /// ([`Layout::held`]): with the pipeline, whose picture is a stream of the
+    /// whole desktop. The bitmap path's tiles are coded here at any size.
+    ceiling: bool,
     /// Whether the host's graphics pipeline is on, and so passed to the browser
     /// ([`RenderPlan::rdp_graphics`]): its frames are never in the framebuffer.
     pass_graphics: bool,
@@ -650,7 +667,10 @@ impl Layout {
         Self { w: px(self.w), h: px(self.h), density, second: self.second }.normalized()
     }
 
-    /// The same request held under the video stream's picture ceiling.
+    /// The same request held under the video stream's picture ceiling, where
+    /// `ceiling` says the session's picture is one: the graphics pipeline's, a
+    /// stream of the whole desktop passed to the browser. The bitmap path's tiles
+    /// are coded here at any size, and its layouts are left as asked.
     ///
     /// Applied to every layout this engine asks for, after the density: the
     /// ceiling is on pixels, and 2560×1440 points is under it at 1x and a 5K
@@ -660,7 +680,10 @@ impl Layout {
     /// encoder's refusal, which ends the session. Every side stays even: the
     /// ceiling's sides are, and an axis left alone was whatever
     /// [`Self::adjusted`] makes of it.
-    fn held(self) -> Self {
+    fn held(self, ceiling: bool) -> Self {
+        if !ceiling {
+            return self;
+        }
         let (w, h) = crate::video::fit_ceiling(self.size());
         let second = self.second.map(|second| second.sized(crate::video::fit_ceiling(second.size())));
         if (w, h) != self.size() || second != self.second {
@@ -1400,7 +1423,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, kept, restates, pass_graphics, plan, monitors } = flags;
+    let Flags { resize, kept, restates, ceiling, pass_graphics, plan, monitors } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -1665,7 +1688,7 @@ async fn active_loop(
                         {
                             applied = pending.layout.densities();
                             layout_retry_at = None;
-                        } else if let Some(known) = kept.and_then(|points| kept_densities(points, &monitors)) {
+                        } else if let Some(known) = kept.and_then(|points| kept_densities(points, ceiling, &monitors)) {
                             applied = known;
                         }
                         info!(
@@ -1715,7 +1738,7 @@ async fn active_loop(
                                 .map(|density| Second::points(w, h).at_density(density))
                                 .or_else(|| current.tab_second(open));
                             install_layout(
-                                Layout::points(w, h).at_density(density).with_second(second).held(),
+                                Layout::points(w, h).at_density(density).with_second(second).held(ceiling),
                                 current,
                                 &mut pending_layout,
                                 &mut layout_retry_at,
@@ -1921,7 +1944,7 @@ async fn active_loop(
                             tab_points = Some((u32::from(w), u32::from(h)));
                             let second = Second::points(u32::from(w), u32::from(h)).at_density(base.second().density);
                             install_layout(
-                                base.with_second(Some(second)).held(),
+                                base.with_second(Some(second)).held(ceiling),
                                 view.current(applied),
                                 &mut pending_layout,
                                 &mut layout_retry_at,
@@ -1943,7 +1966,7 @@ async fn active_loop(
                                 |(w, h)| Second::points(w, h).at_density(density),
                             );
                             install_layout(
-                                base.with_second(Some(second)).held(),
+                                base.with_second(Some(second)).held(ceiling),
                                 view.current(applied),
                                 &mut pending_layout,
                                 &mut layout_retry_at,
@@ -1983,7 +2006,7 @@ async fn active_loop(
                         let second = base.tab_second(view.all && tab.is_some());
                         let first = kept.map_or(base, |(w, h)| Layout::points(w, h));
                         install_layout(
-                            first.at_density(want).with_second(second).held(),
+                            first.at_density(want).with_second(second).held(ceiling),
                             view.current(applied),
                             &mut pending_layout,
                             &mut layout_retry_at,
@@ -2022,7 +2045,7 @@ async fn active_loop(
                         install_layout(
                             Layout { w, h, density: Density::One, second: None }
                                 .at_density(density)
-                                .held()
+                                .held(ceiling)
                                 .with_second(second),
                             view.current(applied),
                             &mut pending_layout,
@@ -2256,8 +2279,9 @@ fn confirms(pending: &PendingLayout, monitors: &[Placed]) -> bool {
 /// session kept at `points`: those points at 1x or at 2x, as [`Layout::points`]
 /// held and adjusted make them, are the only layouts it asks for. `None` for any
 /// other size, or where the two are the same size, held under the ceiling alike.
-fn kept_densities((w, h): (u32, u32), monitors: &[Placed]) -> Option<Densities> {
-    let size = |density| Layout::points(w, h).at_density(density).held().adjusted().size();
+/// `ceiling` is whether the session's layouts are held under it ([`Layout::held`]).
+fn kept_densities((w, h): (u32, u32), ceiling: bool, monitors: &[Placed]) -> Option<Densities> {
+    let size = |density| Layout::points(w, h).at_density(density).held(ceiling).adjusted().size();
     if size(Density::One) == size(Density::Two) {
         return None;
     }
@@ -3589,10 +3613,10 @@ mod tests {
         );
         // A window past the ceiling at 2x is held under it, and fits whole at 1x
         // when re-expressed from its points rather than from the held pixels.
-        let wide = even.with_second(Some(Second::points(2560, 1440).at_density(Density::Two))).held();
+        let wide = even.with_second(Some(Second::points(2560, 1440).at_density(Density::Two))).held(true);
         assert_eq!(wide.second, Some(Second { w: 3840, h: 2400, density: Density::Two }));
         assert_eq!(
-            even.with_second(Some(Second::points(2560, 1440).at_density(Density::One))).held().second,
+            even.with_second(Some(Second::points(2560, 1440).at_density(Density::One))).held(true).second,
             Some(Second { w: 2560, h: 1440, density: Density::One })
         );
         // Open, the tab's monitor stays what it was while the first changes;
@@ -3610,20 +3634,34 @@ mod tests {
         assert_eq!(view.current(mixed.densities()), mixed);
     }
 
-    /// A screen the video encoder would refuse is asked for as the desktop it
-    /// will take, at the density the screen has.
+    /// With the graphics pipeline, a screen the video stream would refuse is asked
+    /// for as the desktop it will take, at the density the screen has. On the
+    /// bitmap path, whose tiles have no ceiling, it is asked for as it is.
     #[test]
-    fn a_layout_is_held_under_the_video_ceiling() {
+    fn a_layout_is_held_under_the_video_ceiling_only_with_the_pipeline() {
         let retina = Layout { w: 2560, h: 1440, density: Density::One, second: None }.at_density(Density::Two);
-        assert_eq!(retina.held(), Layout { w: 3840, h: 2400, density: Density::Two, second: None });
+        assert_eq!(retina.held(true), Layout { w: 3840, h: 2400, density: Density::Two, second: None });
+        assert_eq!(retina.held(false), retina, "the bitmap path asks for the screen whole");
         // A 16:10 4K panel — 1920×1200 at 2x — is a picture the stream takes.
         let inside = Layout { w: 1920, h: 1200, density: Density::One, second: None }.at_density(Density::Two);
-        assert_eq!(inside.held(), inside, "a desktop the stream takes is untouched");
+        assert_eq!(inside.held(true), inside, "a desktop the stream takes is untouched");
         // And the held layout is what the server's answer is checked against, so the
         // retry ladder recognises the desktop it asked for.
-        let pending = PendingLayout::new(retina.held());
+        let pending = PendingLayout::new(retina.held(true));
         assert!(confirms(&pending, &row(&[(3840, 2400)])));
         assert!(!confirms(&pending, &row(&[(5120, 2880)])));
+        let pending = PendingLayout::new(retina.held(false));
+        assert!(confirms(&pending, &row(&[(5120, 2880)])));
+        // The opening layout follows the same rule.
+        let five_k = HostDisplay { w: 2560, h: 1440, scale: 200, fit: false };
+        assert_eq!(
+            opening_layout(&rdp_target(""), Sizing::Window, Some(five_k)),
+            Layout { w: 3840, h: 2400, density: Density::Two, second: None }
+        );
+        assert_eq!(
+            opening_layout(&rdp_target("egfx = false"), Sizing::Window, Some(five_k)),
+            Layout { w: 5120, h: 2880, density: Density::Two, second: None }
+        );
     }
 
     #[test]
@@ -3705,18 +3743,21 @@ mod tests {
     #[test]
     fn a_kept_size_says_its_density() {
         let points = (1920, 980);
-        assert_eq!(kept_densities(points, &row(&[(1920, 980)])), Some(Densities::even(Density::One)));
-        assert_eq!(kept_densities(points, &row(&[(3840, 1960)])), Some(Densities::even(Density::Two)));
-        assert_eq!(kept_densities(points, &row(&[(960, 490)])), None, "not a size the session asks for");
+        assert_eq!(kept_densities(points, true, &row(&[(1920, 980)])), Some(Densities::even(Density::One)));
+        assert_eq!(kept_densities(points, true, &row(&[(3840, 1960)])), Some(Densities::even(Density::Two)));
+        assert_eq!(kept_densities(points, true, &row(&[(960, 490)])), None, "not a size the session asks for");
         assert_eq!(
-            kept_densities(points, &row(&[(1920, 980), (3840, 1960)])),
+            kept_densities(points, true, &row(&[(1920, 980), (3840, 1960)])),
             Some(Densities { first: Density::One, second: Density::Two }),
         );
-        assert_eq!(kept_densities(points, &row(&[(1920, 980), (1280, 800)])), None);
+        assert_eq!(kept_densities(points, true, &row(&[(1920, 980), (1280, 800)])), None);
         // Held under the ceiling, 2x is still not 1x's size.
-        assert_eq!(kept_densities((2560, 1440), &row(&[(3840, 2400)])), Some(Densities::even(Density::Two)));
+        assert_eq!(kept_densities((2560, 1440), true, &row(&[(3840, 2400)])), Some(Densities::even(Density::Two)));
         // Where both are held to one size, the size says nothing.
-        assert_eq!(kept_densities((3840, 2400), &row(&[(3840, 2400)])), None);
+        assert_eq!(kept_densities((3840, 2400), true, &row(&[(3840, 2400)])), None);
+        // The bitmap path holds nothing: 2x is the points doubled, whatever they are.
+        assert_eq!(kept_densities((3840, 2400), false, &row(&[(7680, 4800)])), Some(Densities::even(Density::Two)));
+        assert_eq!(kept_densities((2560, 1440), false, &row(&[(3840, 2400)])), None);
     }
 
     /// A resize is the only acknowledgment a layout gets, and the same event

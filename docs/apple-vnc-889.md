@@ -512,10 +512,9 @@ alone (see [Input and display](architecture.md#input-and-display)).
 
 At factor 1.0 the combined framebuffer is the screens' native pixels side by side:
 a 2x screen beside a 1x one measured 5376×2287. Standard never resizes, so the
-gateway cannot ask for less, and the picture ceiling counts Combined Display by
-the pixels each screen is sent at, not by the bounds they span: past 3840×2400's
-area the session is held with a notice, which offers no screen, as the session
-shows them all.
+gateway cannot ask for less, and need not: the Mac's rectangles are no video
+stream, so Combined Display has no picture ceiling and is shown whole at
+whatever its screens come to.
 
 ### The High Performance virtual display
 

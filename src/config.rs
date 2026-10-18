@@ -1375,7 +1375,7 @@ impl TargetConfig {
 /// (`sizeFollows` in `frontend/src/useRemoteDesktop.ts`). An operator who
 /// wants the larger desk configures a `size` and pays for it deliberately, up
 /// to the ceiling a video stream encodes within
-/// ([`crate::video::MAX_LONG_SIDE`]).
+/// ([`crate::video::MAX_LONG_SIDE`]) where the session's picture is one.
 pub const DEFAULT_SIZE: (u16, u16) = (1440, 900);
 
 /// The most virtual displays a target may ask for ([`TargetConfig::virtual_displays`]).
@@ -1900,17 +1900,32 @@ impl ConfigFile {
             // screen under it, but holding a configured size would open at one
             // the operator did not choose. (A size under the ceiling at 1x may
             // still land over it on a 2x screen; that one is held, like a screen.)
+            // The ceiling is a passed stream's, so an RDP target on the bitmap
+            // path, whose tiles are coded here at any size, takes any size the
+            // host does: a side over the 8192 a Windows host allows (MS-RDPBCGR
+            // 3.3.5.3.3, MS-RDPEDISP's monitor layout) is one it would open
+            // smaller than configured, so it is refused here by the same rule.
+            let bitmap_path = target.protocol == Protocol::Rdp && !target.egfx();
             anyhow::ensure!(
-                target.size.is_none_or(|(w, h)| {
-                    crate::video::within_ceiling((u32::from(w), u32::from(h)))
-                }),
+                bitmap_path
+                    || target.size.is_none_or(|(w, h)| {
+                        crate::video::within_ceiling((u32::from(w), u32::from(h)))
+                    }),
                 "target {:?} sets a {} size, but the video stream encodes at most a \
-                 long side of {} and a short side of {} — set a smaller size, or leave \
-                 the key out",
+                 long side of {} and a short side of {} — set a smaller size, set \
+                 egfx = false on an rdp target, or leave the key out",
                 target.name,
                 size_text(target.size),
                 crate::video::MAX_LONG_SIDE,
                 crate::video::MAX_SHORT_SIDE
+            );
+            let most = crate::rdp_client::proto::display::MAX_DIMENSION;
+            anyhow::ensure!(
+                !bitmap_path || target.size.is_none_or(|(w, h)| u32::from(w) <= most && u32::from(h) <= most),
+                "target {:?} sets a {} size, but a Windows host opens a desktop of at most \
+                 {most} pixels a side — set a smaller size, or leave the key out",
+                target.name,
+                size_text(target.size)
             );
             // A size no session would ever state: a plain target is shown at its
             // server's own size, and Standard mode shows the Mac's physical
@@ -3993,9 +4008,9 @@ vnc_password = \"x\"")).unwrap();
     }
 
     /// The one oversize check-config can see: a size the video stream would refuse
-    /// at 1x.
+    /// at 1x. The ceiling is the stream's, so the bitmap path takes the size.
     #[test]
-    fn a_size_over_the_video_ceiling_is_refused() {
+    fn a_size_over_the_video_ceiling_is_refused_where_the_picture_is_a_stream() {
         let err = ConfigFile::parse(&rdp_toml("size = \"5120x2880\""))
             .expect_err("a 5K size parsed");
         assert!(format!("{err:#}").contains("3840"), "{err:#}");
@@ -4003,6 +4018,14 @@ vnc_password = \"x\"")).unwrap();
             ConfigFile::parse(&rdp_toml(size))
                 .expect("a 4K size, either way up, is a picture the stream takes");
         }
+        ConfigFile::parse(&rdp_toml("size = \"5120x2880\"\negfx = false"))
+            .expect("the bitmap path's tiles have no ceiling");
+        // Up to what a Windows host opens, 8192 a side, which it would clamp a
+        // larger size to: a desktop the operator did not configure.
+        ConfigFile::parse(&rdp_toml("size = \"8192x8192\"\negfx = false")).expect("the host's own most");
+        let err = ConfigFile::parse(&rdp_toml("size = \"8194x4000\"\negfx = false"))
+            .expect_err("a side past the host's most parsed");
+        assert!(format!("{err:#}").contains("8192"), "{err:#}");
     }
 
     /// A Mac's virtual display is not configured, or opened at a client's

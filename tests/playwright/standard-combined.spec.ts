@@ -6,8 +6,8 @@
 // its density, the 2x one scaled down, as one plain desktop with no mosaic; a 2x
 // browser is sent the Mac's own pixels with the mosaic it composes them by. Either
 // way no display list is sent, since there is no single screen to choose, and the
-// picture ceiling counts the pixels each screen is sent at, which a 1x and a 2x
-// screen of a laptop's size are well within.
+// desktop is never held: the Mac's rectangles and the gateway's tiles are no
+// video stream, and have no picture ceiling.
 //
 // Everything asserted is the gateway's decision: the render it resolved, the
 // control messages, the TILE records' framing and place, and the page's
@@ -36,9 +36,6 @@ const BATCH_HEADER_LEN = 8;
 const OP_TILE = 0x06;
 const TILE_HEADER_LEN = 14;
 const TILE = 64;
-/// The ceiling's area, which Combined Display is counted against
-/// (`video::MAX_PIXELS`).
-const MAX_PIXELS = 3840 * 2400;
 
 interface Region {
   pixels: { x: number; y: number; w: number; h: number };
@@ -156,8 +153,8 @@ async function assertTheSessionHolds(page: Page, seen: Session): Promise<void> {
   expect(seen.controlTypes).toContain("tilesStart");
   expect(seen.controlTypes).not.toContain("standardStart");
   expect(seen.controlTypes, "no screen to choose").not.toContain("displays");
-  // Never held on the way to the view its layout shows.
-  expect(seen.oversizes, "held at no point").not.toContain("size");
+  // Never held: Combined Display has no ceiling, so no `oversize` is ever sent.
+  expect(seen.oversizes, "held at no point").toEqual([]);
   expect(seen.misplaced, "tiles off the grid or the desktop").toBe(0);
   expect(seen.strays, "records that were not tiles").toBe(0);
   expect(seen.inexact, "batches their records did not fill").toBe(0);
@@ -183,7 +180,7 @@ test.describe("a Standard Mac's Combined Display, composed by the gateway", () =
     await expect.poll(() => seen.resize?.scale, { timeout: 20_000 }).toBe(1);
     await assertTheSessionHolds(page, seen);
     expect(seen.mosaics.every((regions) => regions.length === 0), "no mosaic").toBe(true);
-    await expect.poll(() => seen.oversize).toBe(null);
+    expect(seen.oversize, "never held").toBeUndefined();
     // The gaps between unequal screens are sent too: the whole desktop is tiles.
     const size = seen.resize ?? { w: 0, h: 0 };
     await expect
@@ -207,9 +204,8 @@ test.describe("a Standard Mac's Combined Display, composed by the gateway", () =
       const right = Math.max(...regions.map((r) => r.pixels.x + r.pixels.w));
       const bottom = Math.max(...regions.map((r) => r.pixels.y + r.pixels.h));
       expect(seen.resize).toMatchObject({ w: right, h: bottom, scale: 2 });
-      // Counted by the pixels each screen is sent at, not the bounds they span.
-      const pixels = regions.reduce((sum, r) => sum + r.pixels.w * r.pixels.h, 0);
-      await expect.poll(() => seen.oversize).toBe(pixels > MAX_PIXELS ? "size" : null);
+      // Shown whole at whatever the screens' pixels come to: no ceiling.
+      expect(seen.oversize, "never held").toBeUndefined();
       await returnToPicker(page);
     });
   });

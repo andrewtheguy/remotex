@@ -375,10 +375,9 @@ export async function openClipboardPanel(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Clipboard", exact: true }).click();
 }
 
-/// The page's alerts but the notice over a desktop past the picture ceiling, a
-/// Standard Mac's Combined Display past it in the Mac's own pixels among them:
-/// a session opens behind it on such a Mac, and the Combined Display case checks
-/// the hold.
+/// The page's alerts but the notice over a desktop past its video stream's
+/// ceiling, a wlshare output's: a session opens behind it, and a spec that
+/// watches for a hold reads the `oversize` message itself.
 export function faults(page: Page) {
   return page.getByRole("alert").filter({ hasNotText: "Too large to show" });
 }

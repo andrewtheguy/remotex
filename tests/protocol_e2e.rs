@@ -1423,9 +1423,16 @@ async fn expect_standard(ws: &mut Ws, quality: Option<&str>) -> Vec<common::Stan
 }
 
 /// [`expect_standard`], for the fake Mac's: rectangles over its corner of the
-/// desktop, each body exactly as the fake sent it.
+/// desktop, each body exactly as the fake sent it. A session of one screen at a
+/// time opens on a pixel of the combined view, asked for until the screen's
+/// layout comes, and the Mac's answer to it is passed like any rectangle, ahead
+/// of the screen whole.
 async fn expect_fake_standard(ws: &mut Ws, quality: Option<&str>) {
-    for rect in expect_standard(ws, quality).await {
+    let mut rects = expect_standard(ws, quality).await;
+    while rects.iter().all(|rect| (rect.x, rect.y, rect.w, rect.h) == (0, 0, 1, 1)) {
+        rects = expect_standard(ws, None).await;
+    }
+    for rect in rects {
         assert_eq!((rect.x, rect.y, rect.w, rect.h), (0, 0, MAC_DESKTOP, MAC_DESKTOP));
         assert_eq!(rect.body, fake_standard_body(rect.body[0]), "the body as the Mac sent it");
     }
@@ -1693,16 +1700,36 @@ async fn takeover_evicts_the_attached_browser_and_lands_the_new_one_on_the_picke
     expect_frame(&mut ws_b).await;
 }
 
-/// On a session the window does not size, a desktop past what a video stream
-/// encodes holds the session open without a picture: the browser is told, is sent
-/// nothing of the desktop, and is told again when it reattaches. Within the ceiling
-/// the same server is video (the tests above).
+/// A plain server's desktop is tiles at whatever size it has: past what a video
+/// stream encodes it is shown like any other, since the tiles are no stream and
+/// have no ceiling, and the browser is told nothing of a hold.
 #[tokio::test]
-async fn an_oversize_vnc_desktop_holds_the_session_without_a_picture() {
+async fn an_oversize_plain_vnc_desktop_is_shown() {
     // A long side just past 3840, and as little else as that allows.
     let (w, h) = (3842, 2);
     let vnc_port = spawn_fake_vnc_sized(w, h).await;
     let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    expect_resize(&mut ws, w, h).await;
+    expect_frame(&mut ws).await;
+}
+
+/// On a `wlshare` target the window does not size, a desktop past what its VP9
+/// stream encodes holds the session open without a picture: the browser is told,
+/// is sent nothing of the desktop, and is told again when it reattaches. The fake
+/// ignores the listing and is coded here, held all the same.
+#[tokio::test]
+async fn an_oversize_wlshare_desktop_holds_the_session_without_a_picture() {
+    let (w, h) = (3842, 2);
+    let vnc_port = spawn_fake_vnc_sized(w, h).await;
+    let addr = spawn_app(TargetConfig {
+        subtype: Some(remotex::config::Subtype::Wlshare),
+        ..target(Protocol::Vnc, vnc_port)
+    })
+    .await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;

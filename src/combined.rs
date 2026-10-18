@@ -20,11 +20,9 @@
 //! Display has. The gaps between unequal screens are filled with the colour the
 //! page leaves them.
 //!
-//! The picture ceiling counts Combined Display by its screens, not by the bounds
-//! they span: the sum of the pixels the page is sent of each, as composed here or as
-//! the Mac sent them, against the ceiling's area ([`crate::video::MAX_PIXELS`]).
-//! A 300×300-point 1x screen beside a 200×200-point 2x one is 300×300 + 200×200
-//! pixels to a 1x browser and 300×300 + 400×400 to a 2x one.
+//! Combined Display has no picture ceiling: its screens are shown at whatever size
+//! they come to, as composed here or as the Mac sent them, since no picture of it is
+//! a video stream ([`crate::video::MAX_LONG_SIDE`]).
 
 use crate::protocol::MosaicRegion;
 use crate::shadow::Rect;
@@ -82,12 +80,6 @@ impl Composition {
     /// Its pixels per point: the browser's density it was composed at.
     pub fn scale(&self) -> f32 {
         self.scale
-    }
-
-    /// The pixels of its screens, the gaps between them aside: what the picture
-    /// ceiling counts it by ([`crate::video::within_area`]).
-    pub fn pixels(&self) -> u64 {
-        self.draws.iter().map(|d| u64::from(d.dst.w) * u64::from(d.dst.h)).sum()
     }
 
     /// A position on the composed view as the Mac addresses it: a pixel of its
@@ -276,7 +268,6 @@ mod tests {
         let composition = Composition::of(&mixed(), 1.0).expect("composed here");
         assert_eq!(composition.size(), (2720, 900));
         assert_eq!(composition.scale(), 1.0);
-        assert_eq!(composition.pixels(), 1280 * 800 + 1440 * 900, "the gap under the 1x screen aside");
     }
 
     #[test]
@@ -284,16 +275,6 @@ mod tests {
         assert_eq!(Composition::of(&mixed(), 2.0), None, "the 1x screen is never enlarged here");
     }
 
-    /// A 300×300-point 1x screen and a 200×200-point 2x one: 300×300 + 200×200
-    /// pixels sent to a 1x browser.
-    #[test]
-    fn what_is_counted_is_what_each_screen_is_sent_at() {
-        let regions = vec![
-            MosaicRegion { pixels: rect(0, 0, 300, 300), points: rect(0, 0, 300, 300) },
-            MosaicRegion { pixels: rect(300, 0, 400, 400), points: rect(300, 0, 200, 200) },
-        ];
-        assert_eq!(Composition::of(&regions, 1.0).unwrap().pixels(), 300 * 300 + 200 * 200);
-    }
 
     #[test]
     fn the_gap_under_the_shorter_screen_is_filled() {

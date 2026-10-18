@@ -28,8 +28,8 @@ deliberately a second implementation rather than an import of the SPA's, because
 wrong parser would otherwise agree with itself.
 
 `tiles.spec.ts` is the picture the gateway codes, read from the same socket, on a
-plain `vnc` target or an `rdp` one with `egfx = false`: the harness desktop is
-well within the ceiling, so every record is TILE and everything it asserts is
+plain `vnc` target or an `rdp` one with `egfx = false`: neither passes a stream,
+so every record is TILE and everything it asserts is
 decidable without asking the browser anything. It parses TILE records itself — op,
 format byte, the image's own signature, a rectangle on the 64-pixel grid inside the
 desktop the last `resize` announced — and checks that no tile outran the
@@ -79,8 +79,8 @@ tiles, passes nothing, sends `tilesStart` and no display list, is never held, an
 that every TILE record lies on the grid of the last `resize` and is painted. At
 a 1x browser the desktop is one plain composition with no `mosaic`, every tile
 of it sent, gaps included; at a 2x one it is the Mac's own pixels behind a
-two-region `mosaic`, at 2x, held only past the ceiling's area in the screens'
-pixels.
+two-region `mosaic`, at 2x, and never held, since Combined Display has no
+picture ceiling.
 
 `target-switch.spec.ts` switches one page, without a reload, between an RDP
 host's pipeline and bitmap targets and a Mac's Adaptive and High Performance

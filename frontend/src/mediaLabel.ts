@@ -177,9 +177,8 @@ export interface VideoStreamInfo {
  * stream it decodes, in how many strips where its pictures come in strips, and
  * which decoder that is, the browser's own or one of the
  * page's in WebAssembly, or what the row is waiting for before the stream's format has
- * arrived. While the desktop is held, past the picture ceiling, there is
- * no picture, whatever decoder was built before; a Mac's own picture is still
- * decoded by this page, under the notice.
+ * arrived. While the desktop is held, past the ceiling of the stream that
+ * carries it, there is no picture, whatever decoder was built before.
  */
 export function videoLabel(
   stream: VideoStreamInfo | null,
@@ -190,7 +189,7 @@ export function videoLabel(
     return `Not in use: the Mac's ${picture} picture is decoded by this page`;
   }
   if (held === "size") {
-    return "Not in use: the desktop is past what the gateway shows";
+    return "Not in use: the desktop is past what its video stream carries";
   }
   if (!stream) {
     return "Waiting for the video format";

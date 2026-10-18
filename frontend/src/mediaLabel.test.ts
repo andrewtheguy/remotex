@@ -188,9 +188,9 @@ test("the video row waits for the format, then names it and its decoder", () => 
   );
   assert.equal(
     videoLabel({ decode: "vp09.00.40.08" }, "size"),
-    "Not in use: the desktop is past what the gateway shows",
+    "Not in use: the desktop is past what its video stream carries",
   );
-  // Held, a Mac's own picture is still decoded, under the notice.
+  // A Mac's own picture has no ceiling, and is decoded whatever is said of a hold.
   assert.equal(
     videoLabel({ decode: "", standard: "full" }, "size"),
     "Not in use: the Mac's Full-quality picture is decoded by this page",

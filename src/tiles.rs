@@ -30,7 +30,7 @@ use anyhow::Context as _;
 use rayon::prelude::*;
 
 use crate::shadow::Rect;
-use crate::video::{Mirror, check_area, check_picture};
+use crate::video::Mirror;
 
 /// The side of a tile, in pixels. A tile at the right or bottom edge of a desktop
 /// whose side is not a multiple of it is cut there.
@@ -109,9 +109,6 @@ pub struct Tiles {
     /// The desktop, learned from [`crate::protocol::ServerMsg::Resize`]. `None` until
     /// the engine has announced one, which it always does before any damage.
     size: Option<(u16, u16)>,
-    /// The pixels the ceiling counts the desktop by where not its bounds: a Standard
-    /// Mac's Combined Display ([`crate::encode::VideoSink::counts`]).
-    counted: Option<u64>,
     /// Built by the first blit of a desktop: see [`Self::mirror_mut`].
     mirror: Option<Mirror>,
     /// One per tile, row by row.
@@ -144,7 +141,6 @@ impl Tiles {
         Self {
             quality,
             size: None,
-            counted: None,
             mirror: None,
             grid: Vec::new(),
             cols: 0,
@@ -164,9 +160,7 @@ impl Tiles {
     /// Cannot fail, and is all that happens on the message path. A different size
     /// drops the mirror and every tile: the browser's canvas starts over black at the
     /// new size, and the remote repaints it, which the next blit builds the mirror for.
-    /// `counted` is what the ceiling counts it by, where not its bounds.
-    pub fn want(&mut self, w: u16, h: u16, counted: Option<u64>) {
-        self.counted = counted;
+    pub fn want(&mut self, w: u16, h: u16) {
         if self.size != Some((w, h)) {
             self.size = Some((w, h));
             self.mirror = None;
@@ -175,6 +169,14 @@ impl Tiles {
             self.start_owed = true;
             self.epoch += 1;
         }
+    }
+
+    /// The desktop as last [`Self::want`]ed, or `None` before any: what a source
+    /// that refuses a desktop past the picture ceiling checks before a blit
+    /// ([`crate::encode::VideoSink::damage`]). The tiles themselves have no ceiling:
+    /// they hold a desktop of any size the remote sends.
+    pub fn size(&self) -> Option<(u16, u16)> {
+        self.size
     }
 
     /// The mirror, built if it is not there yet, with every tile clean: what the
@@ -188,10 +190,6 @@ impl Tiles {
         if self.mirror.is_none() {
             let (w, h) = self.size.ok_or_else(|| anyhow::anyhow!("the tiles were asked for pixels before a desktop size"))?;
             let mirror = Mirror::new(w, h)?;
-            match self.counted {
-                Some(pixels) => check_area(pixels)?,
-                None => check_picture(mirror.size())?,
-            }
             self.cols = usize::from(w.div_ceil(TILE));
             self.rows = usize::from(h.div_ceil(TILE));
             self.grid = vec![Tile::default(); self.cols * self.rows];
@@ -601,7 +599,7 @@ mod tests {
 
     fn tiles(w: u16, h: u16) -> Tiles {
         let mut tiles = Tiles::new(80);
-        tiles.want(w, h, None);
+        tiles.want(w, h);
         tiles
     }
 
@@ -755,7 +753,7 @@ mod tests {
     #[test]
     fn a_coarse_level_is_never_finer_than_the_plan() {
         let mut tiles = Tiles::new(15);
-        tiles.want(64, 64, None);
+        tiles.want(64, 64);
         tiles.blit(placed(0, 0, 64, 64), &noise(64, 64, 2)).expect("a blit");
         let round = tiles.take_round(0, 1).expect("owed");
         assert_eq!((round.coarse(), round.quality()), (true, 15));
@@ -789,7 +787,7 @@ mod tests {
         tiles.blit(placed(0, 0, 128, 128), &noise(128, 128, 1)).expect("a blit");
         let stale = tiles.take_round(0, 0).expect("owed");
         let coded = stale.code().expect("a round codes");
-        tiles.want(64, 64, None);
+        tiles.want(64, 64);
         tiles.blit(placed(0, 0, 64, 64), &flat(64, 64, [5, 5, 5])).expect("a blit at the new size");
         assert!(!tiles.owes(), "nothing while the round is out");
         tiles.put_back(&stale, &coded);
@@ -799,28 +797,18 @@ mod tests {
         assert!(!tiles.tick() && !tiles.tick(), "the stale round's JPEG marked a tile of the new desktop");
     }
 
-    /// Pixels before a size are refused by name, and a desktop past the ceiling is
-    /// refused by its first blit.
+    /// Pixels before a size are refused by name, and a desktop past the video
+    /// stream's ceiling is held like any other: the tiles have no ceiling of their
+    /// own, and a source that refuses one does so before its pixels reach here.
     #[test]
-    fn a_desktop_without_a_size_or_past_the_ceiling_is_refused() {
+    fn a_desktop_without_a_size_is_refused_and_one_past_the_ceiling_is_held() {
         let mut tiles = Tiles::new(80);
+        assert!(tiles.size().is_none());
         assert!(tiles.blit(placed(0, 0, 1, 1), &[0, 0, 0]).is_err());
-        tiles.want(5120, 2880, None);
-        let refused = tiles.blit(placed(0, 0, 1, 1), &[0, 0, 0]).expect_err("a 5K desktop was taken");
-        assert!(format!("{refused:#}").contains("5120x2880"), "{refused:#}");
-    }
-
-    /// A Mac's Combined Display is counted by the pixels of its screens, so its
-    /// bounds may be wider than the ceiling's long side where its screens' pixels
-    /// come to less than the ceiling's area.
-    #[test]
-    fn a_desktop_counted_by_its_screens_is_held_to_the_ceilings_area() {
-        let mut tiles = Tiles::new(80);
-        tiles.want(4160, 1800, Some(1280 * 800 + 2880 * 1800));
-        tiles.blit(placed(0, 0, 1, 1), &[0, 0, 0]).expect("a 1x screen beside a 2x one is within the area");
-        let mut tiles = Tiles::new(80);
-        tiles.want(4160, 1800, Some(3840 * 2400 + 1));
-        assert!(tiles.blit(placed(0, 0, 1, 1), &[0, 0, 0]).is_err());
+        tiles.want(5120, 2880);
+        assert_eq!(tiles.size(), Some((5120, 2880)));
+        tiles.blit(placed(0, 0, 1, 1), &[0, 0, 0]).expect("a 5K desktop is tiles like any other");
+        assert_eq!((tiles.cols, tiles.rows), (80, 45));
     }
 
     /// The palette is at most 256 colours, each pixel its index.
