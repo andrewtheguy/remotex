@@ -3816,6 +3816,11 @@ mod tests {
             standard.accepts(Choices { whole: true, passthrough: Some(Passthrough::AppleAdaptive), ..Choices::default() }),
             Err(NotOffered { target: "mac".to_owned(), choice: "a picture in one tile" })
         );
+        assert_eq!(
+            standard.accepts(Choices { whole: true, ..Choices::default() }),
+            Err(NotOffered { target: "mac".to_owned(), choice: "a picture in one tile" }),
+            "the Full quality is the tiles, which have no one tile to ask for"
+        );
         assert_eq!(standard.offers().passthrough, [Passthrough::AppleAdaptive]);
         assert_eq!(
             standard.accepts(passed),
