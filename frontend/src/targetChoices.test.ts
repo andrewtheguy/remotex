@@ -689,10 +689,10 @@ test("a Mac's picture only this page decodes can be passed", () => {
   assert.equal(options.choices.passthrough, "apple-media");
 
   // Without the page's HEVC decoder, served or runnable, the HEVC is greyed as
-  // for any browser that cannot take it.
-  for (const [offered, abilities] of [
-    [HIGH_PERFORMANCE, NEEDS_PAGE],
-    [MAC_PAGE, { ...NEEDS_PAGE, runsHevc: false }],
+  // for any browser that cannot take it, with which is missing.
+  for (const [offered, abilities, reason] of [
+    [HIGH_PERFORMANCE, NEEDS_PAGE, /this gateway serves no decoder/],
+    [MAC_PAGE, { ...NEEDS_PAGE, runsHevc: false }, /needs WebGL 2/],
   ] as const) {
     const greyed = targetOptions(
       offered,
@@ -700,6 +700,7 @@ test("a Mac's picture only this page decodes can be passed", () => {
       abilities,
     );
     assert.equal(greyed.pictures?.[0].disabled, true);
+    assert.match(greyed.pictures?.[0].note ?? "", reason);
     assert.equal(greyed.choices.passthrough, "apple-h264");
   }
 });

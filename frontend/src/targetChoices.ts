@@ -323,6 +323,17 @@ const NO_APPLE_PICTURE =
   "This browser decodes neither of the Mac's pictures, its HEVC or its H.264, which are all this target sends. Use a browser that does, or the Mac's Screen Sharing Standard.";
 
 /**
+ * Why a Mac's HEVC is greyed here: the browser's own decoder refuses it, and the
+ * page cannot stand in, for want of a decoder from this gateway or of what the
+ * decoder runs on (softwareSupport.ts).
+ */
+function noHevc(target: TargetInfo): string {
+  return target.software
+    ? "This browser does not decode the Mac's HEVC, and this page cannot decode it itself: that needs WebGL 2 with Display P3, WebAssembly SIMD and a cross-origin isolated page."
+    : "This browser does not decode the Mac's HEVC, and this gateway serves no decoder for this page to decode it with.";
+}
+
+/**
  * The ways a Mac's picture can reach this browser, in the order the picker shows
  * them: a High Performance Mac's HEVC passed through, and its H.264; a Standard
  * Mac's Adaptive picture passed through, and the gateway's tiles of its Full
@@ -348,7 +359,7 @@ function pictureOptions(
       label: "HEVC, passed through",
       note: hevc
         ? "The Mac's own picture in 4:4:4. For a LAN."
-        : "This browser does not decode the Mac's HEVC, and this page cannot decode it here.",
+        : noHevc(target),
       disabled: !hevc,
     },
     "apple-h264": {
