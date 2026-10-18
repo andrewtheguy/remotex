@@ -2884,7 +2884,7 @@ mod tests {
         }
         assert!(hook_rx.try_recv().is_err(), "nothing was started");
 
-        // The Mac's H.264, which no browser is asked about, starts the target.
+        // The Mac's H.264, which the gateway is not told about, starts the target.
         mgr.connect(att.id, "mac", None, h264).await.unwrap();
         assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { apple_media: false, apple_h264: true, .. })));
     }

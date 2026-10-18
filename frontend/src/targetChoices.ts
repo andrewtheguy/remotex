@@ -14,13 +14,14 @@
 //   there are two: see `sizeOptions`.
 // - An option the target's type does not offer has no row.
 // - One it offers that cannot be had here is greyed, with the reason: Opus in
-//   a browser with no audio decoder, or a passthrough this browser cannot take.
+//   a browser with no audio decoder, or a passthrough this browser cannot take,
+//   a picture its decoder refuses among them.
 // - An RDP host's graphics pipeline is passed in every session, which is said and
 //   not offered: the gateway composes none.
 // - A High Performance Mac's picture is one of two, both passed through: its
 //   HEVC, or its H.264, in that order: see `pictureOptions`. The first this
-//   browser can take is taken until another is chosen. The H.264 is never
-//   greyed: no browser is asked whether it decodes it.
+//   browser can take is taken until another is chosen, and where it takes
+//   neither the target cannot start.
 // - A Standard Mac's screens are shown one at a time or all at once, as Combined
 //   Display: see `VIEWS`. Screen Sharing Standard's alone; no other target has a
 //   combined view. One at a time until Combined is chosen.
@@ -40,7 +41,9 @@
 //   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
 //   offered high quality alone.
 // - A target that can only be passed, in a browser that cannot take it, cannot
-//   start, and Start says so before the remote is dialled.
+//   start, and Start says so before the remote is dialled: an RDP host's
+//   pipeline in a page that cannot compose it, and a `wlshare` target's VP9 in a
+//   browser whose decoder refuses it.
 // - Which decoder takes the picture is no choice: the browser's own decodes the
 //   VP9, and the page a Mac's passed HEVC where the gateway serves the decoder
 //   for it, in WebAssembly wherever the browser's own decoder does not take it
@@ -163,6 +166,12 @@ export interface Abilities {
   rdpGraphics: boolean;
   /** Whether it decodes the H.264 an RDP host may draw with (rdpH264.ts). */
   rdpH264: boolean;
+  /**
+   * Whether its own decoder takes a High Performance Mac's H.264, and wlshare's
+   * VP9 at 4:2:0 (videoCodecs.ts): no for a browser with no `VideoDecoder`.
+   */
+  appleH264: boolean;
+  vp9: boolean;
   /**
    * Whether this browser has an audio decoder, which Opus and a Mac's AAC-ELD
    * need. FLAC does not: the page decodes it itself (flacDecoder.ts).
@@ -304,6 +313,15 @@ const RDP_GRAPHICS: PassedNote & { blocked: string } = {
     "This browser cannot compose the host's graphics pipeline, which this target always passes: that needs WebGL 2 and a cross-origin isolated page. Use a browser that can, or a target with egfx disabled.",
 };
 
+// Why a `wlshare` target cannot start in a browser that does not decode its VP9,
+// which is its picture in every session.
+const NO_VP9 =
+  "This browser does not decode VP9, which is this wlshare target's picture in every session. Use a browser that does, or a plain vnc target for the same server, which is sent tiles.";
+
+// Why a High Performance Mac cannot start in a browser that takes neither picture.
+const NO_APPLE_PICTURE =
+  "This browser decodes neither of the Mac's pictures, its HEVC or its H.264, which are all this target sends. Use a browser that does, or the Mac's Screen Sharing Standard.";
+
 /**
  * The ways a Mac's picture can reach this browser, in the order the picker shows
  * them: a High Performance Mac's HEVC passed through, and its H.264; a Standard
@@ -314,8 +332,9 @@ const RDP_GRAPHICS: PassedNote & { blocked: string } = {
  *   the page decodes it itself, which it then does (softwareDecoder.ts). The
  *   socket states both answers, and the gateway passes the picture to a page that
  *   has either.
- * - The H.264 is never greyed: no browser is asked whether it decodes it.
- * - Nor is the Mac's Adaptive picture, which every page decodes in WebAssembly
+ * - The H.264 is greyed in a browser whose own decoder does not take it: no
+ *   page decoder stands in for it.
+ * - The Mac's Adaptive picture is never greyed, which every page decodes in WebAssembly
  *   (standardPicture.ts), nor the gateway's tiles, images every page decodes.
  */
 function pictureOptions(
@@ -335,8 +354,10 @@ function pictureOptions(
     "apple-h264": {
       value: "apple-h264",
       label: "H.264, passed through",
-      note: "The Mac's own picture in 4:2:0.",
-      disabled: false,
+      note: abilities.appleH264
+        ? "The Mac's own picture in 4:2:0."
+        : "This browser does not decode the Mac's H.264.",
+      disabled: !abilities.appleH264,
     },
     "apple-adaptive": {
       value: "apple-adaptive",
@@ -618,23 +639,20 @@ export function targetOptions(
     abilities.lossless,
   );
   const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
-  // An RDP host's pipeline is passed whatever is chosen, and a browser that
-  // cannot compose it cannot start the target.
+  // An RDP host's pipeline is passed whatever is chosen.
   const always = target.passthroughs.includes("rdp-graphics");
   const passed: PassedNote | null = always
     ? { label: RDP_GRAPHICS.label, note: RDP_GRAPHICS.note }
     : null;
-  const blocked =
-    always && !abilities.rdpGraphics ? RDP_GRAPHICS.blocked : null;
   const { views, standardView, pictures } = viewRows(
     target,
     remembered?.standardView,
     abilities,
   );
   // What was chosen last time, where it can be had here, and otherwise the
-  // first that can: the H.264 and a Standard Mac's pictures always can. A
-  // remembered null is the gateway's tiles where those are a choice, and
-  // nothing chosen anywhere else.
+  // first that can: a Standard Mac's pictures always can. A remembered null is
+  // the gateway's tiles where those are a choice, and nothing chosen anywhere
+  // else.
   const able = pictures?.filter((option) => !option.disabled) ?? [];
   const passthrough =
     (
@@ -670,8 +688,35 @@ export function targetOptions(
     sound:
       choices.audio !== "off" ||
       (target.passthroughs.includes("apple-media") && abilities.audio),
-    blocked,
+    blocked: blockedReason(target, abilities, able.length > 0),
   };
+}
+
+/**
+ * Why `target` cannot start here, or null: its only pictures are ones this
+ * browser cannot take. An RDP host's pipeline in a page that cannot compose it,
+ * a High Performance Mac with no picture `pictured` here, and a `wlshare`
+ * target's VP9 in a browser whose decoder refuses it.
+ */
+function blockedReason(
+  target: TargetInfo,
+  abilities: Abilities,
+  pictured: boolean,
+): string | null {
+  if (target.passthroughs.includes("rdp-graphics") && !abilities.rdpGraphics) {
+    return RDP_GRAPHICS.blocked;
+  }
+  if (target.passthroughs.includes("apple-media") && !pictured) {
+    return NO_APPLE_PICTURE;
+  }
+  if (
+    target.protocol === "vnc" &&
+    target.subtype === "wlshare" &&
+    !abilities.vp9
+  ) {
+    return NO_VP9;
+  }
+  return null;
 }
 
 // Remembered per target, in this browser, as lasting choices about how each

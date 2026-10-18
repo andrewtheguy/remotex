@@ -1,32 +1,33 @@
 // The one environment check this client makes, and it is a refusal rather than a
 // branch.
 //
-// Two things below the login are not optional and neither can be supplied by the
-// page itself. A **secure context**, because that is what `navigator.clipboard`,
-// `navigator.keyboard` and WebCodecs are all gated on. And the **WebCodecs video
-// decoder**, because every target may deliver its desktop as an encoded video
-// stream (even though an RDP graphics pipeline can be composed instead), and
-// nothing here decodes it without one — the gateway names a configuration and the
-// browser's decoder does the work (videoDecoder.ts).
+// One thing below the login is not optional and cannot be supplied by the page
+// itself: a **secure context**, because that is what `navigator.clipboard`,
+// `navigator.keyboard` and WebCodecs are all gated on.
 //
-// Missing either, every dependent feature used to go missing separately and explain
+// Missing it, every dependent feature used to go missing separately and explain
 // itself separately: near-identical "reach this gateway over HTTPS" messages under
 // the clipboard and the keyboard, a banner over the canvas, and a fallback path
 // behind each. A session that half worked, in a way nobody could describe.
 //
-// So the checks happen once, before React mounts, and the answer is no. Nothing
-// downstream tests `isSecureContext` or `typeof VideoDecoder` again, and nothing
-// carries a second path for either case: there is no such session left to have a
-// path for.
+// So the check happens once, before React mounts, and the answer is no. Nothing
+// downstream tests `isSecureContext` again, and nothing carries a second path for
+// it: there is no such session left to have a path for.
 //
-// The **audio decoder** is the one exception, and it is not a refusal: Safari from
-// 16.4 to 18 has `VideoDecoder` and no `AudioDecoder`, and the desktop is the whole
-// of a session where sound is not. Such a browser starts, and plays the one sound
-// that needs no audio decoder, FLAC, which the page decodes itself (flacDecoder.ts).
-// What does need one is greyed with the reason: Opus at the picker
-// (targetChoices.ts), and a High Performance Mac's AAC-ELD in the menu's Audio
-// button (FloatingMenu.tsx). Asked here, by `decodesAudio`, so that the question has
-// one answer and one place.
+// The **decoders** are not refusals. A browser without a `VideoDecoder`, or whose
+// decoder refuses a codec, starts, and what needs the decoder is greyed at the
+// picker with the reason (targetChoices.ts): wlshare's VP9 and a High Performance
+// Mac's H.264 by their own questions (videoCodecs.ts), the Mac's HEVC where the
+// page cannot decode it either (appleMedia.ts), and an RDP host's H.264
+// (rdpH264.ts). The gateway's tiles, a Standard Mac's Adaptive picture and an RDP
+// host's pipeline without H.264 are decoded by the page and need none of it. The
+// **audio decoder** likewise: Safari from 16.4 to 18 has `VideoDecoder` and no
+// `AudioDecoder`, and the desktop is the whole of a session where sound is not.
+// Such a browser plays the one sound that needs no audio decoder, FLAC, which the
+// page decodes itself (flacDecoder.ts). What does need one is greyed with the
+// reason: Opus at the picker (targetChoices.ts), and a High Performance Mac's
+// AAC-ELD in the menu's Audio button (FloatingMenu.tsx). Asked here, by
+// `decodesAudio`, so that the question has one answer and one place.
 //
 // The gateway speaks plain HTTP and always has — it has no TLS listener and is not
 // getting one. A secure context therefore comes from where the page is reached, not
@@ -39,34 +40,13 @@
 // A LAN address on plain http is the case this refuses, and the message names the
 // three ways out.
 
-/** One reason the client will not start, in the words it goes on screen in. */
-interface Refusal {
-  heading: string;
-  detail: readonly string[];
-  /**
-   * Whether to name the origin underneath. True where the origin *is* the problem,
-   * false where it is not — under "this browser cannot decode" it would read as an
-   * accusation against the address, which is the one thing that is fine.
-   */
-  origin: boolean;
-}
-
-const INSECURE: Refusal = {
+/** Why the client will not start, in the words it goes on screen in. */
+const INSECURE = {
   heading: "This gateway needs a secure connection",
   detail: [
     "The remote desktop needs a secure context for its video, audio, clipboard and keyboard.",
     "Reach it over HTTPS, over an SSH tunnel to localhost, or at http://localhost.",
   ],
-  origin: true,
-};
-
-const NO_VIDEO_DECODER: Refusal = {
-  heading: "This browser cannot decode a remote desktop",
-  detail: [
-    "The desktop arrives encoded, and this browser has no WebCodecs video decoder to play it with.",
-    "Which browsers have one depends on the version and the platform. A recent desktop Chrome or Edge is the safe answer.",
-  ],
-  origin: false,
 };
 
 /**
@@ -84,45 +64,29 @@ export const NO_AUDIO_DECODER =
   "This browser has no WebCodecs AudioDecoder, so it cannot play the remote's sound.";
 
 /**
- * Why the client may not start, or null.
- *
- * The secure context is asked about first because it is the answerable one: WebCodecs
- * is itself secure-context gated, so an insecure origin fails both checks, and
- * "install a different browser" would be the wrong thing to tell someone whose
- * browser is fine.
- */
-function refusal(): Refusal | null {
-  if (!window.isSecureContext) {
-    return INSECURE;
-  }
-  return typeof VideoDecoder === "undefined" ? NO_VIDEO_DECODER : null;
-}
-
-/**
- * Put the refusal on screen, in place of the client.
+ * Put the refusal on screen, in place of the client, with the origin underneath:
+ * "this gateway" is ambiguous the moment someone has two.
  *
  * Plain DOM, no React and no stylesheet of its own: the point of failing here is that
  * nothing else has started, and a message that needed the app to render would be a
  * message that could fail the same way.
  */
-function renderRefusal(root: HTMLElement, reason: Refusal): void {
+function renderRefusal(root: HTMLElement): void {
   root.replaceChildren();
   const panel = document.createElement("main");
   panel.className = "boot-refusal";
   const heading = document.createElement("h1");
-  heading.textContent = reason.heading;
+  heading.textContent = INSECURE.heading;
   panel.append(heading);
-  for (const line of reason.detail) {
+  for (const line of INSECURE.detail) {
     const paragraph = document.createElement("p");
     paragraph.textContent = line;
     panel.append(paragraph);
   }
-  if (reason.origin) {
-    const where = document.createElement("p");
-    where.className = "boot-refusal-origin";
-    where.textContent = window.location.origin;
-    panel.append(where);
-  }
+  const where = document.createElement("p");
+  where.className = "boot-refusal-origin";
+  where.textContent = window.location.origin;
+  panel.append(where);
   root.append(panel);
 }
 
@@ -134,10 +98,9 @@ function renderRefusal(root: HTMLElement, reason: Refusal): void {
  * has just been handed a blank page is not looking.
  */
 export function startupPermitted(root: HTMLElement): boolean {
-  const reason = refusal();
-  if (!reason) {
+  if (window.isSecureContext) {
     return true;
   }
-  renderRefusal(root, reason);
+  renderRefusal(root);
   return false;
 }

@@ -263,8 +263,13 @@ whose bitmap updates are sent as tiles by the gateway.
   and is not part of the client bundle. Do not widen the decoder input to another
   file, an unpinned archive, or a directory, and do not turn the logo path into a
   web root.
-- The page requires a secure context plus `VideoDecoder` and refuses startup in
-  `frontend/src/preflight.ts` without them. A browser without `AudioDecoder`
+- The page requires a secure context and refuses startup in
+  `frontend/src/preflight.ts` without one. A browser without `VideoDecoder`, or
+  whose decoder refuses a codec, starts, and what needs it is greyed at the
+  picker with the reason: wlshare's VP9 and a High Performance Mac's H.264 by
+  their own questions (`frontend/src/videoCodecs.ts`), beside the HEVC's and the
+  RDP pipeline's H.264's. The tiles, a Standard Mac's Adaptive picture and a
+  pipeline without H.264 need none. A browser without `AudioDecoder`
   starts and plays FLAC, which the page decodes itself, save on an iPhone or
   an iPad, which greys FLAC to keep its WebAssembly down (below) and so has no
   sound there; what needs the decoder is greyed with the reason. Do not
@@ -1298,8 +1303,10 @@ Safari on a Mac.
   is taken as its display's where its width is the display's rounded down to
   even, a whole picture where both its sides are, and the last column or row is
   not sent.
-- **No browser is asked.** The picker offers it to every browser and the
-  gateway serves it to any (`Decoders::takes`). The page decodes it in the
+- **The browser is asked, the gateway is not.** The page asks its own
+  `VideoDecoder` about the Mac's High profile H.264 once at load
+  (`frontend/src/videoCodecs.ts`) and the picker greys it where the answer is
+  no; the gateway serves it to any (`Decoders::takes`). The page decodes it in the
   browser's own `VideoDecoder`, a strip a picture, and draws a frame's strips
   as it draws the HEVC's from that decoder (`paintStrips`); there is no software
   decoder for it in the page. A browser that does not decode it says so in the
@@ -1767,8 +1774,9 @@ than it looks — `VideoDecoder` was never doing its work on the main thread any
 from the worker, so a frame reaches the screen without the thread carrying input and
 React being scheduled for it.
 
-A browser without `VideoDecoder` never reaches this code — the preflight gate turns
-it away before React mounts (`preflight.ts`). What survives is the narrower failure:
+A browser without `VideoDecoder`, or whose decoder refuses the codec at load, never
+reaches this code — the picker greys what it would decode
+(`videoCodecs.ts`, `appleMedia.ts`). What survives is the narrower failure:
 a decoder that exists and refuses this *configuration*, which no keyframe repairs.
 That is *said* rather than logged, because the stream is all a target sends and the
 alternative is a desktop that never paints and never explains itself: a banner that stays up, naming the configuration the browser
@@ -2072,8 +2080,11 @@ and `GET /api/targets` carries it:
 - **Offered but unavailable is greyed, with the reason.** The Mac's HEVC
   is greyed wherever the browser cannot take it: one that does not decode the
   Mac's HEVC, or a gateway with no HEVC decoder archive to serve a browser that
-  needs it. The Mac's H.264 is never greyed, and nor are a Standard Mac's
-  own pictures. `/api/targets` says which streams a target can pass, as
+  needs it. The Mac's H.264 is greyed where the browser's own decoder refuses
+  it, and a High Performance Mac neither of whose pictures it takes cannot
+  start, with the reason. A Standard Mac's own pictures are never greyed. A
+  `wlshare` target, whose VP9 is its picture in every session, cannot start in a
+  browser whose decoder refuses it. `/api/targets` says which streams a target can pass, as
   `passthroughs`; a target with any has no picture coded here. For the pipeline the picker says the stream is always
   passed, as a note
   with nothing to choose, and where the
@@ -3207,15 +3218,18 @@ RDP host's passed graphics pipeline, with the gateway's compositor built to
 WebAssembly — applies incoming frames serially, and overlays mouse,
 keyboard, touch, clipboard, display, and audio controls.
 
-**It refuses to start without a secure context and a WebCodecs video decoder**
-(`preflight.ts`, before React mounts), and that refusal is what lets the rest of the
-client be simple: nothing downstream tests for either again or carries a fallback for
-its absence. `navigator.clipboard`, `navigator.keyboard` and WebCodecs itself all
+**It refuses to start without a secure context** (`preflight.ts`, before React
+mounts), and that refusal is what lets the rest of the client be simple: nothing
+downstream tests for one again or carries a fallback for its absence. The decoders
+are not part of the gate. A browser without `VideoDecoder`, or whose decoder
+refuses a codec, starts: the picker greys what needs it, with the reason
+(`videoCodecs.ts`), and the gateway's tiles, a Standard Mac's Adaptive picture and
+an RDP host's pipeline without H.264 are decoded by the page. `navigator.clipboard`, `navigator.keyboard` and WebCodecs itself all
 require a secure context; the gateway speaks plain HTTP and has no TLS listener, so
 one comes from how the page is reached — loopback (`localhost`, `127.0.0.1`, `[::1]`,
 any `.localhost` label), or a TLS-terminating reverse proxy. A LAN address over
 plain `http://` is the case this refuses,
-by name. `AudioDecoder` is not part of the gate. Safari from 16.4 to 18 has
+by name. Nor is `AudioDecoder`. Safari from 16.4 to 18 has
 `VideoDecoder` without it, and a desktop without sound is still the session somebody
 came for. Such a browser starts, and still plays the one sound that needs no audio
 decoder: FLAC, which the page decodes in a WebAssembly module of its own

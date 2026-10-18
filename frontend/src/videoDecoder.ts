@@ -101,8 +101,9 @@ export interface DesktopVideo {
 /**
  * Build the desktop's decoder for one connection.
  *
- * That `VideoDecoder` exists is the client's entry condition and not a question for
- * this path (preflight.ts). The decoder itself is created on the first unit.
+ * A browser whose decoder refuses the stream, or that has no `VideoDecoder`, is
+ * never started a session that sends it: the picker greys it (videoCodecs.ts,
+ * appleMedia.ts). The decoder itself is created on the first unit.
  */
 export function createDesktopVideo(
   handlers: VideoHandlers,

@@ -16,8 +16,12 @@ It needs:
   so reach it on loopback (`localhost`, `127.0.0.1`, `[::1]`, any `.localhost`
   name) or through a TLS-terminating reverse proxy. A LAN address over plain
   `http://` is refused, by name.
-- **WebCodecs**: `VideoDecoder`, with no fallback path for a browser without
-  it. `AudioDecoder` plays Opus and a Mac's AAC-ELD; a browser without it
+- **WebCodecs** for the pictures a remote sends as video: `VideoDecoder` for
+  wlshare's VP9, a High Performance Mac's HEVC or H.264 and an RDP host's
+  H.264. A browser without it, or whose decoder refuses a codec, still starts:
+  the picker greys what needs it, with the reason, and the gateway's tiles, a
+  Standard Mac's Adaptive picture and an RDP pipeline without H.264 work
+  anywhere. `AudioDecoder` plays Opus and a Mac's AAC-ELD; a browser without it
   (Safari 16.4 to 18) plays FLAC alone, which the page decodes itself, and on
   an iPhone or an iPad, which greys FLAC, plays no sound.
 

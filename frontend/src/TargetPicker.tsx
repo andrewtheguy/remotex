@@ -24,6 +24,7 @@ import {
   type ViewOption,
 } from "./targetChoices.ts";
 import { sizeFollows } from "./useRemoteDesktop.ts";
+import { decodesAppleH264, decodesVp9 } from "./videoCodecs.ts";
 
 // The post-login target picker: the state where the user is authenticated and
 // holds the session slot, but no connection has started yet (see
@@ -134,6 +135,8 @@ export default function TargetPicker({
     appleMedia: decodesAppleMedia(),
     rdpGraphics: composesRdpGraphics(),
     rdpH264: decodesRdpH264(),
+    appleH264: decodesAppleH264(),
+    vp9: decodesVp9(),
     audio: decodesAudio(),
     lossless: !pageMemoryIsTight(),
     runsHevc: runnableDecoders().hevc,
