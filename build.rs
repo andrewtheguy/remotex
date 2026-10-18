@@ -75,13 +75,13 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "frontend/wasm/flac/.cargo/config.toml",
         "frontend/wasm/flac/rust-toolchain.toml",
         "frontend/wasm/flac/src",
-        // The page's decoder for a Mac's own picture, Adaptive or Full, a module
-        // of its own (frontend/wasm/vnc), the same way.
-        "frontend/wasm/vnc/Cargo.toml",
-        "frontend/wasm/vnc/Cargo.lock",
-        "frontend/wasm/vnc/.cargo/config.toml",
-        "frontend/wasm/vnc/rust-toolchain.toml",
-        "frontend/wasm/vnc/src",
+        // The page's decoder for a Mac's Adaptive picture, a module of its own
+        // (frontend/wasm/apple-adaptive), the same way.
+        "frontend/wasm/apple-adaptive/Cargo.toml",
+        "frontend/wasm/apple-adaptive/Cargo.lock",
+        "frontend/wasm/apple-adaptive/.cargo/config.toml",
+        "frontend/wasm/apple-adaptive/rust-toolchain.toml",
+        "frontend/wasm/apple-adaptive/src",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }

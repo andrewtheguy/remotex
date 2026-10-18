@@ -1,7 +1,7 @@
 // The page's decoder for a Mac's Adaptive picture, through its binding: the
-// decoder's own tests (wasm/vnc) check what each tile command draws, and these
-// that a rectangle reaches the framebuffer the canvas is painted from, and that
-// one that does not decode says so and keeps what it drew.
+// decoder's own tests (wasm/apple-adaptive) check what each tile command draws,
+// and these that a rectangle reaches the framebuffer the canvas is painted from,
+// and that one that does not decode says so and keeps what it drew.
 //
 // Run with `bun run test` from frontend/, which builds the module first.
 import assert from "node:assert/strict";
@@ -10,7 +10,10 @@ import { test } from "node:test";
 import { loadStandard } from "./standardPicture.ts";
 
 const module = readFileSync(
-  new URL("../wasm/vnc/pkg/remotex_vnc_bg.wasm", import.meta.url),
+  new URL(
+    "../wasm/apple-adaptive/pkg/remotex_apple_adaptive_bg.wasm",
+    import.meta.url,
+  ),
 );
 
 // The quantization tables, each entry 1: the rectangle of no area the Mac sends
