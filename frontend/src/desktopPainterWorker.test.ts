@@ -54,8 +54,8 @@ function harness() {
     startGraphics() {
       calls.push("graphics");
     },
-    startStandard(quality) {
-      calls.push(`standard:${quality}`);
+    startStandard() {
+      calls.push("standard");
     },
     startTiles() {
       calls.push("tiles");
@@ -266,7 +266,7 @@ test("a Mac's own picture starts in its place, behind the frames before it", asy
     generation: 1,
   });
   await settled();
-  h.host.handle({ type: "standardStart", quality: "full" });
+  h.host.handle({ type: "standardStart" });
   h.unstall();
   h.host.handle({
     type: "frame",
@@ -278,7 +278,7 @@ test("a Mac's own picture starts in its place, behind the frames before it", asy
   assert.deepEqual(h.calls, ["draw"]);
   h.release();
   await settled();
-  assert.deepEqual(h.calls, ["draw", "standard:full", "draw"]);
+  assert.deepEqual(h.calls, ["draw", "standard", "draw"]);
 });
 
 test("the part a display shows, and a tab's mirror, hold their place behind a stalled draw", async () => {

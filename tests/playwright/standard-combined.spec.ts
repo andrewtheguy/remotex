@@ -1,6 +1,7 @@
-// What a session started on a Standard Mac's Combined Display puts on the display
-// socket: every screen at once, asked of the Mac in its Full quality and composed
-// and coded by the gateway as its 64x64 tiles. Screen Sharing Standard's alone.
+// What a session of the gateway's tiles on a Standard Mac puts on the display
+// socket: the Mac's Full quality, inflated by the gateway and coded as its 64x64
+// tiles, on one screen at a time, or on Combined Display, every screen at once,
+// composed by the gateway. Combined Display is Screen Sharing Standard's alone.
 //
 // Over a 1x screen beside a 2x one, a 1x browser is sent the screens composed at
 // its density, the 2x one scaled down, as one plain desktop with no mosaic; a 2x
@@ -13,21 +14,24 @@
 // control messages, the TILE records' framing and place, and the page's
 // acknowledgments. Nothing looks at a pixel.
 //
-// It needs a gateway whose local config names an `ard` target on a Mac with a 1x
-// screen beside a 2x one. Keep that gitignored file under `tmp/`, for example
-// `tmp/test_uat.toml`:
+// The one-screen case needs a gateway whose local config names a live Mac as an
+// `ard` target, REMOTEX_PLAYWRIGHT_STANDARD_TARGET; the Combined Display cases an
+// `ard` target on a Mac with a 1x screen beside a 2x one. Keep that gitignored
+// file under `tmp/`, for example `tmp/test_uat.toml`:
 //
 //     cargo run -- serve --config tmp/test_uat.toml
 //
 //     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52888/ \
 //     REMOTEX_PLAYWRIGHT_USERNAME=admin \
 //     REMOTEX_PLAYWRIGHT_PASSWORD=… \
+//     REMOTEX_PLAYWRIGHT_STANDARD_TARGET=macvmstandard \
 //     REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET=macvmstandard \
 //     bunx playwright test '/standard-combined\.spec\.ts$'
 import { expect, type Page, test } from "@playwright/test";
 
 import { faults, leaveSession, logInAndConnectTo, returnToPicker } from "./support";
 
+const STANDARD_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_TARGET;
 const COMBINED_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
@@ -143,23 +147,66 @@ function watchSession(page: Page): Session {
   return seen;
 }
 
-/// What holds of a Combined Display session at either density.
-async function assertTheSessionHolds(page: Page, seen: Session): Promise<void> {
+/// What holds of a session of the gateway's tiles on a Standard Mac, one screen
+/// at a time or Combined Display: it passes nothing, starts as tiles, is never
+/// held, and every record is a tile on the grid.
+async function assertTheTilesHold(page: Page, seen: Session, render: RegExp): Promise<void> {
   await expect
     .poll(() => seen.acked, { message: "batches of tiles painted", timeout: 20_000 })
     .toBeGreaterThan(0);
-  expect(seen.connected?.render).toMatch(/^Combined Display, tiles q\d+$/);
+  expect(seen.connected?.render).toMatch(render);
   expect(seen.connected?.passthrough).toBe(null);
   expect(seen.controlTypes).toContain("tilesStart");
   expect(seen.controlTypes).not.toContain("standardStart");
-  expect(seen.controlTypes, "no screen to choose").not.toContain("displays");
-  // Never held: Combined Display has no ceiling, so no `oversize` is ever sent.
+  // Never held: a Standard Mac's picture has no ceiling, so no `oversize` is
+  // ever sent.
   expect(seen.oversizes, "held at no point").toEqual([]);
   expect(seen.misplaced, "tiles off the grid or the desktop").toBe(0);
   expect(seen.strays, "records that were not tiles").toBe(0);
   expect(seen.inexact, "batches their records did not fill").toBe(0);
   await expect(faults(page)).toHaveCount(0);
 }
+
+/// What holds of a Combined Display session at either density.
+async function assertTheSessionHolds(page: Page, seen: Session): Promise<void> {
+  await assertTheTilesHold(page, seen, /^Combined Display, tiles q\d+$/);
+  expect(seen.controlTypes, "no screen to choose").not.toContain("displays");
+}
+
+test.describe("a Standard Mac of one screen at a time, in the gateway's tiles", () => {
+  test.skip(
+    !STANDARD_TARGET,
+    "set REMOTEX_PLAYWRIGHT_STANDARD_TARGET=<target> against a gateway with a live Mac",
+  );
+
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
+  test("is the Mac's Full quality inflated by the gateway and sent as tiles, with nothing passed", async ({
+    page,
+  }) => {
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, STANDARD_TARGET ?? "", "", { passthrough: null });
+    await assertTheTilesHold(page, seen, /^the Mac's Full quality, tiles q\d+$/);
+    expect(seen.mosaics.every((regions) => regions.length === 0), "one screen, no mosaic").toBe(true);
+    // The whole screen arrives as tiles, as any VNC server's desktop does. The
+    // session opens on a pixel of the combined view the Mac connects on, which
+    // is never shown, so the screen's own `resize` may follow the first tile:
+    // the grid is the last size announced.
+    const grid = () => {
+      const size = seen.resize;
+      return size ? Math.ceil(size.w / TILE) * Math.ceil(size.h / TILE) : -1;
+    };
+    await expect
+      .poll(() => seen.covered.size === grid(), {
+        message: "every tile of the screen",
+        timeout: 30_000,
+      })
+      .toBe(true);
+    await returnToPicker(page);
+  });
+});
 
 test.describe("a Standard Mac's Combined Display, composed by the gateway", () => {
   test.skip(

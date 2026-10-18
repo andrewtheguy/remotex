@@ -3008,7 +3008,7 @@ mod tests {
         expect_passed_mac(&mut back.events).await;
 
         // No display socket comes for the picture.
-        frame_tx.send(ServerMsg::StandardStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
+        frame_tx.send(ServerMsg::StandardStart { engine: 0 }).await.unwrap();
         tokio::time::sleep(DISPLAY_ATTACH_GRACE * 2).await;
         match recv(&mut back.events).await {
             AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
@@ -3066,7 +3066,7 @@ mod tests {
         }
         let (input_rx, frame_tx) = hook_rx.try_recv().expect("engine spawned on connect");
         drop(mgr.attach_display("login", FIRST_DISPLAY, None).unwrap());
-        frame_tx.send(ServerMsg::StandardStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
+        frame_tx.send(ServerMsg::StandardStart { engine: 0 }).await.unwrap();
         match recv(&mut att.events).await {
             AttachEvent::Msg(ServerMsg::Error { message }) => assert!(message.contains("cannot"), "{message}"),
             other => panic!("expected the error, got {other:?}"),
@@ -3135,7 +3135,7 @@ mod tests {
 
         // The display socket that came back first is the fresh engine's.
         frames.send(resize(3)).await.unwrap();
-        frames.send(ServerMsg::StandardStart { engine: 0, quality: crate::config::StandardQuality::Adaptive }).await.unwrap();
+        frames.send(ServerMsg::StandardStart { engine: 0 }).await.unwrap();
         assert!(matches!(
             recv(&mut display.events).await,
             AttachEvent::Msg(ServerMsg::Resize { w: 3, .. })

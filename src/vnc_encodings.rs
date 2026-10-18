@@ -1,8 +1,9 @@
 //! The RFB pixel encodings, decoded to packed RGB888.
 //!
-//! Three of them: ZRLE, the one encoding every target but a Mac's Combined Display
-//! is asked for, zlib, which that view is asked for as the Mac's Full quality, and
-//! Raw, which RFB lets a server send whatever the list says. All three return the rectangle's
+//! Three of them: ZRLE, the one encoding every target but a Standard Mac is asked
+//! for, zlib, which a Standard Mac is asked for as its Full quality, one screen
+//! at a time or on Combined Display, and Raw, which RFB lets a server send
+//! whatever the list says. All three return the rectangle's
 //! pixels in the one format the tile path takes — `w * h * 3`, no padding, no
 //! stride — so [`crate::vnc`]'s rectangle reader has one bounds check, one shadow
 //! comparison, one crop and one sink call. Nothing here knows about tiles, sinks or
@@ -67,7 +68,7 @@ pub enum Payload {
     Zrle,
     /// A `u32` length, then that much of the connection's own deflate stream,
     /// inflating to `w * h` pixels in the forced wire format (encoding 6): a Mac's
-    /// Full quality.
+    /// Full quality, lossless from the Mac to here.
     Zlib,
 }
 

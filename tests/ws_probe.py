@@ -34,7 +34,6 @@ import math
 import os
 import sys
 import time
-import zlib
 
 import requests
 import websockets
@@ -86,14 +85,13 @@ def coordinates(value: str) -> tuple[int, int]:
     return x, y
 
 
-def batch_records(frame: bytes, inflater=None) -> int:
+def batch_records(frame: bytes) -> int:
     """Print one screen batch's records and return how many there were.
 
     Parsed here rather than trusted from anywhere: a VIDEO record is
     ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``, and a STANDARD one
-    ``0x05 | u16 x | u16 y | u16 w | u16 h | u32 len | body``. Given the session's
-    ``inflater``, a Full-quality one's body is inflated on the session's one zlib
-    stream, and must come to its rectangle's pixels, four bytes each."""
+    ``0x05 | u16 x | u16 y | u16 w | u16 h | u32 len | body``, a rectangle of a
+    Mac's Adaptive picture whose first byte says what it is."""
     count = int.from_bytes(frame[2:4], "little")
     sequence = int.from_bytes(frame[4:8], "little")
     at = 8
@@ -112,13 +110,8 @@ def batch_records(frame: bytes, inflater=None) -> int:
         elif op == 0x05:
             x, y, w, h = (int.from_bytes(frame[at + 1 + 2 * i : at + 3 + 2 * i], "little") for i in range(4))
             length = int.from_bytes(frame[at + 9 : at + 13], "little")
-            if inflater is not None:
-                pixels = inflater.decompress(frame[at + 13 : at + 13 + length])
-                assert len(pixels) == w * h * 4, f"{w}x{h} inflated to {len(pixels)} bytes"
-                parts.append(f"zlib {w}x{h}+{x}+{y} {length}B")
-            else:
-                kind = {0: "full", 1: "partial", 2: "tables"}.get(frame[at + 13], "?")
-                parts.append(f"adaptive {kind} {w}x{h}+{x}+{y} {length}B")
+            kind = {0: "full", 1: "partial", 2: "tables"}.get(frame[at + 13], "?")
+            parts.append(f"adaptive {kind} {w}x{h}+{x}+{y} {length}B")
             video += 1
             at += 13 + length
         else:
@@ -161,12 +154,12 @@ async def main() -> int:
         "--passthrough",
         nargs="?",
         const="apple-media",
-        choices=["apple-media", "apple-h264", "apple-adaptive", "apple-full"],
+        choices=["apple-media", "apple-h264", "apple-adaptive"],
         help="start the session with the target's own stream passed, by its name: a "
         "High Performance Mac's HEVC (apple-media, the default, to a client that states "
         "--apple-media) or its H.264 (apple-h264), one of which such a target's session "
-        "has to name, or a Standard Mac's Adaptive picture (apple-adaptive) or its "
-        "Full-quality picture (apple-full), whose zlib --records inflates. An RDP "
+        "has to name, or a Standard Mac's Adaptive picture (apple-adaptive); a Standard "
+        "session that names none is the gateway's tiles of the Mac's Full quality. An RDP "
         "host's graphics pipeline passes in every session and is not named",
     )
     parser.add_argument(
@@ -491,8 +484,6 @@ async def main() -> int:
         clipboard_sent = False
         frames = 0
         video_units = 0
-        # A Full-quality picture is one zlib stream from the session's start.
-        inflater = zlib.decompressobj() if args.passthrough == "apple-full" else None
         audio_format = None
         audio_frames = 0
         audio_error = None
@@ -731,7 +722,7 @@ async def main() -> int:
                     if isinstance(message, bytes):
                         frames += 1
                         if args.records and len(message) >= 8 and message[0] == 0x02:
-                            video_units += batch_records(message, inflater)
+                            video_units += batch_records(message)
                         # Acknowledge the batch at once, as a client that painted it
                         # instantly would: the gateway's paint window holds the next
                         # batch when too many are owed, and a probe that never acked

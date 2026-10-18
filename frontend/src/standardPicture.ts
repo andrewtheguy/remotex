@@ -1,13 +1,12 @@
 import init, { type InitInput, Standard } from "../wasm/vnc/pkg/remotex_vnc.js";
-import type { StandardQuality } from "./protocol.ts";
 
-// A Mac's own picture, decoded in the page: the rectangles of a session started
-// with Standard's Adaptive or Full quality, which the gateway passes as the Mac
-// sent them, the Adaptive quality's 8x8 tiles or the Full quality's zlib, drawn
-// onto a framebuffer of the module's own (wasm/vnc). Each rectangle is drawn
-// on what the ones before it left, so one picture is fed every record of its
-// session, in order, and the canvas is painted from its framebuffer where each
-// rectangle drew.
+// A Mac's Adaptive picture, decoded in the page: the rectangles of a session
+// started with Standard's Adaptive quality, which the gateway passes as the Mac
+// sent them, its own 8x8 tiles, drawn onto a framebuffer of the module's own
+// (wasm/vnc). Each rectangle is drawn on what the ones before it left, so one
+// picture is fed every record of its session, in order, and the canvas is
+// painted from its framebuffer where each rectangle drew. The Mac's Full
+// quality never comes here: the gateway inflates it and sends its tiles.
 
 /** One session's picture. */
 export interface StandardPicture {
@@ -15,8 +14,8 @@ export interface StandardPicture {
   resize(w: number, h: number): void;
   /**
    * Decode one rectangle onto the framebuffer: true when it drew, false for one
-   * that draws nothing, such as the Adaptive quality's quantization tables. Throws for one that does not decode,
-   * whose pixels the framebuffer keeps as far as they were drawn.
+   * that draws nothing, such as the quantization tables. Throws for one that
+   * does not decode, whose pixels the framebuffer keeps as far as they were drawn.
    */
   decode(x: number, y: number, w: number, h: number, body: Uint8Array): boolean;
   /**
@@ -29,7 +28,7 @@ export interface StandardPicture {
   close(): void;
 }
 
-export type StandardFactory = (quality: StandardQuality) => StandardPicture;
+export type StandardFactory = () => StandardPicture;
 
 let loaded: Promise<StandardFactory> | null = null;
 
@@ -40,8 +39,8 @@ let loaded: Promise<StandardFactory> | null = null;
  */
 export function loadStandard(source?: InitInput): Promise<StandardFactory> {
   loaded ??= init(source === undefined ? undefined : { module_or_path: source })
-    .then(({ memory }) => (quality: StandardQuality): StandardPicture => {
-      const standard = new Standard(quality === "full");
+    .then(({ memory }) => (): StandardPicture => {
+      const standard = new Standard();
       let width = 0;
       let height = 0;
       // A view goes with the memory it was made of, which a growth replaces.

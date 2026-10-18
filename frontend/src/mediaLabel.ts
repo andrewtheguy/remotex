@@ -14,7 +14,7 @@
 // console.
 
 import { NO_AUDIO_DECODER } from "./preflight.ts";
-import type { HoldCause, StandardQuality } from "./protocol.ts";
+import type { HoldCause } from "./protocol.ts";
 
 /**
  * Why this browser cannot play a session's sound at all (useRemoteDesktop): it
@@ -159,9 +159,9 @@ export interface VideoStreamInfo {
   // Not a stream at all: an RDP host's graphics pipeline, composed here
   // (`graphicsStart`). No decoder is configured and `decode` names nothing.
   composed?: boolean;
-  // Not a stream either: a Mac's own picture in this quality, decoded by this
-  // page (`standardStart`). No decoder is configured and `decode` names nothing.
-  standard?: StandardQuality;
+  // Not a stream either: a Mac's Adaptive picture, decoded by this page
+  // (`standardStart`). No decoder is configured and `decode` names nothing.
+  standard?: boolean;
   // Nor this: the gateway's tiles, images this page decodes (`tilesStart`). No
   // decoder is configured and `decode` names nothing.
   tiles?: boolean;
@@ -185,8 +185,7 @@ export function videoLabel(
   held: HoldCause | null,
 ): string {
   if (stream?.standard) {
-    const picture = stream.standard === "full" ? "Full-quality" : "Adaptive";
-    return `Not in use: the Mac's ${picture} picture is decoded by this page`;
+    return "Not in use: the Mac's Adaptive picture is decoded by this page";
   }
   if (held === "size") {
     return "Not in use: the desktop is past what its video stream carries";

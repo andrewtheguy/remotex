@@ -25,7 +25,7 @@ use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use crate::config::{RenderPlan, StandardQuality};
+use crate::config::RenderPlan;
 use crate::feedback::LinkFeedback;
 use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, StandardUnit, TileUnit, VideoUnit};
 use crate::shadow::Rect;
@@ -924,15 +924,14 @@ impl VideoSink {
         self.push(Pending::Msg(ServerMsg::Graphics(GraphicsUnit { data: wrapped, frame, held }))).await
     }
 
-    /// A Mac's own picture starts here, from nothing, in `quality`, and is the
-    /// picture from now on ([`Self::pass_standard`]): said ahead of the Mac's first
-    /// rectangle.
-    pub async fn standard_start(&self, quality: StandardQuality) -> anyhow::Result<()> {
+    /// A Mac's Adaptive picture starts here, from nothing, and is the picture from
+    /// now on ([`Self::pass_standard`]): said ahead of the Mac's first rectangle.
+    pub async fn standard_start(&self) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
-        self.push(Pending::Msg(ServerMsg::StandardStart { engine: 0, quality })).await
+        self.push(Pending::Msg(ServerMsg::StandardStart { engine: 0 })).await
     }
 
-    /// Queue one of a Mac's rectangles in its own picture as the next record,
+    /// Queue one of a Mac's rectangles in its Adaptive picture as the next record,
     /// untouched: where it is and its body as the Mac sent it, for the page to
     /// decode.
     ///
@@ -1535,7 +1534,7 @@ mod tests {
     #[tokio::test]
     async fn standard_rectangles_wait_for_the_ones_before_them_to_be_painted() {
         let (sink, mut rx) = video_sink(64, 32).await;
-        sink.standard_start(StandardQuality::Adaptive).await.unwrap();
+        sink.standard_start().await.unwrap();
         sink.pass_standard(0, 0, 64, 16, vec![1; 16 * 1024]).await.unwrap();
         sink.pass_standard(0, 16, 64, 16, vec![2; 16 * 1024]).await.unwrap();
         assert!(sink.passing());
@@ -1976,7 +1975,7 @@ mod tests {
         let (frame_tx, mut rx) = mpsc::channel(256);
         let sink = VideoSink::new("test", frame_tx, VIDEO, feedback(), Oversize::Shown);
         sink.msg(ServerMsg::Resize { w: 5376, h: 2288, scale: UNSCALED }).await.unwrap();
-        sink.standard_start(StandardQuality::Full).await.unwrap();
+        sink.standard_start().await.unwrap();
         sink.pass_standard(5000, 2000, 64, 16, vec![1; 16]).await.unwrap();
         sink.flush().await;
         let out = drain(&mut rx, 3).await;

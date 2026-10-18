@@ -24,11 +24,12 @@
 // - A Standard Mac's screens are shown one at a time or all at once, as Combined
 //   Display: see `VIEWS`. Screen Sharing Standard's alone; no other target has a
 //   combined view. One at a time until Combined is chosen.
-// - A Standard Mac's picture shown one screen at a time is one of the Mac's own,
-//   passed through (beta), as Apple's viewer's quality menu has them, Adaptive or
-//   Full, which this page decodes: the Adaptive one until another is chosen, and
-//   neither greyed. Combined Display passes neither: the gateway codes it from the
-//   Mac's Full quality, so both are greyed under it.
+// - A Standard Mac's picture shown one screen at a time is one of two: the Mac's
+//   own Adaptive picture passed through (beta), which this page decodes, or the
+//   gateway's tiles of the Mac's Full quality, which settle to lossless, named by
+//   no passthrough: see `pictureOptions`. The Adaptive one until the other is
+//   chosen, and neither greyed. Combined Display is the tiles of every screen, so
+//   the Adaptive picture is greyed under it.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
 //   or lossless: see `soundRow`. In a browser with no audio decoder only the
 //   lossless one plays, which the page decodes itself, so ticking takes it.
@@ -50,8 +51,7 @@ export type Passthrough =
   | "rdp-graphics"
   | "apple-media"
   | "apple-h264"
-  | "apple-adaptive"
-  | "apple-full";
+  | "apple-adaptive";
 
 /** One entry of GET /api/targets. */
 export interface TargetInfo {
@@ -84,7 +84,7 @@ export interface TargetInfo {
   /**
    * The streams this target can pass, in the picker's order: none, an RDP host's
    * graphics pipeline, a High Performance Mac's HEVC and its H.264, or a
-   * Standard Mac's Adaptive and Full-quality pictures.
+   * Standard Mac's Adaptive picture.
    */
   passthroughs: Passthrough[];
   /** Whether where the second virtual display sits is a choice. */
@@ -142,9 +142,10 @@ export interface Choices {
   audio: Sound;
   /**
    * The stream of the target's to pass, where which is a choice: a Mac's HEVC,
-   * its H.264 or its own picture, Adaptive or Full. Null on a target with no
-   * such choice: one whose picture the gateway encodes, or that passes a stream
-   * in every session, which is not named.
+   * its H.264 or its Adaptive picture. Null where none is passed: a target whose
+   * picture the gateway codes, a Standard Mac's whose tiles were chosen over its
+   * Adaptive picture, or one that passes a stream in every session, which is not
+   * named.
    */
   passthrough: Passthrough | null;
   placement: Placement;
@@ -253,8 +254,8 @@ export interface PassedNote {
 
 /** One way a Mac's picture can reach this browser. */
 export interface PictureOption {
-  /** What `connect` names: the stream passed. */
-  value: Exclude<Passthrough, "rdp-graphics">;
+  /** What `connect` names: the stream passed, or null for the gateway's tiles. */
+  value: Exclude<Passthrough, "rdp-graphics"> | null;
   label: string;
   /** What choosing it does, or why it cannot be chosen here. */
   note: string;
@@ -306,15 +307,16 @@ const RDP_GRAPHICS: PassedNote & { blocked: string } = {
 /**
  * The ways a Mac's picture can reach this browser, in the order the picker shows
  * them: a High Performance Mac's HEVC passed through, and its H.264; a Standard
- * Mac's Adaptive and Full-quality pictures passed through.
+ * Mac's Adaptive picture passed through, and the gateway's tiles of its Full
+ * quality.
  *
  * - The HEVC is greyed in a browser whose own decoder does not take it, unless
  *   the page decodes it itself, which it then does (softwareDecoder.ts). The
  *   socket states both answers, and the gateway passes the picture to a page that
  *   has either.
  * - The H.264 is never greyed: no browser is asked whether it decodes it.
- * - Nor are the Mac's Standard pictures, which every page decodes in
- *   WebAssembly (standardPicture.ts).
+ * - Nor is the Mac's Adaptive picture, which every page decodes in WebAssembly
+ *   (standardPicture.ts), nor the gateway's tiles, images every page decodes.
  */
 function pictureOptions(
   target: TargetInfo,
@@ -338,21 +340,28 @@ function pictureOptions(
     },
     "apple-adaptive": {
       value: "apple-adaptive",
-      label: "Adaptive (beta), passed through",
-      note: "The Mac's own Adaptive quality, as Apple's viewer has it: a coarse pass and its refinement, the same on any link, where a slower link gets fewer updates. Decoded by this page.",
-      disabled: false,
-    },
-    "apple-full": {
-      value: "apple-full",
-      label: "Full quality (beta), passed through",
-      note: "The Mac's own Full quality, as Apple's viewer has it: every pixel exact, in zlib, decoded by this page. For a LAN.",
+      label: "Apple's Adaptive (beta), passed through",
+      note: "The Mac's own Adaptive quality, as Apple's viewer has it: a coarse pass and its refinement, the same on any link, where a slower link gets fewer updates. Decoded by this page, and never lossless.",
       disabled: false,
     },
   };
-  return target.passthroughs.flatMap((passthrough) =>
+  const offered = target.passthroughs.flatMap((passthrough) =>
     passthrough === "rdp-graphics" ? [] : [options[passthrough]],
   );
+  // A Standard Mac's other picture is coded here, and names no passthrough.
+  return target.passthroughs.includes("apple-adaptive")
+    ? [...offered, GATEWAY_ADAPTIVE]
+    : offered;
 }
+
+// The gateway's own picture of a Standard Mac: its lossless Full quality, zlib,
+// inflated by the gateway and coded as the tiles, as any picture coded here is.
+const GATEWAY_ADAPTIVE: PictureOption = {
+  value: null,
+  label: "Gateway adaptive, settles to lossless",
+  note: "The Mac's lossless Full quality, coded by the gateway as tiles that fit this browser's link: JPEG while a region changes, exact once it has settled. Resumes when this browser comes back.",
+  disabled: false,
+};
 
 const FOLLOWS: Record<"window" | "screen", SizeOption> = {
   window: {
@@ -484,7 +493,7 @@ const VIEWS: ViewOption[] = [
 
 // Why a Standard Mac's own picture is no choice under Combined Display.
 const COMBINED_PICTURE =
-  "Not with Combined Display, which the gateway codes from the Mac's Full quality.";
+  "Not with Combined Display, which is the gateway's tiles of every screen.";
 
 // The second display against the first: the edge of the first a window dragged
 // over arrives on the second from. The right is where it has always been.
@@ -557,7 +566,8 @@ function pipelineRow(
 /**
  * `target`'s screens and picture as the picker shows them: one at a time or
  * Combined Display on a Standard Mac, the remembered one where it is offered, and
- * the Mac's pictures, greyed under Combined Display, which passes none.
+ * the Mac's pictures, the passed one greyed under Combined Display, which is the
+ * gateway's tiles.
  */
 function viewRows(
   target: TargetInfo,
@@ -578,11 +588,11 @@ function viewRows(
     : null;
   const pictures =
     standardView === "combined" && offered
-      ? offered.map((option) => ({
-          ...option,
-          note: COMBINED_PICTURE,
-          disabled: true,
-        }))
+      ? offered.map((option) =>
+          option.value === null
+            ? option
+            : { ...option, note: COMBINED_PICTURE, disabled: true },
+        )
       : offered;
   return { views, standardView, pictures };
 }
@@ -622,11 +632,19 @@ export function targetOptions(
     abilities,
   );
   // What was chosen last time, where it can be had here, and otherwise the
-  // first that can: the H.264 and a Standard Mac's pictures always can.
+  // first that can: the H.264 and a Standard Mac's pictures always can. A
+  // remembered null is the gateway's tiles where those are a choice, and
+  // nothing chosen anywhere else.
   const able = pictures?.filter((option) => !option.disabled) ?? [];
   const passthrough =
-    (able.find((option) => option.value === remembered?.passthrough) ?? able[0])
-      ?.value ?? null;
+    (
+      able.find(
+        (option) =>
+          remembered !== undefined &&
+          "passthrough" in remembered &&
+          option.value === remembered.passthrough,
+      ) ?? able[0]
+    )?.value ?? null;
   const placements = target.placement ? PLACEMENTS : null;
   const choices: Choices = {
     size,

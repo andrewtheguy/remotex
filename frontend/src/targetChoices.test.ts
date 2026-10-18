@@ -75,7 +75,7 @@ const HIGH_PERFORMANCE = target({
 
 const STANDARD = target({
   subtype: "ard",
-  passthroughs: ["apple-adaptive", "apple-full"],
+  passthroughs: ["apple-adaptive"],
   standardView: true,
 });
 
@@ -83,8 +83,8 @@ const SIZED = { w: 1920, h: 1080 };
 
 /** A target's picture options as value and whether it is greyed, in the order shown. */
 function pictures(options: {
-  pictures: { value: string; disabled: boolean }[] | null;
-}): [string, boolean][] | null {
+  pictures: { value: string | null; disabled: boolean }[] | null;
+}): [string | null, boolean][] | null {
   return (
     options.pictures?.map((picture) => [picture.value, picture.disabled]) ??
     null
@@ -192,11 +192,11 @@ test("only what the target's type offers has a row", () => {
   assert.equal(wlshare.pictures, null);
   assert.deepEqual(formats(wlshare), ["opus", "flac"]);
   // Standard Screen Sharing on the Mac's physical displays offers its picture
-  // alone, the Adaptive one until the Full quality is chosen.
+  // alone: the Mac's Adaptive one passed, until the gateway's tiles are chosen.
   const standard = targetOptions(STANDARD, undefined, ABLE);
   assert.deepEqual(pictures(standard), [
     ["apple-adaptive", false],
-    ["apple-full", false],
+    [null, false],
   ]);
   assert.equal(standard.soundRow, null);
   assert.deepEqual(standard.choices, {
@@ -210,24 +210,28 @@ test("only what the target's type offers has a row", () => {
   assert.equal(standard.blocked, null);
 });
 
-test("a Standard Mac's picture is its Adaptive or Full-quality picture passed", () => {
+test("a Standard Mac's picture is its Adaptive picture passed, or the gateway's tiles", () => {
   const first = targetOptions(STANDARD, undefined, UNABLE);
   assert.deepEqual(
     pictures(first),
     [
       ["apple-adaptive", false],
-      ["apple-full", false],
+      [null, false],
     ],
     "a browser that takes no other passthrough takes these",
   );
   assert.equal(first.choices.passthrough, "apple-adaptive", "the first");
-  assert.match(first.pictures?.[0].label ?? "", /^Adaptive \(beta\)/);
-  assert.match(first.pictures?.[1].label ?? "", /^Full quality \(beta\)/);
-  // A remembered VP9 from before is not a choice any more.
+  assert.match(first.pictures?.[0].label ?? "", /^Apple's Adaptive \(beta\)/);
+  assert.match(first.pictures?.[1].label ?? "", /^Gateway adaptive/);
+  assert.match(first.pictures?.[1].note ?? "", /exact once it has settled/);
+  // Nothing remembered is the first; a remembered null is the gateway's tiles.
   assert.equal(
-    targetOptions(STANDARD, { passthrough: null }, ABLE).choices.passthrough,
+    targetOptions(STANDARD, { standardView: "one" }, ABLE).choices.passthrough,
     "apple-adaptive",
   );
+  const tiles = targetOptions(STANDARD, { passthrough: null }, UNABLE);
+  assert.equal(tiles.choices.passthrough, null);
+  assert.equal(tiles.blocked, null);
 
   const adaptive = targetOptions(
     STANDARD,
@@ -238,9 +242,12 @@ test("a Standard Mac's picture is its Adaptive or Full-quality picture passed", 
   assert.equal(adaptive.blocked, null);
   assert.equal(adaptive.sound, false);
 
-  const full = targetOptions(STANDARD, { passthrough: "apple-full" }, UNABLE);
-  assert.equal(full.choices.passthrough, "apple-full");
-  assert.equal(full.blocked, null);
+  // On every other target a remembered null is nothing chosen.
+  assert.equal(
+    targetOptions(HIGH_PERFORMANCE, { passthrough: null }, ABLE).choices
+      .passthrough,
+    "apple-media",
+  );
 });
 
 test("a Standard Mac's screens are one at a time or Combined Display", () => {
@@ -252,24 +259,24 @@ test("a Standard Mac's screens are one at a time or Combined Display", () => {
   assert.match(one.views?.[0].label ?? "", /^One at a time \(beta\)/);
   assert.match(one.views?.[1].label ?? "", /^Combined \(alpha\)/);
   assert.equal(one.choices.standardView, "one", "until Combined is chosen");
-  // Combined Display passes none of the Mac's pictures, which are greyed under
-  // it and come back when one screen at a time is chosen again.
+  // Combined Display is the gateway's tiles: the Mac's Adaptive picture is
+  // greyed under it, and comes back when one screen at a time is chosen again.
   const combined = targetOptions(
     STANDARD,
-    { standardView: "combined", passthrough: "apple-full" },
+    { standardView: "combined", passthrough: "apple-adaptive" },
     ABLE,
   );
   assert.equal(combined.choices.standardView, "combined");
   assert.equal(combined.choices.passthrough, null);
   assert.deepEqual(pictures(combined), [
     ["apple-adaptive", true],
-    ["apple-full", true],
+    [null, false],
   ]);
   assert.equal(combined.blocked, null);
   assert.equal(
-    targetOptions(STANDARD, { passthrough: "apple-full" }, ABLE).choices
+    targetOptions(STANDARD, { passthrough: "apple-adaptive" }, ABLE).choices
       .passthrough,
-    "apple-full",
+    "apple-adaptive",
   );
   // Screen Sharing Standard's alone: no other target has the row, and a
   // Combined remembered for it is not sent.

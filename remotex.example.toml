@@ -192,7 +192,7 @@ site_passwd = ""
 #   vnc, ard-high-performance        yes      always carried   shown         —
 #
 # A Standard "ard" target on the Mac's physical screens also shows Displays: one
-# screen at a time (beta), in the Mac's own picture passed, or Combined (alpha), every
+# screen at a time (beta), in the picture chosen above, or Combined (alpha), every
 # screen at once, which the gateway codes as its tiles from the Mac's Full quality,
 # a screen denser than the browser scaled down there. No other target has it.
 #
@@ -486,12 +486,14 @@ password = "change-me"
 #
 # `subtype = "ard"` is Standard screen sharing: the Mac's physical display list and
 # native pasteboard, with one framebuffer holding every attached display at once.
-# The picker must choose Adaptive or Full quality (both BETA), and the gateway
-# encodes neither. Adaptive asks for Apple's Adaptive quality, the Mac's own 8x8
-# tiles, which are passed for the page to decode, paced by the browser's link.
-# Full quality asks for Apple's Full quality, the Mac's lossless zlib, passed for
-# the page to inflate, for a LAN. No key selects either, and the video keys are
-# refused on the target.
+# The picker chooses its picture. "Apple's Adaptive (beta), passed through" asks
+# the Mac for Apple's Adaptive quality, its own 8x8 tiles, which are passed for the
+# page to decode, paced by the browser's link, and never lossless. "Gateway
+# adaptive, settles to lossless", the one a session that names no passthrough gets,
+# asks the Mac for its Full quality, the lossless zlib, which the gateway inflates
+# and codes as its tiles: JPEG at `video_quality` while a region changes, exact
+# once it has settled. No key selects either; `video_quality` is the only video
+# key the target takes.
 # [[targets]]
 # name = "mac-screen-sharing"
 # protocol = "vnc"
@@ -506,7 +508,8 @@ password = "change-me"
 # at its density, the physical displays disabled meanwhile, and in a session
 # started with resize replaced from every viewport report — and everything else
 # is `ard`'s:
-# the picture, Adaptive or Full quality, the native pasteboard, no sound, no media stream offered and
+# the picture, Apple's Adaptive passed or the gateway's tiles of the Full quality,
+# the native pasteboard, no sound, no media stream offered and
 # no decoders needed, so it runs in every build. Apple's own viewer never offers
 # a virtual display without the media stream, so nothing but remotex has
 # exercised the Mac's side of this; it was tested against macOS 26 only, and a
@@ -596,9 +599,9 @@ password = "change-me"
 # paints them, and a change the link would take too long to carry comes first as a
 # coarse JPEG that sharpens to the exact picture once it is still. A `wlshare` target's picture is wlshare's own VP9, passed through.
 # A passed Mac media stream or RDP graphics pipeline keeps the remote's own quality,
-# so the keys are refused on both Mac subtypes, but for `video_quality` on an "ard"
-# target without `virtual_display`, which is the quality of its Combined Display's
-# tiles, and on RDP apply only to the bitmap path. Every key below is per target, so it belongs *inside* a [[targets]] table
+# so the keys are refused on "ard-high-performance", but for `video_quality` on an
+# "ard" target, which is the quality of the gateway's tiles of the Mac's Full
+# quality, and on RDP apply only to the bitmap path. Every key below is per target, so it belongs *inside* a [[targets]] table
 # and not in a section of their own — uncommented here they would attach to
 # whichever [[targets]] block precedes them, which is the "example" one at the top
 # of this file. There is no global render setting, and every key has a default.

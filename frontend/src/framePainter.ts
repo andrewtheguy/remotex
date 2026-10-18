@@ -19,7 +19,6 @@ import {
   decodeBatchFrame,
   type GraphicsMsg,
   type StandardMsg,
-  type StandardQuality,
   stripRows,
   type TileMsg,
   type VideoMsg,
@@ -80,7 +79,7 @@ export interface FramePainter {
    * and painted on the desktop's canvas. Whatever decoder or compositor stood
    * before is done with.
    */
-  startStandard(quality: StandardQuality): void;
+  startStandard(): void;
   /**
    * Adopt a `tilesStart`: the picture is the gateway's tiles from here, the TILE
    * records after it each an image drawn on the desktop's canvas where it says.
@@ -881,7 +880,7 @@ export function createFramePainter(options: {
         });
       pipeline = starting;
     },
-    startStandard(quality) {
+    startStandard() {
       releaseVideo();
       const starting: Standard = {
         picture: null,
@@ -892,7 +891,7 @@ export function createFramePainter(options: {
         .then((make) => {
           // Replaced or cleared while the module loaded: nothing to make one for.
           if (!starting.broken) {
-            starting.picture = make(quality);
+            starting.picture = make();
             if (framebuffer) {
               starting.picture.resize(framebuffer.w, framebuffer.h);
             }

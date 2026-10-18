@@ -178,10 +178,10 @@ pub const ADAPTIVE_ENCODINGS: &[i32] = &[
 /// share, inflating to the rectangle's pixels in the format the client set.
 pub const ENCODING_ZLIB: i32 = 6;
 
-/// What a session that passes the Mac's Full-quality picture advertises:
-/// [`ENCODINGS`] with zlib ahead of ZRLE, as Apple's viewer's Full list has them,
-/// so the Mac sends zlib alone, which the page inflates, or on Combined Display
-/// the gateway, to compose. ZRLE is the one it keeps
+/// What a session of the Mac's Full quality advertises, which is every Standard
+/// session not started with Adaptive, Combined Display included: [`ENCODINGS`]
+/// with zlib ahead of ZRLE, as Apple's viewer's Full list has them, so the Mac
+/// sends zlib alone, which the gateway inflates for its tiles. ZRLE is the one it keeps
 /// as the lossless codec, and arriving all the same ends the session, as in
 /// [`ADAPTIVE_ENCODINGS`].
 pub const FULL_ENCODINGS: &[i32] = &[
@@ -200,8 +200,9 @@ pub const FULL_ENCODINGS: &[i32] = &[
 ];
 
 /// What an Apple session asks the Mac for: on Standard, the list that brings the
-/// Mac's own picture in `quality`, and [`ENCODINGS`] to open High Performance,
-/// whose rectangles are stepped over.
+/// Mac's picture in `quality`, Adaptive's tiles to pass or Full's zlib to inflate
+/// here, and [`ENCODINGS`] to open High Performance, whose rectangles are stepped
+/// over.
 pub fn encodings(quality: Option<StandardQuality>) -> &'static [i32] {
     match quality {
         None => ENCODINGS,
@@ -210,8 +211,8 @@ pub fn encodings(quality: Option<StandardQuality>) -> &'static [i32] {
     }
 }
 
-/// The one framebuffer encoding the Mac sends a session that passes its picture in
-/// `quality`: the first codec of [`encodings`]'s list.
+/// The one framebuffer encoding the Mac sends a session that asks for its picture
+/// in `quality`: the first codec of [`encodings`]'s list.
 pub fn encoding(quality: StandardQuality) -> i32 {
     match quality {
         StandardQuality::Adaptive => ENCODING_ADAPTIVE,

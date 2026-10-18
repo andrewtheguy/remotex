@@ -25,7 +25,7 @@ layer.
 
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
-| `ard` | Standard, the physical displays | the Mac's own, passed (beta): its 8×8 tiles in a session started with Adaptive, or its zlib with Full quality | none; the Mac's own output is left alone |
+| `ard` | Standard, the physical displays | the gateway's tiles of the Mac's Full quality, its zlib inflated here; or, started with Adaptive, the Mac's own 8×8 tiles passed (beta) | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC, or H.264, over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | as `ard` | none; the Mac's own output is left alone |
 
@@ -49,7 +49,7 @@ official modes alone.
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density Combined Display view is composed at its points as Apple's viewer composes it: by the gateway for a 1x browser, by the browser for a 2x one. |
-| Picture and sound | `ard` passes the Mac's own picture, Adaptive or Full quality, on every view, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Its ZRLE rectangles are stepped over unread and never shown, so a session that passes the stream builds no video encoder: until the stream is up and across display changes the page says the screen is not available and sends the Mac no input. |
+| Picture and sound | `ard` inflates the Mac's Full quality and sends it as the gateway's tiles, or passes the Mac's own Adaptive picture where that was chosen, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Its ZRLE rectangles are stepped over unread and never shown, so a session that passes the stream builds no video encoder: until the stream is up and across display changes the page says the screen is not available and sends the Mac no input. |
 | Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
@@ -131,10 +131,10 @@ session on it, a combination the viewer never offers (above):
   the first it offers, asks as Adaptive quality does, for the 8×8 tiles first
   ([private codecs](#apples-own-framebuffer-encodings)), and leaves out `0x3ea`
   and zlib, which the Mac would not send after them; its page decodes the tiles.
-  One started with Full quality (beta) asks as Full quality does, zlib then
-  ZRLE, and the Mac sends zlib alone, which its page inflates
-  ([Full quality's zlib](#full-qualitys-zlib)). The gateway decodes neither and
-  encodes no picture of a Standard Mac's.
+  Every other Standard session asks as Full quality does, zlib then ZRLE, and
+  the Mac sends zlib alone, which the gateway inflates and codes as its tiles
+  ([Full quality's zlib](#full-qualitys-zlib)). The gateway decodes nothing of
+  the Adaptive picture and encodes nothing of it.
 
 ## Connecting
 
@@ -825,11 +825,12 @@ sampled once a second:
 | 33,333 | 4 | 1,190 bytes | 4.7 Mpx/s |
 | 1,000,000 | 2 | 2,856 bytes | 1.4 Mpx/s |
 
-A Standard session passes the Mac's picture and decodes none of it, so the
+A Standard session passing the Mac's Adaptive picture decodes none of it, so the
 gateway only forwards, and the page's link is what holds the connection. At 0,
-behind a page held to 1 Mbit/s with Full quality and to 300 kbit/s with
-Adaptive, a full-window animation on the Mac and the pointer sweeping, no sample
-of 44 had input unread, while the Mac's send queue stayed full.
+behind a page held to 1 Mbit/s with Full quality, passed at the time, and to
+300 kbit/s with Adaptive, a full-window animation on the Mac and the pointer
+sweeping, no sample of 44 had input unread, while the Mac's send queue stayed
+full.
 
 Arming the full framebuffer at setup and after every layout is still required,
 because it keeps cursor updates alive across logins and locks. Its rectangle is
@@ -1151,11 +1152,13 @@ socket no faster than a set rate. The same was run listing ZRLE alone.
 ### Full quality's zlib
 
 Full quality is RFB's zlib, which the Mac codes the way the standard has it, so
-nothing about it is Apple's own. Listed as Apple's viewer lists it, zlib then
-ZRLE, the Mac logs `preferred codec 6` and keeps both as lossless codecs, and
-sends zlib alone. That was read from `screensharingd`'s log, and with a probe
-and a headless browser that inflated every rectangle a virtual Mac sent, on its
-physical display and on a virtual one across a resize.
+nothing about it is Apple's own, and the gateway inflates it (`vnc_encodings`)
+and codes it as its tiles, as it does any VNC server's picture; it is what every
+Standard session not started with Adaptive asks for. Listed as Apple's viewer
+lists it, zlib then ZRLE, the Mac logs `preferred codec 6` and keeps both as
+lossless codecs, and sends zlib alone. That was read from `screensharingd`'s
+log, and with a probe and a headless browser that inflated every rectangle a
+virtual Mac sent, on its physical display and on a virtual one across a resize.
 - **One stream for the session.** A rectangle is a `u32` length and that many
   bytes of one deflate stream, the zlib header at the first, flushed at each
   rectangle's end and never finished. Each rectangle is inflated on the window
@@ -1190,7 +1193,7 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 | RGB 5-5-5 zlib | `0x3ea` | 1002 | not advertised |
 | 8×8 tiles | `0x3f3` | 1011 | advertised in a session started with Adaptive |
 | ZRLE | `0x10` | 16 | standard RFB |
-| zlib | `0x06` | 6 | standard RFB, advertised in a session started with Full quality |
+| zlib | `0x06` | 6 | standard RFB, advertised in every Standard session not started with Adaptive, and inflated here |
 | Raw | `0x00` | 0 | standard RFB |
 | `DesktopSize` | — | −223 | pseudo-encoding |
 | `LastRect` | — | −224 | pseudo-encoding |
