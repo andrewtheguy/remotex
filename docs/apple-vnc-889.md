@@ -1663,7 +1663,8 @@ four strips do not fit it sends no picture at all (below).
   the session stays open where a missing picture would end it
   ([Liveness](#the-stream)), the gateway sends `pictureWithheld`, and the page
   says "No picture at this size" in the place of "Screen not available" and
-  suggests another size, and to a session passing the H.264 the HEVC, naming
+  suggests another size, and the HEVC to a session passing the H.264 to a
+  browser that takes the HEVC as well, naming
   no direction to resize in: the one case seen at a supported size is a
   physical Mac's whole H.264
   ([The Mac's H.264](architecture.md#the-macs-h264)). It lifts at the display's next offer, which a resize

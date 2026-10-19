@@ -359,11 +359,12 @@ export type ControlMsg =
   // report on its running stream says so, false at the display's next offer or
   // its first picture. The Mac gives no reason: a display too low for the
   // strips it is sent in is one, below any supported size, and a whole H.264
-  // picture of a physical Mac's 1864×983 display another. The page is under
-  // `screenUnavailable` meanwhile and suggests another size, or the HEVC, in
-  // that notice's place. Pushed by the gateway and again on reattach while it holds; the
+  // picture of a physical Mac's 1864×983 display another. `hevc`: the session
+  // passes the H.264 to a browser that takes the HEVC as well. The page is under
+  // `screenUnavailable` meanwhile and suggests another size, and the HEVC where
+  // `hevc` says so, in that notice's place. Pushed by the gateway and again on reattach while it holds; the
   // page never infers it.
-  | { type: "pictureWithheld"; active: boolean }
+  | { type: "pictureWithheld"; active: boolean; hevc: boolean }
   // Why the desktop the `resize` before this describes has no picture, or null
   // when it has one: past what a video stream encodes. No picture follows until a
   // `resize` without a cause. Sent after every `resize` of a source that holds the

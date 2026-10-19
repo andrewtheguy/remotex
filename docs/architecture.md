@@ -1227,9 +1227,11 @@ Three controls with similar names therefore remain separate:
   sends no picture of the display at all, which it does of one too low for its
   four strips and, on a physical Mac, of a 1864×983 display in H.264 sent whole
   ([The Mac's H.264](#the-macs-h264)), the gateway adds `pictureWithheld`, the
-  page suggests another size in that notice's place, and to a session passing
-  the H.264 the HEVC (`SessionCovers` in `frontend/src/RemoteDesktop.tsx`), and
-  the session waits for one
+  page suggests another size in that notice's place, and the HEVC where the
+  message's `hevc` says the session passes the H.264 to a browser that takes
+  the HEVC as well (`RenderPlan::hevc_instead`, `SessionCovers` in
+  `frontend/src/RemoteDesktop.tsx`), the display's tab as much as the canvas,
+  and the session waits for one
   ([In strips](apple-vnc-889.md#in-strips)). The Mac's ZRLE rectangles
   are stepped over by their length (`Decoders::step_over`), never inflated and
   never handed to `VideoSink::damage`, so a session that passes the stream

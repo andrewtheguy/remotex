@@ -84,7 +84,7 @@ function SessionCovers({
   resizing,
   unavailable,
   withheld,
-  h264,
+  hevc,
   oversize,
   size,
   displays,
@@ -94,8 +94,9 @@ function SessionCovers({
   resizing: boolean;
   unavailable: boolean;
   withheld: boolean;
-  // The session passes the Mac's H.264, whose HEVC may come where it does not.
-  h264: boolean;
+  // The session passes the Mac's H.264 to a browser that takes its HEVC as
+  // well, which may come where the H.264 does not.
+  hevc: boolean;
   oversize: HoldCause | null;
   size: RemoteSize | null;
   displays: DisplayInfo[];
@@ -134,15 +135,15 @@ function SessionCovers({
           this size: waiting brings none, and another size may. The Mac gives no
           reason, and the one seen at a supported size is its H.264 sent whole,
           where the HEVC came, so the notice names no direction to resize in and
-          offers the HEVC to an H.264 session. */}
+          offers the HEVC where the gateway says this browser takes it. */}
       {unavailable && withheld && !resizing && (
         <div className="resize-overlay" role="alert">
           <span className="status">No picture at this size</span>
           <span className="status-hint">
-            {`The Mac sends no ${h264 ? "H.264 " : ""}picture of ${
+            {`The Mac sends no ${hevc ? "H.264 " : ""}picture of ${
               size ? `a ${size.w}×${size.h} display` : "a display this size"
             }. Resize the window to try another size${
-              h264 ? ", or start the session with HEVC" : ""
+              hevc ? ", or start the session with HEVC" : ""
             }.`}
           </span>
         </div>
@@ -319,7 +320,7 @@ export default function RemoteDesktop({
     remoteResizing,
     screenUnavailable,
     pictureWithheld,
-    passthrough,
+    withheldHevc,
     setViewOnly,
     onLocalShortcut,
     takeOver,
@@ -529,7 +530,7 @@ export default function RemoteDesktop({
           resizing={remoteResizing}
           unavailable={screenUnavailable}
           withheld={pictureWithheld}
-          h264={passthrough === "apple-h264"}
+          hevc={withheldHevc}
           oversize={oversize}
           size={size}
           displays={displays}
