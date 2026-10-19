@@ -391,7 +391,15 @@ export function createPainterWorker(
           endDecodeWorker("hevc");
           break;
         case "retire":
-          void stopEgfx().then(() => post({ type: "retired" }));
+          // Retired either way: a pool worker that failed to stop was ended too.
+          void stopEgfx()
+            .catch((error: unknown) => {
+              console.warn(
+                "the compositor's pool did not stop cleanly:",
+                error,
+              );
+            })
+            .then(() => post({ type: "retired" }));
           break;
       }
     },

@@ -111,29 +111,22 @@ export interface DesktopPainter {
 }
 
 /**
- * How long a worker told to `retire` has to say it has, before it is ended
- * anyway: its pool stops in far less.
- */
-const RETIRE_MS = 2000;
-
-/**
  * End a paint worker. On an iPhone or an iPad, once it has stopped what would
  * outlive it there (`keepsEndedWorkers`): the compositor's pool, whose workers it
- * ends once their threads have returned (`stopEgfx`). What it says before then is
- * for nobody. Elsewhere at once: Chromium left a paint worker ended just after
- * its pool's workers hanging, never closed, in about half of the sessions.
+ * ends once their threads have returned (`stopEgfx`). Not before, however long
+ * that takes behind the frames queued ahead of it: ended sooner, it would keep
+ * the memory until the tab closes. What it says before then is for nobody.
+ * Elsewhere at once: Chromium left a paint worker ended just after its pool's
+ * workers hanging, never closed, in about half of the sessions.
  */
 function endPainter(worker: Worker): void {
   if (!keepsEndedWorkers()) {
     worker.terminate();
     return;
   }
-  const end = () => worker.terminate();
-  const late = setTimeout(end, RETIRE_MS);
   worker.onmessage = (ev: MessageEvent<PainterEvent>) => {
     if (ev.data.type === "retired") {
-      clearTimeout(late);
-      end();
+      worker.terminate();
     }
   };
   worker.postMessage({ type: "retire" } satisfies PainterCommand);

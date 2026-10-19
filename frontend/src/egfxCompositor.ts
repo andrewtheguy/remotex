@@ -223,7 +223,8 @@ async function startThreads(
  * Stop the pool, if one was started, and end its workers once each thread has
  * returned out of the module: what ends the paint worker on an iPhone or an iPad
  * does this first (desktopPainter.ts). A module loaded after composes on a pool
- * of its own.
+ * of its own. A worker that fails instead of stopping is ended too, its thread
+ * out of the module, and the failure thrown once every worker is.
  */
 export async function stopEgfx(): Promise<void> {
   const pending = loaded;
@@ -234,20 +235,28 @@ export async function stopEgfx(): Promise<void> {
   await pending.catch(() => {});
   const stopped = workers.splice(0).map(
     (worker) =>
-      new Promise<void>((resolve) => {
+      new Promise<void>((resolve, reject) => {
         worker.onmessage = ({ data }: MessageEvent<PoolEvent>) => {
           if (data.type === "stopped") {
             worker.terminate();
             resolve();
           }
         };
+        worker.onerror = (event) => {
+          worker.terminate();
+          reject(new Error(event.message || "a thread did not stop"));
+        };
       }),
   );
   if (stopped.length > 0) {
     stopPool();
   }
-  await Promise.all(stopped);
+  const outcomes = await Promise.allSettled(stopped);
   loaded = null;
+  const failed = outcomes.find((outcome) => outcome.status === "rejected");
+  if (failed) {
+    throw failed.reason;
+  }
 }
 
 /**
