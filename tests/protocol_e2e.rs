@@ -1440,15 +1440,22 @@ async fn expect_standard(ws: &mut Ws, starts: bool) -> Vec<common::StandardRect>
 /// desktop, each body exactly as the fake sent it. A session of one screen at a
 /// time opens on a pixel of the combined view, asked for until the screen's
 /// layout comes, and the Mac's answer to it is passed like any rectangle, ahead
-/// of the screen whole.
+/// of the screen whole: in batches of its own, or at the front of the screen's.
 async fn expect_fake_standard(ws: &mut Ws, starts: bool) {
-    let mut rects = expect_standard(ws, starts).await;
-    while rects.iter().all(|rect| (rect.x, rect.y, rect.w, rect.h) == (0, 0, 1, 1)) {
-        rects = expect_standard(ws, false).await;
-    }
-    for rect in rects {
-        assert_eq!((rect.x, rect.y, rect.w, rect.h), (0, 0, MAC_DESKTOP, MAC_DESKTOP));
-        assert_eq!(rect.body, fake_standard_body(rect.body[0]), "the body as the Mac sent it");
+    let mut starts = starts;
+    loop {
+        let rects = expect_standard(ws, starts).await;
+        starts = false;
+        let pixel = |rect: &&common::StandardRect| (rect.x, rect.y, rect.w, rect.h) == (0, 0, 1, 1);
+        let screen: Vec<_> = rects.iter().skip_while(pixel).collect();
+        if screen.is_empty() {
+            continue;
+        }
+        for rect in screen {
+            assert_eq!((rect.x, rect.y, rect.w, rect.h), (0, 0, MAC_DESKTOP, MAC_DESKTOP));
+            assert_eq!(rect.body, fake_standard_body(rect.body[0]), "the body as the Mac sent it");
+        }
+        return;
     }
 }
 
