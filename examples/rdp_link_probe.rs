@@ -25,7 +25,7 @@
 //! - [`THROTTLE_ENV`] makes the link to the host itself slow: `4000:100` puts a
 //!   relay in front of the host that reads from it at 4 Mbit/s, through a small
 //!   receive buffer so the host's own socket backs up, and holds everything sent
-//!   to it for 100 ms; a third number is that buffer in kilobytes, and a fourth
+//!   to it for 100 ms (a rate of `0` reads it unlimited); a third number is that buffer in kilobytes, and a fourth
 //!   how many seconds in the relay stops limiting, to see whether the host goes
 //!   back.
 //! - [`H264_ENV`] lets the host draw with H.264: `1` where it chooses, by region
@@ -86,9 +86,9 @@ const SIZE: (u32, u32) = (1280, 800);
 const WINDOW: Duration = Duration::from_secs(5);
 
 /// A relay to `host:port` that is a slow link: what the host sends is read at
-/// `kbps` through a small receive buffer, and what is sent to the host is held for
-/// `delay`. Returns the local port it listens on, for one connection.
-async fn throttle(host: &str, port: u16, kbps: u64, delay: Duration, buffer_kb: u32, lift: Option<Duration>) -> u16 {
+/// `kbps`, or as it comes without one, through a small receive buffer, and what
+/// is sent to the host is held for `delay`. Returns the local port it listens on, for one connection.
+async fn throttle(host: &str, port: u16, kbps: Option<u64>, delay: Duration, buffer_kb: u32, lift: Option<Duration>) -> u16 {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let bare = host.trim_start_matches('[').trim_end_matches(']').to_owned();
     let address = tokio::net::lookup_host((bare, port))
@@ -141,6 +141,7 @@ async fn throttle(host: &str, port: u16, kbps: u64, delay: Duration, buffer_kb: 
             if lift.is_some_and(|lift| opened.elapsed() >= lift) {
                 continue;
             }
+            let Some(kbps) = kbps else { continue };
             free = free.max(tokio::time::Instant::now() - Duration::from_millis(20))
                 + Duration::from_micros(n as u64 * 8000 / kbps);
             tokio::time::sleep_until(free).await;
@@ -429,6 +430,7 @@ async fn a_real_host_draws_for_a_slow_client() {
         let mut parts = said.split(':');
         let mut number = |otherwise: u64| parts.next().map_or(otherwise, |part| part.parse::<u64>().expect("a number"));
         let (kbps, delay, buffer_kb, lift) = (number(0), number(0), number(16), number(0));
+        let kbps = (kbps > 0).then_some(kbps);
         (kbps, Duration::from_millis(delay), buffer_kb as u32, (lift > 0).then(|| Duration::from_secs(lift)))
     });
     println!(
@@ -472,8 +474,10 @@ async fn a_real_host_draws_for_a_slow_client() {
             acknowledger.frame_composed(frame);
         }
     });
-    // When the page's link is free of everything passed so far.
-    let page_kbps: Option<u64> = std::env::var(PAGE_ENV).ok().map(|said| said.parse().expect("kbit/s"));
+    // When the page's link is free of everything passed so far. A rate of 0 is no
+    // link to wait for.
+    let page_kbps: Option<u64> =
+        std::env::var(PAGE_ENV).ok().map(|said| said.parse().expect("kbit/s")).filter(|&kbps| kbps > 0);
     let mut link_free = tokio::time::Instant::now();
     let epoch = tokio::time::Instant::now();
     // Returns the page's clock, in milliseconds, when it composes the frame.

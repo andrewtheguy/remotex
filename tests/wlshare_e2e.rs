@@ -319,8 +319,10 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     // Switch outputs. The checkmark moves when wlshare says it moved, and the
     // window follows there: HEADLESS-2 reports its own 1280x800, which the
     // window's declaration usually reaches before its framebuffer does, so the
-    // desktop may never be shown at that size. Its picture is painted afresh.
+    // desktop may never be shown at that size. Its picture is painted afresh,
+    // none of HEADLESS-1's tiles counting towards it.
     view.painted = false;
+    view.coverage = Some(common::Coverage::new(window.w as u16, window.h as u16));
     ws.send(Message::text(format!(r#"{{"type":"selectDisplay","id":{second}}}"#)))
         .await
         .unwrap();

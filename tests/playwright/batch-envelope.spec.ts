@@ -26,6 +26,8 @@ const VIDEO_KEYFRAME = 0x01;
 const VIDEO_STRIP = 0x02;
 const VIDEO_STRIP_INDEX = 0x0c;
 const VIDEO_STRIP_ENDS = 0x10;
+const TILE_JPEG = 0x01;
+const TILE_PNG = 0x02;
 
 /// A record as its header frames it: what the Mac's picture is decides which
 /// kind arrives, a passed stream's access units, a Standard Mac's own
@@ -34,6 +36,8 @@ interface BatchRecordFrame {
   op: number;
   /// A video unit's flags; zero for the rest.
   flags: number;
+  /// A tile's image format; zero for the rest.
+  format: number;
   w: number;
   h: number;
   payloadLen: number;
@@ -84,6 +88,7 @@ function parseBatch(payload: Buffer): Batch {
     records.push({
       op,
       flags: op === OP_VIDEO ? payload.readUInt8(at + 1) : 0,
+      format: op === OP_TILE ? payload.readUInt8(at + 1) : 0,
       w: payload.readUInt16LE(at + layout.size),
       h: payload.readUInt16LE(at + layout.size + 2),
       payloadLen,
@@ -177,6 +182,12 @@ test.describe("v4 batch envelope", () => {
             record.flags & (VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS),
             "a strip's number and end only on a strip",
           ).toBe(0);
+        }
+        if (record.op === OP_TILE) {
+          expect(
+            [TILE_JPEG, TILE_PNG],
+            "a tile's image is a JPEG or a PNG",
+          ).toContain(record.format);
         }
         // A Standard record is the Mac's rectangle as it sent it, which may
         // be empty; a unit and a tile never are. Every record has a body.

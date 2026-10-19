@@ -1028,8 +1028,9 @@ audio, so a later Open begins with a fresh stream. The protocol state machine is
 `examples/rdp_client_probe.rs` drives a real host's Recording panel in
 `a_real_host_records_the_microphone`. With `REMOTEX_UAT_MICROPHONE=1` it asserts
 version negotiation, then feeds a tone for the host's level meter while the
-device is open. Like the camera probe it is ignored by default and does not
-automatically inspect what the remote application heard.
+device is open. Like the camera probe it runs only when named on the probe's
+command line, and does not automatically inspect what the remote application
+heard.
 
 ## Sound (MS-RDPEA)
 

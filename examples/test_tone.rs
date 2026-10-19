@@ -38,6 +38,7 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::error::TryRecvError;
 
 use remotex::audio::{AudioBridge, PCM_CD_QUALITY};
 use remotex::config::{Protocol, TargetConfig};
@@ -132,12 +133,17 @@ async fn main() {
                     // and a client that never hears a size sits on "waiting for
                     // the remote desktop" forever. Polled on the audio cadence
                     // rather than blocked on, since this thread owes the queue a
-                    // buffer every 20 ms.
-                    while let Ok(msg) = input_rx.try_recv() {
-                        if matches!(msg, remotex::protocol::ClientMsg::Refresh)
-                            && frame_tx.blocking_send(size.clone()).is_err()
-                        {
-                            return;
+                    // buffer every 20 ms. A session that dropped its input is gone.
+                    loop {
+                        match input_rx.try_recv() {
+                            Ok(remotex::protocol::ClientMsg::Refresh) => {
+                                if frame_tx.blocking_send(size.clone()).is_err() {
+                                    return;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => return,
                         }
                     }
                     due += buffer;
