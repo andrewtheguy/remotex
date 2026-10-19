@@ -76,8 +76,7 @@ rule as an exception, rather than refusing it or bending the rule unlisted.
   the wire's word, and the Apple mosaic as the one rescale, made downward in the
   gateway for Standard's Combined Display.
 - [Media paths](docs/architecture.md#media-paths): passed untouched or the
-  gateway's own tiles, with a rule for each passthrough, a desktop past the ceiling,
-  audio, camera and microphone.
+  gateway's own tiles, a desktop past the ceiling, audio, camera and microphone.
 
 ## Packaging and platforms
 

@@ -403,12 +403,10 @@ this for every source they code, a plain VNC server's ZRLE, an RDP host's bitmap
 path and a Standard Mac's Full quality alike, by sending a still JPEG tile again
 as PNG once it has settled. A passed stream does it only where the remote's own
 codec does: an RDP host under its Lossless policy, and a High Performance Mac's
-HEVC as the Mac refines it. So a source whose format is lossless and which the
-gateway can decode is the tiles, and is passed only where its own format is the
-reason to pass it, as wlshare's VP9 is wlshare's own adaptive stream and a Mac's
-Adaptive picture is Apple's own, decodable nowhere here. A Standard Mac's Full
-quality, plain RFB zlib, was passed for a while only because it shared the
-Adaptive picture's framing; it is the tiles now, and do not pass it again.
+HEVC as the Mac refines it. That is why the lossless sources the gateway can
+decode, a Standard Mac's Full quality (plain RFB zlib) among them, are sent as
+tiles today, while wlshare's VP9, wlshare's own adaptive stream, and a Mac's
+Adaptive picture, Apple's own and decodable nowhere here, are passed.
 
 Whatever the gateway transcodes goes to tiles. A video encoder (VP9, H.264, AV1 or
 any other), a codec probe, or a codec key that selects one is not added as a side
