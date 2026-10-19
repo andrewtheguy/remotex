@@ -1375,7 +1375,14 @@ the strip's number, a frame's strips sharing its timestamp.
   of strip-sized pictures, and stacked they were the display.
 - **Strips predict from each other.** A keyframe is an IDR of strip 0 and a
   picture of each other strip that is not an IDR, and each strip decoded on its
-  own named pictures it did not have.
+  own named pictures it did not have. The Mac's H.264 encoder enables its
+  long-term-reference mode by default. Its reference planner gives all but one
+  of the DPB's slots to long-term references and leaves one short-term
+  reference, from which the common section planner builds the strip's list.
+  That one is the picture immediately before it in the stream's decoding
+  order, another strip, as the slices show. The private HEVC encoder has that
+  mode off and, with more than one section, keeps up to 15 short-term
+  references, enough to name the same strip four and eight pictures back.
 - **The packets carry the order number.** A picture comes as FU-B fragments,
   every one with the number after its FU header, or as a STAP-B. A keyframe's
   sample description comes in a packet of its own ahead of the first and the
@@ -1393,13 +1400,21 @@ the strip's number, a frame's strips sharing its timestamp.
 - **A PLI brings a keyframe.** One sent as SRTCP was answered at the next frame
   by an IDR of strip 0 and a picture of each other strip, each with its
   description.
-- **Acknowledgements and refresh requests are not the HEVC's alone.** Read from
-  AVConference, the answer enables long-term references from the offer's field
-  7 alone, the Mac's side always having them on: neither the codec, nor `LTR;`
-  in the codec's features, nor the tile count enters it. Neither does any step
-  from an acknowledgement or a refresh request to the encoder. Remotex
-  acknowledges and asks for refreshes on the HEVC alone, so an H.264 loss costs
-  a keyframe.
+- **The H.264 acknowledgement is lost inside the Mac.** With H.264's
+  long-term-reference mode on, the encoder marks a picture with an LTR-specific
+  acknowledgement token, while the transmitter reads only the ordinary token.
+  The return path has the same mismatch: the encoder listens for LTR-specific
+  acknowledgements and the transmitter supplies only ordinary ones. It
+  therefore neither marks the picture with the RTP extension's `0x10` bit nor
+  registers its token, and an APP-name-5 acknowledgement has no token to
+  reach. Removing `LTR;` from payload 123's features, turning offer field 7
+  off, and turning field 2 on each left every strip without `0x10` and left its
+  rate unchanged. Only a host-side encoder property changes the mode; no path
+  from an offer or an RTCP packet sets it. A host-only preference can instead
+  select the legacy software H.264 encoder, which uses the ordinary token, but
+  its behavior in strips was not read and a viewer cannot select it. Remotex
+  consequently cannot acknowledge or request an acknowledged-reference
+  refresh of H.264, so a loss costs a keyframe.
 - **On a detailed still picture the strips never settle.** At 1440×900, a
   full-screen photograph in Chrome on macvm, with the rate target at 58.4
   Mbit/s throughout, the Mac sent about 17 frames a second in four strips, each
@@ -1411,7 +1426,10 @@ the strip's number, a frame's strips sharing its timestamp.
   repeat too, at about 3.7 Mbit/s, until acknowledged. With one tile the H.264
   came about a picture a second, settling at pictures under 1 KB, about 0.1
   Mbit/s, and so remotex offers the H.264 one tile
-  ([The Mac's H.264](architecture.md#the-macs-h264)).
+  ([The Mac's H.264](architecture.md#the-macs-h264)). This is not macvm's
+  software encoder alone: a physical Mac's recorded long H.264 strip session
+  averaged 27 Mbit/s and never had a second below 5 Mbit/s, while its HEVC strip
+  session averaged 0.5 Mbit/s.
 
 Seen at 1600×1000 and 2880×1800. Passed through remotex, Chrome on Linux
 decoded it in its software decoder, and Chrome and Safari on a Mac decoded it;
@@ -1724,17 +1742,16 @@ A still screen is not silent. After any change of the screen, the Mac's
 capture hands its encoder the unchanged frame again, about 18 times a second,
 until it has spent a fixed count of 300 such idle frames, some 20 s, and then
 hands it nothing until the screen next changes. What goes out of the repeats is
-the encoder's to decide, and it decides by the tile count. Read from
-AVConference and VideoProcessing, and measured on macvm at 1440×900 under a
-full-screen still page, from the encoder's statistics, which the Mac logs once a
-second:
+the encoder's to decide, and it decides by the tile count. Read from the Mac's
+transmitter and encoders, and measured on macvm at 1440×900 under a full-screen
+still page, from the encoder's statistics, which the Mac logs once a second:
 
 | The stream | Repeats sent | The picture's rate during them |
 |---|---|---|
 | H.264, one tile | about one a second | about 7 kbit/s |
 | HEVC, four strips, not acknowledged | every one, four strips about 18 times a second | 3.3–4.9 Mbit/s |
 | HEVC, four strips, each strip picture acknowledged by its decoding order number | none, from about 2 s after the change | nothing |
-| H.264, four strips, acknowledged or not | every one | about 25 Mbit/s |
+| H.264, four strips, which cannot be acknowledged | every one | about 25 Mbit/s |
 
 - **One tile drops them on a clock.** A repeat, with no keyframe or refresh
   owed, is dropped while the last picture sent came at a quantizer of 22 or
@@ -1756,12 +1773,18 @@ second:
 - **An acknowledged still screen settles coarser.** Its repeats stop at a
   picture of quantizer 22 or so, which came at about 40 dB PSNR against the
   quantizer-6 picture that unacknowledged strips refine the same screen to.
-- **H.264 strips cannot be acknowledged.** None of their packets carries the
-  `0x10` bit, so nothing matches an acknowledgement, by either value. Each
-  strip picture predicts from one reference, the picture before it in the
-  decoding order, which is another strip's: the picture parameter set allows
-  one, no slice asks for more, and each slice's list is reordered to the
-  long-term picture before it. A repeat is so coded mostly intra.
+- **H.264 strips cannot be acknowledged.** The H.264 encoder asks with the
+  LTR-specific token, but the transmitter reads only the ordinary token. None
+  of the packets therefore carries the
+  `0x10` bit or has its token registered, so nothing matches an
+  acknowledgement, by either value; the reverse path has the same mismatch
+  between LTR-specific and ordinary acknowledgements. The same encoder mode
+  leaves one short-term reference. Each strip picture consequently predicts
+  from the picture before it in the decoding order, another strip's: the
+  picture parameter set allows one, no slice asks for more, and each slice's
+  list names that picture. A repeat is so coded mostly intra. The feature
+  string, offer fields 7 and 2, and every RTCP request tested leave the encoder
+  mode unchanged; one whole H.264 picture is the viewer-side escape.
 - **Remotex acknowledges each HEVC strip picture it hands on by its decoding
   order number,** as it acknowledges a picture of one tile by its timestamp.
 
