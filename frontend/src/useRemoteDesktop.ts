@@ -765,6 +765,10 @@ export function useRemoteDesktop(
   // gateway's `pictureWithheld`, which says why the screen is not available.
   // Reset as `remoteResizing` is.
   const [pictureWithheld, setPictureWithheld] = useState(false);
+  // With it, whether the session passes the H.264 to this browser, which takes
+  // the HEVC as well: the gateway's word, the display's tab's as much as the
+  // canvas's, for the notice to suggest the HEVC.
+  const [withheldHevc, setWithheldHevc] = useState(false);
   // Either notice is over the desktop, which is what input and focus follow: a
   // key or a click sent to a Mac whose picture is not on screen lands wherever
   // the display that comes back happens to put it.
@@ -2382,6 +2386,7 @@ export function useRemoteDesktop(
           break;
         case "pictureWithheld":
           setPictureWithheld(msg.active);
+          setWithheldHevc(msg.hevc);
           break;
         case "oversize":
           if (msg.cause) {
@@ -3379,6 +3384,7 @@ export function useRemoteDesktop(
     remoteResizing,
     screenUnavailable,
     pictureWithheld,
+    withheldHevc,
     viewOnly,
     setViewOnly,
     onLocalShortcut,

@@ -911,15 +911,17 @@ pub fn rtcp_receiver_report(ssrc: u32) -> [u8; 8] {
     report
 }
 
-/// AVConference's acknowledgement of a picture this side has whole, by its RTP
-/// `timestamp`: an APP packet whose name is the number 5. The Mac's encoder keeps
-/// the newest acknowledged picture as a long-term reference, which is what lets it
-/// answer [`rtcp_refresh`] without an IDR. Alone in its datagram, as the rate
-/// report is.
-pub fn rtcp_reference_ack(ssrc: u32, timestamp: u32) -> [u8; 16] {
+/// AVConference's acknowledgement of a picture this side has whole, by the
+/// `picture` the Mac filed it under ([`Assembly::acknowledgement`]): an APP
+/// packet whose name is the number 5. In one tile the Mac's encoder keeps the
+/// newest acknowledged picture as a long-term reference, which is what lets it
+/// answer [`rtcp_refresh`] without an IDR; in strips an acknowledged strip is
+/// one whose repeats of a still screen it stops sending. Alone in its datagram,
+/// as the rate report is.
+pub fn rtcp_reference_ack(ssrc: u32, picture: u32) -> [u8; 16] {
     let mut ack = [0x80, 204, 0, 3, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0];
     ack[4..8].copy_from_slice(&ssrc.to_be_bytes());
-    ack[12..].copy_from_slice(&timestamp.to_be_bytes());
+    ack[12..].copy_from_slice(&picture.to_be_bytes());
     ack
 }
 
@@ -1537,7 +1539,10 @@ impl Depacketizer {
 /// of the first strip followed by intra pictures of the others.
 ///
 /// A lost packet, or a picture missing from the order, drops everything up to
-/// the next such keyframe: the stream has no refresh pictures.
+/// the next such keyframe: the stream has no refresh pictures. Each HEVC strip
+/// picture handed on is acknowledged by its decoding order number
+/// ([`Assembly::acknowledgement`]), without which the Mac sends every repeat of a
+/// still screen the capture hands its encoder.
 pub struct Strips {
     /// The display's SSRC, the first strip's.
     base: Option<u32>,
@@ -1612,6 +1617,12 @@ impl Strips {
         (strip, out)
     }
 
+    /// The decoding order number of the picture [`Self::push`] last yielded,
+    /// until the next packet.
+    fn yielded(&self) -> Option<u16> {
+        self.next.map(|next| next.wrapping_sub(1))
+    }
+
     /// Drop everything up to the next keyframe.
     pub fn resync(&mut self) {
         self.next = None;
@@ -1652,6 +1663,17 @@ impl Assembly {
         match self {
             Self::Whole(_) => ssrc,
             Self::Strips(strips) => strips.stream(ssrc),
+        }
+    }
+
+    /// What the Mac filed the unit just yielded, of RTP `timestamp`, under for
+    /// its acknowledgement ([`rtcp_reference_ack`]): the timestamp in one tile,
+    /// and in strips, whose four pictures of a frame share it, the strip
+    /// picture's decoding order number.
+    fn acknowledgement(&self, timestamp: u32) -> u32 {
+        match self {
+            Self::Whole(_) => timestamp,
+            Self::Strips(strips) => strips.yielded().map_or(timestamp, u32::from),
         }
     }
 
@@ -3143,7 +3165,8 @@ struct VideoLeg {
     /// The stream's picture size, from its parameter sets: what a refresh
     /// request names.
     size: Option<(u16, u16)>,
-    /// The RTP timestamp of a picture handed on and not yet acknowledged.
+    /// What a picture handed on and not yet acknowledged was filed under
+    /// ([`Assembly::acknowledgement`]).
     unacknowledged: Option<u32>,
     packets: u64,
     forged: u64,
@@ -3315,10 +3338,10 @@ impl VideoLeg {
                         if self.counted.replace(header.timestamp) != Some(header.timestamp) {
                             self.pictures += 1;
                         }
-                        // A stream in strips has no refresh pictures to predict
-                        // from an acknowledged one, and the H.264 is asked for none.
-                        if strip.is_none() && self.codec == Codec::Hevc {
-                            self.unacknowledged = Some(header.timestamp);
+                        // The HEVC's pictures ask to be acknowledged, and the
+                        // H.264's do not.
+                        if self.codec == Codec::Hevc {
+                            self.unacknowledged = Some(self.assembly.acknowledgement(header.timestamp));
                         }
                         Ok(Took::Nothing)
                     }
@@ -3362,11 +3385,12 @@ impl VideoLeg {
         let _ = self.socket.send(&request).await;
     }
 
-    /// Tell the Mac's encoder of the picture just handed on, which it may then
-    /// predict a refresh from.
+    /// Tell the Mac's encoder of the picture just handed on, which in one tile
+    /// it may then predict a refresh from, and in strips stop sending that
+    /// strip's repeats of a still screen from.
     async fn acknowledge(&mut self) {
-        if let Some(timestamp) = self.unacknowledged.take() {
-            let ack = self.rtcp.protect(&rtcp_reference_ack(self.ssrc, timestamp));
+        if let Some(picture) = self.unacknowledged.take() {
+            let ack = self.rtcp.protect(&rtcp_reference_ack(self.ssrc, picture));
             let _ = self.socket.send(&ack).await;
         }
     }
@@ -4308,6 +4332,21 @@ mod tests {
         assert_eq!(s.push(&strip(3, 900, 0, true), &numbered(9, TRAIL)), (3, trail()));
         assert_eq!(s.push(&strip(0, 14, 400, true), &numbered(10, TRAIL)), (0, trail()));
         assert_eq!(s.stream(12), 9, "the display's SSRC is its first strip's");
+    }
+
+    /// The Mac files a picture of one tile under its timestamp, and a strip's,
+    /// whose frame's pictures share one, under its decoding order number.
+    #[test]
+    fn a_picture_is_acknowledged_by_what_the_mac_filed_it_under() {
+        let mut whole = Assembly::new(Codec::Hevc, false);
+        assert!(matches!(whole.push(&header(1, 400, true), IDR).1, Depacketized::Unit(_)));
+        assert_eq!(whole.acknowledgement(400), 400);
+
+        let mut strips = Assembly::new(Codec::Hevc, true);
+        assert!(matches!(strips.push(&strip(0, 1, 800, true), &numbered(7, IDR)).1, Depacketized::Unit(_)));
+        assert_eq!(strips.acknowledgement(800), 7);
+        assert!(matches!(strips.push(&strip(1, 1, 800, true), &numbered(8, TRAIL)).1, Depacketized::Unit(_)));
+        assert_eq!(strips.acknowledgement(800), 8, "the frame's second strip, under the same timestamp");
     }
 
     /// A picture missing from the decoding order is one every strip may predict

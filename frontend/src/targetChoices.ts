@@ -359,15 +359,15 @@ function pictureOptions(
       value: "apple-media",
       label: "HEVC, passed through",
       note: hevc
-        ? "The Mac's own picture in 4:4:4. For a LAN."
+        ? "The Mac's own picture in 4:4:4. Recommended, for the best quality."
         : noHevc(target),
       disabled: !hevc,
     },
     "apple-h264": {
       value: "apple-h264",
-      label: "H.264, passed through",
+      label: "H.264 (alpha), passed through",
       note: abilities.appleH264
-        ? "The Mac's own picture in 4:2:0."
+        ? "The Mac's own picture in 4:2:0, in the browser's own decoder. For compatibility."
         : "This browser has no video decoder for the Mac's H.264.",
       disabled: !abilities.appleH264,
     },

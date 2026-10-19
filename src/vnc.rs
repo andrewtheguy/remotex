@@ -763,6 +763,9 @@ struct DesktopState {
     /// display ([`ServerMsg::PictureWithheld`]), as the Mac's stream last said
     /// ([`tell_withheld`]).
     withheld: bool,
+    /// The browser takes the HEVC this session's H.264 could be traded for,
+    /// which [`ServerMsg::PictureWithheld`] says ([`RenderPlan::hevc_instead`]).
+    hevc_instead: bool,
     /// The list the Mac holds names the media stream first, so it sends this
     /// session no pixels ([`vnc_apple_media::encodings_preferring_media_stream`]):
     /// from the `SetEncodings` that asks for the stream's ports to the session's
@@ -1916,9 +1919,9 @@ async fn tell_withheld(
         let media = media.lock().unwrap();
         (media.withheld(canvas), media.withheld(1))
     };
-    let (told, size) = {
+    let (told, size, hevc) = {
         let mut d = desktop.lock().unwrap();
-        (std::mem::replace(&mut d.withheld, canvas) != canvas, d.size)
+        (std::mem::replace(&mut d.withheld, canvas) != canvas, d.size, d.hevc_instead)
     };
     if told {
         if canvas {
@@ -1928,7 +1931,7 @@ async fn tell_withheld(
                 size.0, size.1
             );
         }
-        sink.msg(ServerMsg::PictureWithheld { active: canvas }).await?;
+        sink.msg(ServerMsg::PictureWithheld { active: canvas, hevc }).await?;
     }
     let told = tab
         .lock()
@@ -1942,7 +1945,7 @@ async fn tell_withheld(
                  report says it has sent none"
             );
         }
-        tab_send(tab, Some(media), vec![ServerMsg::PictureWithheld { active: second }]).await;
+        tab_send(tab, Some(media), vec![ServerMsg::PictureWithheld { active: second, hevc }]).await;
     }
     Ok(())
 }
@@ -3105,6 +3108,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         media_live: false,
         covered: media_stream,
         withheld: false,
+        hevc_instead: plan.hevc_instead,
         media_preferred: false,
         in_update: false,
         media_stream,
@@ -3627,9 +3631,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                     // A stream still to deliver, or a resize in progress, is said
                     // to the new browser too.
-                    let (resizing, covered, withheld) = {
+                    let (resizing, covered, withheld, hevc) = {
                         let d = desktop.lock().unwrap();
-                        (d.hp.shown, d.covered, d.withheld)
+                        (d.hp.shown, d.covered, d.withheld, d.hevc_instead)
                     };
                     if covered
                         && let Err(e) = sink.msg(ServerMsg::ScreenUnavailable { active: true }).await
@@ -3637,7 +3641,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         break Err(e);
                     }
                     if withheld
-                        && let Err(e) = sink.msg(ServerMsg::PictureWithheld { active: true }).await
+                        && let Err(e) = sink.msg(ServerMsg::PictureWithheld { active: true, hevc }).await
                     {
                         break Err(e);
                     }
@@ -6614,7 +6618,8 @@ async fn tab_repaint(shared: &Shared, macos: bool) {
         .as_mut()
         .is_some_and(|tab| std::mem::replace(&mut tab.withheld, withheld) != withheld);
     if told {
-        msgs.push(ServerMsg::PictureWithheld { active: withheld });
+        let hevc = shared.desktop.lock().unwrap().hevc_instead;
+        msgs.push(ServerMsg::PictureWithheld { active: withheld, hevc });
     }
     // A resize in progress covers the tab as it covers the canvas.
     if shared.desktop.lock().unwrap().hp.shown {
@@ -8911,9 +8916,9 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
+        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(with_wlshare_vp9(&rest, walked), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
-        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
+        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -10093,6 +10098,7 @@ mod tests {
             media_live: false,
             covered: false,
             withheld: false,
+            hevc_instead: false,
             media_preferred: false,
             in_update: false,
             media_stream: false,
@@ -10134,6 +10140,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
+            hevc_instead: false,
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
@@ -10172,6 +10179,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
+            hevc_instead: false,
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
@@ -12811,7 +12819,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -13314,7 +13322,7 @@ mod tests {
         sink.flush().await;
         std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|msg| match msg {
-                ServerMsg::PictureWithheld { active } => Some(active),
+                ServerMsg::PictureWithheld { active, .. } => Some(active),
                 _ => None,
             })
             .collect()
@@ -13404,6 +13412,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
+            hevc_instead: false,
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
@@ -13446,6 +13455,7 @@ mod tests {
             adaptive: false,
             apple_media: false,
             apple_h264: false,
+            hevc_instead: false,
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,

@@ -1186,7 +1186,10 @@ Three controls with similar names therefore remain separate:
   strips its pictures come in (`strips`: 4, and 1 for whole pictures), which
   the Info panel's video row repeats. A keyframe is strip 0's IDR; the other
   strips' intra pictures follow it as ordinary units, so a restart drops to
-  that IDR as it drops to any. For the page's software decoder, each strip
+  that IDR as it drops to any. Each strip picture handed on is acknowledged to
+  the Mac by its decoding order number, without which the Mac sends every
+  repeat of a still screen for some 20 s after each change
+  ([Repeats of a still screen](apple-vnc-889.md#repeats-of-a-still-screen)). For the page's software decoder, each strip
   decodes to a picture of its own, which the decode worker answers with where
   its rows go in the display, and the paint worker uploads it there, into
   textures of the display's size, and draws the display at the frame's last
@@ -1222,8 +1225,13 @@ Three controls with similar names therefore remain separate:
   pointer and keys would land on a display nobody can see, so the page drops its
   input listeners and releases what was held. Where the Mac's own report says it
   sends no picture of the display at all, which it does of one too low for its
-  four strips, the gateway adds `pictureWithheld`, the page asks for a larger
-  size in that notice's place, and the session waits for one
+  four strips and, on a physical Mac, of a 1864×983 display in H.264 sent whole
+  ([The Mac's H.264](#the-macs-h264)), the gateway adds `pictureWithheld`, the
+  page suggests another size in that notice's place, and the HEVC where the
+  message's `hevc` says the session passes the H.264 to a browser that takes
+  the HEVC as well (`RenderPlan::hevc_instead`, `SessionCovers` in
+  `frontend/src/RemoteDesktop.tsx`), the display's tab as much as the canvas,
+  and the session waits for one
   ([In strips](apple-vnc-889.md#in-strips)). The Mac's ZRLE rectangles
   are stepped over by their length (`Decoders::step_over`), never inflated and
   never handed to `VideoSink::damage`, so a session that passes the stream
@@ -1301,10 +1309,14 @@ Safari on a Mac.
   within tens of milliseconds, as it does for the HEVC, and drops one that comes
   within a second of its last keyframe, so the request is made again until the
   IDR comes. No picture is acknowledged and no refresh asked for.
-- **An odd side is coded a pixel shorter.** 4:2:0 has no odd size to say: at
-  1281×801 the Mac sent one tile as 1280×800. So a picture is taken as its
-  display's where both its sides are the display's rounded down to even, and
-  the last column or row is not sent.
+- **An odd side is coded a pixel shorter, on macvm.** 4:2:0 has no odd size
+  to say: at 1281×801 macvm sent one tile as 1280×800. So a picture is taken as
+  its display's where both its sides are the display's rounded down to even,
+  and the last column or row is not sent. A physical Mac, macwork, sent no
+  picture of a 1864×983 display asked for whole, its reports saying it had sent
+  none, so the page said "No picture at this size", where the same display in
+  four strips had come; whether an even height brings the picture there has
+  not been tried.
 - **Neither the browser nor the gateway is asked.** The picker offers the Mac's
   H.264 to any browser with a `VideoDecoder` and greys it only for one without
   (`frontend/src/videoCodecs.ts`): one with a decoder and no H.264 is too
@@ -2071,8 +2083,9 @@ and `GET /api/targets` carries it:
 - **A Mac's picture is one of two.** `choices.passthrough` names the stream
   passed, `apple-media` for a High Performance Mac's HEVC or `apple-h264` for its H.264
   (`Passthrough` in `src/config.rs`). The picker's Picture group shows them as
-  radios in that order, HEVC passed through, H.264 passed through, and takes
-  the first that is not greyed until somebody chooses another (`pictureOptions`
+  radios in that order, HEVC passed through, recommended for the best quality,
+  and H.264 (alpha) passed through, for compatibility, and
+  takes the first that is not greyed until somebody chooses another (`pictureOptions`
   in `frontend/src/targetChoices.ts`). A `connect` that names neither is
   refused: no picture of a High Performance Mac's is coded here. A Standard
   Mac's Picture group is Apple's Adaptive (beta) passed through, which `connect`

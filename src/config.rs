@@ -211,6 +211,11 @@ pub struct RenderPlan {
     /// [`Passthrough::AppleH264`], chosen at the picker. Never set with
     /// [`Self::apple_media`], and none of the fields above reach it either.
     pub apple_h264: bool,
+    /// The browser takes the Mac's HEVC as well ([`Decoders::takes`]), which a
+    /// session passing the H.264 suggests where the Mac sends no picture of a
+    /// display ([`crate::protocol::ServerMsg::PictureWithheld`]). Never set
+    /// without [`Self::apple_h264`].
+    pub hevc_instead: bool,
     /// A Standard Mac's picture, in the quality the Mac is asked for, on every
     /// session of an `ard` target and no other: Adaptive, the Mac's own picture
     /// passed as it came for the browser to decode ([`Passthrough::AppleAdaptive`],
@@ -1094,6 +1099,7 @@ impl TargetConfig {
         let passthrough = self.passthrough(choices);
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let apple_h264 = passthrough == Some(Passthrough::AppleH264);
+        let hevc_instead = apple_h264 && decoders.takes(Passthrough::AppleMedia);
         // Every Standard session has one of the Mac's qualities: Adaptive where
         // it was chosen, and the Mac's Full quality, inflated here, otherwise.
         let apple_standard = self.standard_mode().then(|| {
@@ -1109,6 +1115,7 @@ impl TargetConfig {
             wlshare: self.wlshare(),
             apple_media,
             apple_h264,
+            hevc_instead,
             apple_standard,
             apple_combined,
             rdp_graphics,
@@ -3344,6 +3351,7 @@ mod tests {
                 adaptive: false,
                 apple_media: false,
                 apple_h264: false,
+                hevc_instead: false,
                 apple_standard: None, apple_combined: false,
                 rdp_graphics: false,
                 rdp_h264: false,
@@ -3363,6 +3371,7 @@ mod tests {
                 adaptive: false,
                 apple_media: false,
                 apple_h264: false,
+                hevc_instead: false,
                 apple_standard: None, apple_combined: false,
                 rdp_graphics: false,
                 rdp_h264: false,
@@ -3789,6 +3798,11 @@ mod tests {
         assert_eq!(plan.passthrough(), Some(Passthrough::AppleH264));
         assert_eq!(plan.describe(), "the Mac's H.264, passed through");
         assert_eq!(hp.beyond(h264, declines), None, "served to any browser");
+        // Its HEVC is suggested where the Mac sends no picture only to a browser
+        // that takes it.
+        assert!(!plan.hevc_instead);
+        assert!(hp.render_plan(h264, takes).hevc_instead);
+        assert!(!hp.render_plan(passed, takes).hevc_instead, "the HEVC is what it passes");
         assert_eq!(Passthrough::AppleH264.name(), "apple-h264");
         assert_eq!(
             hp.accepts(Choices { passthrough: Some(Passthrough::RdpGraphics), ..Choices::default() }),
@@ -4620,7 +4634,7 @@ vnc_password = \"x\"")).unwrap();
         for (key, adaptive) in [("render_adaptive = true", true), ("render_adaptive = false", false), ("", true)] {
             let cfg = ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 80\n{key}"))).expect("a wlshare target");
             let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-            assert_eq!(plan, RenderPlan { quality: 80, adaptive, apple_media: false, apple_h264: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 }, "{key}");
+            assert_eq!(plan, RenderPlan { quality: 80, adaptive, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 }, "{key}");
         }
     }
 

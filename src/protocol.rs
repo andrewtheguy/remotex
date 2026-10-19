@@ -1319,13 +1319,16 @@ pub enum ServerMsg {
     /// at the size the `Resize` before this describes: `active` is true once its
     /// own report on the display's leg says so of a stream that has brought no
     /// picture ([`crate::vnc_apple_media::MediaStream::withheld`]), and false at
-    /// the display's next offer or its first picture. The Mac gives no reason; a
-    /// display too low for the strips it is sent in is the known one. The
+    /// the display's next offer or its first picture. The Mac gives no reason: a
+    /// display too low for the strips it is sent in is one, below any supported
+    /// size, and a physical Mac's whole H.264 picture of a 1864×983 display
+    /// another. `hevc` says the session passes the H.264 to a browser that takes
+    /// the HEVC as well ([`crate::config::RenderPlan::hevc_instead`]). The
     /// session stays open, and the browser, which is under
-    /// [`ServerMsg::ScreenUnavailable`] meanwhile, asks for another size in that
-    /// notice's place. Sent only by the Apple High Performance engine, and again
-    /// on reattach while it holds.
-    PictureWithheld { active: bool },
+    /// [`ServerMsg::ScreenUnavailable`] meanwhile, suggests another size in that
+    /// notice's place, and the HEVC where `hevc` is set. Sent only by the Apple
+    /// High Performance engine, and again on reattach while it holds.
+    PictureWithheld { active: bool, hevc: bool },
     /// Why the desktop the `Resize` before this describes has no picture, or `None`
     /// when it has one: past what a video stream encodes. No picture follows until
     /// a `Resize` without a cause. Sent after every `Resize` of a source that holds
@@ -1507,7 +1510,7 @@ enum ControlMsg<'a> {
     TouchReady,
     Resizing { active: bool },
     ScreenUnavailable { active: bool },
-    PictureWithheld { active: bool },
+    PictureWithheld { active: bool, hevc: bool },
     Oversize { cause: Option<HoldCause> },
     Clipboard {
         text: &'a str,
@@ -1712,7 +1715,9 @@ impl ServerMsg {
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
             ServerMsg::ScreenUnavailable { active } => control(&ControlMsg::ScreenUnavailable { active: *active }),
-            ServerMsg::PictureWithheld { active } => control(&ControlMsg::PictureWithheld { active: *active }),
+            ServerMsg::PictureWithheld { active, hevc } => {
+                control(&ControlMsg::PictureWithheld { active: *active, hevc: *hevc })
+            }
             ServerMsg::Oversize { cause } => control(&ControlMsg::Oversize { cause: *cause }),
             ServerMsg::AudioFormat {
                 codec,
@@ -2263,10 +2268,10 @@ mod tests {
                 ),
                 None => panic!("screenUnavailable must be a text frame"),
             }
-            match (ServerMsg::PictureWithheld { active }).text_frame() {
+            match (ServerMsg::PictureWithheld { active, hevc: !active }).text_frame() {
                 Some(json) => assert_eq!(
                     json,
-                    format!(r#"{{"type":"pictureWithheld","active":{active}}}"#)
+                    format!(r#"{{"type":"pictureWithheld","active":{active},"hevc":{}}}"#, !active)
                 ),
                 None => panic!("pictureWithheld must be a text frame"),
             }
