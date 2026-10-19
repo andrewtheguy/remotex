@@ -105,6 +105,8 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 /// The page holds this bound on what it reports (`remoteMinimum.ts`). Here a
 /// size under it is refused where it arrives ([`under_minimum`]), never raised
 /// to it: what is sent to the Mac is a size some client asked for, or nothing.
+/// A session passing the H.264 alone asks for a pixel less on an odd side
+/// ([`VirtualMode::even_sided`]).
 pub const MIN_DISPLAY_POINTS: (u16, u16) = (800, 600);
 
 /// Whether a display of `points` is less than a Mac is asked for
@@ -429,6 +431,23 @@ pub fn set_server_scaling(scale: f32) -> Vec<u8> {
 pub struct VirtualMode {
     pub pixels: (u16, u16),
     pub scaled: (u16, u16),
+}
+
+impl VirtualMode {
+    /// This mode with each side of its pixels rounded down to even, the points
+    /// re-derived at `density`: what a session passing the Mac's H.264 asks for.
+    /// A physical Mac sends no picture of a whole H.264 picture with an odd side:
+    /// macwork, asked for 1864×983 or 1863×982, ran the stream with its reports
+    /// saying it had sent none, where 1864×982 and 1864×984 came, and offering the
+    /// stream at the even size for the odd display changed nothing, so it is the
+    /// virtual display that sizes the picture. Its HEVC pads an odd side itself and
+    /// is asked for the display as it is.
+    pub fn even_sided(self, density: f32) -> Self {
+        let even = |px: u16| (px & !1).max(2);
+        let pixels = (even(self.pixels.0), even(self.pixels.1));
+        let scaled = |px: u16| (f32::from(px) / density).round().max(1.0) as u16;
+        Self { pixels, scaled: (scaled(pixels.0), scaled(pixels.1)) }
+    }
 }
 
 /// The mode `points` at `density` resolves to, held under the fixed dynamic
@@ -1292,6 +1311,20 @@ mod tests {
         // the logical size, so 1x and 2x modes of the same points agree here.
         let one_x = set_display_configuration(&[virtual_display_mode((1600, 1000), 1.0)]);
         assert_eq!(display[0x82..0x8a], one_x[CONFIG_HEAD..][0x82..0x8a]);
+    }
+
+    /// A session passing the H.264 asks for even pixels on each side, the points
+    /// re-derived: a physical Mac sends no picture of a whole H.264 picture with
+    /// an odd side.
+    #[test]
+    fn an_h264_sessions_mode_has_even_sides() {
+        let even = |points, density: f32| virtual_display_mode(points, density).even_sided(density);
+        assert_eq!(even((1864, 983), 1.0), VirtualMode { pixels: (1864, 982), scaled: (1864, 982) });
+        assert_eq!(even((1863, 982), 1.0), VirtualMode { pixels: (1862, 982), scaled: (1862, 982) });
+        assert_eq!(even((1863, 983), 1.0), VirtualMode { pixels: (1862, 982), scaled: (1862, 982) }, "each side on its own");
+        assert_eq!(even((1864, 984), 1.0), virtual_display_mode((1864, 984), 1.0), "an even display is asked for as it is");
+        // At 2x every side is even already, and the points stay the window's.
+        assert_eq!(even((1863, 983), 2.0), VirtualMode { pixels: (3726, 1966), scaled: (1863, 983) });
     }
 
     #[test]

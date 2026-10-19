@@ -357,6 +357,12 @@ whose bitmap updates are sent as tiles by the gateway.
     arithmetic, for a quarter of the bytes on the link. Screen Sharing
     Standard's Combined Display session alone. See
     [A Standard Mac's Combined Display](#a-standard-macs-combined-display).
+  - Exception: a High Performance session passing the Mac's H.264 asks for a
+    virtual display with even sides, a pixel less than the window on an odd
+    one, because a physical Mac sends no H.264 picture of a display with an
+    odd side; the display is shown as is, a row or column short of the window.
+    The trade-off is one bare row or column against no picture at all. See
+    [The Mac's H.264](#the-macs-h264).
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
   pixel density, not a fit factor. A session started with resize has the window
   continuously driving the remote size, and any other keeps the size it opened
@@ -1229,7 +1235,8 @@ Three controls with similar names therefore remain separate:
   pointer and keys would land on a display nobody can see, so the page drops its
   input listeners and releases what was held. Where the Mac's own report says it
   sends no picture of the display at all, which it does of one too low for its
-  four strips and, on a physical Mac, of a 1864×983 display in H.264 sent whole
+  four strips, and did, on a physical Mac, of a display with an odd side in H.264
+  sent whole, which a session passing the H.264 no longer asks for
   ([The Mac's H.264](#the-macs-h264)), the gateway adds `pictureWithheld`, the
   page suggests another size in that notice's place, and the HEVC where the
   message's `hevc` says the session passes the H.264 to a browser that takes
@@ -1313,14 +1320,25 @@ Safari on a Mac.
   within tens of milliseconds, as it does for the HEVC, and drops one that comes
   within a second of its last keyframe, so the request is made again until the
   IDR comes. No picture is acknowledged and no refresh asked for.
-- **An odd side is coded a pixel shorter, on macvm.** 4:2:0 has no odd size
-  to say: at 1281×801 macvm sent one tile as 1280×800. So a picture is taken as
-  its display's where both its sides are the display's rounded down to even,
-  and the last column or row is not sent. A physical Mac, macwork, sent no
-  picture of a 1864×983 display asked for whole, its reports saying it had sent
-  none, so the page said "No picture at this size", where the same display in
-  four strips had come; whether an even height brings the picture there has
-  not been tried.
+- **An odd side is asked for a pixel shorter.** A physical Mac sends no
+  picture of a whole H.264 picture with an odd side: macwork, asked for
+  1864×983 and for 1863×982, ran the stream with its reports saying it had sent
+  none, so the page said "No picture at this size", where 1864×982 and 1864×984
+  came, and its HEVC came at every one of those sizes, whole or in strips, its
+  encoder padding the side. Offering the stream at the even size for the odd
+  display changed nothing: the virtual display sizes the picture, not the
+  offer. So a session passing the H.264 asks the Mac for a virtual display
+  with even sides, a pixel less than the window on an odd one, 1864×982 for a
+  1864×983 window (`VirtualMode::even_sided` in `src/vnc_apple.rs`), opening
+  and at every resize, and the window shows that display at 100% with its
+  last row or column bare, as it shows any desktop smaller than itself. The
+  window's points are kept apart from the display's (`DesktopState::hp_points`
+  in `src/vnc.rs`), so a density change asks for the window again, every side
+  even at 2x, and not for the shortened display. macvm's
+  H.264 encoder crops an odd side instead, sending 1280×800 of 1281×801
+  unasked, so only a physical Mac shows the withheld picture; such a picture is
+  taken as the display's (`Passer::pass_whole`). The HEVC is asked for the
+  display as it is.
 - **Neither the browser nor the gateway is asked.** The picker offers the Mac's
   H.264 to any browser with a `VideoDecoder` and greys it only for one without
   (`frontend/src/videoCodecs.ts`): one with a decoder and no H.264 is too
