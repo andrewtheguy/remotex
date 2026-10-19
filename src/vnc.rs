@@ -726,7 +726,7 @@ struct DesktopState {
     /// Pixel polling then holds to [`HP_HOLD_REQUEST`], which still brings the
     /// cursor shapes and layouts.
     media_live: bool,
-    /// The picture is the media stream alone, decoded here or passed: a High
+    /// The picture is the media stream alone, passed: a High
     /// Performance session, whose ZRLE rectangles are stepped over undecoded and
     /// never shown, in the stream's gaps either — the seconds before it delivers,
     /// and across a display change — so a session that passes the stream codes no

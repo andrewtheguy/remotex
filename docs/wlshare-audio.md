@@ -186,7 +186,7 @@ Exercise the current path:
 
 ```sh
 REMOTEX_PROBE_PASSWORD=… uv run tests/ws_probe.py \
-  --port <gateway port> --target <name> --user <user> --seconds 8 --audio
+  --port <gateway port> --target <name> --user <user> --seconds 8 --sound --audio
 # meanwhile, on the host
 pw-play <some>.wav
 ```

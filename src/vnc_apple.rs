@@ -10,8 +10,8 @@
 //!
 //! ## What the extension is for, here
 //!
-//! **Compression**: Standard's picture is the Mac's own, Apple's 8×8 tiles or
-//! zlib, passed for the page to decode ([`encodings`]). High Performance opens
+//! **Compression**: Standard's picture is the Mac's own, Apple's 8×8 tiles passed
+//! for the page to decode or zlib inflated here and sent as tiles ([`encodings`]). High Performance opens
 //! with ZRLE (`ENCODING_ZRLE`) and steps its rectangles over: its picture is the
 //! media stream.
 //!
@@ -43,8 +43,8 @@
 //! unofficial `virtual_display` key, which asks for one with the same messages.
 //! `ard-high-performance` takes its picture and sound from the media stream alone
 //! ([`crate::vnc_apple_media`]); its ZRLE is stepped over undecoded, and the
-//! browser stays covered until the stream delivers. `ard` keeps its picture on
-//! ZRLE and carries no sound, on either kind of display.
+//! browser stays covered until the stream delivers. `ard` takes the Mac's own
+//! picture and carries no sound, on either kind of display.
 //! Every Apple subtype uses Apple's native pasteboard protocol, enabling
 //! monitoring before the rekey and carrying fetches and clipboard data inside the
 //! encrypted transport.

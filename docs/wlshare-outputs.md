@@ -82,8 +82,8 @@ moved it. A selection that named an output the list does not have is dropped
 before the wire.
 
 - **Labels.** Each menu entry shows the compositor name, such as `DP-2`, followed
-  by its logical size and scale: `1728×883 at 2x` or `1920×1080 at 1x`. This is
-  the same representation used by the Apple display picker.
+  by its logical size and, above 1x, its scale: `1728×883 at 2x` or `1920×1080`.
+  This is the same representation used by the Apple display picker.
 - **Selection acknowledgement.** A click sends `SelectOutput`, but the checkmark
   changes only when the next `OutputList` names that output as active. If the ID
   is no longer selectable when wlshare handles it, wlshare sends the current list
@@ -100,7 +100,8 @@ before the wire.
 - **Framebuffer size.** A differently sized output is announced with an
   `ExtendedDesktopSize` rectangle whether or not the session lets the browser
   request resizes. The gateway advertises both RFB size pseudo-encodings on every
-  VNC target so wlshare has a negotiated way to change the framebuffer geometry.
+  `wlshare` and plain `vnc` target so wlshare has a negotiated way to change the
+  framebuffer geometry.
   After a server-side size change, wlshare disconnects at the next update if the
   client advertised neither, rather than sending pixels with dimensions the
   client cannot learn. That is wlshare's implementation policy, not a general

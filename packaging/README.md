@@ -79,10 +79,11 @@ bash packaging/build-native-packages.sh
 ```
 
 The frontend's
-build compiles two WebAssembly modules: one from the gateway's graphics crate
+build compiles three WebAssembly modules: one from the gateway's graphics crate
 (`frontend/wasm/egfx` around
 `crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline),
-and the page's FLAC decoder for a session's lossless sound (`frontend/wasm/flac`),
+and the page's FLAC decoder for a session's lossless sound (`frontend/wasm/flac`)
+and its decoder for a Mac's Adaptive picture (`frontend/wasm/apple-adaptive`),
 which the stable toolchain builds. So wherever the frontend is built — `bun run build`, or a
 Cargo build without `REMOTEX_PREBUILT_FRONTEND` — the compositor's module is built by the nightly
 toolchain `frontend/wasm/egfx/rust-toolchain.toml` pins, which its threads need and
@@ -149,8 +150,9 @@ Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`.
 
-The one C library built from source is jemalloc, through `tikv-jemallocator`.
-It is the global allocator on Unix and is linked with unprefixed `malloc` symbols,
+The C libraries built from source are SQLite, for `[meter]`, through `rusqlite`'s
+`bundled` feature, and jemalloc, through `tikv-jemallocator`.
+jemalloc is the global allocator on Unix and is linked with unprefixed `malloc` symbols,
 so allocations in libopus and libFLAC use it as well as Rust allocations. The build
 environment must provide a C compiler and `make`. Windows continues to use its
 system heap.

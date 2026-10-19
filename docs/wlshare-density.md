@@ -15,7 +15,8 @@ output, through `tests/ws_probe.py`.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare), a VNC
 server written for this: RFB 3.8 with ZRLE as its standard lossless pixel encoding
-and a VP9 encoding of its own, 4:4:4, that the gateway passes through
+and a VP9 encoding of its own, 4:4:4 or, for a browser without it, 4:2:0, that
+the gateway passes through
 ([wlshare's stream, passed through](architecture.md#wlshares-stream-passed-through)),
 wlr-screencopy capture, and this extension built in. It tracks each output's
 exact scale from wlr-output-management, with `wl_output.scale` as the fallback,
@@ -149,7 +150,7 @@ and the desktop's resize. Any other server against the same target stays at
 Reproduce it:
 
 ```sh
-uv run tests/ws_probe.py --port <gateway port> --target <name> --user <user> \
+uv run tests/ws_probe.py --port <gateway port> --target <name> --user <user> --resize \
   --display 1728x1117@200 --viewport 1728x883 --viewport-after-resize --seconds 24
 # meanwhile, on the host
 swaymsg output HEADLESS-1 scale 2 ; sleep 7 ; swaymsg output HEADLESS-1 scale 1
@@ -178,6 +179,6 @@ the browser's density is re-declared only when it changes.
 Reproduce it with the host at `scale 1`:
 
 ```sh
-uv run tests/ws_probe.py --port <gateway port> --target <name> --user <user> \
+uv run tests/ws_probe.py --port <gateway port> --target <name> --user <user> --resize \
   --display 1728x1117@200 --viewport 1728x883 --viewport-after-resize --seconds 10
 ```
