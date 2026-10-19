@@ -17,7 +17,11 @@
 // Progressive's tiles are decoded side by side, on threads: workers this one
 // starts, each an instance of the module on the one memory (egfxPool.worker.ts).
 // A memory that is shared needs a page that is cross-origin isolated, which the
-// gateway's two headers make of every page it serves (src/assets.rs).
+// gateway's two headers make of every page it serves (src/assets.rs). On an
+// iPhone or an iPad the pool is stopped before the paint worker is ended
+// (`stopEgfx`), and its workers are ended once their threads have returned:
+// ending a worker whose thread waits in the module frees nothing on iOS, not the
+// memory it shares, until the tab is closed.
 //
 // H.264 is the one codec the module does not decode (ALPHA, rdpH264.ts): a
 // run's access units are found by `scan`, decoded by the browser (egfxVideo.ts),
@@ -34,8 +38,9 @@ import init, {
   Egfx,
   type InitInput,
   startPool,
+  stopPool,
 } from "../wasm/egfx/pkg/remotex_egfx.js";
-import type { PoolSeat } from "./egfxPool.worker.ts";
+import type { PoolEvent, PoolSeat } from "./egfxPool.worker.ts";
 
 /**
  * The most threads the tiles are decoded on. Past four the captured desktop this
@@ -164,8 +169,18 @@ export type EgfxFactory = () => EgfxCompositor;
 
 let loaded: Promise<EgfxFactory> | null = null;
 
-/** The pool's workers, held for as long as the pool is: the page's lifetime. */
-const workers: Worker[] = [];
+/**
+ * One of the pool's workers, and how its thread ended: stopped, or failed, as it
+ * said or as its `error` said, heard from the worker's start so that `stopEgfx`
+ * learns of an end that came before it asked.
+ */
+interface PoolThread {
+  worker: Worker;
+  ended: Promise<void>;
+}
+
+/** The pool's workers, held for as long as the pool is: until `stopEgfx`. */
+const poolThreads: PoolThread[] = [];
 
 /**
  * Start the pool: `threads` workers, each told what this instance is and heard
@@ -188,17 +203,28 @@ async function startThreads(
               new URL("./egfxPool.worker.ts", import.meta.url),
               { type: "module", name: "egfx-pool" },
             );
-            workers.push(worker);
-            worker.onmessage = ({ data }: MessageEvent<string | null>) => {
-              if (data === null) {
-                resolve();
-              } else {
-                reject(new Error(data));
-              }
-            };
-            worker.onerror = (event) => {
-              reject(new Error(event.message || "a thread did not start"));
-            };
+            // A failure before the seat is the start's; one after, the thread's.
+            const ended = new Promise<void>((stopped, broke) => {
+              const fail = (error: Error) => {
+                reject(error);
+                broke(error);
+              };
+              worker.onmessage = ({ data }: MessageEvent<PoolEvent>) => {
+                if (data.type === "seated") {
+                  resolve();
+                } else if (data.type === "stopped") {
+                  stopped();
+                } else {
+                  fail(new Error(data.reason));
+                }
+              };
+              worker.onerror = (event) => {
+                fail(new Error(event.message || "a thread failed"));
+              };
+            });
+            // Read by `stopEgfx`, or never, for a pool that is not stopped.
+            ended.catch(() => {});
+            poolThreads.push({ worker, ended });
             // Throws for a memory that cannot be shared, which is a page that is
             // not cross-origin isolated.
             worker.postMessage(seat);
@@ -206,12 +232,43 @@ async function startThreads(
       ),
     );
   } catch (error) {
-    for (const worker of workers.splice(0)) {
+    for (const { worker } of poolThreads.splice(0)) {
       worker.terminate();
     }
     throw error;
   }
   startPool(threads);
+}
+
+/**
+ * Stop the pool, if one was started, and end its workers once each thread has
+ * returned out of the module: what ends the paint worker on an iPhone or an iPad
+ * does this first (desktopPainter.ts). A module loaded after composes on a pool
+ * of its own. A worker whose thread failed, before or after this was asked, is
+ * ended too, its thread out of the module, and the failure thrown once every
+ * worker is.
+ */
+export async function stopEgfx(): Promise<void> {
+  const pending = loaded;
+  if (pending === null) {
+    return;
+  }
+  // A load that failed has ended its workers already.
+  await pending.catch(() => {});
+  const stopping = poolThreads.splice(0);
+  if (stopping.length > 0) {
+    stopPool();
+  }
+  const outcomes = await Promise.allSettled(
+    stopping.map(({ worker, ended }) =>
+      ended.finally(() => worker.terminate()),
+    ),
+  );
+  loaded = null;
+  const failed = outcomes.find((outcome) => outcome.status === "rejected");
+  if (failed) {
+    throw failed.reason;
+  }
 }
 
 /**

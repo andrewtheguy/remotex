@@ -1171,7 +1171,10 @@ export default function FloatingMenu({
   // that closes it again.
   const [dockedHeight, setDockedHeight] = useState(0);
   const { open, setOpen, hidden, toolbarStyle, button } = useFloatingButton({
-    glyph: "☰",
+    // The first display's number while the second is in a tab of its own, whose
+    // button shows 2: ☰ beside 2 reads as a menu and another display, not as
+    // display 1 and display 2. The root page is always the first display.
+    glyph: displays.some((display) => display.tab !== null) ? "1" : "☰",
     dockedHeight,
     isMacHost,
     onLocalShortcut,

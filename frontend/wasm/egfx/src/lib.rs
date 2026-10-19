@@ -19,6 +19,13 @@
 //! this module on the one memory. So the pool's threads are seats the page's workers
 //! take ([`run_pool_thread`]) before the pool is made of them ([`start_pool`]). A
 //! module whose pool was never started composes on the thread that calls it.
+//!
+//! The pool is the module's own, named to the graphics crate
+//! ([`remotex_rdp_graphics::pool`]), not rayon's global one, so that it can be
+//! stopped ([`stop_pool`]): a thread waiting for work waits inside this module,
+//! and iOS frees nothing of a worker ended there — not its instance, not the
+//! memory it shares — until its tab is closed. Stopped, each thread returns from
+//! [`run_pool_thread`], and its worker can be ended.
 
 use std::io;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -51,7 +58,7 @@ pub fn module() -> JsValue {
 }
 
 /// Run one of the pool's threads on the worker that calls this, which waits for
-/// the pool to be started and returns when the pool is gone: never, in a page.
+/// the pool to be started and returns once [`stop_pool`] has stopped it.
 #[wasm_bindgen(js_name = runPoolThread)]
 pub fn run_pool_thread() {
     let thread = seats().take.lock().expect("no thread panics holding a seat").recv();
@@ -66,13 +73,22 @@ pub fn run_pool_thread() {
 #[wasm_bindgen(js_name = startPool)]
 pub fn start_pool(threads: usize) -> Result<(), JsError> {
     let offer = seats().offer.lock().expect("no thread panics holding a seat").clone();
-    ThreadPoolBuilder::new()
+    let pool = ThreadPoolBuilder::new()
         .num_threads(threads)
         // The thread that was not sent is dropped with the error: it is not `Sync`,
         // which an error is.
         .spawn_handler(move |thread| offer.send(thread).map_err(|_| io::Error::other("the pool's seats are gone")))
-        .build_global()
-        .map_err(|e| JsError::new(&e.to_string()))
+        .build()
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    remotex_rdp_graphics::pool::set(Some(pool));
+    Ok(())
+}
+
+/// Stop the pool: each of its threads finishes what it holds and returns from
+/// [`run_pool_thread`]. Compositors compose on the calling thread after.
+#[wasm_bindgen(js_name = stopPool)]
+pub fn stop_pool() {
+    remotex_rdp_graphics::pool::set(None);
 }
 
 /// One pipeline's compositor. Made where a pipeline starts (`graphicsStart`) and

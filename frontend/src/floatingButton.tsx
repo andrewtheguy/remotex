@@ -95,7 +95,8 @@ export function useFloatingButton({
   onLocalShortcut,
 }: {
   // What the closed button shows, which is how the two pages' buttons are told
-  // apart: ☰ on the session's page, the display's number on a display's tab.
+  // apart: the display's number on a display's tab, and on the session's page 1
+  // while there is such a tab, ☰ otherwise.
   glyph: string;
   // How much of the bottom edge a docked panel is covering, which the button and
   // its drawer stay above. Zero on a page with no panels.

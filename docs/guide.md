@@ -194,7 +194,7 @@ touch.
   sockets only, not yet by eye.
 
   The second display's tab has a menu of its own, behind a button showing the
-  display's number where the session's page shows ☰. It holds what is that tab's
+  display's number, 2, where the session's page shows 1 instead of ☰. It holds what is that tab's
   alone, **Immersive full screen**, that display's size and density, and
   **Disconnect**; everything else stays in the menu on the session's page.
 

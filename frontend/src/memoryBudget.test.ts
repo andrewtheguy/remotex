@@ -2,7 +2,7 @@
 // with `bun test src/memoryBudget.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { saysOutOfMemory } from "./memoryBudget.ts";
+import { keepsEndedWorkers, saysOutOfMemory } from "./memoryBudget.ts";
 
 test("each engine's words for running out of memory are read as that", () => {
   for (const reason of [
@@ -30,4 +30,46 @@ test("other failures are not", () => {
   ]) {
     assert.equal(saysOutOfMemory(reason), false, reason);
   }
+});
+
+test("an iPhone or an iPad keeps ended workers, and nothing else does", () => {
+  const iphone =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6.1 Mobile/15E148 Safari/604.1";
+  const mac =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15";
+  const chrome =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
+  assert.equal(
+    keepsEndedWorkers({
+      userAgent: iphone,
+      platform: "iPhone",
+      maxTouchPoints: 5,
+    }),
+    true,
+  );
+  // An iPad asking for desktop pages.
+  assert.equal(
+    keepsEndedWorkers({
+      userAgent: mac,
+      platform: "MacIntel",
+      maxTouchPoints: 5,
+    }),
+    true,
+  );
+  assert.equal(
+    keepsEndedWorkers({
+      userAgent: mac,
+      platform: "MacIntel",
+      maxTouchPoints: 0,
+    }),
+    false,
+  );
+  assert.equal(
+    keepsEndedWorkers({
+      userAgent: chrome,
+      platform: "Win32",
+      maxTouchPoints: 0,
+    }),
+    false,
+  );
 });

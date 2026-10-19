@@ -15,8 +15,9 @@ import type { RemoteSize } from "./useRemoteDesktop.ts";
 // Everything the session has one of, its sound, clipboard, display picker
 // and End session, stays on the session's page.
 //
-// The button shows the display's number where the session's shows ☰, so the two
-// windows of one session are told apart by the control each carries.
+// The button shows the display's number, as the session's shows 1 while this tab
+// is open, so the two windows of one session are told apart by the control each
+// carries.
 export default function DisplayMenu({
   display,
   connected,

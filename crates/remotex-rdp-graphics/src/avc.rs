@@ -615,7 +615,9 @@ fn fill(rows: &mut Vec<u8>, area: Area, row: impl Fn(usize, &mut [u8]) + Sync) {
     if area.pixels() < PARALLEL_FROM {
         rows.chunks_exact_mut(stride).enumerate().for_each(|(at, out)| row(area.top + at, out));
     } else {
-        rows.par_chunks_exact_mut(stride).enumerate().for_each(|(at, out)| row(area.top + at, out));
+        crate::pool::install(|| {
+            rows.par_chunks_exact_mut(stride).enumerate().for_each(|(at, out)| row(area.top + at, out));
+        });
     }
 }
 

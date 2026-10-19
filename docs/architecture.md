@@ -248,9 +248,11 @@ whose bitmap updates are sent as tiles by the gateway.
   memory back (`frontend/src/desktopPainter.ts`). The HEVC's decode worker
   ends. The pipeline's compositor and the decoder of a Mac's own
   picture run in the paint worker itself, so a session that loaded either ends
-  that worker, and the page mounts new canvases for the next, since a canvas is
-  transferred to one worker once. A display tab that stops showing its display
-  lets go of its decode worker too. The display socket outlives a session and
+  that worker, on an iPhone or an iPad once it has stopped the compositor's
+  threads (`endPainter` in `frontend/src/desktopPainter.ts`), and the page
+  mounts new canvases for the
+  next, since a canvas is transferred to one worker once. A display tab that
+  stops showing its display lets go of its decode worker too. The display socket outlives a session and
   is not ordered against the session socket, so an ended engine's format or
   picture start can arrive after its `picker`. Each carries its `engine`, which
   the session layer stamps in on the way out (`ServerMsg::stamped`), and
@@ -258,7 +260,11 @@ whose bitmap updates are sent as tiles by the gateway.
   running; the page drops a start whose engine is at or below that.
   A picture that fails because the browser ran out of memory says so in the video
   banner, with a Reload: the page that comes back reattaches to the session with
-  its memory whole (`saysOutOfMemory` in `frontend/src/memoryBudget.ts`).
+  its memory whole (`saysOutOfMemory` in `frontend/src/memoryBudget.ts`). Not on an
+  iPhone or an iPad, where an ended session's compositor keeps its memory until
+  the tab is closed, a reload included, and only a new tab has its memory whole:
+  there the banner says to close the tab and open the page in a new one, and
+  offers no Reload (`keepsEndedWorkers`).
 - The only versioned client asset read at run time is the software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
@@ -1613,6 +1619,14 @@ the pipeline.
   gateway as in the page. A page's threads are workers: the paint worker starts
   up to four (`frontend/src/egfxPool.worker.ts`), each an instance of the module
   on the one memory, and makes the pool of them once every one has answered.
+  The pool is the module's own, not rayon's global one, so that it can be
+  stopped: on an iPhone or an iPad, before the paint worker is ended it stops
+  the pool, each thread returns, and then its worker is ended (`stopEgfx`). iOS
+  frees nothing of a worker ended while its thread waits in the module, not the
+  memory it shares, until the tab is closed: a tab that did that ran out of
+  memory at its seventh session. Elsewhere the paint worker is ended at once,
+  its threads with it: Chromium left one ended just after its pool's workers
+  hanging, never closed, in about half of the sessions.
   Everything else a pipeline carries — ClearCodec, the caches, the copies between
   surfaces — is order itself and stays on the paint worker. A shared memory is
   given only to a page that is cross-origin isolated, so the gateway sends
@@ -2859,8 +2873,8 @@ socket; a closed tab only ends the feed. The root page is always the first
 display, so there is no `/display/1`.
 
 The tab has a menu of its own (`DisplayMenu.tsx`), the session page's button and
-drawer (`floatingButton.tsx`) with the display's number on the button where the
-session's shows ☰. It holds what is the tab's alone: immersive full screen, which
+drawer (`floatingButton.tsx`) with the display's number on the button, where the
+session's shows 1 rather than ☰ while the tab is there. It holds what is the tab's alone: immersive full screen, which
 is a window's and which the session page's button reaches only for its own
 window, and Disconnect. What the session has one of — sound, clipboard, the display picker, End
 session — stays in the menu on the session's page. The clipboard's automatic sync
