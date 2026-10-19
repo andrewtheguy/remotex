@@ -155,13 +155,14 @@ impl Protocol {
     }
 }
 
-/// A target's audio keys as the encoder consumes them, resolved by
+/// A target's audio key as the encoder consumes it, resolved by
 /// [`TargetConfig::audio_plan`]. In bits per second because that is libopus's
-/// unit; the config speaks kbit/s because a person does.
+/// unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioPlan {
     /// The Opus target bitrate — the average the encoder holds to, and the
-    /// ceiling of the walk when the plan is adaptive.
+    /// ceiling of the walk when the plan is adaptive. Always
+    /// [`AUDIO_BITRATE_KBPS`] from a target; a test may build a plan at another.
     pub bitrate_bps: i32,
     /// Whether the bitrate tracks the audio socket's backpressure, walking
     /// between sound-opus's floor and [`Self::bitrate_bps`] — and silence is
@@ -170,18 +171,18 @@ pub struct AudioPlan {
 }
 
 impl AudioPlan {
-    /// The default rate with no walk — what `audio_adaptive = false` resolves to.
+    /// The one rate with no walk — what `audio_adaptive = false` resolves to.
     pub fn fixed() -> Self {
         Self { adaptive: false, ..Self::default() }
     }
 }
 
 impl Default for AudioPlan {
-    /// What an unset dial means: Opus at the default rate, walking down to the
-    /// floor when the link is behind. The fallback [`crate::session`] uses when
+    /// What an unset switch means: Opus at [`AUDIO_BITRATE_KBPS`], walking down
+    /// to the floor when the link is behind. The fallback [`crate::session`] uses when
     /// no target is selected, where there is no config to read.
     fn default() -> Self {
-        Self { bitrate_bps: DEFAULT_AUDIO_BITRATE_KBPS as i32 * 1000, adaptive: true }
+        Self { bitrate_bps: AUDIO_BITRATE_KBPS as i32 * 1000, adaptive: true }
     }
 }
 
@@ -925,18 +926,9 @@ pub struct TargetConfig {
     /// records in, so there is no codec or quality key beside this one.
     #[serde(default)]
     pub microphone: bool,
-    /// The Opus bitrate this target's sound holds on a link that can carry it,
-    /// in kbit/s (6–510); `None` reads as [`DEFAULT_AUDIO_BITRATE_KBPS`].
-    ///
-    /// The audio dial's `video_quality`: a *ceiling* rather than a promise. It
-    /// is the average the encoder holds to — Opus is variable-rate, so a packet
-    /// of silence costs a few bytes and a packet of music costs about this —
-    /// and, with [`Self::audio_adaptive`] on, the rate a link that keeps up gets
-    /// and the one the walk climbs back to.
-    #[serde(default)]
-    pub audio_bitrate: Option<u32>,
-    /// Let [`Self::audio_bitrate`] track the audio socket's own backpressure —
-    /// on unless the operator turned it off, like [`Self::render_adaptive`].
+    /// Let the Opus bitrate, [`AUDIO_BITRATE_KBPS`], track the audio socket's
+    /// own backpressure — on unless the operator turned it off, like
+    /// [`Self::render_adaptive`].
     ///
     /// A send that blocks means the previous packets are still unwritten, and
     /// sustained blocking walks the bitrate down toward the floor; a clear
@@ -984,11 +976,13 @@ pub struct TargetConfig {
 /// worth looking at.
 pub const DEFAULT_VIDEO_QUALITY: u8 = 90;
 
-/// The Opus bitrate (kbit/s) when [`TargetConfig::audio_bitrate`] is unset — the
-/// ceiling of the adaptive walk, not a promise. Well clear of where stereo Opus
-/// starts to be audibly lossy, and the walk is what takes it down on a link that
-/// cannot carry it.
-pub const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 96;
+/// The Opus bitrate (kbit/s) of every session whose sound is Opus — the ceiling
+/// of the adaptive walk, not a promise, and not a key. It is the rate a Mac's
+/// own AAC-ELD runs at, so a link carries the same sound budget whichever
+/// server it reaches, and the walk is what takes it down on a link that cannot
+/// carry it. Opus is variable-rate: a packet of silence costs a few bytes and a
+/// packet of music about this.
+pub const AUDIO_BITRATE_KBPS: u32 = 320;
 
 /// Read [`TargetConfig::size`]: a width by a height, as in `"1920x1080"`.
 fn size<'de, D>(deserializer: D) -> Result<Option<(u16, u16)>, D::Error>
@@ -1295,16 +1289,13 @@ impl TargetConfig {
         self.audio_adaptive.unwrap_or(true)
     }
 
-    /// The audio keys collapsed to what the encoder is built from, the same way
-    /// [`Self::render_plan`] collapses the render dial: defaults resolved,
-    /// kilobits turned into the bits libopus speaks, and whether there is a
-    /// walk. A ceiling at or under the walk's floor gets a walk of nothing
-    /// rather than a refused config, as `video_quality` does. Callers gate on
+    /// The audio switch collapsed to what the encoder is built from, the same
+    /// way [`Self::render_plan`] collapses the render dial: the one rate in the
+    /// bits libopus speaks, and whether there is a walk. Callers gate on
     /// [`Self::sound`] — a session without sound has no plan to resolve, and
     /// neither has a Mac's passed sound, which no encoder touches.
     pub fn audio_plan(&self) -> AudioPlan {
-        let bitrate_kbps = self.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS);
-        AudioPlan { bitrate_bps: bitrate_kbps as i32 * 1000, adaptive: self.audio_adaptive() }
+        AudioPlan { adaptive: self.audio_adaptive(), ..AudioPlan::default() }
     }
 
     /// The one PCM format this target's sound can be in, known before the
@@ -2022,24 +2013,17 @@ impl ConfigFile {
                  vnc target with subtype = \"wlshare\". Remove the key.",
                 target.name
             );
-            // The bitrate keys and the adaptive switch tune the Opus encoder, for the
-            // sessions that take the target's sound: the one here for MS-RDPEA's
-            // PCM on RDP, and wlshare's own on a `wlshare` target, which is told
-            // the rate over its audio extension ([`crate::vnc_audio`]). On `ard` and on a plain `vnc` target no
-            // session has any, and `ard-high-performance`'s is passed as the Mac's
-            // own AAC-ELD ([`crate::vnc_apple_media`]), so the keys could not do
-            // anything there.
-            let sound = target.offers().audio;
+            // The adaptive switch tunes the Opus encoder, for the sessions that take
+            // the target's sound: the one here for MS-RDPEA's PCM on RDP, and
+            // wlshare's own on a `wlshare` target, which is told the rate over its
+            // audio extension ([`crate::vnc_audio`]). On `ard` and on a plain `vnc`
+            // target no session has any, and `ard-high-performance`'s is passed as
+            // the Mac's own AAC-ELD ([`crate::vnc_apple_media`]), so the key could
+            // not do anything there. Either way: `false` without sound is as
+            // unreadable as `true`, and a key nothing reads is a mistake to report,
+            // not a preference to keep.
             anyhow::ensure!(
-                target.audio_bitrate.is_none() || sound,
-                "target {:?} is {kind} and sets audio_bitrate — it is the encoder's rate, \
-                 and no session there has sound to encode. Remove the key.",
-                target.name
-            );
-            // Either way: `false` without sound is as unreadable as `true`, and a key
-            // nothing reads is a mistake to report, not a preference to keep.
-            anyhow::ensure!(
-                target.audio_adaptive.is_none() || sound,
+                target.audio_adaptive.is_none() || target.offers().audio,
                 "target {:?} is {kind} and sets audio_adaptive — adapting means moving the \
                  encoder's bitrate, and no session there has sound to encode. Remove the key.",
                 target.name
@@ -2062,14 +2046,6 @@ impl ConfigFile {
                  which only a `wlshare` target is sent. Remove the key.",
                 target.name
             );
-            if let Some(kbps) = target.audio_bitrate {
-                anyhow::ensure!(
-                    (6..=510).contains(&kbps),
-                    "target {:?} sets audio_bitrate = {kbps}, which is out of range — it is \
-                     in kbit/s and must be 6–510",
-                    target.name
-                );
-            }
             // Which credentials a VNC target may carry is the subtype's to say:
             // an Apple subtype authenticates an account to a Mac and nothing else,
             // while a plain target carries an account for RSA-AES, the machine's
@@ -4474,7 +4450,7 @@ vnc_password = \"x\"")).unwrap();
         assert!(!config.targets[0].offers().audio);
         assert!(!config.targets[0].sound(Choices { audio: Sound::Opus, ..Choices::default() }));
 
-        for key in ["audio_bitrate = 96", "audio_adaptive = false", "render_adaptive = false"] {
+        for key in ["audio_adaptive = false", "render_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");
@@ -4507,10 +4483,10 @@ vnc_password = \"x\"")).unwrap();
         assert!(mac.sound(Choices::default()), "the sound leg comes with the picture");
         assert!(!mac.offers().audio, "so there is nothing to choose");
 
-        // The sound is the Mac's own AAC-ELD, so the Opus encoder's keys have
+        // The sound is the Mac's own AAC-ELD, so the Opus encoder's switch has
         // nothing to tune, and the picture the Mac's HEVC or H.264, so nor have
-        // the picture's.
-        for key in ["audio_bitrate = 128", "audio_adaptive = false", "video_quality = 60", "render_adaptive = false"] {
+        // the picture's keys.
+        for key in ["audio_adaptive = false", "video_quality = 60", "render_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");
@@ -4661,43 +4637,32 @@ vnc_password = \"x\"")).unwrap();
         assert!(format!("{err:#}").contains("render_adaptive_min"), "{err:#}");
     }
 
-    /// The audio keys resolve the same way the render dial does: defaults
-    /// filled, kilobits become bits, and the walk is on unless it was turned
-    /// off — a target that names none of them already adapts.
+    /// The rate is the one AAC-ELD runs at, and the walk is on unless it was
+    /// turned off — a target that names nothing already adapts.
     #[test]
-    fn the_audio_plan_resolves_defaults_and_the_walk() {
+    fn the_audio_plan_is_the_one_rate_and_the_walk() {
         let cfg = parse_audio_target("").expect("bare audio");
         assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
         assert_eq!(
             cfg.targets[0].audio_plan(),
-            AudioPlan { bitrate_bps: 96_000, adaptive: true },
-            "adaptive by default, from the default ceiling"
-        );
-
-        let cfg = parse_audio_target("audio_bitrate = 128").expect("a rate");
-        assert_eq!(
-            cfg.targets[0].audio_plan(),
-            AudioPlan { bitrate_bps: 128_000, adaptive: true },
-            "a ceiling alone moves the ceiling and keeps the walk"
+            AudioPlan { bitrate_bps: 320_000, adaptive: true },
+            "adaptive by default, from the one ceiling"
         );
 
         let cfg = parse_audio_target("audio_adaptive = false").expect("fixed");
         assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::fixed(), "turned off, the plan has no walk");
-        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan { bitrate_bps: 96_000, adaptive: false });
+        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan { bitrate_bps: 320_000, adaptive: false });
 
-        let cfg = parse_audio_target("audio_bitrate = 64\naudio_adaptive = true").expect("adaptive at a rate");
-        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan { bitrate_bps: 64_000, adaptive: true });
+        let cfg = parse_audio_target("audio_adaptive = true").expect("adaptive");
+        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
     }
 
-    /// A ceiling under the walk's floor is no contradiction: the plan keeps
-    /// the walk, which then has nothing to give up, the way the render dial
-    /// does under its encoder's floor.
+    /// The bitrate key is gone: every Opus session is sent at the one rate, and a
+    /// file that still writes it is refused as any unknown key is.
     #[test]
-    fn a_ceiling_below_the_floor_keeps_a_walk_of_nothing() {
-        let cfg = parse_audio_target("audio_bitrate = 24").expect("a low ceiling");
-        let plan = cfg.targets[0].audio_plan();
-        assert_eq!(plan, AudioPlan { bitrate_bps: 24_000, adaptive: true });
-        assert!(plan.bitrate_bps < sound_opus::walk::BITRATE_FLOOR as i32);
+    fn an_audio_bitrate_is_no_longer_a_key() {
+        let err = parse_audio_target("audio_bitrate = 96").unwrap_err();
+        assert!(format!("{err:#}").contains("audio_bitrate"), "{err:#}");
     }
 
     /// The floor key is gone: the walk's floor is sound-opus's, fixed where a
@@ -4709,28 +4674,14 @@ vnc_password = \"x\"")).unwrap();
         assert!(format!("{err:#}").contains("audio_adaptive_min"), "{err:#}");
     }
 
-    /// Every key that tunes the encoder is refused on a target none of whose
-    /// sessions has sound to encode, and so is the adaptive switch in either
-    /// position.
+    /// The adaptive switch is refused, in either position, on a target none of
+    /// whose sessions has sound to encode.
     #[test]
-    fn the_bitrate_keys_need_a_target_that_carries_sound() {
+    fn the_adaptive_switch_needs_a_target_that_carries_sound() {
         let plain = |key: &str| ConfigFile::parse(&vnc_toml(key)).unwrap_err();
-        let err = plain("audio_bitrate = 96");
-        assert!(format!("{err:#}").contains("is plain vnc and sets audio_bitrate"), "{err:#}");
         for switch in ["true", "false"] {
             let err = plain(&format!("audio_adaptive = {switch}"));
             assert!(format!("{err:#}").contains("sets audio_adaptive"), "{err:#}");
-        }
-    }
-
-    /// The bitrate has a range: libopus's, in kbit/s.
-    #[test]
-    fn the_audio_bitrate_is_validated_against_libopus() {
-        parse_audio_target("audio_bitrate = 6").expect("the bottom of the range");
-        parse_audio_target("audio_bitrate = 510").expect("the top of the range");
-        for off in ["audio_bitrate = 5", "audio_bitrate = 999"] {
-            let err = parse_audio_target(off).unwrap_err();
-            assert!(format!("{err:#}").contains("6–510"), "{err:#}");
         }
     }
 }

@@ -2201,7 +2201,8 @@ one. Both appear on the client's session card, which
 
 `GET /api/targets` carries `subtype` too, beside the options each target offers
 (`resize`, `audio`, `passthroughs`, `placement`,
-`pipeline` and `standardView`) and the sizes it keeps
+`pipeline` and `standardView`), whether its Opus follows the link
+(`audioAdaptive`, so the picker can say so), and the sizes it keeps
 (`size`, the configured one, and `defaultSize`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
 not something to discover after connecting. The row uses the config spelling
@@ -2345,23 +2346,24 @@ encoder.
 There is no codec byte in the binary frame; the codec is named once, out of
 band, in `audioFormat`. It is Opus encoded here: `codec` is `opus`, `sampleRate`
 48 000, `packetFrames` 960 (20 ms), and `head` the `OpusHead`. The rate is
-`audio_bitrate`, default 96 kbit/s, walking down to the floor sound-opus fixes,
-32 kbit/s. The one exception is a High Performance Mac's AAC-ELD, passed in
+320 kbit/s, the rate a Mac's own AAC-ELD runs at, walking down to the floor
+sound-opus fixes, 32 kbit/s. The one exception is a High Performance Mac's AAC-ELD, passed in
 every session on such a target: `codec` `mp4a.40.39`, `packetFrames` 480 (10 ms), `head`
 the Mac's AudioSpecificConfig, and each packet one of the Mac's units, with no
-encoder and none of the keys below reaching it
+encoder and neither the rate nor the switch below reaching it
 ([Apple's media stream, passed through](#apples-media-stream-passed-through)).
 
 Opus is encoded in `Application::Audio` mode under constrained VBR, set
-explicitly by sound-opus's encoder, which `src/opus_stream.rs` drives: `audio_bitrate` is the average the encoder
+explicitly by sound-opus's encoder, which `src/opus_stream.rs` drives: the rate is the average the encoder
 holds to, silence costs a few bytes a packet and a loud passage a little more
 than the number, and the running rate stays close enough to it that the
-configured kbit/s is what the link sees. There is no FEC and no DTX — the socket
+number is what the link sees. There is no FEC and no DTX — the socket
 is TCP, nothing is lost, and the adaptive walk already sheds silence.
 
-The rate is a per-target key and the audio dial's `video_quality`: a ceiling the
-link may fall below, on by default like `render_adaptive`, with
-`audio_adaptive = false` holding the rate whatever the link does. The walk is
+The rate is not a key. Like AAC-ELD's, it is always the highest the sound is
+sent at, `AUDIO_BITRATE_KBPS` in `src/config.rs`: a ceiling the link may fall
+below, on by default like `render_adaptive`, with `audio_adaptive = false`
+holding it whatever the link does. The walk is
 sound-opus's (`sound_opus::walk::BitrateWalk`), the one crate that codes a
 desktop's sound as Opus for this gateway and for wlshare, so nothing adaptive
 about sound is this gateway's own: `AudioWalk` (`src/audio.rs`) owns one beside

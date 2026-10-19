@@ -54,6 +54,7 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     size: null,
     defaultSize: DEFAULT_SIZE,
     audio: false,
+    audioAdaptive: false,
     software: false,
     passthroughs: [],
     placement: false,
@@ -68,6 +69,7 @@ const RDP = target({
   protocol: "rdp",
   resize: true,
   audio: true,
+  audioAdaptive: true,
   passthroughs: ["rdp-graphics"],
   pipeline: true,
 });
@@ -377,6 +379,16 @@ test("High Performance's sound has no row and is always carried", () => {
   assert.equal(options.soundRow, null);
   assert.equal(options.choices.audio, "off");
   assert.equal(options.sound, true);
+});
+
+test("Opus says whether its rate follows the link", () => {
+  const note = (offers: TargetInfo) =>
+    targetOptions(offers, undefined, ABLE).soundRow?.formats[0].note ?? "";
+  assert.match(note(RDP), /up to 320 kbit\/s, lower while the link is behind/);
+  assert.match(
+    note({ ...RDP, audioAdaptive: false }),
+    /at 320 kbit\/s whatever the link/,
+  );
 });
 
 test("a browser with no audio decoder is offered FLAC alone", () => {

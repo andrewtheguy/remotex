@@ -2351,7 +2351,6 @@ mod tests {
             microphone: meta.microphone,
             video_quality: None,
             render_adaptive: None,
-            audio_bitrate: None,
             virtual_display: false,
             audio_adaptive: None,
         }
@@ -4015,7 +4014,7 @@ mod tests {
                 other => panic!("expected the passed unit, got {other:?}"),
             }
             let rate = *asked.borrow();
-            assert_eq!(rate, (codec == "opus").then_some(96_000), "the rate wlshare's Opus starts at");
+            assert_eq!(rate, (codec == "opus").then_some(320_000), "the rate wlshare's Opus starts at");
         }
     }
 

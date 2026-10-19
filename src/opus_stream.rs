@@ -37,8 +37,8 @@ pub struct OpusStream {
 
 impl OpusStream {
     /// Starts a stream for `format` at `bitrate_bps`
-    /// ([`crate::config::TargetConfig::audio_bitrate`], already resolved to bits
-    /// per second), returning the encoder and the `OpusHead` bytes a decoder has
+    /// ([`crate::config::AUDIO_BITRATE_KBPS`], or wherever the walk has taken it,
+    /// in bits per second), returning the encoder and the `OpusHead` bytes a decoder has
     /// to be configured with before the first packet.
     ///
     /// Fails if libopus will not encode this shape — in practice only a channel

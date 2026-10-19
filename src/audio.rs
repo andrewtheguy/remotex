@@ -896,9 +896,10 @@ mod tests {
         let now = Instant::now();
         assert_eq!(walk.sent(SLOW, now), None);
         let lower = walk.sent(SLOW, now).expect("two slow sends give up rate");
+        assert!(lower < plan.bitrate_bps, "{lower}");
         bridge.ask_rate(lower);
         assert!(asked.has_changed().unwrap());
-        assert_eq!(*asked.borrow_and_update(), Some(64_000));
+        assert_eq!(*asked.borrow_and_update(), Some(lower));
 
         let fixed = bridge.take_listener().into_passed(crate::vnc_audio::PASSED_OPUS, Some(AudioPlan::fixed()));
         assert!(fixed.signals.is_none(), "a fixed rate is named once and never walked");
