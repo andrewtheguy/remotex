@@ -1269,7 +1269,7 @@ Safari on a Mac.
 
 - **The offer names H.264 alone.** Offered both codecs, as Apple's viewer offers
   them, the Mac sends HEVC; offered payload 123 alone it sends H.264
-  (`Codec::H264` in `src/vnc_apple_media.rs`, which `Receive` carries to
+  (`Receive::H264` in `src/vnc_apple_media.rs`, which carries the codec to
   the offer). The ports, the keys, the sound leg and the rate reports are the
   HEVC session's.
 - **Whole pictures, not strips.** The offer asks for one tile, each picture a
