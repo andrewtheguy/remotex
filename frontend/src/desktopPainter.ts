@@ -24,7 +24,8 @@
 // decoder of a Mac's own picture are modules of this worker's own, so a
 // session that loaded either ends the worker, and the page mounts new canvases for
 // the next one. Otherwise the worker is kept, and its decode worker, the HEVC's,
-// goes.
+// goes. A worker is ended only once it has stopped the compositor's pool
+// (`retire`), whose threads iOS would keep, with the memory, until the tab closes.
 import { decodesAppleMedia } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { PicturePart } from "./egfxPicture.ts";
@@ -107,6 +108,29 @@ export interface DesktopPainter {
   endSession(): boolean;
 }
 
+/**
+ * How long a worker told to `retire` has to say it has, before it is ended
+ * anyway: its pool stops in far less.
+ */
+const RETIRE_MS = 2000;
+
+/**
+ * End a paint worker, once it has stopped what would outlive it: the compositor's
+ * pool, whose workers it ends once their threads have returned (`stopEgfx`).
+ * What it says before then is for nobody.
+ */
+function retire(worker: Worker): void {
+  const end = () => worker.terminate();
+  const late = setTimeout(end, RETIRE_MS);
+  worker.onmessage = (ev: MessageEvent<PainterEvent>) => {
+    if (ev.data.type === "retired") {
+      clearTimeout(late);
+      end();
+    }
+  };
+  worker.postMessage({ type: "retire" } satisfies PainterCommand);
+}
+
 let current: {
   canvas: HTMLCanvasElement;
   worker: Worker;
@@ -134,7 +158,9 @@ export function desktopPainterFor(
   if (spent.has(canvas)) {
     return null;
   }
-  current?.worker.terminate();
+  if (current) {
+    retire(current.worker);
+  }
   const worker = new Worker(
     new URL("./desktopPainter.worker.ts", import.meta.url),
     { type: "module", name: "desktop-painter" },
@@ -172,7 +198,7 @@ export function desktopPainterFor(
       handlers?.onResized(event.seq);
     } else if (event.type === "reached") {
       handlers?.onReached(event.seq);
-    } else {
+    } else if (event.type === "painted") {
       handlers?.onPainted(
         event.sequence,
         event.generation,
@@ -253,9 +279,8 @@ export function desktopPainterFor(
         post({ type: "sessionEnded" });
         return false;
       }
-      // Its decode workers and the compositor's threads are its own, and end
-      // with it.
-      worker.terminate();
+      // Its decode workers end with it, and the compositor's threads before it.
+      retire(worker);
       handlers = null;
       spent.add(canvas);
       spent.add(graphics);

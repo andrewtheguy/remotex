@@ -470,7 +470,7 @@ fn decode(grid: &mut Grid, mut passes: Vec<Pass<'_>>) {
             decode_tile(tile, passes);
         }
     } else {
-        work.into_par_iter().for_each(|(tile, passes)| decode_tile(tile, passes));
+        crate::pool::install(|| work.into_par_iter().for_each(|(tile, passes)| decode_tile(tile, passes)));
     }
 }
 

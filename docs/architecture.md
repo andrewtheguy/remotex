@@ -248,9 +248,10 @@ whose bitmap updates are sent as tiles by the gateway.
   memory back (`frontend/src/desktopPainter.ts`). The HEVC's decode worker
   ends. The pipeline's compositor and the decoder of a Mac's own
   picture run in the paint worker itself, so a session that loaded either ends
-  that worker, and the page mounts new canvases for the next, since a canvas is
-  transferred to one worker once. A display tab that stops showing its display
-  lets go of its decode worker too. The display socket outlives a session and
+  that worker, once it has stopped the compositor's threads (`retire` in
+  `frontend/src/desktopPainter.ts`), and the page mounts new canvases for the
+  next, since a canvas is transferred to one worker once. A display tab that
+  stops showing its display lets go of its decode worker too. The display socket outlives a session and
   is not ordered against the session socket, so an ended engine's format or
   picture start can arrive after its `picker`. Each carries its `engine`, which
   the session layer stamps in on the way out (`ServerMsg::stamped`), and
@@ -1617,6 +1618,12 @@ the pipeline.
   gateway as in the page. A page's threads are workers: the paint worker starts
   up to four (`frontend/src/egfxPool.worker.ts`), each an instance of the module
   on the one memory, and makes the pool of them once every one has answered.
+  The pool is the module's own, not rayon's global one, so that it can be
+  stopped: before the paint worker is ended it stops the pool, each thread
+  returns, and then its worker is ended (`stopEgfx`). iOS frees nothing of a
+  worker ended while its thread waits in the module, not the memory it shares,
+  until the tab is closed: a tab that did that ran out of memory at its seventh
+  session.
   Everything else a pipeline carries — ClearCodec, the caches, the copies between
   surfaces — is order itself and stays on the paint worker. A shared memory is
   given only to a page that is cross-origin isolated, so the gateway sends

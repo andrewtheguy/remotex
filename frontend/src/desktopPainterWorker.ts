@@ -32,6 +32,7 @@
 // also the cure and not only the escape — closing the decoders settles every access
 // unit the stuck draw is holding, so the chain it abandoned unwedges behind it.
 
+import { stopEgfx } from "./egfxCompositor.ts";
 import { createGraphicsPicture, type PicturePart } from "./egfxPicture.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import type { MosaicView } from "./mosaic.ts";
@@ -118,7 +119,12 @@ export type PainterCommand =
    * The session is over, after its `clear`: what its picture alone loaded goes,
    * which in a worker that is kept is its decode worker (desktopPainter.ts).
    */
-  | { type: "sessionEnded" };
+  | { type: "sessionEnded" }
+  /**
+   * The page is about to end this worker: stop what would outlive it, the
+   * compositor's pool (`stopEgfx`), and say `retired`.
+   */
+  | { type: "retire" };
 
 /** What the worker sends back: the painter's callbacks and the resize echo. */
 export type PainterEvent =
@@ -140,7 +146,9 @@ export type PainterEvent =
    * `epoch` is how many `clear`s this worker had taken when it said so: one said
    * for an attachment that has since been cleared is not the page's to act on.
    */
-  | { type: "graphicsShown"; shown: boolean; epoch: number };
+  | { type: "graphicsShown"; shown: boolean; epoch: number }
+  /** `retire` is done: the worker can be ended. */
+  | { type: "retired" };
 
 export interface PainterHost {
   handle(command: PainterCommand): void;
@@ -380,6 +388,9 @@ export function createPainterWorker(
           // At once, as the clear ahead of it ran: that clear closed the
           // decoders, so no unit is left for the decode worker to answer.
           endDecodeWorker("hevc");
+          break;
+        case "retire":
+          void stopEgfx().then(() => post({ type: "retired" }));
           break;
       }
     },

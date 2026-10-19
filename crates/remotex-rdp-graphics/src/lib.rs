@@ -25,12 +25,14 @@
 //! - [`compositor`] — the pipeline and a framebuffer together, fed commands that
 //!   were passed on.
 //! - [`fidelity`] — whether what a host has drawn with is its picture exactly.
+//! - [`pool`] — the threads the decoding that runs side by side runs on.
 
 pub mod avc;
 pub mod compositor;
 pub mod fidelity;
 pub mod framebuffer;
 pub mod gfx;
+pub mod pool;
 pub mod proto;
 
 pub use compositor::{Composed, Compositor};
