@@ -6,7 +6,6 @@ import {
   createAudioContext,
   createAudioPlayer,
   decodeAudioHead,
-  FLAC_CODEC,
 } from "./audioPlayer.ts";
 import { type CameraSender, startCameraSender } from "./cameraSender.ts";
 import { connectionLabel } from "./connectionLabel.ts";
@@ -1821,13 +1820,11 @@ export function useRemoteDesktop(
       return true;
     };
 
-    // A format only an audio decoder plays, in a browser with none: not one its
-    // picker offers, so a session started elsewhere with Opus. Said as what it is
-    // rather than as the decoder's absence surfacing as an error.
-    const blockedWithoutDecoder = (
-      msg: Extract<ControlMsg, { type: "audioFormat" }>,
-    ): boolean => {
-      if (msg.codec === FLAC_CODEC || decodesAudio()) {
+    // A format in a browser with no audio decoder, which plays none: not one its
+    // picker offers, so a session started elsewhere with sound. Said as what it
+    // is rather than as the decoder's absence surfacing as an error.
+    const blockedWithoutDecoder = (): boolean => {
+      if (decodesAudio()) {
         return false;
       }
       setAudioBlock("decoder");
@@ -1846,7 +1843,7 @@ export function useRemoteDesktop(
       if (audioPlayerRef.current) {
         releaseAudio();
       }
-      if (blockedWithoutDecoder(msg) || heldForAppleSound(msg)) {
+      if (blockedWithoutDecoder() || heldForAppleSound(msg)) {
         return;
       }
       // The click's context when there is one, which is the first format after the
@@ -2068,7 +2065,7 @@ export function useRemoteDesktop(
       seq: number,
     ): AudioBlock | null => {
       // Any other session's sound is Opus or FLAC, as chosen at this browser's
-      // picker, which offers only FLAC where there is no audio decoder.
+      // picker, which offers neither where there is no audio decoder.
       if (!msg.audio || msg.subtype !== "ard-high-performance") {
         return null;
       }

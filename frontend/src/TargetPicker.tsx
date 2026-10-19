@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { AppVersion } from "./AppVersion.tsx";
 import { decodesAppleMedia } from "./appleMedia.ts";
 import { connectionShortLabel } from "./connectionLabel.ts";
+import { decodesFlac } from "./flacSound.ts";
 import { gatewayFetch } from "./gateway.ts";
 import { versionMismatch } from "./gatewayVersion.ts";
-import { pageMemoryIsTight } from "./memoryBudget.ts";
 import { decodesAudio } from "./preflight.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { decodesRdpH264 } from "./rdpH264.ts";
@@ -138,7 +138,7 @@ export default function TargetPicker({
     appleH264: decodesAppleH264(),
     vp9: decodesVp9(),
     audio: decodesAudio(),
-    lossless: !pageMemoryIsTight(),
+    lossless: decodesFlac(),
     runsHevc: runnableDecoders().hevc,
     follows: sizeFollows(),
   };
@@ -505,7 +505,7 @@ function SoundChoice({
           type="checkbox"
           checked={row.checked}
           disabled={row.disabled || locked}
-          onChange={(e) => choose(e.target.checked ? row.ticks : "off")}
+          onChange={(e) => choose(e.target.checked ? "opus" : "off")}
         />
         <span className="picker-option-text">
           <span>{row.label}</span>

@@ -32,8 +32,9 @@
 //   chosen, and neither greyed. Combined Display is the tiles of every screen, so
 //   the Adaptive picture is greyed under it.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
-//   or lossless: see `soundRow`. In a browser with no audio decoder only the
-//   lossless one plays, which the page decodes itself, so ticking takes it.
+//   or lossless: see `soundRow`. Ticking takes Opus. A browser with no audio
+//   decoder has no sound to tick, and one whose decoder does not play FLAC is
+//   not offered lossless.
 // - Where the second display sits is a choice on a target that asks its host for
 //   two and tells it where each is: see `PLACEMENTS`.
 // - How the host draws an RDP pipeline, high quality or adaptive H.264 (alpha), is a
@@ -178,15 +179,11 @@ export interface Abilities {
    */
   appleH264: boolean;
   vp9: boolean;
-  /**
-   * Whether this browser has an audio decoder, which Opus and a Mac's AAC-ELD
-   * need. FLAC does not: the page decodes it itself (flacDecoder.ts).
-   */
+  /** Whether this browser has an audio decoder, which every sound needs. */
   audio: boolean;
   /**
-   * Whether it is offered lossless sound: not where the page loads as little
-   * WebAssembly as it can (memoryBudget.ts), since FLAC's decoder is a module of
-   * its own.
+   * Whether that decoder plays lossless sound, FLAC, which Safari's does not
+   * (flacSound.ts).
    */
   lossless: boolean;
   /** Whether this page can run its software HEVC decoder (softwareSupport.ts). */
@@ -223,9 +220,7 @@ export interface SoundRow {
   checked: boolean;
   /** Whether it cannot be ticked: no format plays here. */
   disabled: boolean;
-  /** What ticking it takes: the first format this browser plays. */
-  ticks: Exclude<Sound, "off">;
-  /** Opus first, then lossless. */
+  /** Opus first, which ticking it takes, then lossless. */
   formats: SoundFormat[];
 }
 
@@ -459,11 +454,10 @@ function sizeOptions(
 /**
  * `target`'s sound as the picker shows it: nothing where it offers none, and
  * otherwise a tick and, under a ticked one, Opus or FLAC. Ticking it takes
- * Opus. A browser with no audio decoder plays FLAC alone, so there Opus is
- * greyed and ticking takes FLAC; an Opus remembered from before is not sent,
- * and stays remembered for a browser that can. A browser that loads as little
- * WebAssembly as it can greys FLAC in the same way, and one of those with no
- * audio decoder either has nothing to tick.
+ * Opus. A browser whose decoder does not play FLAC greys it with the reason,
+ * and one with no audio decoder has nothing to tick. A format remembered from
+ * before that does not play here is not sent, and stays remembered for a
+ * browser that plays it.
  */
 function soundRow(
   target: TargetInfo,
@@ -490,7 +484,9 @@ function soundRow(
       label: "FLAC",
       note: lossless
         ? "Lossless, about a megabit a second of music. For a LAN."
-        : "Not on this device, which loads as little WebAssembly as it can: its decoder is a module of its own.",
+        : !plays
+          ? "This browser has no WebCodecs AudioDecoder to play it with."
+          : "This browser's AudioDecoder does not decode FLAC.",
       disabled: !lossless,
     },
   ];
@@ -503,12 +499,9 @@ function soundRow(
       label: "Sound",
       note: plays
         ? "Take the remote's sound and play it here."
-        : lossless
-          ? "Take the remote's sound and play it here, lossless: this browser has no decoder for Opus."
-          : "This browser has no decoder for Opus, and this device is not offered lossless.",
+        : "This browser has no WebCodecs AudioDecoder, so it cannot play the remote's sound.",
       checked: audio !== "off",
-      disabled: !plays && !lossless,
-      ticks: plays ? "opus" : "flac",
+      disabled: !plays,
       formats,
     },
     audio,

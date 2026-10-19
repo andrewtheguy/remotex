@@ -85,9 +85,8 @@ https://github.com/user-attachments/assets/1b5dfc6f-8510-490b-bd88-d4c52c48b0a5
   the browser paints them, which settle to lossless.
 - **Remote sound in the browser, as adaptive Opus or lossless FLAC.** An RDP
   or wlshare session plays the remote's sound here, as Opus at a bitrate that
-  follows the browser link or as FLAC, lossless for a LAN, which an iPhone, an
-  iPad or a device reporting 4 GB of memory or less is not offered, to load as
-  little WebAssembly as it can. A High Performance
+  follows the browser link or as FLAC, lossless for a LAN, which Safari's
+  decoder does not play and Safari is not offered. A High Performance
   Mac always sends its AAC-ELD sound. Standard Screen Sharing and plain VNC
   carry none.
 - **Clipboard text in both directions.** RDP and Apple Screen Sharing carry

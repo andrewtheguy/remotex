@@ -213,18 +213,6 @@ remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI an
 xrdp never does, which is the reason this stays an always-offered capability
 rather than a key.
 
-### A cheaper frame of lossless sound
-
-Taken up if a page is ever short of the time. The page's FLAC decoder takes a
-thousandth of a core for a frame of music, three fifths of what libFLAC takes
-natively. Most of it is the residual's Rice codes and the prediction, two loops
-in which every sample waits on the one before, and each now waits for little
-more than that: a code on a count of zeros and a rotation, a sample on a
-product and a sum. What is left is running the two together, a partition's
-codes and its prediction in one loop, so that their waits overlap. What has
-been tried, and how a change is judged, are in
-[the benchmark](../frontend/wasm/flac/bench/README.md).
-
 ## Not planned
 
 ### Decoding an RDP host's H.264 at the gateway

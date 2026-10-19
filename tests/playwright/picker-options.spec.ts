@@ -248,6 +248,122 @@ test.describe("the picker's options", () => {
   });
 });
 
+/** The codec of every `audioFormat` the page's audio socket is told. */
+function watchAudioFormats(page: Page): string[] {
+  const formats: string[] = [];
+  page.on("websocket", (ws) => {
+    if (new URL(ws.url()).pathname !== "/ws/audio") {
+      return;
+    }
+    ws.on("framereceived", ({ payload }) => {
+      if (typeof payload !== "string") {
+        return;
+      }
+      const message: Record<string, unknown> = JSON.parse(payload);
+      if (message.type === "audioFormat") {
+        formats.push(String(message.codec));
+      }
+    });
+  });
+  return formats;
+}
+
+test.describe("lossless sound", () => {
+  test.skip(
+    !PICKER_TARGET,
+    "set REMOTEX_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
+  );
+
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
+  test("plays through the browser's own decoder", async ({ page }) => {
+    const seen = watchSession(page);
+    const formats = watchAudioFormats(page);
+    // What the player reports when its decoder fails (audioPlayer.ts).
+    const failures: string[] = [];
+    page.on("console", (message) => {
+      if (message.text().startsWith("audio: the decoder failed")) {
+        failures.push(message.text());
+      }
+    });
+    await logIn(page);
+
+    const item = await openTarget(page);
+    await item.getByRole("checkbox", { name: SOUND }).check();
+    const flac = item.getByRole("radio", { name: /^FLAC/ });
+    await expect(flac).toBeEnabled();
+    await flac.check();
+    await item.getByRole("button", { name: "Start", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    expect(seen.connects.at(-1)).toMatchObject({ audio: "flac" });
+    await expect.poll(() => formats, { timeout: 10_000 }).toEqual(["flac"]);
+
+    // Sound arrives and decodes: the menu offers Mute, and no decoder failed.
+    await page.getByRole("button", { name: "Open menu" }).click();
+    await expect(page.getByRole("button", { name: "Mute" })).toBeEnabled();
+    await page.getByRole("button", { name: "Close menu" }).click();
+    expect(failures).toEqual([]);
+    await returnToPicker(page);
+  });
+
+  test("is greyed where the browser's decoder fails a FLAC frame", async ({
+    page,
+  }) => {
+    // Safari 27 as the page sees it: an AudioDecoder that takes the FLAC
+    // configuration and then fails every frame, and plays Opus.
+    await page.addInitScript(() => {
+      const Native = globalThis.AudioDecoder;
+      globalThis.AudioDecoder = class extends Native {
+        #init: AudioDecoderInit;
+        #flac = false;
+        constructor(init: AudioDecoderInit) {
+          super(init);
+          this.#init = init;
+        }
+        configure(config: AudioDecoderConfig) {
+          this.#flac = config.codec === "flac";
+          super.configure(config);
+        }
+        decode(chunk: EncodedAudioChunk) {
+          if (!this.#flac) {
+            super.decode(chunk);
+            return;
+          }
+          queueMicrotask(() =>
+            this.#init.error(
+              new DOMException(
+                "InternalAudioDecoderCocoa decoding failed",
+                "EncodingError",
+              ),
+            ),
+          );
+        }
+      };
+    });
+    const seen = watchSession(page);
+    await logIn(page);
+
+    // FLAC is greyed, with the reason, and ticking the sound takes Opus.
+    const item = await openTarget(page);
+    await item.getByRole("checkbox", { name: SOUND }).check();
+    await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
+    const flac = item.getByRole("radio", { name: /^FLAC/ });
+    await expect(flac).toBeDisabled();
+    await expect(flac).toHaveAccessibleName(/does not decode FLAC/);
+
+    await item.getByRole("button", { name: "Start", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    expect(seen.connects.at(-1)).toMatchObject({ audio: "opus" });
+    await returnToPicker(page);
+  });
+});
+
 test.describe("a browser with no audio decoder", () => {
   test.skip(
     !PICKER_TARGET,
@@ -258,57 +374,30 @@ test.describe("a browser with no audio decoder", () => {
     await leaveSession(page);
   });
 
-  test("starts, and plays FLAC, which the page decodes itself", async ({
-    page,
-  }) => {
+  test("starts, without sound", async ({ page }) => {
     // Safari 16.4 to 18 as the page sees it: a video decoder and no audio one.
     await page.addInitScript(() => {
       Reflect.deleteProperty(globalThis, "AudioDecoder");
     });
     const seen = watchSession(page);
-    // The codec of every `audioFormat` the audio socket announced.
-    const formats: string[] = [];
-    page.on("websocket", (ws) => {
-      if (new URL(ws.url()).pathname !== "/ws/audio") {
-        return;
-      }
-      ws.on("framereceived", ({ payload }) => {
-        if (typeof payload !== "string") {
-          return;
-        }
-        const message: Record<string, unknown> = JSON.parse(payload);
-        if (message.type === "audioFormat") {
-          formats.push(String(message.codec));
-        }
-      });
-    });
     await logIn(page);
 
-    // The sound is a choice, and ticking it takes FLAC: Opus is greyed, with the
-    // reason.
+    // The sound cannot be ticked, and says why.
     const item = await openTarget(page);
-    await item.getByRole("checkbox", { name: SOUND }).check();
-    await expect(item.getByRole("radio", { name: /^FLAC/ })).toBeChecked();
-    const opus = item.getByRole("radio", { name: /^Opus/ });
-    await expect(opus).toBeDisabled();
-    await expect(opus).not.toBeChecked();
+    const sound = item.getByRole("checkbox", { name: SOUND });
+    await expect(sound).toBeDisabled();
+    await expect(sound).not.toBeChecked();
     await expect(item).toContainText("no WebCodecs AudioDecoder");
 
     await item.getByRole("button", { name: "Start", exact: true }).click();
     await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
       timeout: 20_000,
     });
-    expect(seen.connects.at(-1)).toMatchObject({ audio: "flac" });
+    expect(seen.connects.at(-1)).toMatchObject({ audio: "off" });
     expect(seen.statuses.at(-1)).toMatchObject({
       type: "connected",
-      audio: true,
+      audio: false,
     });
-    await expect.poll(() => formats, { timeout: 10_000 }).toEqual(["flac"]);
-
-    // And the menu offers Mute, not a greyed reason.
-    await page.getByRole("button", { name: "Open menu" }).click();
-    await expect(page.getByRole("button", { name: "Mute" })).toBeEnabled();
-    await page.getByRole("button", { name: "Close menu" }).click();
     await returnToPicker(page);
   });
 });
@@ -320,8 +409,7 @@ test.describe("the picker on a phone", () => {
   );
 
   // A phone as the page tells one: a screen whose short side is a phone's, and,
-  // set in the test, the two touch points a pinch needs and an iPhone's
-  // platform, whose browser loads as little WebAssembly as it can.
+  // set in the test, the two touch points a pinch needs.
   test.use({
     viewport: { width: 390, height: 844 },
     hasTouch: true,
@@ -339,18 +427,8 @@ test.describe("the picker on a phone", () => {
       Object.defineProperty(Navigator.prototype, "maxTouchPoints", {
         get: () => 5,
       });
-      Object.defineProperty(Navigator.prototype, "platform", {
-        get: () => "iPhone",
-      });
     });
     const seen = watchSession(page);
-    // Every fetch of the FLAC decoder's module, which an iPhone never makes.
-    const flacModules: string[] = [];
-    page.on("request", (request) => {
-      if (/remotex_flac/.test(request.url())) {
-        flacModules.push(request.url());
-      }
-    });
     await logIn(page);
 
     // The size the target configures, and the default beside it.
@@ -362,12 +440,9 @@ test.describe("the picker on a phone", () => {
       item.getByRole("radio", { name: FOLLOWS_WINDOW }),
     ).toHaveCount(0);
 
-    // Sound is Opus here: FLAC is greyed, with the reason.
+    // Ticking the sound takes Opus.
     await item.getByRole("checkbox", { name: SOUND }).check();
     await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
-    const flac = item.getByRole("radio", { name: /^FLAC/ });
-    await expect(flac).toBeDisabled();
-    await expect(flac).toHaveAccessibleName(/WebAssembly/);
 
     await item.getByRole("radio", { name: /^1440×900/ }).check();
     await item.getByRole("button", { name: "Start", exact: true }).click();
@@ -382,6 +457,5 @@ test.describe("the picker on a phone", () => {
       type: "connected",
       resize: false,
     });
-    expect(flacModules, "the FLAC decoder's module, fetched").toEqual([]);
   });
 });

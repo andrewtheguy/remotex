@@ -24,11 +24,11 @@
 // host's pipeline without H.264 are decoded by the page and need none of it. The
 // **audio decoder** likewise: Safari from 16.4 to 18 has `VideoDecoder` and no
 // `AudioDecoder`, and the desktop is the whole of a session where sound is not.
-// Such a browser plays the one sound that needs no audio decoder, FLAC, which the
-// page decodes itself (flacDecoder.ts). What does need one is greyed with the
-// reason: Opus at the picker (targetChoices.ts), and a High Performance Mac's
-// AAC-ELD in the menu's Audio button (FloatingMenu.tsx). Asked here, by
-// `decodesAudio`, so that the question has one answer and one place.
+// Every sound needs the decoder, so such a browser plays none, and says why: the
+// picker's Sound row is greyed with the reason (targetChoices.ts), and a High
+// Performance Mac's AAC-ELD, which comes whatever was chosen, in the menu's Audio
+// button (FloatingMenu.tsx). Asked here, by `decodesAudio`, so that the question
+// has one answer and one place.
 //
 // The gateway speaks plain HTTP and always has — it has no TLS listener and is not
 // getting one. A secure context therefore comes from where the page is reached, not

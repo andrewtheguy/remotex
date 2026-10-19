@@ -33,14 +33,13 @@ const UNABLE: Abilities = {
   appleH264: false,
   vp9: false,
   audio: false,
-  lossless: true,
+  lossless: false,
   runsHevc: false,
   follows: "window",
 };
-// An iPad's and an iPhone's browser, which load as little WebAssembly as they
-// can and are offered no lossless sound.
-const TABLET: Abilities = { ...ABLE, lossless: false, follows: "screen" };
-const PHONE: Abilities = { ...ABLE, lossless: false, follows: null };
+// An iPad's and an iPhone's browser, whose desktop follows the screen or nothing.
+const TABLET: Abilities = { ...ABLE, follows: "screen" };
+const PHONE: Abilities = { ...ABLE, follows: null };
 const DEFAULT_SIZE = { w: 1440, h: 900 };
 
 function target(offers: Partial<TargetInfo>): TargetInfo {
@@ -391,39 +390,25 @@ test("Opus says whether its rate follows the link", () => {
   );
 });
 
-test("a browser with no audio decoder is offered FLAC alone", () => {
-  const MUTE: Abilities = { ...ABLE, audio: false };
+test("a browser with no audio decoder is offered no sound", () => {
+  // Safari 16.4 to 18 as the page sees it: a video decoder and no audio one.
+  const MUTE: Abilities = { ...ABLE, audio: false, lossless: false };
   const formats = (options: ReturnType<typeof targetOptions>) =>
     options.soundRow?.formats.map((format) => [format.value, format.disabled]);
 
-  // The sound is a choice still, and ticking it takes the one format that plays.
-  const unticked = targetOptions(RDP, undefined, MUTE);
-  assert.equal(unticked.soundRow?.checked, false);
-  assert.equal(unticked.soundRow?.ticks, "flac");
-  assert.deepEqual(formats(unticked), [
-    ["opus", true],
-    ["flac", false],
-  ]);
-  assert.match(unticked.soundRow?.formats[0].note ?? "", /AudioDecoder/);
-
-  const lossless = targetOptions(RDP, { audio: "flac" }, MUTE);
-  assert.equal(lossless.choices.audio, "flac");
-  assert.equal(lossless.soundRow?.checked, true);
-  assert.equal(lossless.sound, true);
-
-  // An Opus remembered from before is not sent, and is kept for a browser that
-  // plays it.
-  const opus = targetOptions(RDP, { audio: "opus" }, MUTE);
-  assert.equal(opus.choices.audio, "off");
-  assert.equal(opus.soundRow?.checked, false);
-  assert.equal(opus.sound, false);
-  const able = targetOptions(RDP, { audio: "opus" }, ABLE);
-  assert.equal(able.choices.audio, "opus");
-  assert.equal(able.soundRow?.ticks, "opus");
-  assert.deepEqual(formats(able), [
-    ["opus", false],
-    ["flac", false],
-  ]);
+  // Nothing plays: the sound cannot be ticked, and says why.
+  for (const remembered of [undefined, "opus", "flac"] as const) {
+    const options = targetOptions(RDP, { audio: remembered }, MUTE);
+    assert.equal(options.soundRow?.disabled, true);
+    assert.equal(options.soundRow?.checked, false);
+    assert.equal(options.choices.audio, "off");
+    assert.equal(options.sound, false);
+    assert.deepEqual(formats(options), [
+      ["opus", true],
+      ["flac", true],
+    ]);
+    assert.match(options.soundRow?.note ?? "", /AudioDecoder/);
+  }
 
   // High Performance's sound is its AAC-ELD, which nothing here can play, so
   // Start spends no click on an audio context. Its picture is untouched.
@@ -432,48 +417,39 @@ test("a browser with no audio decoder is offered FLAC alone", () => {
   assert.equal(mac.pictures?.[0].disabled, false);
 });
 
-test("a browser held to little WebAssembly is offered no lossless sound", () => {
+test("a browser whose decoder does not play FLAC is offered Opus alone", () => {
+  // Safari 27, whose AudioDecoder takes Opus and fails a FLAC frame.
+  const SAFARI: Abilities = { ...ABLE, lossless: false };
   const formats = (options: ReturnType<typeof targetOptions>) =>
     options.soundRow?.formats.map((format) => [format.value, format.disabled]);
 
-  for (const mobile of [PHONE, TABLET]) {
-    // FLAC is greyed, with the reason, so its decoder is never loaded here, and
-    // ticking the sound takes Opus.
-    const options = targetOptions(RDP, undefined, mobile);
-    assert.equal(options.soundRow?.disabled, false);
-    assert.equal(options.soundRow?.ticks, "opus");
-    assert.deepEqual(formats(options), [
-      ["opus", false],
-      ["flac", true],
-    ]);
-    assert.match(options.soundRow?.formats[1].note ?? "", /WebAssembly/);
-
-    // A FLAC remembered from before is not sent, and is kept for a browser
-    // that is offered it.
-    const lossless = targetOptions(RDP, { audio: "flac" }, mobile);
-    assert.equal(lossless.choices.audio, "off");
-    assert.equal(lossless.soundRow?.checked, false);
-    assert.equal(lossless.sound, false);
-    assert.equal(
-      targetOptions(RDP, { audio: "flac" }, ABLE).choices.audio,
-      "flac",
-    );
-  }
-
-  // One with no audio decoder either has no format that plays: the sound
-  // cannot be ticked, and says why.
-  const mute = targetOptions(
-    RDP,
-    { audio: "flac" },
-    { ...PHONE, audio: false },
-  );
-  assert.equal(mute.soundRow?.disabled, true);
-  assert.equal(mute.choices.audio, "off");
-  assert.deepEqual(formats(mute), [
-    ["opus", true],
+  // FLAC is greyed, with the reason.
+  const options = targetOptions(RDP, undefined, SAFARI);
+  assert.equal(options.soundRow?.disabled, false);
+  assert.deepEqual(formats(options), [
+    ["opus", false],
     ["flac", true],
   ]);
-  assert.match(mute.soundRow?.note ?? "", /Opus/);
+  assert.match(options.soundRow?.formats[1].note ?? "", /does not decode FLAC/);
+
+  // A FLAC remembered from before is not sent, and is kept for a browser that
+  // plays it; an Opus one is.
+  const lossless = targetOptions(RDP, { audio: "flac" }, SAFARI);
+  assert.equal(lossless.choices.audio, "off");
+  assert.equal(lossless.soundRow?.checked, false);
+  assert.equal(lossless.sound, false);
+  assert.equal(
+    targetOptions(RDP, { audio: "flac" }, ABLE).choices.audio,
+    "flac",
+  );
+  assert.equal(
+    targetOptions(RDP, { audio: "opus" }, SAFARI).choices.audio,
+    "opus",
+  );
+  assert.deepEqual(formats(targetOptions(RDP, undefined, ABLE)), [
+    ["opus", false],
+    ["flac", false],
+  ]);
 });
 
 test("a Mac's HEVC this browser cannot take is greyed, with the reason", () => {

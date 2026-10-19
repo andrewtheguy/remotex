@@ -118,7 +118,7 @@ announces late is still taken.
   a frame (`AudioBridge::unit`), and from there to `/ws/audio` behind an
   `audioFormat` that says `passthrough` (`AudioListener::into_passed`): `opus`
   with the `OpusHead` above, which the browser's WebCodecs decoder takes, or
-  `flac` for the page's own decoder. Nothing here decodes, checks or re-encodes
+  `flac` for the same decoder, under a header the page writes. Nothing here decodes, checks or re-encodes
   a frame; the browser's decoder is what refuses a bad one. An empty frame, one
   past the audio socket's 16-bit packet length, or one outside a begin and an
   end is dropped with a warning.
@@ -134,8 +134,8 @@ announces late is still taken.
 - A listener that falls behind the queue loses its oldest units, as one of PCM
   does, but these were coded: the pump sends a gap frame
   ([Audio frames](architecture.md#audio-frames)) ahead of the next batch, and
-  the player resets its Opus decoder there. FLAC frames decode alone, and its
-  player takes no notice.
+  the player resets its decoder there. FLAC frames decode alone, so for them
+  the reset loses nothing more.
 - A declared frame length above 65,536 bytes is read past without allocating a
   frame, which keeps the RFB stream aligned. Of the frames that are read, only a
   nonempty one of at most 65,535 bytes fits the audio socket's 16-bit packet
