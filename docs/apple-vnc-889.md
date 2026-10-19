@@ -1741,10 +1741,13 @@ four strips do not fit it sends no picture at all (below).
 A still screen is not silent. After any change of the screen, the Mac's
 capture hands its encoder the unchanged frame again, about 18 times a second,
 until it has spent a fixed count of 300 such idle frames, some 20 s, and then
-hands it nothing until the screen next changes. What goes out of the repeats is
-the encoder's to decide, and it decides by the tile count. Read from the Mac's
-transmitter and encoders, and measured on macvm at 1440×900 under a full-screen
-still page, from the encoder's statistics, which the Mac logs once a second:
+hands it nothing until the screen next changes. Each idle callback reuses the
+last captured frame and marks it as a repeat. The count is the capture's own
+default, not a limit negotiated with the viewer, and no offer or RTCP message
+changes it. What goes out of the repeats is the encoder's to decide, and it
+decides by the tile count. Read from the Mac's transmitter and encoders, and
+measured on macvm at 1440×900 under a full-screen still page, from the
+encoder's statistics, which the Mac logs once a second:
 
 | The stream | Repeats sent | The picture's rate during them |
 |---|---|---|
@@ -1753,6 +1756,12 @@ still page, from the encoder's statistics, which the Mac logs once a second:
 | HEVC, four strips, each strip picture acknowledged by its decoding order number | none, from about 2 s after the change | nothing |
 | H.264, four strips, which cannot be acknowledged | every one | about 25 Mbit/s |
 
+- **A dropped repeat still counts as encoded in the Mac's statistics.** The
+  encoder produces no coded picture for it, but its callback increments the
+  encoded count and then the dropped count. Thus one-tile H.264's roughly 18
+  encoded frames and one transmitted frame a second mean that about 17 were
+  discarded before a picture existed; `Tx_fps`, not `Enc_fps`, says what left
+  the encoder.
 - **One tile drops them on a clock.** A repeat, with no keyframe or refresh
   owed, is dropped while the last picture sent came at a quantizer of 22 or
   finer and is under a second old; after a second one goes out. Nothing the
@@ -1760,8 +1769,10 @@ still page, from the encoder's statistics, which the Mac logs once a second:
 - **Strips drop them once acknowledged.** A strip's repeat is dropped only
   when the strip's last picture sent came at a quantizer of 22 or finer, four
   of its repeats have gone out, and one of its pictures has been acknowledged;
-  then all but one in a thousand are. Unacknowledged, every repeat goes out, and
-  the strips go on refining, to a quantizer of 6.
+  then all but one in a thousand are. Only a repeat actually sent below
+  quantizer 23 is kept as a candidate whose acknowledgement can arm this drop.
+  Unacknowledged, every repeat goes out, and the strips go on refining, to a
+  quantizer of 6.
 - **A strip is acknowledged by its decoding order number.** With more than one
   tile the Mac files each picture that asks to be acknowledged (the header
   extension's `0x10` bit) under its 16-bit decoding order number, not under its
