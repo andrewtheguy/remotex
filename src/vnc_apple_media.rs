@@ -306,9 +306,10 @@ pub enum Codec {
 
 /// The screen-video offer's blob: one stream at `size` backing pixels offering
 /// H.264 (RTP payload `123`) and, for a stream in [`Codec::Hevc`], HEVC (`100`),
-/// `tiles` pictures to a frame. The stream's fields
-/// follow `initWithScreenSSRC:…:customVideoWidth:customVideoHeight:tilesPerFrame:
-/// ltrpEnabled:pixelFormats:…`; the Mac answers with HEVC where it is offered.
+/// `tiles` pictures to a frame. The stream's fields are those Apple's viewer
+/// sends: the SSRC, the codecs, the width and height, the tile count,
+/// long-term references on, and the pixel formats; the Mac answers with HEVC
+/// where it is offered.
 fn video_offer_blob(ssrc: u32, (width, height): (u16, u16), tiles: u64, codec: Codec) -> Vec<u8> {
     let mut blob = Proto::default();
     blob.uint(1, 1);
@@ -3839,11 +3840,11 @@ mod tests {
         (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
     }
 
-    /// The media blob Apple's own `AVCMediaStreamNegotiator initWithMode:8` produced
-    /// on macOS 26.6 for SSRC 3606155525, byte for byte.
+    /// The sound offer's blob Apple's own negotiator produced on macOS 26.6 for
+    /// SSRC 3606155525, byte for byte.
     const CAPTURED_AUDIO_BLOB: &str = "080110011a120885a2c6b70d1000180020ffbc0128003000320d56696365726f7920312e372e3040004a05080110ab024a0908ea1f1000188080014a0b080010c0d1e123188080204a0b08001080dac409188080064a0a08001080b489131880604a0b080010808ece1c188080104a0508101084204a0b08001080c2d72f188080404a05080410e4324a0b080010809bee02188080086880e0f084deafb6a3ee017002800100";
 
-    /// And the `initWithMode:7` blob for SSRC 3023179925 at 1600×1000, with
+    /// And its screen-video offer's blob for SSRC 3023179925 at 1600×1000, with
     /// Apple's four tiles to a frame.
     const CAPTURED_VIDEO_BLOB: &str = "080110012af5010895a1c8a10b10001a7d087b120a0801100118c387032000120a0801100218c387032000120a0801100118c387032000120a0801100218c3870320001a47464c533b4d533a2d313b4c463a2d313b4c54523b43414241433b504f533a303b454f443a313b4854533a323b52523a333b41523a342f332c352f383b58523a342f332c352f383b20011a5c0864120a0801100118c387032000120a0801100218c3870320001a3e464c533b4c463a2d313b504f533a353b454f443a313b4854533a323b52523a333b504f53453a343b41523a342f332c352f383b58523a342f332c352f383b200e20c00c28e80730043801403f48016001320d56696365726f7920312e372e3040004a0a08001080b489131880604a05080110ab024a0908ea1f1000188080014a0b080010c0d1e123188080204a0b08001080dac409188080064a0b080010808ece1c188080104a0508101084204a0b08001080c2d72f188080404a05080410e4324a0b080010809bee0218808008688080e7dedfafb6a3ee017002800100";
 
