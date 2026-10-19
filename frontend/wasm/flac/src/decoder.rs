@@ -23,11 +23,13 @@
 //! nothing after it.
 //!
 //! What a frame costs is its residual, a Rice code a sample, and its
-//! prediction, a sum over the samples before each one. So the bits are read
-//! through a 64-bit window that is taken once for two samples ([`Bits`]), the
-//! prediction is a loop of its own for each order an encoder commonly picks,
-//! in 32-bit arithmetic wherever the frame's own widths say that is exact, and
-//! the frame's checksum is taken eight bytes at a step.
+//! prediction, a sum over the samples before each one, and in each a sample
+//! waits on the one before. So the codes are read a few at a time out of a
+//! 64-bit window ([`Bits::rice`]), each waiting on the one before for a count
+//! of zeros and a rotation, the prediction is a loop of its own for each order
+//! an encoder commonly picks, a sample waiting on the one before for a product
+//! and a sum ([`predict`]), in 32-bit arithmetic wherever the frame's own widths
+//! say that is exact, and the frame's checksum is taken eight bytes at a step.
 
 use std::fmt;
 
@@ -208,15 +210,21 @@ struct Bits<'a> {
     end: usize,
 }
 
+/// The 64 bits of `words` from bit `at`, the first uppermost.
+#[inline(always)]
+fn window_at(words: &[u64], at: usize) -> u64 {
+    let (first, bit) = (at >> 6, at & 63);
+    let word = |at: usize| words.get(at).copied().unwrap_or(0);
+    // In two steps, so that from a word's first bit nothing of the next is
+    // taken.
+    word(first) << bit | word(first + 1) >> 1 >> (63 - bit)
+}
+
 impl Bits<'_> {
     /// The next 64 bits, the first uppermost.
     #[inline(always)]
     fn window(&self) -> u64 {
-        let (first, bit) = (self.at >> 6, self.at & 63);
-        let word = |at: usize| self.words.get(at).copied().unwrap_or(0);
-        // In two steps, so that from a word's first bit nothing of the next
-        // is taken.
-        word(first) << bit | word(first + 1) >> 1 >> (63 - bit)
+        window_at(self.words, self.at)
     }
 
     fn short(&self) -> bool {
@@ -270,39 +278,59 @@ impl Bits<'_> {
 
     /// A partition's residuals, each a Rice code of `parameter` low bits: a run
     /// of zeros that counts the rest, a one, the low bits, and the sign folded
-    /// into the lowest. A window is taken once for a few of them and they are
-    /// read out of it in registers, each waiting on the one before for no more
-    /// than a count of zeros and a shift; the code the window does not hold
-    /// whole is read apart.
+    /// into the lowest. A few of them are read out of a window in registers,
+    /// each waiting on the one before for no more than a count of zeros and a
+    /// rotation, and whether the window held them whole is asked once for them
+    /// all: a few that it did not are read again apart. The next window is
+    /// what is left of this one with the bits after it below, which were
+    /// loaded while its codes were being read, so it does not wait on a load.
     fn rice(&mut self, parameter: u32, residuals: &mut [i32]) -> Result<(), Fault> {
         // As many codes to a window as it mostly holds whole: a code is its
         // parameter's bits, the one, and a run that is seldom long.
         let together = (52 / (parameter as usize + 3)).clamp(2, 8);
+        let low = (1u64 << parameter) - 1;
+        // The reader's place, in a local through the partition.
+        let mut at = self.at;
+        let mut next = window_at(self.words, at);
         for group in residuals.chunks_mut(together) {
-            let mut window = self.window();
-            let mut have = 64;
-            for residual in group {
+            // The bits after the window, which do not wait on its codes.
+            let (mut window, after) = (next, window_at(self.words, at + 64));
+            let mut used = 0;
+            for residual in group.iter_mut() {
                 let zeros = window.leading_zeros();
                 let length = zeros + 1 + parameter;
-                // Fewer than the window has, so that the shift past the code
-                // is one shift, of less than the window's width.
-                let folded = if length < have {
-                    let low = window << zeros << 1 >> 1 >> (63 - parameter);
-                    window <<= length;
-                    have -= length;
-                    zeros << parameter | low as u32
-                } else {
-                    self.at += (64 - have) as usize;
-                    let folded = self.rice_slowly(parameter)?;
-                    (window, have) = (self.window(), 64);
-                    folded
-                };
-                *residual = (folded >> 1) as i32 ^ -((folded & 1) as i32);
+                // The code comes round to the bottom, its one and its low bits
+                // lowest, and what follows it to the top. What came round
+                // before it is below what the window holds whole, and is read
+                // into only by codes the window did not hold.
+                window = window.rotate_left(length);
+                used += length;
+                let folded = zeros << parameter | (window & low) as u32;
+                *residual = zigzag(folded);
             }
-            self.at += (64 - have) as usize;
+            if used < 64 {
+                at += used as usize;
+                // The window's bits not yet read, and the bits after it below
+                // them.
+                next = window & u64::MAX << used | after >> 1 >> (63 - used);
+            } else {
+                self.at = at;
+                for residual in group {
+                    *residual = zigzag(self.rice_slowly(parameter)?);
+                }
+                at = self.at;
+                next = window_at(self.words, at);
+            }
         }
+        self.at = at;
         Ok(())
     }
+}
+
+/// A residual from its Rice code's number, the sign folded into the lowest bit.
+#[inline(always)]
+fn zigzag(folded: u32) -> i32 {
+    (folded >> 1) as i32 ^ -((folded & 1) as i32)
 }
 
 /// Each sample from `ORDER` on becomes itself, a residual, plus the prediction
@@ -310,20 +338,28 @@ impl Bits<'_> {
 /// back is weighed by. A function for each order, so that the sum is laid out
 /// whole. In 32 bits, wrapping: the
 /// caller knows the sum fits, or the stream is not one an encoder made.
+///
+/// A sample waits on the one before it, and on nothing else that is not known
+/// a sample sooner: so the sum over the others is taken a sample ahead, while
+/// the one before is still being made, and a sample waits on one product and
+/// one addition rather than on the whole sum.
 fn predict<const ORDER: usize>(samples: &mut [i32], coefficients: &[i32], shift: u32) {
     let Some(coefficients) = coefficients.first_chunk::<ORDER>() else { return };
-    if samples.len() < ORDER {
-        return;
-    }
+    let Some(first) = samples.first_chunk::<ORDER>() else { return };
     // The sample before, which the next waits on: kept out of memory.
-    let mut last = samples[ORDER - 1];
+    let mut last = first[ORDER - 1];
+    // The next sample's prediction from all but the one before it.
+    let mut older = (1..ORDER).fold(0i32, |sum, n| sum.wrapping_add(coefficients[n].wrapping_mul(first[ORDER - 1 - n])));
     for at in ORDER..samples.len() {
         let (before, rest) = samples.split_at_mut(at);
         let Some(before) = before.last_chunk::<ORDER>() else { return };
-        let mut sum = coefficients[0].wrapping_mul(last);
-        for n in 1..ORDER {
-            sum = sum.wrapping_add(coefficients[n].wrapping_mul(before[ORDER - 1 - n]));
-        }
+        let sum = older.wrapping_add(coefficients[0].wrapping_mul(last));
+        // The sample after this one's, from this one's `last` and the samples
+        // before it.
+        older = (1..ORDER).fold(0i32, |sum, n| {
+            let sample = if n == 1 { last } else { before[ORDER - n] };
+            sum.wrapping_add(coefficients[n].wrapping_mul(sample))
+        });
         last = rest[0].wrapping_add(sum >> shift);
         rest[0] = last;
     }
@@ -358,6 +394,15 @@ fn predict_wide(samples: &mut [i32], coefficients: &[i32], shift: u32) {
 }
 
 fn predict_narrow(samples: &mut [i32], coefficients: &[i32], shift: u32) {
+    // A fixed predictor, whoever wrote it, has coefficients known here, and so
+    // multiplied as shifts and sums.
+    match (coefficients, shift) {
+        ([1], 0) => return predict::<1>(samples, FIXED[1], 0),
+        ([2, -1], 0) => return predict::<2>(samples, FIXED[2], 0),
+        ([3, -3, 1], 0) => return predict::<3>(samples, FIXED[3], 0),
+        ([4, -6, 4, -1], 0) => return predict::<4>(samples, FIXED[4], 0),
+        _ => {}
+    }
     match coefficients.len() {
         0 => {}
         1 => predict::<1>(samples, coefficients, shift),

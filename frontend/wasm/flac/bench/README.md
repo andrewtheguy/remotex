@@ -56,25 +56,32 @@ same binding, which copied a frame's samples out twice.
 
 | sample | claxon | the module | libFLAC |
 |---|---|---|---|
-| `silence-48000` | 24.1 | 8.8 | 26.7 |
-| `tone-48000` | 72.4 | 30.1 | 48.9 |
-| `music-48000` | 146.6 | 57.6 | 75.1 |
-| `music-44100` | 136.3 | 53.2 | 70.6 |
-| `symphony-48000` | 146.0 | 55.3 | 72.0 |
-| `symphony-44100` | 135.3 | 51.3 | 67.2 |
-| `noise-48000` | 165.2 | 57.1 | 78.2 |
-| `white-48000` | 91.4 | 40.6 | 98.4 |
+| `silence-48000` | 24.1 | 8.5 | 29.2 |
+| `tone-48000` | 72.4 | 21.9 | 50.6 |
+| `music-48000` | 146.6 | 47.3 | 78.0 |
+| `music-44100` | 136.3 | 43.7 | 73.1 |
+| `symphony-48000` | 146.0 | 44.9 | 75.7 |
+| `symphony-44100` | 135.3 | 42.0 | 70.2 |
+| `noise-48000` | 165.2 | 48.1 | 80.5 |
+| `white-48000` | 91.4 | 39.3 | 110.6 |
 
 A frame is 20 ms of sound, so the module takes a thousandth of a core to
 play music. libFLAC's column carries what `sound-flac` does around it, a
-stream opened and closed for every frame, which is the 27 K of its silence.
+stream opened and closed for every frame, which is the 29 K of its silence.
+The claxon column was measured on another day than the other two, which were
+measured together.
 
 ## Where a frame's time goes
 
-In the Rice codes of the residual, half of a frame of music, and the
-prediction, a fifth; the checksum is a twentieth, and the floats and the
-binding the rest. What each of the decoder's choices is worth on `music` at
-48 kHz, in thousands of cycles a frame, each row with the rows above it:
+In the Rice codes of the residual, two fifths of a frame of music, and the
+prediction, over a quarter; the checksum is a twelfth, and the floats and the
+binding the rest. Each of the two is a loop in which a sample waits on the one
+before: a code on where the code before ended, a count of zeros and a rotation
+away, and a predicted sample on the sample before it, a product and a sum
+away. Both are near what those waits cost, so fewer instructions in either no
+longer make a frame cheaper (below). What each of the decoder's choices is
+worth on `music` at 48 kHz, in thousands of cycles a frame, each row with the
+rows above it:
 
 | the decoder | a frame |
 |---|---|
@@ -85,6 +92,18 @@ binding the rest. What each of the decoder's choices is worth on `music` at
 | SIMD, for the floats and the channels | 76 |
 | the frame laid out once as words, so no load turns bytes round | 69 |
 | as many codes to a window as the parameter says it mostly holds, two to eight | 58 |
+| each code rotated round the window, so the run, the one and the low bits are one rotation and a mask, and whether the window held its codes whole asked once for them all | 53 |
+| the prediction from all but the sample before taken a sample ahead, so a sample waits on one product and one sum | 50 |
+| the reader's place in a local through a partition, where with the codes rotated it was written back after every window | 49 |
+| the next window spliced from what is left of this one and the bits after it, loaded while its codes are read, so it does not wait on a load | 47 |
+
+Two choices do nothing for `music` and are kept for other sound. A fixed
+predictor's coefficients, known in the code, become shifts and sums: `tone`,
+which is all fourth-order fixed, 26.8 K to 25.0. And wasm-opt is told not to
+fold a function with one caller into it (`--one-caller-inline-max-function-size=0`
+in `Cargo.toml`): folded, a subframe's decoding shares one function with the
+whole frame's, and V8 keeps fewer of its values in registers. `noise` 49.5 K
+to 48.0, `tone` 23.7 to 22.0.
 
 ## Tried and no faster
 
@@ -95,8 +114,21 @@ binding the rest. What each of the decoder's choices is worth on `music` at
 - **One shift past a code**, by its whole length, where there were three: no
   fewer cycles on its own with two codes to a window, 69.1 K against 69.6. It
   is kept, as the simpler.
-- **The reader's place in a local through a partition**, written back at its
-  end: 58.7 K against 58.6. The compiler had it there already.
+- **The run's place above the low bits as a product**, by two to the
+  parameter, where it is a shift: 53.6 K against 53.1. On x86 V8 shifts and
+  rotates by an amount in one register, which a product would leave to the
+  rotation alone.
+- **A number of codes to a window known in the code**, a function for each
+  from two to eight, so a window's codes are laid out whole with no count:
+  7 K fewer instructions a frame and 0.7 K more cycles, and with the window
+  spliced 9 K fewer instructions and as many cycles. The codes wait on each
+  other, not on the instructions.
+- **The frame laid out last byte first**, so that one load at any byte is the
+  window, where it is two words shifted together: 50.1 K against 50.3 on
+  `music`, and `silence` 9.5 K against 8.1. Turning the frame round a byte at
+  a time costs what the load saves.
+- **The sum with the sample before added last**, as written in the loop that
+  sums it: 57.3 K against 57.9. LLVM puts it back where it was.
 
 ## Profiling
 
@@ -109,6 +141,10 @@ FLAC_WASM_DIR=DIR perf record -- node --perf-basic-prof --no-liftoff bench/decod
 perf report --no-children --sort symbol
 ```
 
-`wasm-bindgen` is the one `wasm-pack` fetched, under `~/.cache/.wasm-pack`,
+`wasm-bindgen` is the one `wasm-pack` fetched for the crate's version, under `~/.cache/.wasm-pack`,
 and `wasm-objdump -d` of the module it writes shows what a loop was compiled
-to.
+to. That module has not been through wasm-opt, which folds functions into one
+another: `wasm-opt -g` with the flags in `Cargo.toml` gives the module that is
+shipped, its names kept. `node --perf-prof` also writes V8's machine code for
+it, as `jit-PID.dump`, for `perf inject --jit` and `perf annotate`: what V8
+keeps in registers is where the last cycles went.
