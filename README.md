@@ -69,20 +69,20 @@ https://github.com/user-attachments/assets/1b5dfc6f-8510-490b-bd88-d4c52c48b0a5
   display has a browser tab of its own, and each tab's window sizes its
   display. Apple's own viewer on macOS 26 does not offer this: with two virtual
   displays it reports that dynamic resolution is not available.
-- **The gateway's tiles, or the remote's own picture path.** Where the gateway
-  codes the picture it sends 64×64 tiles, exact as PNG where they hold few
+- **The remote's own picture, decoded in the browser, or the gateway's tiles.**
+  A Windows host's graphics pipeline is passed for the browser to compose, drawn
+  in high quality for a LAN or, in alpha, as H.264 the host fits to the browser
+  link. A High Performance Mac's HEVC or its H.264 is always passed unchanged,
+  and neither adapts to the browser link: a still screen sends little, motion
+  much. The H.264 needs no HEVC decoder in the page, so every build serves a
+  High Performance Mac to any browser. A Standard Mac's own Adaptive picture is
+  passed (beta), decoded in the page, paced by the browser link, whose precision
+  stays the same while a slower link gets fewer updates and later refinement.
+  wlshare's passed VP9 follows the browser link too. Where the gateway codes the
+  picture, as for a plain VNC server or a Standard Mac's Full quality, lossless
+  zlib inflated here, it sends 64×64 tiles, exact as PNG where they hold few
   colours and as JPEG where they move, sent again exactly once still, as fast as
-  the browser paints them; wlshare's passed VP9 follows the browser link too. A Windows host's graphics
-  pipeline is passed for the browser to compose, drawn in high quality for a LAN or, in
-  alpha, as H.264 the host fits to the browser link. A High Performance Mac's
-  HEVC or its H.264 is always passed unchanged, and neither adapts to the
-  browser link: a still screen sends little, motion much. The H.264 needs no
-  HEVC decoder in the page, so every build serves a High Performance Mac to any
-  browser. A Standard Mac's Full quality, lossless zlib, is inflated by the
-  gateway and sent as its tiles, which settle to lossless; or its own Adaptive
-  picture is passed (beta), decoded in the page, paced by the browser link,
-  whose precision stays the same while a slower link gets fewer updates and
-  later refinement.
+  the browser paints them, which settle to lossless.
 - **Remote sound in the browser, as adaptive Opus or lossless FLAC.** An RDP
   or wlshare session plays the remote's sound here, as Opus at a bitrate that
   follows the browser link or as FLAC, lossless for a LAN, which an iPhone, an

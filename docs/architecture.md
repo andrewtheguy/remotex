@@ -22,29 +22,32 @@ axum server ── single session slot ── protocol engine
                                          └─ built-in RFB client (3.8 or Apple 003.889)
 ```
 
-Ordinary RDP and VNC source frames are decoded in the gateway and sent as tiles:
-the desktop in 64×64 tiles, each changed tile an image the browser decodes on its
-own, PNG where it holds few enough colours to be exact and JPEG at the target's
-quality where it does not, every changed tile a coarse JPEG where the link would
-take too long to carry them, and a JPEG tile sent again as PNG once it is still —
-see [The tiles](#the-tiles). wlshare, reached as `subtype = "wlshare"`, instead
-codes its own VP9 stream, at the quality and walk the target's render plan
-resolves to, for the gateway to pass through unchanged, at 4:4:4 for a browser
-whose own decoder takes it and 4:2:0 for one that does not. A
-`wlshare` desktop too large for that stream, in a session that does not resize it,
-has no picture: the session stays up and the page offers the server's outputs — see
-[past the ceiling](#past-the-ceiling). A
-Mac is reached
-over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
-Apple's viewer reaches it: in Screen Sharing's Standard mode with `subtype = "ard"`,
-or in High Performance with `ard-high-performance` (a virtual display, with its
+Where the remote makes a picture of its own, the gateway passes it untouched and
+the browser decodes or composes it. An RDP host's graphics pipeline is passed in
+every session of a target with the pipeline on, the default — see
+[RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
+wlshare, reached as `subtype = "wlshare"`, codes its own VP9 stream, at the
+quality and walk the target's render plan resolves to, at 4:4:4 for a browser
+whose own decoder takes it and 4:2:0 for one that does not. A `wlshare` desktop
+too large for that stream, in a session that does not resize it, has no picture:
+the session stays up and the page offers the server's outputs — see
+[past the ceiling](#past-the-ceiling). A Mac is reached over Apple's own RFB
+003.889 with Apple Remote Desktop authentication, as Apple's viewer reaches it:
+in High Performance with `ard-high-performance` (a virtual display, with its
 picture and sound over the Mac's media stream, as Apple's viewer takes them),
 whose AAC-ELD sound and whose picture every session passes to the browser, the
 picture as its HEVC or its H.264, neither decoded here — see
-[Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
-host's graphics pipeline is not decoded here either: on a target with the
-pipeline on, every session passes it on for the browser to compose — see
-[RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
+[Apple's media stream, passed through](#apples-media-stream-passed-through); or
+in Screen Sharing's Standard mode with `subtype = "ard"`, whose own Adaptive
+picture a session started with it passes for the page to decode.
+
+The rest is decoded in the gateway and sent as tiles: a plain VNC server's
+desktop, an RDP host's bitmap path (`egfx = false`) and a Standard Mac's Full
+quality, in 64×64 tiles, each changed tile an image the browser decodes on its
+own, PNG where it holds few enough colours to be exact and JPEG at the target's
+quality where it does not, every changed tile a coarse JPEG where the link would
+take too long to carry them, and a JPEG tile sent again as PNG once it is still —
+see [The tiles](#the-tiles).
 How a session's desktop is sized, whether it takes the remote's sound, whether
 it passes the Mac's stream and how an RDP host draws its pipeline are chosen at
 the picker before it starts — see
@@ -374,9 +377,17 @@ whose bitmap updates are sent as tiles by the gateway.
 
 ### Media paths
 
-#### The gateway's tiles, or passed untouched
+#### Passed untouched, or the gateway's tiles
 
 A session's picture reaches the browser one of two ways, both ordinary:
+- **Passed untouched**, as the remote made it, for the browser to decode or
+  compose: today an RDP host's graphics pipeline in every session of a target
+  with it on, a High Performance Mac's HEVC or its H.264 in every session,
+  whichever it was started with, a Standard Mac's Adaptive picture in a session
+  started with it, and wlshare's VP9 on a `wlshare` target, each with its rule
+  below. Another stream the user
+  asks to pass joins them with a rule of its own; do not refuse it on this
+  rule's account.
 - **Coded here** as tiles ([The tiles](#the-tiles)): the desktop in 64×64 tiles,
   a changed tile a PNG where it holds few enough colours to be exact and a JPEG at
   the target's quality where it does not, a coarse JPEG first where the link is
@@ -384,14 +395,6 @@ A session's picture reaches the browser one of two ways, both ordinary:
   as the browser paints them. The coders are
   the `jpeg-encoder` and `png` crates, both pure Rust, and the browser decodes both
   images itself.
-- **Passed untouched**, as the remote made it, for the browser to decode or
-  compose: today wlshare's VP9 on a `wlshare` target, a High Performance Mac's
-  HEVC or its H.264 in every session, whichever it was started with, a Standard
-  Mac's Adaptive picture in a session started with it, and an RDP host's
-  graphics pipeline in every session of a target with it on, each with its rule
-  below. Another stream the user
-  asks to pass joins them with a rule of its own; do not refuse it on this
-  rule's account.
 
 The goal of either way is a picture that settles to lossless wherever the source
 is lossless: a region that has stopped changing ends up on the page exactly as
@@ -779,13 +782,14 @@ the engine's own task.
 
 ### The picture
 
-Each target has one full-desktop picture path. Ordinarily it is the tiles the
-gateway codes, or wlshare's own VP9 stream, passed through. Three paths keep
-another representation the remote made: an `ard-high-performance` session passes
-the Mac's HEVC or its H.264, chosen at the picker, an `ard` session started with
-it passes the Mac's own Adaptive picture, and every session of an RDP target
-with the pipeline on passes the host's graphics pipeline for the browser to
-compose. A `wlshare` desktop past the picture ceiling in a session started without
+Each target has one full-desktop picture path. Where the remote makes a picture
+of its own, it is passed: every session of an RDP target with the pipeline on
+passes the host's graphics pipeline for the browser to compose, a `wlshare`
+target wlshare's own VP9 stream, an `ard-high-performance` session the Mac's
+HEVC or its H.264, chosen at the picker, and an `ard` session started with it
+the Mac's own Adaptive picture. Otherwise it is the tiles the gateway codes: a
+plain `vnc` server's desktop, an RDP host's bitmap path and a Standard Mac's
+Full quality. A `wlshare` desktop past the picture ceiling in a session started without
 resize has no picture until the server sends a smaller one — see
 [past the ceiling](#past-the-ceiling).
 

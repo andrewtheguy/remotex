@@ -75,8 +75,8 @@ rule as an exception, rather than refusing it or bending the rule unlisted.
   layers, the display picker as the remote's, presentation at 100%, density as
   the wire's word, and the Apple mosaic as the one rescale, made downward in the
   gateway for Standard's Combined Display.
-- [Media paths](docs/architecture.md#media-paths): the gateway's own tiles or
-  passed untouched, with a rule for each passthrough, a desktop past the ceiling,
+- [Media paths](docs/architecture.md#media-paths): passed untouched or the
+  gateway's own tiles, with a rule for each passthrough, a desktop past the ceiling,
   audio, camera and microphone.
 
 ## Packaging and platforms
