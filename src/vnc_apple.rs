@@ -102,17 +102,25 @@ pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 /// Performance picture is sent in, and at 2x one it answers with a display of
 /// its own choosing and then captures nothing of.
 ///
-/// The page holds this bound on what it reports (`remoteMinimum.ts`). Here a
-/// size under it is refused where it arrives ([`under_minimum`]), never raised
-/// to it: what is sent to the Mac is a size some client asked for, or nothing.
-/// A session passing the H.264 alone asks for a pixel less on an odd side
-/// ([`VirtualMode::even_sided`]).
+/// The gateway alone holds this bound: a client reports its window as it is,
+/// and a size under it is raised to it where it becomes a size for the Mac
+/// ([`raised_to_minimum`]), as Apple's own client never asks for less. A window
+/// smaller than the display it is then given scrolls, as every desktop larger
+/// than its window does. A configured size under it fails `check-config`
+/// ([`under_minimum`]). A session passing the H.264 alone asks for a pixel less
+/// on an odd side ([`VirtualMode::even_sided`]).
 pub const MIN_DISPLAY_POINTS: (u16, u16) = (800, 600);
 
 /// Whether a display of `points` is less than a Mac is asked for
 /// ([`MIN_DISPLAY_POINTS`]).
 pub fn under_minimum(points: (u16, u16)) -> bool {
     points.0 < MIN_DISPLAY_POINTS.0 || points.1 < MIN_DISPLAY_POINTS.1
+}
+
+/// `points` with each side raised to no less than a Mac is asked for
+/// ([`MIN_DISPLAY_POINTS`]).
+pub fn raised_to_minimum(points: (u16, u16)) -> (u16, u16) {
+    (points.0.max(MIN_DISPLAY_POINTS.0), points.1.max(MIN_DISPLAY_POINTS.1))
 }
 
 /// What this client advertises to a Mac.

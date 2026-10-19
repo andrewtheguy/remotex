@@ -50,8 +50,7 @@ export type ClientMsg =
   // false — they express case through an explicit Shift code instead.
   | { type: "key"; code: string; pressed: boolean; caps: boolean }
   // Requested desktop size in points (CSS pixels). Engines apply their own policy.
-  // The page reports a Mac no size under its own client's smallest
-  // (remoteMinimum.ts); the gateway passes on what it is told.
+  // The gateway raises a Mac's to no less than its own client's smallest.
   | { type: "viewport"; w: number; h: number }
   // Restore the target-defined default size; distinct from sending no request.
   // The screen this browser window is on: its full resolution in CSS pixels

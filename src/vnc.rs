@@ -3415,11 +3415,14 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             }
                             // The tab's window: the second display's size, in
                             // points, as the session's own viewport is the first's.
+                            // A Mac's is raised to no less than it is asked for.
                             (ClientMsg::Viewport { w, h }, Some(_)) => {
-                                if resize && virtual_display && vnc_apple::under_minimum((w, h)) {
-                                    refused_small("second display's window", (w, h));
-                                } else if resize && w > 0 && h > 0 {
-                                    desktop.lock().unwrap().second_points = Some((w, h));
+                                if resize && w > 0 && h > 0 {
+                                    desktop.lock().unwrap().second_points = Some(if virtual_display {
+                                        vnc_apple::raised_to_minimum((w, h))
+                                    } else {
+                                        (w, h)
+                                    });
                                     if let Err(e) =
                                         request_resize(&uplink, &desktop, ResizeAsk::Density, virtual_display).await
                                     {
@@ -3928,21 +3931,11 @@ enum ResizeAsk {
     Density,
 }
 
-/// Log a size reported for a Mac's virtual display that is less than a Mac is
-/// asked for ([`vnc_apple::MIN_DISPLAY_POINTS`]) and so is not acted on.
-fn refused_small(what: &str, points: (u16, u16)) {
-    let (w, h) = vnc_apple::MIN_DISPLAY_POINTS;
-    warn!(
-        "vnc: a {what} of {}x{} points is under the {w}x{h} a Mac is asked for at least; \
-         the display keeps its size",
-        points.0, points.1
-    );
-}
-
 /// Handle a browser viewport report (dynamic resize).
 ///
-/// A report under what a Mac is asked for at least is refused for a virtual
-/// display, as a zero side is for every server: logged, and nothing recorded.
+/// A zero side is refused for every server, and a report under what a Mac is
+/// asked for at least is raised to it for a virtual display
+/// ([`vnc_apple::raised_to_minimum`]).
 ///
 /// A High Performance Mac owns a virtual display, so replacing its one-mode
 /// `SetDisplayConfiguration` is the resize request — and the mode it requests is
@@ -3966,12 +3959,7 @@ async fn request_resize(
         let mut d = desktop.lock().unwrap();
         let want = match ask {
             ResizeAsk::Viewport((0, _) | (_, 0)) => return Ok(()),
-            // Less than a Mac is asked for: refused, not raised. The page
-            // reports no such window, so this is another client's.
-            ResizeAsk::Viewport(points) if virtual_display && vnc_apple::under_minimum(points) => {
-                refused_small("window", points);
-                return Ok(());
-            }
+            ResizeAsk::Viewport(points) if virtual_display => vnc_apple::raised_to_minimum(points),
             ResizeAsk::Viewport(points) => points,
             // The current size, in the points it is rendered from: the one
             // request that starts from pixels, and from this end's own. A size
@@ -10631,19 +10619,23 @@ mod tests {
         assert_eq!(written(&wire), sent);
     }
 
-    /// A window under the smallest Apple's own client allows is not asked of a
-    /// Mac's virtual display, and is not raised to it either: the report is
-    /// refused whole. Any other server takes the size it is given.
+    /// A window under the smallest Apple's own client allows is raised to it,
+    /// side by side, for a Mac's virtual display. Any other server takes the
+    /// size it is given.
     #[tokio::test]
     async fn a_mac_is_not_asked_for_less_than_its_own_clients_smallest_window() {
         let (uplink, wire) = test_uplink();
         let desktop = shared_desktop((1024, 768), None, None);
-        for small in [(320, 68), (799, 600), (800, 599), (640, 400)] {
+        for (small, raised) in [
+            ((320, 68), (800, 600)),
+            ((1280, 140), (1280, 600)),
+            ((640, 900), (800, 900)),
+            ((800, 600), (800, 600)),
+            ((1440, 900), (1440, 900)),
+        ] {
             request_resize(&uplink, &desktop, ResizeAsk::Viewport(small), true).await.unwrap();
-            assert_eq!(desktop.lock().unwrap().hp.newest_points(), None, "{small:?}");
+            assert_eq!(desktop.lock().unwrap().hp.newest_points(), Some(raised), "{small:?}");
         }
-        request_resize(&uplink, &desktop, ResizeAsk::Viewport((800, 600)), true).await.unwrap();
-        assert_eq!(desktop.lock().unwrap().hp.newest_points(), Some((800, 600)));
         assert!(written(&wire).is_empty(), "a virtual display's size waits for the window to settle");
 
         let generic = shared_desktop((1024, 768), None, None);
