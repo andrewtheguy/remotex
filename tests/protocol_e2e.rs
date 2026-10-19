@@ -1269,7 +1269,6 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         video_quality: None,
         render_adaptive: None,
         virtual_display: false,
-        audio_bitrate: None,
         audio_adaptive: None,
     }
 }

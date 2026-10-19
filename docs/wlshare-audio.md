@@ -37,9 +37,8 @@ username = "me"
 password = "…"
 ```
 
-`audio_bitrate` and `audio_adaptive` mean on this target what they mean on an
-`rdp` one, with wlshare's encoder in place of the gateway's: Opus at
-`audio_bitrate`, walked down toward the floor sound-opus fixes while the
+`audio_adaptive` means on this target what it means on an `rdp` one, with
+wlshare's encoder in place of the gateway's: Opus at 320 kbit/s, walked down toward the floor sound-opus fixes while the
 browser's link is behind. They tune a session started with its sound as Opus;
 one started with it lossless is sent FLAC, which has no rate. The
 format is chosen at the picker and is the gateway's to ask for on the wire;
@@ -98,7 +97,7 @@ a session started with lossless sound has none
 ([Lossless sound](architecture.md#lossless-sound)). As FLAC, music and speech
 cost about two-thirds of their 1.5 Mbit/s PCM rate or less on the RFB
 connection and on the browser's, and a desktop playing nothing, whose capture
-still runs, a few bytes a frame; as Opus they cost the target's bitrate on both.
+still runs, a few bytes a frame; as Opus they cost up to 320 kbit/s on both.
 
 ## What the gateway does with it
 
@@ -123,8 +122,8 @@ announces late is still taken.
   a frame; the browser's decoder is what refuses a bad one. An empty frame, one
   past the audio socket's 16-bit packet length, or one outside a begin and an
   end is dropped with a warning.
-- The Opus bitrate is the target's: `audio_bitrate` is named to wlshare with the
-  enable, and where `audio_adaptive` is on, the walk that would move an encoder
+- The Opus bitrate is the gateway's one rate, 320 kbit/s, named to wlshare with
+  the enable, and where `audio_adaptive` is on, the walk that would move an encoder
   here — sound-opus's, the crate wlshare codes with too — moves wlshare's
   instead. The pump that feeds `/ws/audio` measures how
   long its sends block, as for any target, and each rate the walk arrives at

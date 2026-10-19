@@ -2252,7 +2252,7 @@ struct Flags {
     /// `None` on every other target and wherever `audio` was not asked for.
     wlshare_audio: Option<Arc<crate::audio::AudioBridge>>,
     /// The rate, in bits per second, wlshare is asked to code Opus at until the
-    /// listener's walk asks for another: the target's `audio_bitrate`.
+    /// listener's walk asks for another: [`crate::config::AUDIO_BITRATE_KBPS`].
     audio_rate: i32,
     /// The browser's camera, on a `wlshare` target that carries one: the bridge
     /// the camera socket drives, lent to wlshare once it announces its camera

@@ -2244,6 +2244,46 @@ export function useRemoteDesktop(
       setVideoStream({ decode: "", composed: true });
     };
 
+    // Both paths update the panel, but only unsolicited pushes mirror into the
+    // browser's OS clipboard. Opening/revealing the panel is a read action; its
+    // explicit Copy button is the consent boundary for changing the local
+    // clipboard.
+    const handleClipboard = (
+      msg: Extract<ControlMsg, { type: "clipboard" }>,
+    ) => {
+      const { text, changedAtMs, requested, oversizedBytes, unconfirmed } = msg;
+      const snapshot = { text, changedAtMs, oversizedBytes, unconfirmed };
+      setRemoteClipboard((prev) => ({
+        ...snapshot,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      if (requested) {
+        // Release anyone blocked on this Fetch; a racing unsolicited push
+        // remains an automatic-sync event and does not open the panel before
+        // the actual response arrives.
+        settleClipboardWaiters(snapshot);
+      } else {
+        // A copy on the remote is immediately pastable here. Best effort by
+        // design: `writeText` rejects when the tab is unfocused, which is
+        // exactly when a remote copy is most likely to arrive. Never mirror an
+        // empty push, which would wipe the local clipboard for a non-text
+        // remote copy — a refused oversized copy arrives as one of those, and
+        // the panel is where its size is reported.
+        mirrorRemoteClipboard(text);
+      }
+    };
+
+    const handleOversize = (msg: Extract<ControlMsg, { type: "oversize" }>) => {
+      if (msg.cause) {
+        releaseAt = null;
+        setOversize(msg.cause);
+      } else if (pendingResizes.size > 0) {
+        releaseAt = resizeSeq;
+      } else {
+        release();
+      }
+    };
+
     const handleControlMsg = (msg: ControlMsg) => {
       // Any control message proves the socket attached to the slot, so reset
       // the reconnect backoff (an onopen-time reset would let a slot that
@@ -2330,34 +2370,9 @@ export function useRemoteDesktop(
         case "graphicsView":
           handleGraphicsView(msg);
           break;
-        case "clipboard": {
-          // Both paths update the panel, but only unsolicited pushes mirror
-          // into the browser's OS clipboard. Opening/revealing the panel is a
-          // read action; its explicit Copy button is the consent boundary for
-          // changing the local clipboard.
-          const { text, changedAtMs, requested, oversizedBytes, unconfirmed } =
-            msg;
-          const snapshot = { text, changedAtMs, oversizedBytes, unconfirmed };
-          setRemoteClipboard((prev) => ({
-            ...snapshot,
-            seq: (prev?.seq ?? 0) + 1,
-          }));
-          if (requested) {
-            // Release anyone blocked on this Fetch; a racing unsolicited push
-            // remains an automatic-sync event and does not open the panel
-            // before the actual response arrives.
-            settleClipboardWaiters(snapshot);
-          } else {
-            // A copy on the remote is immediately pastable here. Best effort by
-            // design: `writeText` rejects when the tab is unfocused, which is
-            // exactly when a remote copy is most likely to arrive. Never mirror an
-            // empty push, which would wipe the local clipboard for a non-text
-            // remote copy — a refused oversized copy arrives as one of those, and
-            // the panel is where its size is reported.
-            mirrorRemoteClipboard(text);
-          }
+        case "clipboard":
+          handleClipboard(msg);
           break;
-        }
         case "mosaic":
           handleMosaic(msg);
           break;
@@ -2389,14 +2404,7 @@ export function useRemoteDesktop(
           setWithheldHevc(msg.hevc);
           break;
         case "oversize":
-          if (msg.cause) {
-            releaseAt = null;
-            setOversize(msg.cause);
-          } else if (pendingResizes.size > 0) {
-            releaseAt = resizeSeq;
-          } else {
-            release();
-          }
+          handleOversize(msg);
           break;
         case "picker":
           // No target selected (idle attach, switch-target, a takeover, or an

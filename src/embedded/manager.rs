@@ -769,7 +769,7 @@ fn describe_offers(target: &TargetConfig) -> String {
 }
 
 /// A target's audio as it will sound on the wire, in a session that takes it as
-/// Opus. Kilobits because the config speaks kilobits, and the codec named the way
+/// Opus. Kilobits because a person reads them, and the codec named the way
 /// `ServerMsg::AudioFormat` names it. Lossless is the picker's other format and
 /// has no key to describe.
 fn describe_audio(target: &TargetConfig) -> String {
@@ -781,11 +781,9 @@ fn describe_audio(target: &TargetConfig) -> String {
     }
     let plan = target.audio_plan();
     let ceiling = plan.bitrate_bps / 1000;
-    let floor = sound_opus::walk::BITRATE_FLOOR as i32;
-    if plan.adaptive && floor < plan.bitrate_bps {
-        format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s, or flac", floor / 1000)
+    if plan.adaptive {
+        format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s, or flac", sound_opus::walk::BITRATE_FLOOR / 1000)
     } else {
-        // A walk with nothing under it, or none: the rate is the rate.
         format!("opus at {ceiling} kbit/s, or flac")
     }
 }
@@ -1721,8 +1719,8 @@ mod tests {
         assert!(page.contains("account password set"), "{page}");
         assert!(!page.contains("hunter2"), "a password does not reach the screen: {page}");
         assert!(
-            page.contains("opus ≤96 kbit/s, adaptive down to 32 kbit/s"),
-            "an unset dial is named at its defaults, walk included: {page}"
+            page.contains("opus ≤320 kbit/s, adaptive down to 32 kbit/s"),
+            "an unset switch is named with the one rate, walk included: {page}"
         );
         assert!(
             page.contains(&spec("render", "the host's graphics pipeline, passed through")),
