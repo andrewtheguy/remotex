@@ -1285,7 +1285,7 @@ Safari on a Mac.
   puts them ahead of the picture (`h264_parameter_sets`), so what the browser is
   sent is Annex B with its parameter sets in band, a keyframe where it holds an
   IDR. The `videoFormat` names the stream by its own set: `avc1.` and the
-  profile, constraints and level, `avc1.640020` for a 1600×1000 display.
+  profile, constraints and level, `avc1.640028` for a 1600×1000 display.
 - **The set is written saying there is no reordering.** The Mac's sequence
   parameter set has a VUI with no bitstream restriction, which leaves a decoder
   free to hold back as many pictures as its buffer has room for before it shows
