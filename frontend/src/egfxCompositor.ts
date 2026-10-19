@@ -17,11 +17,11 @@
 // Progressive's tiles are decoded side by side, on threads: workers this one
 // starts, each an instance of the module on the one memory (egfxPool.worker.ts).
 // A memory that is shared needs a page that is cross-origin isolated, which the
-// gateway's two headers make of every page it serves (src/assets.rs). The pool is
-// stopped before the paint worker is ended (`stopEgfx`), and its workers are
-// ended once their threads have returned: ending a worker whose thread waits in
-// the module frees nothing on iOS, not the memory it shares, until the tab is
-// closed.
+// gateway's two headers make of every page it serves (src/assets.rs). On an
+// iPhone or an iPad the pool is stopped before the paint worker is ended
+// (`stopEgfx`), and its workers are ended once their threads have returned:
+// ending a worker whose thread waits in the module frees nothing on iOS, not the
+// memory it shares, until the tab is closed.
 //
 // H.264 is the one codec the module does not decode (ALPHA, rdpH264.ts): a
 // run's access units are found by `scan`, decoded by the browser (egfxVideo.ts),
@@ -221,8 +221,9 @@ async function startThreads(
 
 /**
  * Stop the pool, if one was started, and end its workers once each thread has
- * returned out of the module: what ends the paint worker does this first. A
- * module loaded after composes on a pool of its own.
+ * returned out of the module: what ends the paint worker on an iPhone or an iPad
+ * does this first (desktopPainter.ts). A module loaded after composes on a pool
+ * of its own.
  */
 export async function stopEgfx(): Promise<void> {
   const pending = loaded;

@@ -9,28 +9,33 @@ const OUT_OF_MEMORY =
 /**
  * Whether `reason`, a failure the page shows, is the browser saying it ran out of
  * memory: the page then says so, and how to get the memory back
- * (`reloadFreesMemory`).
+ * (`keepsEndedWorkers`).
  */
 export function saysOutOfMemory(reason: string): boolean {
   return OUT_OF_MEMORY.test(reason);
 }
 
-/** What `reloadFreesMemory` reads of the browser. */
+/** What `keepsEndedWorkers` reads of the browser. */
 type Device = Pick<Navigator, "userAgent" | "platform" | "maxTouchPoints">;
 
 /**
- * Whether a reload gives the page's memory back, which the session then
- * reattaches with as it was. Not on an iPhone or an iPad, whatever the browser:
- * there a session's compositor keeps its memory after the session ends, until
- * the tab is closed, a reload included — an iPhone's tab failed at its seventh
- * session and on every reload after, and a new tab did not. Safari on a Mac,
- * running the same sessions, did not. There the page says to close the tab
- * instead. An iPad that asks for desktop pages names itself a Mac, and is told
- * from one by its touch points.
+ * Whether this device keeps what a worker held, its instance and the memory it
+ * shares, after the worker is ended while its thread waits in WebAssembly, until
+ * the tab is closed, a reload included: an iPhone or an iPad, whatever the
+ * browser. The compositor's pool threads wait there between jobs: an iPhone's tab
+ * ran out of memory at its seventh session that ended them so, and on every
+ * reload after, and a new tab did not. Safari on a Mac, running the same
+ * sessions, did not.
+ *
+ * So there the paint worker stops its pool before it is ended
+ * (desktopPainter.ts), and a page that ran out of memory, whose reload would
+ * end its workers so, says to close the tab rather than reload it. An iPad that
+ * asks for desktop pages names itself a Mac, and is told from one by its touch
+ * points.
  */
-export function reloadFreesMemory(device: Device = navigator): boolean {
-  const ios =
+export function keepsEndedWorkers(device: Device = navigator): boolean {
+  return (
     /iPhone|iPad|iPod/.test(device.userAgent) ||
-    (device.platform === "MacIntel" && device.maxTouchPoints > 1);
-  return !ios;
+    (device.platform === "MacIntel" && device.maxTouchPoints > 1)
+  );
 }

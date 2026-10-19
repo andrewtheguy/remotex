@@ -2,7 +2,7 @@
 // with `bun test src/memoryBudget.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { reloadFreesMemory, saysOutOfMemory } from "./memoryBudget.ts";
+import { keepsEndedWorkers, saysOutOfMemory } from "./memoryBudget.ts";
 
 test("each engine's words for running out of memory are read as that", () => {
   for (const reason of [
@@ -32,7 +32,7 @@ test("other failures are not", () => {
   }
 });
 
-test("a reload frees the memory everywhere but an iPhone or an iPad", () => {
+test("an iPhone or an iPad keeps ended workers, and nothing else does", () => {
   const iphone =
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6.1 Mobile/15E148 Safari/604.1";
   const mac =
@@ -40,36 +40,36 @@ test("a reload frees the memory everywhere but an iPhone or an iPad", () => {
   const chrome =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
   assert.equal(
-    reloadFreesMemory({
+    keepsEndedWorkers({
       userAgent: iphone,
       platform: "iPhone",
       maxTouchPoints: 5,
     }),
-    false,
+    true,
   );
   // An iPad asking for desktop pages.
   assert.equal(
-    reloadFreesMemory({
+    keepsEndedWorkers({
       userAgent: mac,
       platform: "MacIntel",
       maxTouchPoints: 5,
     }),
-    false,
+    true,
   );
   assert.equal(
-    reloadFreesMemory({
+    keepsEndedWorkers({
       userAgent: mac,
       platform: "MacIntel",
       maxTouchPoints: 0,
     }),
-    true,
+    false,
   );
   assert.equal(
-    reloadFreesMemory({
+    keepsEndedWorkers({
       userAgent: chrome,
       platform: "Win32",
       maxTouchPoints: 0,
     }),
-    true,
+    false,
   );
 });

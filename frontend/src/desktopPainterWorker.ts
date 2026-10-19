@@ -121,8 +121,9 @@ export type PainterCommand =
    */
   | { type: "sessionEnded" }
   /**
-   * The page is about to end this worker: stop what would outlive it, the
-   * compositor's pool (`stopEgfx`), and say `retired`.
+   * The page is about to end this worker on an iPhone or an iPad: stop what
+   * would outlive it there, the compositor's pool (`stopEgfx`), and say
+   * `retired`.
    */
   | { type: "retire" };
 

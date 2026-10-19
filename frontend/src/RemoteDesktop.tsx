@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import DisplayMenu from "./DisplayMenu.tsx";
 import FloatingMenu from "./FloatingMenu.tsx";
-import { reloadFreesMemory, saysOutOfMemory } from "./memoryBudget.ts";
+import { keepsEndedWorkers, saysOutOfMemory } from "./memoryBudget.ts";
 import type { DisplayInfo, HoldCause } from "./protocol.ts";
 import TargetPicker from "./TargetPicker.tsx";
 import {
@@ -505,24 +505,24 @@ export default function RemoteDesktop({
           out of memory says so, and how to get the memory back: a reload, which
           the page reattaches to the session as it was after, or on an iPhone or
           an iPad, where a reload does not give it back, a new tab
-          (`reloadFreesMemory`). */}
+          (`keepsEndedWorkers`). */}
       {videoError && mode === "desktop" && (
         <div className="video-banner" role="alert">
           {saysOutOfMemory(videoError) &&
-            (reloadFreesMemory() ? (
-              <p className="video-banner-lead">
-                This page ran out of memory. Reload it to free the memory; the
-                session stays connected and comes back.
-              </p>
-            ) : (
+            (keepsEndedWorkers() ? (
               <p className="video-banner-lead">
                 This page ran out of memory, and on this device reloading does
                 not free it. Close this tab and open the page in a new one to
                 start the session again.
               </p>
+            ) : (
+              <p className="video-banner-lead">
+                This page ran out of memory. Reload it to free the memory; the
+                session stays connected and comes back.
+              </p>
             ))}
           {videoError}
-          {saysOutOfMemory(videoError) && reloadFreesMemory() && (
+          {saysOutOfMemory(videoError) && !keepsEndedWorkers() && (
             <button
               type="button"
               className="status-action video-banner-action"
