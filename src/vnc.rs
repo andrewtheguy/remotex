@@ -684,6 +684,18 @@ struct DesktopState {
     /// How many virtual displays the session asked the Mac for, one or two: the
     /// target's `virtual_displays`. Every display configuration names that many.
     hp_displays: usize,
+    /// Every virtual display is asked for with even sides, a pixel less than the
+    /// window on an odd one ([`vnc_apple::VirtualMode::even_sided`]): the session
+    /// passes the Mac's H.264, of which a physical Mac sends no picture with an
+    /// odd side.
+    even_sides: bool,
+    /// The window's size in points as last asked of the Mac: the opening size,
+    /// then each viewport report. What a request that changes something else, the
+    /// density or the second display, asks for again ([`Self::hp_first_points`]):
+    /// the display itself may be a pixel shorter ([`Self::even_sides`]), and a
+    /// request re-derived from it would keep that pixel off a display that could
+    /// have it, a 2x one.
+    hp_points: Option<(u16, u16)>,
     /// The virtual displays as the Mac's last layout placed them, in its order.
     /// Empty until the first layout. With two, `size` and `scale` are those of the
     /// one on the session's canvas ([`Self::view`]), not the framebuffer the Mac
@@ -1214,7 +1226,8 @@ impl DesktopState {
             .enumerate()
             .map(|(leg, density)| {
                 let points = if leg == 0 { points } else { self.second_points.unwrap_or(points) };
-                vnc_apple::virtual_display_mode(points, density)
+                let mode = vnc_apple::virtual_display_mode(points, density);
+                if self.even_sides { mode.even_sided(density) } else { mode }
             })
             .collect()
     }
@@ -1229,10 +1242,14 @@ impl DesktopState {
         }
     }
 
-    /// The first virtual display's size in points, as it stands: what a request
-    /// that changes something else, the density or the second display, asks for
-    /// again.
+    /// The first virtual display's points: the window's, as last asked for
+    /// ([`Self::hp_points`]), or the display's size in points as it stands. What
+    /// a request that changes something else, the density or the second
+    /// display, asks for again.
     fn hp_first_points(&self) -> (u16, u16) {
+        if let Some(points) = self.hp_points {
+            return points;
+        }
         let (size, scale) = self.virtuals.first().map_or((self.size, self.scale), |v| (v.size, v.scale));
         let point = |v: u16| (f32::from(v) / scale).round().max(1.0) as u16;
         (point(size.0), point(size.1))
@@ -2190,6 +2207,7 @@ async fn session(
             resize: choices.resize(),
             kept: (config.wlshare() && !choices.resize())
                 .then(|| config.opening_size(choices.size, display)),
+            hp_opening: virtual_display.then(|| config.opening_size(choices.size, display)),
             apple,
             virtual_display,
             wlshare_audio,
@@ -2237,6 +2255,11 @@ struct Flags {
     /// size is either stated by [`opening_mode`] at connect (a virtual display)
     /// or never stated at all (Standard `ard` exposes physical displays).
     kept: Option<(u16, u16)>,
+    /// The size a virtual display opens at, in points ([`opening_mode`]): what a
+    /// High Performance request that changes the density asks for again until a
+    /// window reports ([`DesktopState::hp_points`]). `None` on every other
+    /// target.
+    hp_opening: Option<(u16, u16)>,
     /// Whether this is Apple's revision, 003.889, with the metadata encodings both
     /// Apple subtypes negotiate: the read loop's ZRLE stream, cursor cache and
     /// display list, and the Mac's reading of the pointer mask.
@@ -2440,7 +2463,14 @@ async fn connect(
                 "a Standard session asks the Mac for one of its qualities, Adaptive or Full, \
                  and a High Performance session's picture is its media stream"
             );
+            // A session passing the H.264 opens on a display with even sides, as
+            // every one it asks for later has ([`DesktopState::even_sides`]).
             let opening = opening_mode(config, choices.size, display);
+            let opening = if matches!(receive, Some(vnc_apple_media::Receive::H264)) {
+                opening.even_sided(display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)))
+            } else {
+                opening
+            };
             apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, receive, plan.apple_standard)
                 .await
         }
@@ -3041,6 +3071,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         macos,
         resize,
         kept,
+        hp_opening,
         apple,
         virtual_display,
         wlshare_audio,
@@ -3079,6 +3110,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         size,
         scale: UNSCALED,
         host_density,
+        even_sides: matches!(plan.passthrough(), Some(Passthrough::AppleH264)),
+        hp_points: hp_opening,
         screen: None,
         // A kept size is seeded as a held request: nothing can be asked for
         // before the server declares SetDesktopSize support, and the hold is
@@ -3949,6 +3982,7 @@ async fn request_resize(
         if virtual_display {
             // Recorded, not sent: [`hp_resize_step`] asks the Mac once the window
             // has held still — see [`HpResize`].
+            d.hp_points = Some(want);
             let noop = d.hp_noop(want);
             d.hp.report(want, noop, tokio::time::Instant::now());
             return Ok(());
@@ -10074,6 +10108,8 @@ mod tests {
             size,
             scale: UNSCALED,
             host_density: 1.0,
+            even_sides: false,
+            hp_points: None,
             screen,
             pending,
             viewport: None,
@@ -10675,6 +10711,39 @@ mod tests {
             Some(hp_config((1600, 1000), 2.0)),
             "current points, twice the pixels"
         );
+    }
+
+    /// A session passing the H.264 asks for a display with even sides, a pixel
+    /// less than the window on an odd one, and keeps the window's points.
+    #[tokio::test(start_paused = true)]
+    async fn an_h264_session_asks_for_a_display_with_even_sides() {
+        let (uplink, _wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let desktop = shared_desktop((1600, 1000), None, None);
+        desktop.lock().unwrap().even_sides = true;
+
+        request_resize(&uplink, &desktop, ResizeAsk::Viewport((1863, 983)), true).await.unwrap();
+        assert_eq!(hp_settle(&uplink, &desktop, &sink).await, Some(hp_config((1862, 982), 1.0)));
+        assert_eq!(desktop.lock().unwrap().hp_points, Some((1863, 983)), "the window's points are kept");
+    }
+
+    /// A session passing the H.264 asked for 1863×983 and got a 1862×982 display
+    /// ([`DesktopState::even_sides`]); its window moving to a 2x screen asks for
+    /// the window's points again, every side even at 2x, not the display's.
+    #[tokio::test(start_paused = true)]
+    async fn a_density_change_asks_for_the_window_again_not_the_shortened_display() {
+        let (uplink, _wire) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let desktop = shared_desktop((1862, 982), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.even_sides = true;
+            d.hp_points = Some((1863, 983));
+            d.host_density = 2.0;
+        }
+
+        request_resize(&uplink, &desktop, ResizeAsk::Density, true).await.unwrap();
+        assert_eq!(hp_settle(&uplink, &desktop, &sink).await, Some(hp_config((1863, 983), 2.0)));
     }
 
     /// A window dragged to another screen reports its new size and then its new

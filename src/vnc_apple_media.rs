@@ -53,6 +53,10 @@
 //!   for the HEVC of a session that asked for it. A display the Mac sends no
 //!   picture of in strips is the Mac's to say ([`MediaStream::withheld`]).
 //!
+//! The picture's size is the display's, in either codec: the fields do not size
+//! the picture, the virtual display does, which a session passing the H.264 asks
+//! for with even sides ([`crate::vnc_apple::VirtualMode::even_sided`]).
+//!
 //! Its bitrate entries are Apple's, and so is what bounds them: the Mac's rate
 //! controller walks the picture's target between 20 and 60 Mbit/s by the one-way delay this
 //! side reports ([`RateFeedback`]), every 50 ms as Apple's viewer does.
@@ -197,6 +201,7 @@ const ALL_STRIPS: u8 = (1 << STRIPS) - 1;
 fn strip_rows(height: u16) -> usize {
     (usize::from(height) / STRIPS).next_multiple_of(16)
 }
+
 
 /// Minimal protocol-buffers writer: varints and length-delimited fields are the
 /// whole of what the offers use.
@@ -1803,9 +1808,10 @@ impl Passer {
 
 impl Passer {
     /// [`Self::pass`] for a unit that is the whole of a display of `display`,
-    /// where one is offered. H.264's 4:2:0 has no odd size to say: the Mac codes
-    /// a display of one a column or a row short, 1280×800 at 1281×801, and the
-    /// unit is the display's all the same.
+    /// where one is offered. A session passing the H.264 asks for a display with
+    /// even sides ([`crate::vnc_apple::VirtualMode::even_sided`]); a Mac that codes
+    /// an odd one a column or a row short anyway, macvm's 1280×800 of 1281×801, is
+    /// taken as the display's all the same.
     fn pass_whole(&mut self, unit: &AccessUnit, display: Option<(u16, u16)>) -> Option<PassedUnit> {
         let passed = self.pass(unit)?;
         Some(match display {
@@ -4426,6 +4432,20 @@ mod tests {
         assert!(offered(&Offers::new(1, Receive::Hevc { strips: true }), (1600, 1000), 4));
         assert!(offered(&Offers::new(1, Receive::Hevc { strips: true }), (160, 90), 4), "the Mac says what it sends none of");
         assert!(offered(&Offers::new(1, Receive::Hevc { strips: false }), (1600, 1000), 1), "a passed stream");
+    }
+
+    /// The offer carries the display's size as it is, in either codec: offered
+    /// 1864×982 for a 1864×983 display, a physical Mac still sent no H.264
+    /// picture of it, so the fields do not size the picture, the virtual display
+    /// does ([`crate::vnc_apple::VirtualMode::even_sided`]).
+    #[test]
+    fn the_offer_carries_the_display_as_it_is() {
+        let offered = |offers: &Offers, size, codec| {
+            let want = offer(MODE_VIDEO, &video_offer_blob(offers.videos[0].ssrc, size, 1, codec), &offers.call_id);
+            offers.configuration(&[size]).windows(want.len()).any(|at| at == want)
+        };
+        assert!(offered(&Offers::new(1, Receive::H264), (1864, 983), Codec::H264));
+        assert!(offered(&Offers::new(1, Receive::Hevc { strips: false }), (1863, 983), Codec::Hevc));
     }
 
     /// Each strip's SSRC has sequence numbers of its own, so its own rollover.

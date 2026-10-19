@@ -1285,13 +1285,14 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
 
 Each offer is a binary property list of four keys around a deflated
 AVConference protobuf. Remotex rebuilds Apple's offers field by field and changes
-one field, and a second in a session that passes the picture:
+one field, and others in a session that passes the picture:
 
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. It sets the frame rate the stream is configured for, which is 30 or 60 and nothing above: 60 with it, for a display the Mac's encoder can take at 60, judged from its pixel rate over the display's pixels, and 30 without it or for a larger display. The virtual display's refresh rate does not enter it. That rate is what the encoder spaces four strips by ([Rate control](#rate-control)). |
 | `tilesPerFrame` (video stream field 6) | 4 | 4 for the HEVC, whatever the display's size; 1 for the H.264, and for an HEVC session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the page puts together. One tile is one picture of the whole display on the one SSRC. |
 | The video stream's codecs (field 3) | H.264 (123) and HEVC (100) | Both, and H.264 alone for a session started with the H.264 passthrough | Offered both the Mac sends HEVC; offered 123 alone, H.264. |
+| The picture's size (video stream fields 4 and 5) | The display's | The display's | Offered 1864×982 for a 1864×983 display, a physical Mac still sent no H.264 picture of it: the fields do not size the picture, the virtual display does, so a session passing the H.264 asks for one with even sides ([The Mac's H.264](architecture.md#the-macs-h264)). |
 
 The video offer names two codecs by their RTP payload numbers, 123 for H.264
 and 100 for HEVC, each with its own feature string. Offered both, the Mac sends
@@ -1682,8 +1683,9 @@ four strips do not fit it sends no picture at all (below).
   says "No picture at this size" in the place of "Screen not available" and
   suggests another size, and the HEVC to a session passing the H.264 to a
   browser that takes the HEVC as well, naming
-  no direction to resize in: the one case seen at a supported size is a
-  physical Mac's whole H.264
+  no direction to resize in: the one case seen at a supported size was a
+  physical Mac's whole H.264 of a display with an odd side, which a session
+  passing the H.264 no longer asks for
   ([The Mac's H.264](architecture.md#the-macs-h264)). It lifts at the display's next offer, which a resize
   brings, at a picture, or at a sender's report. The leg still owes its
   reports.
