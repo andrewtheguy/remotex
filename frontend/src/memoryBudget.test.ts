@@ -2,7 +2,7 @@
 // with `bun test src/memoryBudget.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { saysOutOfMemory } from "./memoryBudget.ts";
+import { reloadFreesMemory, saysOutOfMemory } from "./memoryBudget.ts";
 
 test("each engine's words for running out of memory are read as that", () => {
   for (const reason of [
@@ -30,4 +30,10 @@ test("other failures are not", () => {
   ]) {
     assert.equal(saysOutOfMemory(reason), false, reason);
   }
+});
+
+test("a reload frees the memory everywhere but WebKit", () => {
+  assert.equal(reloadFreesMemory("Google Inc."), true);
+  assert.equal(reloadFreesMemory(""), true);
+  assert.equal(reloadFreesMemory("Apple Computer, Inc."), false);
 });

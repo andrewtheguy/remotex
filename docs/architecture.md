@@ -258,7 +258,10 @@ whose bitmap updates are sent as tiles by the gateway.
   running; the page drops a start whose engine is at or below that.
   A picture that fails because the browser ran out of memory says so in the video
   banner, with a Reload: the page that comes back reattaches to the session with
-  its memory whole (`saysOutOfMemory` in `frontend/src/memoryBudget.ts`).
+  its memory whole (`saysOutOfMemory` in `frontend/src/memoryBudget.ts`). Not in
+  WebKit, where a shared WebAssembly memory outlives a reload of its tab and only
+  a new tab has its memory whole: there the banner says to close the tab and
+  open the page in a new one, and offers no Reload (`reloadFreesMemory`).
 - The only versioned client asset read at run time is the software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at

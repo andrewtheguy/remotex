@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import DisplayMenu from "./DisplayMenu.tsx";
 import FloatingMenu from "./FloatingMenu.tsx";
-import { saysOutOfMemory } from "./memoryBudget.ts";
+import { reloadFreesMemory, saysOutOfMemory } from "./memoryBudget.ts";
 import type { DisplayInfo, HoldCause } from "./protocol.ts";
 import TargetPicker from "./TargetPicker.tsx";
 import {
@@ -502,18 +502,26 @@ export default function RemoteDesktop({
           session is up — and this is a session that *is* up, showing nothing. It is
           also not `connectError`: nothing is wrong with the session or the gateway,
           it is this browser that cannot decode what is arriving. One that ran
-          out of memory says so and offers the reload that gives the memory
-          back: the page reattaches to the session as it was. */}
+          out of memory says so, and how to get the memory back: a reload, which
+          the page reattaches to the session as it was after, or in WebKit, where
+          a reload does not give it back, a new tab (`reloadFreesMemory`). */}
       {videoError && mode === "desktop" && (
         <div className="video-banner" role="alert">
-          {saysOutOfMemory(videoError) && (
-            <p className="video-banner-lead">
-              This page ran out of memory. Reload it to free the memory; the
-              session stays connected and comes back.
-            </p>
-          )}
+          {saysOutOfMemory(videoError) &&
+            (reloadFreesMemory() ? (
+              <p className="video-banner-lead">
+                This page ran out of memory. Reload it to free the memory; the
+                session stays connected and comes back.
+              </p>
+            ) : (
+              <p className="video-banner-lead">
+                This page ran out of memory, and in this browser reloading does
+                not free it. Close this tab and open the page in a new one to
+                start the session again.
+              </p>
+            ))}
           {videoError}
-          {saysOutOfMemory(videoError) && (
+          {saysOutOfMemory(videoError) && reloadFreesMemory() && (
             <button
               type="button"
               className="status-action video-banner-action"
