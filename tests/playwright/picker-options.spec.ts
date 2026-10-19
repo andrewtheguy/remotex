@@ -10,10 +10,10 @@
 // cannot start it. Nothing here looks at the canvas.
 //
 // It needs a gateway with an `rdp` target that configures a size, the one type that
-// offers all three choices. The tone harness in `src/server.rs` is one, with a
+// offers all three choices. The tone harness in `examples/test_tone.rs` is one, with a
 // scripted engine and no remote:
 //
-//     cargo test --lib serve_a_test_tone -- --ignored --nocapture
+//     cargo run --example test_tone
 //
 // then, against the address it prints:
 //
@@ -92,7 +92,8 @@ async function openTarget(page: Page): Promise<Locator> {
 }
 
 const SOUND = /^Sound/;
-const PASSED = "egfx is on for this target, so every session passes the host's graphics pipeline through";
+const PASSED =
+  "egfx is on for this target, so every session passes the host's graphics pipeline through";
 
 test.describe("the picker's options", () => {
   test.skip(
@@ -115,7 +116,8 @@ test.describe("the picker's options", () => {
     });
 
     // The pipeline is passed in every session of an rdp target that has it,
-    // without being named, and drawn as was chosen.
+    // without being named, and drawn as was chosen. A choice the target does not
+    // offer goes with its default, as a Standard Mac's view does.
     expect(seen.connects).toEqual([
       {
         size: "window",
@@ -123,6 +125,7 @@ test.describe("the picker's options", () => {
         passthrough: null,
         placement: "right",
         pipeline: "adaptive-region",
+        standardView: "one",
       },
     ]);
     const connected = seen.statuses.at(-1);
@@ -144,7 +147,9 @@ test.describe("the picker's options", () => {
     // A target starts closed, a gateway's only one included: nothing starts a
     // session until it is opened and Start is pressed.
     await expect(
-      page.getByRole("button", { name: targetNamePattern(PICKER_TARGET ?? "") }),
+      page.getByRole("button", {
+        name: targetNamePattern(PICKER_TARGET ?? ""),
+      }),
     ).toHaveAttribute("aria-expanded", "false");
     await expect(
       page.getByRole("button", { name: "Start", exact: true }),
@@ -158,7 +163,9 @@ test.describe("the picker's options", () => {
     await expect(sizes).toHaveCount(2);
     await expect(sizes.first()).toHaveAccessibleName(/^\d+×\d+/);
     await expect(sizes.first()).toBeChecked();
-    await expect(item.getByRole("radio", { name: FOLLOWS_WINDOW })).not.toBeChecked();
+    await expect(
+      item.getByRole("radio", { name: FOLLOWS_WINDOW }),
+    ).not.toBeChecked();
     // Its sound is ticked, and under it are the two formats, the one chosen
     // shown.
     await expect(item.getByRole("checkbox", { name: SOUND })).toBeChecked();
@@ -174,8 +181,12 @@ test.describe("the picker's options", () => {
     await expect(item).toContainText(PASSED);
     await expect(item.getByRole("checkbox", { name: /pass/i })).toHaveCount(0);
     const graphics = item.getByRole("group", { name: "Graphics" });
-    await expect(graphics.getByRole("radio", { name: /^High quality/ })).toBeChecked();
-    await expect(graphics.getByRole("radio", { name: /^H\.264/ })).toHaveCount(0);
+    await expect(
+      graphics.getByRole("radio", { name: /^High quality/ }),
+    ).toBeChecked();
+    await expect(graphics.getByRole("radio", { name: /^H\.264/ })).toHaveCount(
+      0,
+    );
     await graphics.getByRole("radio", { name: /^Adaptive \(alpha\)/ }).check();
     await expect(
       graphics.getByRole("radio", { name: /^H\.264 full screen/ }),
@@ -192,7 +203,9 @@ test.describe("the picker's options", () => {
       page.getByRole("heading", { name: "Pick a target" }),
     ).toBeVisible({ timeout: 20_000 });
     const again = await openTarget(page);
-    await expect(again.getByRole("radio", { name: FOLLOWS_WINDOW })).toBeChecked();
+    await expect(
+      again.getByRole("radio", { name: FOLLOWS_WINDOW }),
+    ).toBeChecked();
     await expect(again.getByRole("checkbox", { name: SOUND })).toBeChecked();
     await expect(again.getByRole("radio", { name: /^Opus/ })).toBeChecked();
   });
@@ -436,9 +449,9 @@ test.describe("the picker on a phone", () => {
     const sizes = item.getByRole("group", { name: "Size" }).getByRole("radio");
     await expect(sizes).toHaveCount(2);
     await expect(sizes.first()).toBeChecked();
-    await expect(
-      item.getByRole("radio", { name: FOLLOWS_WINDOW }),
-    ).toHaveCount(0);
+    await expect(item.getByRole("radio", { name: FOLLOWS_WINDOW })).toHaveCount(
+      0,
+    );
 
     // Ticking the sound takes Opus.
     await item.getByRole("checkbox", { name: SOUND }).check();

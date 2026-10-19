@@ -203,7 +203,7 @@ mod tests {
     /// was a container: `ffprobe` used to be the check that this agrees with
     /// something other than itself, and without Ogg there is nothing for a third
     /// party demuxer to read. The remaining outside readers are this decoder and
-    /// the browser's own (`server::tests::serve_a_test_tone`).
+    /// the browser's own (`examples/test_tone.rs`).
     #[test]
     fn a_tone_survives_the_round_trip() {
         let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");

@@ -166,36 +166,42 @@ export class Zgfx {
     }
     const bits = new Bits(data);
     while (bits.left > 0) {
-      if (bits.peek(1) === 0) {
-        bits.take(1);
-        this.emit(bits.take(8), out);
-        continue;
-      }
-      const literal = SHORT_LITERALS.find(
-        ([code, length]) => bits.peek(length) === code && length <= bits.left,
-      );
-      if (literal) {
-        bits.take(literal[1]);
-        this.emit(literal[2], out);
-        continue;
-      }
-      const token = DISTANCES.find(
-        ([code, length]) => bits.peek(length) === code && length <= bits.left,
-      );
-      if (!token) {
-        throw new Error("a reserved token");
-      }
-      const [, length, valueBits, base] = token;
-      bits.take(length);
-      const distance = base + bits.take(valueBits);
-      if (distance === 0) {
-        for (const byte of bits.bytes(bits.take(15))) {
-          this.emit(byte, out);
-        }
-        continue;
-      }
-      this.copy(distance, matchLength(bits), out);
+      this.token(bits, out);
     }
+  }
+
+  /// One token of a compressed segment: a literal, a match, or a run of bytes
+  /// sent as they are.
+  private token(bits: Bits, out: number[]): void {
+    if (bits.peek(1) === 0) {
+      bits.take(1);
+      this.emit(bits.take(8), out);
+      return;
+    }
+    const literal = SHORT_LITERALS.find(
+      ([code, length]) => bits.peek(length) === code && length <= bits.left,
+    );
+    if (literal) {
+      bits.take(literal[1]);
+      this.emit(literal[2], out);
+      return;
+    }
+    const token = DISTANCES.find(
+      ([code, length]) => bits.peek(length) === code && length <= bits.left,
+    );
+    if (!token) {
+      throw new Error("a reserved token");
+    }
+    const [, length, valueBits, base] = token;
+    bits.take(length);
+    const distance = base + bits.take(valueBits);
+    if (distance === 0) {
+      for (const byte of bits.bytes(bits.take(15))) {
+        this.emit(byte, out);
+      }
+      return;
+    }
+    this.copy(distance, matchLength(bits), out);
   }
 
   private emit(byte: number, out: number[]): void {

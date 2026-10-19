@@ -11,7 +11,7 @@
 // It needs a gateway with a target that actually produces audio, which the tone
 // harness in `src/server.rs` provides deterministically and without a remote:
 //
-//     cargo test --lib serve_a_test_tone -- --ignored --nocapture
+//     cargo run --example test_tone
 //
 // then, against the address it prints:
 //
@@ -105,8 +105,12 @@ test.describe("the audio socket", () => {
     await start(page, false);
 
     await page.getByRole("button", { name: "Open menu" }).click();
-    await expect(page.getByRole("button", { name: "End session" })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^(Mute|Unmute)$/ })).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "End session" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /^(Mute|Unmute)$/ }),
+    ).toHaveCount(0);
     expect(traffic.map((t) => t.url).sort()).toEqual(["/ws", "/ws/display"]);
   });
 
@@ -176,7 +180,8 @@ test.describe("the audio socket", () => {
     // that the button does anything at all.
     await expect
       .poll(
-        () => traffic.filter((t) => t.url === "/ws/audio").every((t) => t.closed),
+        () =>
+          traffic.filter((t) => t.url === "/ws/audio").every((t) => t.closed),
         { timeout: 20_000 },
       )
       .toBe(true);

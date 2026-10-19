@@ -14,7 +14,8 @@ const CRC32_TABLE = (() => {
   for (let i = 0; i < 256; i += 1) {
     let value = i;
     for (let bit = 0; bit < 8; bit += 1) {
-      value = (value & 1) === 1 ? CRC32_POLYNOMIAL ^ (value >>> 1) : value >>> 1;
+      value =
+        (value & 1) === 1 ? CRC32_POLYNOMIAL ^ (value >>> 1) : value >>> 1;
     }
     table[i] = value >>> 0;
   }

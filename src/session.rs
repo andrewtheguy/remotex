@@ -862,8 +862,10 @@ impl SessionManager {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_test_spawner(
+    /// A session slot whose engines are `spawn_engine`'s, scripted by the caller:
+    /// the tests', and the tone harness's (`examples/test_tone.rs`). Nothing in the
+    /// gateway calls it.
+    pub fn with_test_spawner(
         targets: Vec<TargetConfig>,
         spawn_engine: impl Fn(
             TargetConfig,

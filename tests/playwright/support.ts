@@ -5,7 +5,7 @@
 // configuration (workers: 1) rather than by luck — a second browser claiming the
 // slot would evict the first.
 import { execFileSync } from "node:child_process";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 export const BASE_URL =
   process.env.REMOTEX_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:52380/";
@@ -221,26 +221,9 @@ export async function logInAndConnectTo(
 // The size that follows this browser's window, as the picker names it.
 export const FOLLOWS_WINDOW = /This window's size/;
 
-// Open `target` at the picker, set its options to `choices` and press Start.
-//
-// The target's button opens it rather than connecting, and says whether it is open:
-// one left open by an earlier Start on this picker would be closed by a second
-// click. An
-// option the target does not show is left alone when it is not asked for; one that
-// is asked for and is absent or greyed fails here, by name, rather than as a
-// session that started without it.
-export async function startTarget(
-  page: Page,
-  target: string,
-  choices: StartChoices,
-): Promise<void> {
-  const row = page.getByRole("button", { name: targetNamePattern(target) });
-  if ((await row.getAttribute("aria-expanded")) !== "true") {
-    await row.click();
-  }
-  const item = page.getByRole("listitem").filter({ has: row });
-  // The size is a pair of radio buttons where the target offers two, the kept size
-  // first, and one stated line otherwise.
+// The size is a pair of radio buttons where the target offers two, the kept size
+// first, and one stated line otherwise.
+async function chooseSize(item: Locator, choices: StartChoices): Promise<void> {
   const follows = item.getByRole("radio", { name: FOLLOWS_WINDOW });
   if ((await follows.count()) > 0) {
     const size = choices.resize
@@ -250,7 +233,13 @@ export async function startTarget(
   } else if (choices.resize) {
     await expect(item).toContainText(FOLLOWS_WINDOW);
   }
-  // Sound is ticked or not, where the target offers it: asked for, it is Opus.
+}
+
+// Sound is ticked or not, where the target offers it: asked for, it is Opus.
+async function chooseSound(
+  item: Locator,
+  choices: StartChoices,
+): Promise<void> {
   const sound = item.getByRole("checkbox", { name: /^Sound/ });
   if (choices.sound || (await sound.count()) > 0) {
     await sound.setChecked(choices.sound ?? false, {
@@ -262,8 +251,14 @@ export async function startTarget(
       .getByRole("radio", { name: /^Opus/ })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
-  // How the host draws the pipeline, where the target has one: high quality, or
-  // adaptive and then its H.264 over the full screen or by region.
+}
+
+// How the host draws the pipeline, where the target has one: high quality, or
+// adaptive and then its H.264 over the full screen or by region.
+async function choosePipeline(
+  item: Locator,
+  choices: StartChoices,
+): Promise<void> {
   const graphics = item.getByRole("group", { name: "Graphics" });
   const pipeline = choices.pipeline ?? "high-quality";
   if (pipeline !== "high-quality" || (await graphics.count()) > 0) {
@@ -283,7 +278,10 @@ export async function startTarget(
       })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
-  // A Standard Mac's screens: one at a time, or Combined Display.
+}
+
+// A Standard Mac's screens: one at a time, or Combined Display.
+async function chooseView(item: Locator, choices: StartChoices): Promise<void> {
   const views = item.getByRole("group", { name: "Displays" });
   const view = choices.standardView ?? "one";
   if (view !== "one" || (await views.count()) > 0) {
@@ -293,8 +291,14 @@ export async function startTarget(
       })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
-  // A Mac's picture: which of its streams is passed, where one is asked for, or
-  // the gateway's tiles of a Standard Mac's Full quality.
+}
+
+// A Mac's picture: which of its streams is passed, where one is asked for, or
+// the gateway's tiles of a Standard Mac's Full quality.
+async function choosePicture(
+  item: Locator,
+  choices: StartChoices,
+): Promise<void> {
   if (choices.passthrough !== undefined) {
     const names = {
       "apple-media": /^HEVC, passed through/,
@@ -310,6 +314,31 @@ export async function startTarget(
       .getByRole("radio", { name })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
+}
+
+// Open `target` at the picker, set its options to `choices` and press Start.
+//
+// The target's button opens it rather than connecting, and says whether it is open:
+// one left open by an earlier Start on this picker would be closed by a second
+// click. An
+// option the target does not show is left alone when it is not asked for; one that
+// is asked for and is absent or greyed fails here, by name, rather than as a
+// session that started without it.
+export async function startTarget(
+  page: Page,
+  target: string,
+  choices: StartChoices,
+): Promise<void> {
+  const row = page.getByRole("button", { name: targetNamePattern(target) });
+  if ((await row.getAttribute("aria-expanded")) !== "true") {
+    await row.click();
+  }
+  const item = page.getByRole("listitem").filter({ has: row });
+  await chooseSize(item, choices);
+  await chooseSound(item, choices);
+  await choosePipeline(item, choices);
+  await chooseView(item, choices);
+  await choosePicture(item, choices);
   await item.getByRole("button", { name: "Start", exact: true }).click();
 }
 

@@ -22,12 +22,16 @@
 //!
 //! ```sh
 //! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> \
-//!   cargo test --release --test rdp_damage_probe -- --ignored --nocapture
+//!   cargo run --release --example rdp_damage_probe -- a_real_host_reports_every_pixel_it_paints a_host_redraw_matches_what_was_decoded
 //! ```
 //!
 //! Play something on the remote first: a still desktop reports nothing and proves
-//! nothing.
+//! nothing. `pwsh tests/rdp_motion.ps1 start` puts a full-screen moving picture on
+//! it, and `stop` takes it off again, as [`a_host_redraw_matches_what_was_decoded`]
+//! wants: it compares a redraw of a desktop that has settled.
 
+#[path = "../tests/common/mod.rs"]
+#[allow(dead_code)]
 mod common;
 
 use std::time::{Duration, Instant};
@@ -265,8 +269,7 @@ fn dump(name: &str, width: u32, height: u32, pixels: &[u8]) {
     println!("  wrote {}", path.display());
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a real Windows host, named by REMOTEX_UAT_TARGET"]
+/// A case: Needs a real Windows host, named by REMOTEX_UAT_TARGET.
 async fn a_real_host_reports_every_pixel_it_paints() {
     let (session, mut events) = connect();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -448,10 +451,9 @@ fn differing_cells(width: u32, height: u32, a: &[u8], b: &[u8]) -> Vec<(u32, u32
 ///
 /// ```sh
 /// REMOTEX_UAT_TARGET=<rdp target> REMOTEX_DAMAGE_SCROLL=960,500 REMOTEX_DAMAGE_DUMP=tmp/qa/decode \
-///   cargo test --release --test rdp_damage_probe a_host_redraw -- --ignored --nocapture
+///   cargo run --release --example rdp_damage_probe -- a_host_redraw_matches_what_was_decoded
 /// ```
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a real Windows host, named by REMOTEX_UAT_TARGET"]
+/// A case: Needs a real Windows host, named by REMOTEX_UAT_TARGET.
 async fn a_host_redraw_matches_what_was_decoded() {
     common::init_logging();
     let (session, mut events) = connect();
@@ -581,4 +583,24 @@ async fn a_host_redraw_matches_what_was_decoded() {
     }
     dump("decoded", width, height, &decoded);
     dump("redraw", width, height, &redraws[0]);
+}
+
+/// The cases this runs, named on its command line, in the order named.
+const CASES: &[&str] = &["a_real_host_reports_every_pixel_it_paints", "a_host_redraw_matches_what_was_decoded"];
+
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
+    let named: Vec<String> = std::env::args().skip(1).collect();
+    if named.is_empty() || named.iter().any(|case| !CASES.contains(&case.as_str())) {
+        eprintln!("usage: cargo run --example rdp_damage_probe -- CASE...\ncases: {}", CASES.join(", "));
+        std::process::exit(2);
+    }
+    for case in named {
+        println!("== {case}");
+        match case.as_str() {
+            "a_real_host_reports_every_pixel_it_paints" => a_real_host_reports_every_pixel_it_paints().await,
+            "a_host_redraw_matches_what_was_decoded" => a_host_redraw_matches_what_was_decoded().await,
+            _ => unreachable!("checked above"),
+        }
+    }
 }

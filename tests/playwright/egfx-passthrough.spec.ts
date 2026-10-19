@@ -121,6 +121,21 @@ function wholeCommands(run: Buffer): boolean {
   return at === run.length;
 }
 
+/// One run's message unwrapped by `zgfx`: whether it is whole PDUs and how many
+/// of them are H.264, or null where it does not unwrap.
+function unwrapRun(
+  zgfx: Zgfx,
+  message: Buffer,
+): { whole: boolean; h264: number } | null {
+  let commands: Buffer;
+  try {
+    commands = Buffer.from(zgfx.unwrap(message));
+  } catch {
+    return null;
+  }
+  return { whole: wholeCommands(commands), h264: h264Commands(commands) };
+}
+
 /// A batch's records, each message unwrapped by `zgfx`, the pipeline's decoder, in
 /// order: none for records that arrived before their pipeline was said to begin,
 /// which are only counted.
@@ -150,18 +165,13 @@ function parseBatch(payload: Buffer, zgfx: Zgfx | null): Batch {
       exact = false;
       break;
     }
-    if (zgfx) {
-      let commands: Buffer | null = null;
-      try {
-        const message = payload.subarray(start, start + length);
-        commands = Buffer.from(zgfx.unwrap(message));
-      } catch {
-        unwrapped = false;
-      }
-      if (commands) {
-        whole &&= wholeCommands(commands);
-        h264 += h264Commands(commands);
-      }
+    const read =
+      zgfx && unwrapRun(zgfx, payload.subarray(start, start + length));
+    if (read) {
+      whole &&= read.whole;
+      h264 += read.h264;
+    } else if (zgfx) {
+      unwrapped = false;
     }
     runs.push(length);
     at = start + length;
@@ -591,9 +601,9 @@ test.describe("a target whose passed pipeline may carry H.264", () => {
 
     // The host is told it may draw with H.264 only for a page that said it
     // decodes it, and the session says which it is.
-    await expect.poll(() => seen.connected?.render, { timeout: 20_000 }).toBe(
-      "the host's graphics pipeline with H.264, passed through",
-    );
+    await expect
+      .poll(() => seen.connected?.render, { timeout: 20_000 })
+      .toBe("the host's graphics pipeline with H.264, passed through");
     expect(seen.decodesH264).toBe("true");
 
     // A batch that carries H.264 is acknowledged only once every access unit in

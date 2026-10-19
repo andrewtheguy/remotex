@@ -74,7 +74,11 @@ interface Session {
   pageHevc?: string;
   /** The `choices` of every `connect` the page sent. */
   connects: Record<string, unknown>[];
-  formats: { decode: string; passthrough: boolean }[];
+  /**
+   * The `decode` of every `videoFormat`, each a passed stream's: the gateway's
+   * own picture is tiles, announced by `tilesStart`.
+   */
+  formats: { decode: string }[];
   /** The sequence of the first batch that opens with a keyframe after a passed format. */
   passedKeyframe?: number;
   /** Every `paintAck` sequence the page sent. */
@@ -127,17 +131,14 @@ function watchSession(page: Page): Session {
       if (typeof payload === "string") {
         const message = JSON.parse(payload);
         if (message.type === "videoFormat") {
-          seen.formats.push({
-            decode: message.decode,
-            passthrough: message.passthrough === true,
-          });
+          seen.formats.push({ decode: message.decode });
         }
         return;
       }
       if (payload.readUInt8(0) !== BATCH_FRAME_KIND) {
         return;
       }
-      const passed = seen.formats.at(-1)?.passthrough === true;
+      const passed = seen.formats.length > 0;
       if (
         passed &&
         seen.passedKeyframe === undefined &&
@@ -177,9 +178,9 @@ async function offered(page: Page): Promise<unknown> {
 /// or repaint request before it: decoded, or failed and said so first.
 async function expectPassedPicture(page: Page, seen: Session): Promise<void> {
   await expect
-    .poll(() => seen.formats.some((f) => f.passthrough), { timeout: 20_000 })
-    .toBe(true);
-  for (const format of seen.formats.filter((f) => f.passthrough)) {
+    .poll(() => seen.formats.length, { timeout: 20_000 })
+    .toBeGreaterThan(0);
+  for (const format of seen.formats) {
     expect(format.decode).toMatch(/^hev1\./);
   }
   await expect
@@ -249,7 +250,6 @@ export async function expectDecodedAsTheBrowserSays(page: Page): Promise<void> {
       .poll(() => seen.formats.length, { timeout: 20_000 })
       .toBeGreaterThan(0);
     for (const format of seen.formats) {
-      expect(format.passthrough).toBe(true);
       expect(format.decode).toMatch(/^avc1\./);
     }
     expect(seen.decoderFiles).toEqual([]);

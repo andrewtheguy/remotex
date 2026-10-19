@@ -2,7 +2,7 @@
 // the only part of the player a test can reach: everything around it is an
 // AudioContext, a WebCodecs decoder and Web Audio nodes, none of which exist here.
 // What a browser adds — whether it can decode Opus at all — no unit test can answer;
-// that is `cargo test --lib serve_a_test_tone -- --ignored` on each browser.
+// that is `cargo run --example test_tone` on each browser.
 //
 // Run with `bun test src/audioSchedule.test.ts` from frontend/.
 import assert from "node:assert/strict";

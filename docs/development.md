@@ -78,10 +78,32 @@ reachable from the machine running the tests; an SSH config alias is not
 resolved for the tests' direct VNC connections.
 
 RDP has no container that represents the server this project supports first:
-Windows' own Remote Desktop over NLA. Its end-to-end tests therefore borrow a
-real Windows machine — see
-[`tests/rdp_proto_probe.rs`](../tests/rdp_proto_probe.rs) and
-[`tests/rdp_client_probe.rs`](../tests/rdp_client_probe.rs).
+Windows' own Remote Desktop over NLA. Its end-to-end checks therefore borrow a
+real Windows machine, named from the operator's `tmp/test_uat.toml`, and some
+want a moving picture on its desktop first, which
+[`tests/rdp_motion.ps1`](../tests/rdp_motion.ps1) `start`s and `stop`s. So
+they are not tests that a run of the ignored ones would reach and wait on, but
+examples run on demand, each with the cases named on its command line, under
+`examples/`:
+
+```sh
+REMOTEX_UAT_TARGET=windows-ent-sandbox \
+cargo run --example rdp_client_probe -- a_real_host_paints_and_resizes
+```
+
+Run one with no case to list its cases. The usage of each is at the top of its
+file: [`rdp_proto_probe`](../examples/rdp_proto_probe.rs) and
+[`rdp_client_probe`](../examples/rdp_client_probe.rs) are the client against a
+host, and [`rdp_link_probe`](../examples/rdp_link_probe.rs),
+[`rdp_damage_probe`](../examples/rdp_damage_probe.rs) and
+[`rdp_repaint_probe`](../examples/rdp_repaint_probe.rs) measure one. `cargo test`
+builds them all, and runs the unit tests the link and protocol probes hold.
+
+[`test_tone`](../examples/test_tone.rs) is the same kind of tool for the browser's
+half of sound: the gateway's own router in front of a scripted engine that plays a
+440 Hz tone, served until it is stopped, for a browser to listen to and for the
+Playwright specs that need a target with sound and no remote
+([`tests/playwright`](../tests/playwright/README.md)).
 
 Stable headless browser checks for DOM/control-plane flows live under
 [`tests/playwright`](../tests/playwright/README.md). They intentionally do not

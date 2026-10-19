@@ -6,14 +6,14 @@
 //! a time, and it prints what the host drew for it.
 //!
 //! ```sh
-//! REMOTEX_UAT_TARGET=windows-ent-sandbox REMOTEX_UAT_MOTION=tmp/link-probe/motion.ps1 \
+//! REMOTEX_UAT_TARGET=windows-ent-sandbox REMOTEX_UAT_MOTION=tests/rdp_motion.ps1 \
 //!   REMOTEX_UAT_PAGE_KBPS=8000 \
-//!   cargo test --profile qa --test rdp_link_probe -- --ignored --nocapture
+//!   cargo run --profile qa --example rdp_link_probe -- a_real_host_draws_for_a_slow_client
 //! ```
 //!
 //! [`MOTION_ENV`] names a script run with `start` once the desktop is up and
-//! `stop` at the end, to put the same moving picture on the host each time; without
-//! it, play something there first.
+//! `stop` at the end, to put the same moving picture on the host each time:
+//! `tests/rdp_motion.ps1` is one. Without it, play something there first.
 //!
 //! - [`PAGE_ENV`] is a page on a link of that many kbit/s behind a gateway: each
 //!   frame is said to be composed when the bytes passed so far would have crossed
@@ -25,7 +25,7 @@
 //! - [`THROTTLE_ENV`] makes the link to the host itself slow: `4000:100` puts a
 //!   relay in front of the host that reads from it at 4 Mbit/s, through a small
 //!   receive buffer so the host's own socket backs up, and holds everything sent
-//!   to it for 100 ms; a third number is that buffer in kilobytes, and a fourth
+//!   to it for 100 ms (a rate of `0` reads it unlimited); a third number is that buffer in kilobytes, and a fourth
 //!   how many seconds in the relay stops limiting, to see whether the host goes
 //!   back.
 //! - [`H264_ENV`] lets the host draw with H.264: `1` where it chooses, by region
@@ -53,6 +53,12 @@
 //! the frames were composed. Nothing but a drawing host is asserted: the rest is
 //! the measurement.
 
+// Built as a test too (Cargo.toml), for the unit tests below, where `main`
+// and what only it reaches are not called.
+#![cfg_attr(test, allow(dead_code))]
+
+#[path = "../tests/common/mod.rs"]
+#[allow(dead_code)]
 mod common;
 
 use std::collections::BTreeMap;
@@ -80,9 +86,9 @@ const SIZE: (u32, u32) = (1280, 800);
 const WINDOW: Duration = Duration::from_secs(5);
 
 /// A relay to `host:port` that is a slow link: what the host sends is read at
-/// `kbps` through a small receive buffer, and what is sent to the host is held for
-/// `delay`. Returns the local port it listens on, for one connection.
-async fn throttle(host: &str, port: u16, kbps: u64, delay: Duration, buffer_kb: u32, lift: Option<Duration>) -> u16 {
+/// `kbps`, or as it comes without one, through a small receive buffer, and what
+/// is sent to the host is held for `delay`. Returns the local port it listens on, for one connection.
+async fn throttle(host: &str, port: u16, kbps: Option<u64>, delay: Duration, buffer_kb: u32, lift: Option<Duration>) -> u16 {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let bare = host.trim_start_matches('[').trim_end_matches(']').to_owned();
     let address = tokio::net::lookup_host((bare, port))
@@ -135,6 +141,7 @@ async fn throttle(host: &str, port: u16, kbps: u64, delay: Duration, buffer_kb: 
             if lift.is_some_and(|lift| opened.elapsed() >= lift) {
                 continue;
             }
+            let Some(kbps) = kbps else { continue };
             free = free.max(tokio::time::Instant::now() - Duration::from_millis(20))
                 + Duration::from_micros(n as u64 * 8000 / kbps);
             tokio::time::sleep_until(free).await;
@@ -402,8 +409,7 @@ impl Tally {
     }
 }
 
-#[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml, with a moving picture on its desktop"]
+/// A case: Drives a real RDP host named in tmp/test_uat.toml, with a moving picture on its desktop.
 async fn a_real_host_draws_for_a_slow_client() {
     common::init_logging();
     let name = std::env::var(TARGET_ENV)
@@ -424,6 +430,7 @@ async fn a_real_host_draws_for_a_slow_client() {
         let mut parts = said.split(':');
         let mut number = |otherwise: u64| parts.next().map_or(otherwise, |part| part.parse::<u64>().expect("a number"));
         let (kbps, delay, buffer_kb, lift) = (number(0), number(0), number(16), number(0));
+        let kbps = (kbps > 0).then_some(kbps);
         (kbps, Duration::from_millis(delay), buffer_kb as u32, (lift > 0).then(|| Duration::from_secs(lift)))
     });
     println!(
@@ -467,8 +474,10 @@ async fn a_real_host_draws_for_a_slow_client() {
             acknowledger.frame_composed(frame);
         }
     });
-    // When the page's link is free of everything passed so far.
-    let page_kbps: Option<u64> = std::env::var(PAGE_ENV).ok().map(|said| said.parse().expect("kbit/s"));
+    // When the page's link is free of everything passed so far. A rate of 0 is no
+    // link to wait for.
+    let page_kbps: Option<u64> =
+        std::env::var(PAGE_ENV).ok().map(|said| said.parse().expect("kbit/s")).filter(|&kbps| kbps > 0);
     let mut link_free = tokio::time::Instant::now();
     let epoch = tokio::time::Instant::now();
     // Returns the page's clock, in milliseconds, when it composes the frame.
@@ -571,6 +580,7 @@ async fn a_real_host_draws_for_a_slow_client() {
 }
 
 /// A StartFrame timestamp, packed as 2.2.2.11 lays it out.
+#[cfg(test)]
 fn packed(hours: u32, minutes: u32, seconds: u32, millis: u32) -> u32 {
     (hours << 22) | (minutes << 16) | (seconds << 10) | millis
 }
@@ -599,4 +609,23 @@ fn the_lag_is_taken_around_the_hosts_midnight() {
     assert_eq!(lag(first, nearest), 0);
     assert_eq!(lag(second, nearest), 0);
     assert_eq!(lag(first + 30, nearest), 30, "a later composition is behind by what it waited");
+}
+
+/// The cases this runs, named on its command line, in the order named.
+const CASES: &[&str] = &["a_real_host_draws_for_a_slow_client"];
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let named: Vec<String> = std::env::args().skip(1).collect();
+    if named.is_empty() || named.iter().any(|case| !CASES.contains(&case.as_str())) {
+        eprintln!("usage: cargo run --example rdp_link_probe -- CASE...\ncases: {}", CASES.join(", "));
+        std::process::exit(2);
+    }
+    for case in named {
+        println!("== {case}");
+        match case.as_str() {
+            "a_real_host_draws_for_a_slow_client" => a_real_host_draws_for_a_slow_client().await,
+            _ => unreachable!("checked above"),
+        }
+    }
 }

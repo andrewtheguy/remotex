@@ -33,7 +33,7 @@ speaks what this client implements may happen to work, but that is neither
 tested nor promised. Where [MS-RDPBCGR] is silent
 or wrong about what such a host really does — and it is, in places, about both —
 the reference is FreeRDP's `libfreerdp/core`, and the arbiter is a real host:
-`tests/rdp_proto_probe.rs` and `tests/rdp_client_probe.rs` drive one named in the
+`examples/rdp_proto_probe.rs` and `examples/rdp_client_probe.rs` drive one named in the
 operator's `tmp/test_uat.toml`. Several of the decisions below are marked as
 measured rather than read, and each of those is a place where the specification
 alone would have produced a client that connects and then quietly does nothing.
@@ -405,7 +405,7 @@ flush. A monitor layout is answered by ResetGraphics, which the session
 announces as `Event::Resize` without rebuilding the channels.
 
 The support boundary is the set below, not every command or codec a current
-Windows release could send. `tests/rdp_client_probe.rs` prints the codec and
+Windows release could send. `examples/rdp_client_probe.rs` prints the codec and
 command tally for the particular host and session under test, so a newly observed
 kind is visible instead of being inferred from an earlier run.
 
@@ -547,7 +547,7 @@ desktop, and read as it came, under `PASSED_AHEAD`, a sixth of one.
 
 Measured against a Windows 11 host drawing one full-screen moving picture at
 1280×800, with a caller that took the frames as a link of a given rate would
-(`tests/rdp_link_probe.rs`):
+(`examples/rdp_link_probe.rs`):
 
 | The caller's link | Socket read as it came | Socket left while two wait |
 | --- | --- | --- |
@@ -577,7 +577,7 @@ mappings, which this client ignores, and only 10.7 has a flag to say so. Version
 10.1's capability data is sixteen reserved bytes where every other set's is four
 bytes of flags, in the advertise and in a confirmation of it. `AVC_THINCLIENT`,
 which asks for the whole desktop in AVC444 (MS-RDPEGFX 2.2.3.6), is set only by
-`H264::WholeDesktop`, on every set from 10.3; `tests/rdp_link_probe.rs` asks
+`H264::WholeDesktop`, on every set from 10.3; `examples/rdp_link_probe.rs` asks
 for it with `REMOTEX_UAT_H264=whole`. Measured against a
 Windows 11 host without a GPU: it confirms 10.7 and goes on drawing with
 ClearCodec, Progressive and the caches, and draws what moves like video with
@@ -602,12 +602,12 @@ surfaces whose streams have ended, the caller decodes each unit through its
 surface's decoder and supplies the picture (`Compositor::supply`), and the run is
 composed, painting the masked rectangles from those samples as full-range BT.709.
 A unit whose picture was not supplied leaves its rectangles as they were.
-`a_real_host_draws_video_with_h264` in `tests/rdp_client_probe.rs` checks what is
+`a_real_host_draws_video_with_h264` in `examples/rdp_client_probe.rs` checks what is
 passed against a host playing a video.
 
 `Compositor` (`compositor.rs`) is the other half: the same compositor, fed the
 commands that were passed. The page's WebAssembly module is a binding around it
-(`frontend/wasm/egfx`), and `tests/rdp_client_probe.rs` composes what a real
+(`frontend/wasm/egfx`), and `examples/rdp_client_probe.rs` composes what a real
 host's session passes with it, test-side (`Page`). It is right only for a
 pipeline it has followed from
 its first command, which is why `Event::FramesMarked` is where a caller starts
@@ -897,7 +897,7 @@ rather than truncated, in both directions — a partial paste cannot be told fro
 whole one. A remote copy too large even to receive is reported as its size, which
 is what the panel says instead of showing text that is not there.
 
-`tests/rdp_client_probe.rs` drives the whole of it against a real host, including
+`examples/rdp_client_probe.rs` drives the whole of it against a real host, including
 the part no gateway can do for itself: it takes the remote clipboard over, has the
 remote paste it and copy what it pasted, and compares the bytes that come back
 with the bytes that went out.
@@ -991,7 +991,7 @@ go to a `CameraSink` on that thread. `src/rdp_camera.rs` is the gateway's adapte
 sink becomes `CameraBridge` signals, and the bridge's control becomes the session's
 feed.
 
-`tests/rdp_client_probe.rs` plugs a camera into a real host and, under
+`examples/rdp_client_probe.rs` plugs a camera into a real host and, under
 `REMOTEX_UAT_CAMERA=1`, asserts that the host agreed version 2 and opened the
 announced device's channel; `RUST_LOG=remotex=debug` shows the host's device queries
 and this end's answers.
@@ -1025,11 +1025,12 @@ than a gap. A host channel close or socket close flushes queued and partial
 audio, so a later Open begins with a fresh stream. The protocol state machine is
 `rdp_client/proto/rdpeai.rs`; `src/rdp_mic.rs` is its bridge adapter.
 
-`tests/rdp_client_probe.rs` drives a real host's Recording panel in
+`examples/rdp_client_probe.rs` drives a real host's Recording panel in
 `a_real_host_records_the_microphone`. With `REMOTEX_UAT_MICROPHONE=1` it asserts
 version negotiation, then feeds a tone for the host's level meter while the
-device is open. Like the camera probe it is ignored by default and does not
-automatically inspect what the remote application heard.
+device is open. Like the camera probe it runs only when named on the probe's
+command line, and does not automatically inspect what the remote application
+heard.
 
 ## Sound (MS-RDPEA)
 
@@ -1063,7 +1064,7 @@ format list once per channel and a Close after every stream.
 The measured part: a Windows host negotiates nothing until something plays. A
 session opened onto a quiet desktop shows the dynamic channel opened and not a byte
 on it, for as long as the desktop stays quiet, and a probe that asserts on the
-format list fails there through no fault in the client. `tests/rdp_client_probe.rs`
+format list fails there through no fault in the client. `examples/rdp_client_probe.rs`
 asserts the negotiation only under `REMOTEX_UAT_AUDIO=1`, which is the run's word
 that a sound is playing on the remote; without it the counts are printed.
 

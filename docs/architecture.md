@@ -1438,7 +1438,7 @@ for itself* below describe, and with Adaptive by its rate control
 
 The compositor the page runs is the gateway's own, unit tested
 as it is there, and the module built from it is tested as the page loads it.
-What is passed is checked against a real host: `tests/rdp_client_probe.rs`
+What is passed is checked against a real host: `examples/rdp_client_probe.rs`
 composes what a session passes test-side, with the page's compositor,
 `tests/playwright/egfx-passthrough.spec.ts` reads the display socket of a
 headless browser composing one, and `tests/playwright/egfx-two-displays.spec.ts`
@@ -2418,7 +2418,7 @@ each has been rediscovered the hard way more than once:
   silent, the gateway logs "arming audio, the remote's audio channel is not up
   yet", and the browser's Audio button has nothing to play. A session with no
   sound is not, by that alone, a session with anything wrong; start a sound on the
-  remote before deciding the client is broken; `tests/rdp_client_probe.rs` asserts
+  remote before deciding the client is broken; `examples/rdp_client_probe.rs` asserts
   the negotiation only under `REMOTEX_UAT_AUDIO=1`, which says one is playing.
 - **No `rdpdr`, no sound.** A host redirects no audio to a client that named
   `rdpsnd` without also naming the device-redirection channel, even with no device
@@ -2533,7 +2533,7 @@ everything else here — the claim and engine binding, the eviction, the
 byte-for-byte control frames — and so is the MS-RDPECAM wire the RDP client
 speaks, against the specification's own examples. The wlshare path is exercised
 by its container test; RDP has no container host.
-`tests/rdp_client_probe.rs` checks against a real host that the camera is
+`examples/rdp_client_probe.rs` checks against a real host that the camera is
 negotiated and its device opened, and its `a_real_host_streams_the_camera` opens
 the host's Camera app and carries H.264 frames from a file to it. Like every real-host
 probe it is ignored by default, and it checks that the host started the stream
@@ -2640,7 +2640,7 @@ dynamic channel. The host speaks first: version, recording formats, then an Open
 when an application records. The client offers exactly one of the host's 16-bit
 PCM formats, preferring mono and 16 kHz, and cuts the decoded PCM into the
 `FramesPerPacket` groups the host named. A full sixteen-buffer queue drops its
-oldest audio. `tests/rdp_client_probe.rs` drives this negotiation against a real
+oldest audio. `examples/rdp_client_probe.rs` drives this negotiation against a real
 host under `REMOTEX_UAT_MICROPHONE=1` and feeds a tone while the host's Recording
 panel holds the device open. See
 [The RDP client](rdp-client.md#microphone-ms-rdpeai).

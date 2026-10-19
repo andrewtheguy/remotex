@@ -233,8 +233,10 @@ bun run --cwd frontend check
 
 The end-to-end tests under `tests/` are ignored by default: the VNC and wlshare
 ones need Docker or Podman (`cargo test --test vnc_e2e --test wlshare_e2e --
---ignored`), the RDP probes borrow a real Windows host, and the headless browser
-tests are described in [`tests/playwright`](tests/playwright/README.md).
+--ignored`). The RDP probes borrow a real Windows host, so they are examples run
+on demand rather than tests (`cargo run --example rdp_client_probe -- <case>`),
+and the headless browser tests are described in
+[`tests/playwright`](tests/playwright/README.md).
 [Development](docs/development.md) has the details, and
 [Packaging](packaging/README.md) covers release builds.
 
