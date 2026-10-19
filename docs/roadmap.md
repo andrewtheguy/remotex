@@ -205,9 +205,8 @@ MS-RDPEI is a *dynamic* channel and that transport is already here:
 every Create Request it does not want with `NO_LISTENER` (`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
 touch event's contact frames — and the contact state machine are the work.
 
-The rest is waiting for it. A host that opens the channel becomes
-`Event::TouchReady`, which the engine forwards as `ServerMsg::TouchReady` and
-re-sends to each client that attaches; the browser offers the passthrough toggle
+The rest is waiting for it. A host that opens the channel is to be forwarded as
+`ServerMsg::TouchReady` and re-sent to each client that attaches; the browser offers the passthrough toggle
 only after that, and `rdp.rs` drops a `ClientMsg::Touch` today because no engine
 can report one. Held contacts must be released when a client goes away, or the
 remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and

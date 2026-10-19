@@ -422,8 +422,8 @@ composes an RDP host's graphics pipeline, whether it decodes the H.264 such
 a pipeline may carry, and whether its own decoder takes 4:4:4 VP9. The last
 two refuse nobody. The H.264 answer decides only whether a passed pipeline's host is
 told it may draw with H.264, in a session started with Adaptive; a browser that
-says no has Adaptive greyed, and a session it reaches all the same, a
-takeover's, is drawn without it. The VP9 answer decides only whether a
+says no has Adaptive greyed, and a `connect` from it that names Adaptive all
+the same is drawn without it. The VP9 answer decides only whether a
 `wlshare` target's stream is 4:4:4 or 4:2:0 for it ([the codec](#the-codec)).
 The other two say which passthrough the browser
 can take. The Mac's greys its HEVC at the picker, where a browser that says
@@ -2111,8 +2111,8 @@ and `GET /api/targets` carries it:
   session would pass a stream the browser said it cannot take is refused
   (`ConnectError::Beyond`). Adaptive is greyed for a browser whose
   `VideoDecoder` cannot decode the host's H.264, with "This browser has no
-  VideoDecoder that takes the host's H.264."; a session that chose it all the
-  same, a takeover's, is drawn High quality rather than refused.
+  VideoDecoder that takes the host's H.264."; a `connect` that names it all the
+  same is drawn High quality rather than refused.
 - **The host draws the pipeline high quality or adaptive.** `choices.pipeline` says
   `high-quality`, `adaptive-desktop` or `adaptive-region` (`Pipeline` in
   `src/config.rs`), offered by an `rdp` target with the pipeline on and refused
