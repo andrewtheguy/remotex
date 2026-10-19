@@ -765,6 +765,9 @@ export function useRemoteDesktop(
   // gateway's `pictureWithheld`, which says why the screen is not available.
   // Reset as `remoteResizing` is.
   const [pictureWithheld, setPictureWithheld] = useState(false);
+  // The remote's own stream the session passes, as `connected` names it: what
+  // the withheld notice suggests in place of the one the Mac sends nothing of.
+  const [passthrough, setPassthrough] = useState<string | null>(null);
   // Either notice is over the desktop, which is what input and focus follow: a
   // key or a click sent to a Mac whose picture is not on screen lands wherever
   // the display that comes back happens to put it.
@@ -2121,6 +2124,7 @@ export function useRemoteDesktop(
       // browser can decode what a streaming target sends is answered by `configure`
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
+      setPassthrough(msg.passthrough);
       setOversize(null);
       setConnection(connectionLabel(msg.protocol, msg.subtype));
       // The two Apple subtypes are the Macs; `remoteOs` says the same once the
@@ -3379,6 +3383,7 @@ export function useRemoteDesktop(
     remoteResizing,
     screenUnavailable,
     pictureWithheld,
+    passthrough,
     viewOnly,
     setViewOnly,
     onLocalShortcut,

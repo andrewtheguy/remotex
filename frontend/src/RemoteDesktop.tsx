@@ -84,6 +84,7 @@ function SessionCovers({
   resizing,
   unavailable,
   withheld,
+  h264,
   oversize,
   size,
   displays,
@@ -93,6 +94,8 @@ function SessionCovers({
   resizing: boolean;
   unavailable: boolean;
   withheld: boolean;
+  // The session passes the Mac's H.264, whose HEVC may come where it does not.
+  h264: boolean;
   oversize: HoldCause | null;
   size: RemoteSize | null;
   displays: DisplayInfo[];
@@ -128,17 +131,19 @@ function SessionCovers({
       )}
 
       {/* The same gap, once the Mac has said it sends no picture of a display
-          this size: waiting brings none, and another size does. The Mac says so
-          of a display too low for the strips its picture is sent in, and gives
-          no reason, so the notice asks for a size rather than naming one. */}
+          this size: waiting brings none, and another size may. The Mac gives no
+          reason, and the one seen at a supported size is its H.264 sent whole,
+          where the HEVC came, so the notice names no direction to resize in and
+          offers the HEVC to an H.264 session. */}
       {unavailable && withheld && !resizing && (
         <div className="resize-overlay" role="alert">
           <span className="status">No picture at this size</span>
           <span className="status-hint">
-            {size
-              ? `The Mac sends no picture of a ${size.w}×${size.h} display.`
-              : "The Mac sends no picture of a display this size."}{" "}
-            Make the window larger, or start the session at a larger size.
+            {`The Mac sends no ${h264 ? "H.264 " : ""}picture of ${
+              size ? `a ${size.w}×${size.h} display` : "a display this size"
+            }. Resize the window to try another size${
+              h264 ? ", or start the session with HEVC" : ""
+            }.`}
           </span>
         </div>
       )}
@@ -314,6 +319,7 @@ export default function RemoteDesktop({
     remoteResizing,
     screenUnavailable,
     pictureWithheld,
+    passthrough,
     setViewOnly,
     onLocalShortcut,
     takeOver,
@@ -523,6 +529,7 @@ export default function RemoteDesktop({
           resizing={remoteResizing}
           unavailable={screenUnavailable}
           withheld={pictureWithheld}
+          h264={passthrough === "apple-h264"}
           oversize={oversize}
           size={size}
           displays={displays}

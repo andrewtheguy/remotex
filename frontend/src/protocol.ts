@@ -245,8 +245,9 @@ export type ControlMsg =
       subtype: string | null;
       resize: boolean;
       audio: boolean;
-      // The remote's own stream this session passes untouched — "rdp-graphics"
-      // or "apple-media" — or null for a desktop the gateway encodes.
+      // The remote's own stream this session passes untouched — "rdp-graphics",
+      // "apple-media", "apple-h264" or "apple-adaptive" — or null for a desktop
+      // the gateway encodes.
       passthrough: string | null;
       // Whether this target redirects the browser's camera to the remote.
       // Capability only — enabling is this client's move, made afresh each
@@ -356,10 +357,11 @@ export type ControlMsg =
   // A High Performance Mac has said it sends no picture of the display shown,
   // at the size the `resize` before this describes: true once the Mac's own
   // report on its running stream says so, false at the display's next offer or
-  // its first picture. The Mac gives no reason; a display too low for the
-  // strips it is sent in is the known one. The page is under
-  // `screenUnavailable` meanwhile and asks for another size in that notice's
-  // place. Pushed by the gateway and again on reattach while it holds; the
+  // its first picture. The Mac gives no reason: a display too low for the
+  // strips it is sent in is one, below any supported size, and a whole H.264
+  // picture of a physical Mac's 1864×983 display another. The page is under
+  // `screenUnavailable` meanwhile and suggests another size, or the HEVC, in
+  // that notice's place. Pushed by the gateway and again on reattach while it holds; the
   // page never infers it.
   | { type: "pictureWithheld"; active: boolean }
   // Why the desktop the `resize` before this describes has no picture, or null

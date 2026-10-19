@@ -1225,8 +1225,11 @@ Three controls with similar names therefore remain separate:
   pointer and keys would land on a display nobody can see, so the page drops its
   input listeners and releases what was held. Where the Mac's own report says it
   sends no picture of the display at all, which it does of one too low for its
-  four strips, the gateway adds `pictureWithheld`, the page asks for a larger
-  size in that notice's place, and the session waits for one
+  four strips and, on a physical Mac, of a 1864×983 display in H.264 sent whole
+  ([The Mac's H.264](#the-macs-h264)), the gateway adds `pictureWithheld`, the
+  page suggests another size in that notice's place, and to a session passing
+  the H.264 the HEVC (`SessionCovers` in `frontend/src/RemoteDesktop.tsx`), and
+  the session waits for one
   ([In strips](apple-vnc-889.md#in-strips)). The Mac's ZRLE rectangles
   are stepped over by their length (`Decoders::step_over`), never inflated and
   never handed to `VideoSink::damage`, so a session that passes the stream
