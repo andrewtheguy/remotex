@@ -428,8 +428,10 @@ pub enum ClientMsg {
 /// 0x06 TILE      u8 format | u16 x | u16 y | u16 w | u16 h | u32 len | image[len]
 /// ```
 ///
-/// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
-/// other bit, as it does for the frame's own flags byte. The encoder knows which frames are
+/// A `VIDEO` record's flags are `0x01` for a keyframe and, for a picture sent in strips, `0x02`
+/// with the strip's number in `0x0C` and `0x10` on the last of its frame
+/// ([`batch::VIDEO_STRIP`]); a receiver rejects any other bit, as it does for the frame's own
+/// flags byte. The encoder knows which frames are
 /// keyframes, so telling the client costs one byte and saves it parsing a bitstream — which is
 /// what it used to do, and which VP9 does not offer: VP9 carries no parameter sets, so there is
 /// nothing in the payload to read.

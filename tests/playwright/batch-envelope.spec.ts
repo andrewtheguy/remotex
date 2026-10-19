@@ -17,10 +17,22 @@ import { leaveSession, logInAndConnect, skipUnlessLiveMac } from "./support";
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
 const OP_VIDEO = 0x03;
+const OP_STANDARD = 0x05;
+const OP_TILE = 0x06;
 const VIDEO_HEADER_LEN = 10;
+const STANDARD_HEADER_LEN = 13;
+const TILE_HEADER_LEN = 14;
 const VIDEO_KEYFRAME = 0x01;
+const VIDEO_STRIP = 0x02;
+const VIDEO_STRIP_INDEX = 0x0c;
+const VIDEO_STRIP_ENDS = 0x10;
 
-interface Unit {
+/// A record as its header frames it: what the Mac's picture is decides which
+/// kind arrives, a passed stream's access units, a Standard Mac's own
+/// rectangles or the gateway's tiles.
+interface BatchRecordFrame {
+  op: number;
+  /// A video unit's flags; zero for the rest.
   flags: number;
   w: number;
   h: number;
@@ -31,49 +43,58 @@ interface Batch {
   flags: number;
   count: number;
   sequence: number;
-  units: Unit[];
+  records: BatchRecordFrame[];
   /** Whether the records exactly filled the frame. */
   exact: boolean;
   /** The first record op this parser did not recognize, if any. */
   badOp?: number;
 }
 
-// Parse a batch frame the same way `decodeBatchFrame` does, but independently:
-// re-using the SPA's parser here would let a wrong parser agree with itself.
 function parseBatch(payload: Buffer): Batch {
   const count = payload.readUInt16LE(2);
-  const units: Unit[] = [];
+  const records: BatchRecordFrame[] = [];
   let at = BATCH_HEADER_LEN;
   let exact = true;
   let badOp: number | undefined;
   while (at < payload.length) {
     const op = payload.readUInt8(at);
-    // An op this parser does not know stops it here, which is where the bad byte
-    // is. Both real parsers reject rather than guess: `decodeBatchFrame` drops the
-    // whole frame, and `batch_records` in tests/common/mod.rs refuses the op.
-    if (op !== OP_VIDEO) {
+    // Where each kind keeps its size and its body's length, and how long its
+    // header is. An op this parser does not know stops it here, which is where
+    // the bad byte is. Both real parsers reject rather than guess:
+    // `decodeBatchFrame` drops the whole frame, and `batch_records` in
+    // tests/common/mod.rs refuses the op.
+    const layout =
+      op === OP_VIDEO
+        ? { header: VIDEO_HEADER_LEN, size: 2, length: 6 }
+        : op === OP_STANDARD
+          ? { header: STANDARD_HEADER_LEN, size: 5, length: 9 }
+          : op === OP_TILE
+            ? { header: TILE_HEADER_LEN, size: 6, length: 10 }
+            : undefined;
+    if (!layout) {
       badOp = op;
       exact = false;
       break;
     }
-    if (at + VIDEO_HEADER_LEN > payload.length) {
+    if (at + layout.header > payload.length) {
       exact = false;
       break;
     }
-    const payloadLen = payload.readUInt32LE(at + 6);
-    units.push({
-      flags: payload.readUInt8(at + 1),
-      w: payload.readUInt16LE(at + 2),
-      h: payload.readUInt16LE(at + 4),
+    const payloadLen = payload.readUInt32LE(at + layout.length);
+    records.push({
+      op,
+      flags: op === OP_VIDEO ? payload.readUInt8(at + 1) : 0,
+      w: payload.readUInt16LE(at + layout.size),
+      h: payload.readUInt16LE(at + layout.size + 2),
       payloadLen,
     });
-    at += VIDEO_HEADER_LEN + payloadLen;
+    at += layout.header + payloadLen;
   }
   return {
     flags: payload.readUInt8(1),
     count,
     sequence: payload.readUInt32LE(4),
-    units,
+    records,
     exact: exact && at === payload.length,
     badOp,
   };
@@ -135,7 +156,7 @@ test.describe("v4 batch envelope", () => {
     for (const batch of batches) {
       expect(batch.flags, "reserved flags must be zero").toBe(0);
       expect(
-        batch.units.length,
+        batch.records.length,
         "the header's record count must match the records present",
       ).toBe(batch.count);
       expect(
@@ -143,22 +164,40 @@ test.describe("v4 batch envelope", () => {
         "every record op must be one this build knows",
       ).toBeUndefined();
       expect(batch.exact, "records must exactly fill the frame").toBe(true);
-      for (const unit of batch.units) {
+      for (const record of batch.records) {
+        // A unit says whether it is a keyframe and, where the picture comes in
+        // strips, which strip it is and whether it ends its frame.
         expect(
-          unit.flags & ~VIDEO_KEYFRAME,
-          "the keyframe bit is the only flag",
+          record.flags &
+            ~(VIDEO_KEYFRAME | VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS),
+          "the keyframe and strip bits are the only flags",
         ).toBe(0);
-        expect(unit.w).toBeGreaterThan(0);
-        expect(unit.h).toBeGreaterThan(0);
-        expect(unit.payloadLen).toBeGreaterThan(0);
+        if ((record.flags & VIDEO_STRIP) === 0) {
+          expect(
+            record.flags & (VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS),
+            "a strip's number and end only on a strip",
+          ).toBe(0);
+        }
+        // A Standard record is the Mac's rectangle as it sent it, which may
+        // be empty; a unit and a tile never are. Every record has a body.
+        if (record.op !== OP_STANDARD) {
+          expect(record.w).toBeGreaterThan(0);
+          expect(record.h).toBeGreaterThan(0);
+        }
+        expect(record.payloadLen).toBeGreaterThan(0);
       }
     }
 
-    // The stream starts where a decoder that has seen nothing can start.
-    expect(
-      batches[0].units[0].flags & VIDEO_KEYFRAME,
-      "the first unit of the session is a keyframe",
-    ).toBe(VIDEO_KEYFRAME);
+    // A passed stream starts where a decoder that has seen nothing can start.
+    const video = batches
+      .flatMap((batch) => batch.records)
+      .filter((record) => record.op === OP_VIDEO);
+    if (video.length > 0) {
+      expect(
+        video[0].flags & VIDEO_KEYFRAME,
+        "the first unit of the session is a keyframe",
+      ).toBe(VIDEO_KEYFRAME);
+    }
 
     expect(
       batches.map((batch) => batch.sequence),
