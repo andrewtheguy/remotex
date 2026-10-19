@@ -250,6 +250,18 @@ required-features = ["embedded-gateway"]
 name = "tui_control_plane_e2e"
 required-features = ["embedded-gateway"]
 
+# What drives a real RDP host is run on demand, as an example, and never by a
+# test run: `cargo run --example <probe> -- <case>`, a host from the operator's
+# tmp/test_uat.toml. These two also hold unit tests of their own, which every
+# `cargo test` runs.
+[[example]]
+name = "rdp_link_probe"
+test = true
+
+[[example]]
+name = "rdp_proto_probe"
+test = true
+
 [dev-dependencies]
 tokio-tungstenite = "0.29"
 # Scratch directories for the tests that need a real path on disk: an instance

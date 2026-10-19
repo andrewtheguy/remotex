@@ -6,14 +6,14 @@
 //! a time, and it prints what the host drew for it.
 //!
 //! ```sh
-//! REMOTEX_UAT_TARGET=windows-ent-sandbox REMOTEX_UAT_MOTION=tmp/link-probe/motion.ps1 \
+//! REMOTEX_UAT_TARGET=windows-ent-sandbox REMOTEX_UAT_MOTION=tests/rdp_motion.ps1 \
 //!   REMOTEX_UAT_PAGE_KBPS=8000 \
-//!   cargo test --profile qa --test rdp_link_probe -- --ignored --nocapture
+//!   cargo run --profile qa --example rdp_link_probe -- a_real_host_draws_for_a_slow_client
 //! ```
 //!
 //! [`MOTION_ENV`] names a script run with `start` once the desktop is up and
-//! `stop` at the end, to put the same moving picture on the host each time; without
-//! it, play something there first.
+//! `stop` at the end, to put the same moving picture on the host each time:
+//! `tests/rdp_motion.ps1` is one. Without it, play something there first.
 //!
 //! - [`PAGE_ENV`] is a page on a link of that many kbit/s behind a gateway: each
 //!   frame is said to be composed when the bytes passed so far would have crossed
@@ -53,6 +53,12 @@
 //! the frames were composed. Nothing but a drawing host is asserted: the rest is
 //! the measurement.
 
+// Built as a test too (Cargo.toml), for the unit tests below, where `main`
+// and what only it reaches are not called.
+#![cfg_attr(test, allow(dead_code))]
+
+#[path = "../tests/common/mod.rs"]
+#[allow(dead_code)]
 mod common;
 
 use std::collections::BTreeMap;
@@ -402,8 +408,7 @@ impl Tally {
     }
 }
 
-#[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml, with a moving picture on its desktop"]
+/// A case: Drives a real RDP host named in tmp/test_uat.toml, with a moving picture on its desktop.
 async fn a_real_host_draws_for_a_slow_client() {
     common::init_logging();
     let name = std::env::var(TARGET_ENV)
@@ -571,6 +576,7 @@ async fn a_real_host_draws_for_a_slow_client() {
 }
 
 /// A StartFrame timestamp, packed as 2.2.2.11 lays it out.
+#[cfg(test)]
 fn packed(hours: u32, minutes: u32, seconds: u32, millis: u32) -> u32 {
     (hours << 22) | (minutes << 16) | (seconds << 10) | millis
 }
@@ -599,4 +605,23 @@ fn the_lag_is_taken_around_the_hosts_midnight() {
     assert_eq!(lag(first, nearest), 0);
     assert_eq!(lag(second, nearest), 0);
     assert_eq!(lag(first + 30, nearest), 30, "a later composition is behind by what it waited");
+}
+
+/// The cases this runs, named on its command line, in the order named.
+const CASES: &[&str] = &["a_real_host_draws_for_a_slow_client"];
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let named: Vec<String> = std::env::args().skip(1).collect();
+    if named.is_empty() || named.iter().any(|case| !CASES.contains(&case.as_str())) {
+        eprintln!("usage: cargo run --example rdp_link_probe -- CASE...\ncases: {}", CASES.join(", "));
+        std::process::exit(2);
+    }
+    for case in named {
+        println!("== {case}");
+        match case.as_str() {
+            "a_real_host_draws_for_a_slow_client" => a_real_host_draws_for_a_slow_client().await,
+            _ => unreachable!("checked above"),
+        }
+    }
 }

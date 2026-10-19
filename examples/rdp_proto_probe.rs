@@ -11,7 +11,7 @@
 //!
 //! ```sh
 //! REMOTEX_UAT_TARGET=windows-ent-sandbox \
-//!   cargo test --test rdp_proto_probe -- --ignored --nocapture
+//!   cargo run --example rdp_proto_probe -- a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence
 //! ```
 //!
 //! It goes as far as the connection can be carried, and then watches the desktop
@@ -28,6 +28,12 @@
 //! What it decodes is also written out, as `tmp/rdp_proto_probe.ppm`, for an operator
 //! who would rather look at the desktop than read a coverage figure.
 
+// Built as a test too (Cargo.toml), for the unit tests below, where `main`
+// and what only it reaches are not called.
+#![cfg_attr(test, allow(dead_code))]
+
+#[path = "../tests/common/mod.rs"]
+#[allow(dead_code)]
 mod common;
 
 use std::time::Duration;
@@ -40,6 +46,7 @@ use remotex::rdp_client::proto::finalization::{self, Response};
 use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
 use remotex::rdp_client::proto::channel::Chunk;
 use remotex::rdp_client::proto::{channel, cliprdr, display, dvc};
+#[cfg(test)]
 use remotex::rdp_client::proto::input::{self, Button, Event};
 use remotex::rdp_client::proto::pointer::{self, Pointer};
 use remotex::rdp_client::proto::info::ClientInfo;
@@ -84,8 +91,7 @@ const WATCH: Duration = Duration::from_secs(5);
 /// Where the decoded desktop is left for an operator to look at.
 const PICTURE: &str = "tmp/rdp_proto_probe.ppm";
 
-#[tokio::test]
-#[ignore = "requires a real Windows host from tmp/test_uat.toml"]
+/// A case: Requires a real Windows host from tmp/test_uat.toml.
 async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
     common::init_logging();
     let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
@@ -829,6 +835,7 @@ fn our_input_events_encode_to_the_bytes_ironrdp_sends() {
 
 /// The 36 events of [`our_input_events_encode_to_the_bytes_ironrdp_sends`] in one
 /// PDU, as IronRDP wrote it.
+#[cfg(test)]
 const BATCH: &str = concat!(
     "0080d824001e011e0248035b200008000000002000087f0737042000900a0014002000100a0014002000c01e0028",
     "002000a032003c0020002032003c004001804600500040020046005000207802010002002088030100020020ff04",
@@ -898,5 +905,24 @@ fn our_monitor_layout_encodes_to_the_bytes_ironrdp_sends() {
             theirs,
             "a {width}x{height} layout at {scale}%"
         );
+    }
+}
+
+/// The cases this runs, named on its command line, in the order named.
+const CASES: &[&str] = &["a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence"];
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let named: Vec<String> = std::env::args().skip(1).collect();
+    if named.is_empty() || named.iter().any(|case| !CASES.contains(&case.as_str())) {
+        eprintln!("usage: cargo run --example rdp_proto_probe -- CASE...\ncases: {}", CASES.join(", "));
+        std::process::exit(2);
+    }
+    for case in named {
+        println!("== {case}");
+        match case.as_str() {
+            "a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence" => a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence().await,
+            _ => unreachable!("checked above"),
+        }
     }
 }

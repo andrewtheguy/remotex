@@ -11,7 +11,7 @@
 //!
 //!   REMOTEX_PROBE_CONFIG=tmp/test_config.toml \
 //!   REMOTEX_PROBE_TARGET=desktop-vnvgdaf \
-//!     cargo test --release --test rdp_repaint_probe -- --ignored --nocapture
+//!     cargo run --release --example rdp_repaint_probe -- full_desktop_repaints_against_a_real_host
 //!
 //! `--release` is not optional here. A debug PNG encode is several times slower, which
 //! would flatter every depth equally and tell you nothing about the real one.
@@ -29,6 +29,8 @@
 //! What it produced, on a 12-core arm64 Mac against a 1280x800 Windows desktop, is
 //! the table in `encode::ENCODE_DEPTH` — the measurement that picked the depth.
 
+#[path = "../tests/common/mod.rs"]
+#[allow(dead_code)]
 mod common;
 
 use std::net::SocketAddr;
@@ -81,8 +83,7 @@ async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
     (addr, target, size)
 }
 
-#[tokio::test]
-#[ignore = "instrument, not a test; needs a real RDP host"]
+/// A case: Instrument, not a test; needs a real RDP host.
 async fn full_desktop_repaints_against_a_real_host() {
     common::init_logging();
     let (addr, target, size) = spawn_app().await;
@@ -146,4 +147,23 @@ async fn full_desktop_repaints_against_a_real_host() {
         millis[millis.len() * 9 / 10],
         millis[millis.len() - 1],
     );
+}
+
+/// The cases this runs, named on its command line, in the order named.
+const CASES: &[&str] = &["full_desktop_repaints_against_a_real_host"];
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let named: Vec<String> = std::env::args().skip(1).collect();
+    if named.is_empty() || named.iter().any(|case| !CASES.contains(&case.as_str())) {
+        eprintln!("usage: cargo run --example rdp_repaint_probe -- CASE...\ncases: {}", CASES.join(", "));
+        std::process::exit(2);
+    }
+    for case in named {
+        println!("== {case}");
+        match case.as_str() {
+            "full_desktop_repaints_against_a_real_host" => full_desktop_repaints_against_a_real_host().await,
+            _ => unreachable!("checked above"),
+        }
+    }
 }

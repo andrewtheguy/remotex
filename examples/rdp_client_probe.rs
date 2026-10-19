@@ -71,10 +71,11 @@
 //!
 //! ```sh
 //! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> REMOTEX_UAT_AUDIO=1 REMOTEX_UAT_CAMERA=1 \
-//!   cargo test --test rdp_client_probe -- --ignored --nocapture --test-threads 1
+//!   cargo run --example rdp_client_probe -- a_real_host_paints_and_resizes \
+//!     a_real_host_round_trips_the_clipboard a_real_host_records_the_microphone
 //! ```
 //!
-//! The stream is the third test, [`stream_camera`], and it needs a stream to play and a
+//! The stream is a case of its own, [`stream_camera`], and it needs a stream to play and a
 //! host with the Windows Camera app: it opens the app through the Run dialog, plays the
 //! file named by [`CAMERA_STREAM_ENV`] into the camera the app opens, and closes the app
 //! again. What it asserts is the host's part of the Video Capture sequence — it starts
@@ -87,7 +88,7 @@
 //!   -pix_fmt yuv420p -g 30 -bf 0 -x264-params aud=1:repeat-headers=1 \
 //!   -bsf:v h264_mp4toannexb -f h264 tmp/camera_probe_640x480.h264
 //! REMOTEX_UAT_TARGET=<rdp target> REMOTEX_UAT_CAMERA_STREAM=tmp/camera_probe_640x480.h264 \
-//!   cargo test --test rdp_client_probe a_real_host_streams_the_camera -- --ignored --nocapture
+//!   cargo run --example rdp_client_probe -- a_real_host_streams_the_camera
 //! ```
 //!
 //! ## H.264
@@ -104,9 +105,11 @@
 //!
 //! ```sh
 //! REMOTEX_UAT_TARGET=<rdp target> \
-//!   cargo test --test rdp_client_probe a_real_host_draws_video_with_h264 -- --ignored --nocapture
+//!   cargo run --example rdp_client_probe -- a_real_host_draws_video_with_h264
 //! ```
 
+#[path = "../tests/common/mod.rs"]
+#[allow(dead_code)]
 mod common;
 
 use std::collections::BTreeSet;
@@ -1173,32 +1176,50 @@ async fn pass_h264() {
     drop(session);
 }
 
-#[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml, with a video playing on its desktop"]
+/// A case: Drives a real RDP host named in tmp/test_uat.toml, with a video playing on its desktop.
 async fn a_real_host_draws_video_with_h264() {
     pass_h264().await;
 }
 
-#[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml"]
+/// A case: Drives a real RDP host named in tmp/test_uat.toml.
 async fn a_real_host_paints_and_resizes() {
     case().await;
 }
 
-#[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml, and its Run dialog"]
+/// A case: Drives a real RDP host named in tmp/test_uat.toml, and its Run dialog.
 async fn a_real_host_round_trips_the_clipboard() {
     round_trip().await;
 }
 
-#[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml, its Camera app, and a stream in REMOTEX_UAT_CAMERA_STREAM"]
+/// A case: Drives a real RDP host named in tmp/test_uat.toml, its Camera app, and a stream in REMOTEX_UAT_CAMERA_STREAM.
 async fn a_real_host_streams_the_camera() {
     stream_camera().await;
 }
 
-#[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml"]
+/// A case: Drives a real RDP host named in tmp/test_uat.toml.
 async fn a_real_host_records_the_microphone() {
     record_microphone().await;
+}
+
+/// The cases this runs, named on its command line, in the order named.
+const CASES: &[&str] = &["a_real_host_draws_video_with_h264", "a_real_host_paints_and_resizes", "a_real_host_round_trips_the_clipboard", "a_real_host_streams_the_camera", "a_real_host_records_the_microphone"];
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let named: Vec<String> = std::env::args().skip(1).collect();
+    if named.is_empty() || named.iter().any(|case| !CASES.contains(&case.as_str())) {
+        eprintln!("usage: cargo run --example rdp_client_probe -- CASE...\ncases: {}", CASES.join(", "));
+        std::process::exit(2);
+    }
+    for case in named {
+        println!("== {case}");
+        match case.as_str() {
+            "a_real_host_draws_video_with_h264" => a_real_host_draws_video_with_h264().await,
+            "a_real_host_paints_and_resizes" => a_real_host_paints_and_resizes().await,
+            "a_real_host_round_trips_the_clipboard" => a_real_host_round_trips_the_clipboard().await,
+            "a_real_host_streams_the_camera" => a_real_host_streams_the_camera().await,
+            "a_real_host_records_the_microphone" => a_real_host_records_the_microphone().await,
+            _ => unreachable!("checked above"),
+        }
+    }
 }
