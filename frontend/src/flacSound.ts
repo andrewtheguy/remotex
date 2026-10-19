@@ -116,8 +116,8 @@ const PROBE_FRAME =
   "m94weQxz9ZZfZbjzX2xzpQoCoIy/x07JkERa4ikMzV6rrL98eLN8JjvzFqG3oUk1QltVsLUY";
 
 /**
- * How long the decode may take to answer before it counts as a no: the page
- * mounts only once every answer is in.
+ * How long the question may take to answer, support check and decode together,
+ * before it counts as a no: the page mounts only once every answer is in.
  */
 let attemptTimeoutMs = 2000;
 
@@ -129,19 +129,21 @@ async function decodesFrame(): Promise<boolean> {
     return false;
   }
   const config = flacConfig(PROBE_STREAM);
-  try {
-    const support = await AudioDecoder.isConfigSupported(config);
-    if (support.supported !== true) {
-      return false;
-    }
-  } catch {
-    return false;
-  }
   let samples = 0;
   let failed = false;
   let decoder: AudioDecoder | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const unanswered = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("no answer")), attemptTimeoutMs);
+  });
   try {
+    const support = await Promise.race([
+      AudioDecoder.isConfigSupported(config),
+      unanswered,
+    ]);
+    if (support.supported !== true) {
+      return false;
+    }
     decoder = new AudioDecoder({
       output: (data) => {
         samples += data.numberOfFrames;
@@ -154,12 +156,6 @@ async function decodesFrame(): Promise<boolean> {
     decoder.configure(config);
     const data = Uint8Array.from(atob(PROBE_FRAME), (c) => c.charCodeAt(0));
     decoder.decode(new EncodedAudioChunk({ type: "key", timestamp: 0, data }));
-    const unanswered = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error("no answer")),
-        attemptTimeoutMs,
-      );
-    });
     await Promise.race([decoder.flush(), unanswered]);
   } catch {
     return false;

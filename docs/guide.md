@@ -22,8 +22,8 @@ It needs:
   the picker greys what needs it, with the reason, and the gateway's tiles, a
   Standard Mac's Adaptive picture and an RDP pipeline without H.264 work
   anywhere. `AudioDecoder` plays Opus, a Mac's AAC-ELD and FLAC; a browser
-  without it (Safari 16.4 to 18) plays no sound, and Safari's, which fails
-  FLAC, plays Opus and the Mac's sound.
+  without it (Safari 16.4 to 18) plays no sound, and a later Safari, whose
+  `AudioDecoder` fails FLAC, plays Opus and the Mac's sound.
 
 For desktop use, install the page as an app in Chrome or Edge. An app window
 hands the page the key chords a normal tab keeps for itself (⌘W, ⌘T, ⌘N and the

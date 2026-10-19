@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { askFlac, decodesFlac, resetFlacForTests } from "./flacSound.ts";
 
 /** What a fake decoder does with the frame: Chrome's and Firefox's, and Safari's. */
-type Behaviour = "decodes" | "fails" | "silent" | "unsupported";
+type Behaviour = "decodes" | "fails" | "silent" | "stalls" | "unsupported";
 
 interface FakeInit {
   output: (data: { numberOfFrames: number; close(): void }) => void;
@@ -22,9 +22,11 @@ async function answerFor(behaviour: Behaviour | null): Promise<boolean> {
     behaviour === null
       ? undefined
       : class {
-          static async isConfigSupported(config: AudioDecoderConfig) {
+          static isConfigSupported(config: AudioDecoderConfig) {
             assert.equal(config.codec, "flac");
-            return { supported: behaviour !== "unsupported" };
+            return behaviour === "stalls"
+              ? new Promise(() => {})
+              : Promise.resolve({ supported: behaviour !== "unsupported" });
           }
           state = "unconfigured";
           #init: FakeInit;
@@ -74,6 +76,8 @@ test("one that takes FLAC and then fails the frame is not", async () => {
 test("one that refuses the configuration, or never answers, is not", async () => {
   assert.equal(await answerFor("unsupported"), false);
   assert.equal(await answerFor("silent"), false);
+  // Its support check alone stalling counts against the same time.
+  assert.equal(await answerFor("stalls"), false);
 });
 
 test("a browser with no audio decoder is not", async () => {

@@ -281,10 +281,10 @@ test.describe("lossless sound", () => {
   test("plays through the browser's own decoder", async ({ page }) => {
     const seen = watchSession(page);
     const formats = watchAudioFormats(page);
-    // What the player reports when a decoder fails.
+    // What the player reports when its decoder fails (audioPlayer.ts).
     const failures: string[] = [];
     page.on("console", (message) => {
-      if (/^audio: /.test(message.text())) {
+      if (message.text().startsWith("audio: the decoder failed")) {
         failures.push(message.text());
       }
     });
