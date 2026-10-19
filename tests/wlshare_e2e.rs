@@ -316,16 +316,16 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     view.until(&mut ws, "the viewport at 2x", |v| v.size == Some(window)).await;
     assert_eq!(sway_output(&container, "HEADLESS-1"), (1600, 1200, 2.0));
 
-    // Switch outputs. The checkmark moves when wlshare says it moved, the
-    // desktop becomes HEADLESS-2's own 1280x800, and the window follows there.
-    let before = view.sizes.len();
+    // Switch outputs. The checkmark moves when wlshare says it moved, and the
+    // window follows there: HEADLESS-2 reports its own 1280x800, which the
+    // window's declaration usually reaches before its framebuffer does, so the
+    // desktop may never be shown at that size. Its picture is painted afresh.
+    view.painted = false;
     ws.send(Message::text(format!(r#"{{"type":"selectDisplay","id":{second}}}"#)))
         .await
         .unwrap();
     view.until(&mut ws, "the window on HEADLESS-2", |v| {
-        v.active() == Some(second)
-            && v.size == Some(window)
-            && v.sizes[before..].iter().any(|s| *s != window)
+        v.active() == Some(second) && v.size == Some(window)
     })
     .await;
     assert_eq!(sway_output(&container, "HEADLESS-2"), (1600, 1200, 2.0));
