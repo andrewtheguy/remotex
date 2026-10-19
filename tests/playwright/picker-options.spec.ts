@@ -115,7 +115,8 @@ test.describe("the picker's options", () => {
     });
 
     // The pipeline is passed in every session of an rdp target that has it,
-    // without being named, and drawn as was chosen.
+    // without being named, and drawn as was chosen. A choice the target does not
+    // offer goes with its default, as a Standard Mac's view does.
     expect(seen.connects).toEqual([
       {
         size: "window",
@@ -123,6 +124,7 @@ test.describe("the picker's options", () => {
         passthrough: null,
         placement: "right",
         pipeline: "adaptive-region",
+        standardView: "one",
       },
     ]);
     const connected = seen.statuses.at(-1);
