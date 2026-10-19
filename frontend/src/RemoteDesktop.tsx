@@ -503,8 +503,9 @@ export default function RemoteDesktop({
           also not `connectError`: nothing is wrong with the session or the gateway,
           it is this browser that cannot decode what is arriving. One that ran
           out of memory says so, and how to get the memory back: a reload, which
-          the page reattaches to the session as it was after, or in WebKit, where
-          a reload does not give it back, a new tab (`reloadFreesMemory`). */}
+          the page reattaches to the session as it was after, or on an iPhone or
+          an iPad, where a reload does not give it back, a new tab
+          (`reloadFreesMemory`). */}
       {videoError && mode === "desktop" && (
         <div className="video-banner" role="alert">
           {saysOutOfMemory(videoError) &&
@@ -515,7 +516,7 @@ export default function RemoteDesktop({
               </p>
             ) : (
               <p className="video-banner-lead">
-                This page ran out of memory, and in this browser reloading does
+                This page ran out of memory, and on this device reloading does
                 not free it. Close this tab and open the page in a new one to
                 start the session again.
               </p>

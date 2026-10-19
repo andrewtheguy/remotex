@@ -15,14 +15,22 @@ export function saysOutOfMemory(reason: string): boolean {
   return OUT_OF_MEMORY.test(reason);
 }
 
+/** What `reloadFreesMemory` reads of the browser. */
+type Device = Pick<Navigator, "userAgent" | "platform" | "maxTouchPoints">;
+
 /**
  * Whether a reload gives the page's memory back, which the session then
- * reattaches with as it was. Not in WebKit — Safari, and every browser on iOS
- * and iPadOS — where a shared WebAssembly memory outlives a reload of its tab:
- * an iPhone's tab ran out of memory again on every reload, and a new tab did
- * not (WebKit bug 256023). There the page says to close the tab instead. Told
- * apart by the vendor WebKit names, which Chromium's and Gecko's do not.
+ * reattaches with as it was. Not on an iPhone or an iPad, whatever the browser:
+ * there a session's compositor keeps its memory after the session ends, until
+ * the tab is closed, a reload included — an iPhone's tab failed at its seventh
+ * session and on every reload after, and a new tab did not. Safari on a Mac,
+ * running the same sessions, did not. There the page says to close the tab
+ * instead. An iPad that asks for desktop pages names itself a Mac, and is told
+ * from one by its touch points.
  */
-export function reloadFreesMemory(vendor = navigator.vendor): boolean {
-  return vendor !== "Apple Computer, Inc.";
+export function reloadFreesMemory(device: Device = navigator): boolean {
+  const ios =
+    /iPhone|iPad|iPod/.test(device.userAgent) ||
+    (device.platform === "MacIntel" && device.maxTouchPoints > 1);
+  return !ios;
 }

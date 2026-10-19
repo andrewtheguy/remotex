@@ -32,8 +32,44 @@ test("other failures are not", () => {
   }
 });
 
-test("a reload frees the memory everywhere but WebKit", () => {
-  assert.equal(reloadFreesMemory("Google Inc."), true);
-  assert.equal(reloadFreesMemory(""), true);
-  assert.equal(reloadFreesMemory("Apple Computer, Inc."), false);
+test("a reload frees the memory everywhere but an iPhone or an iPad", () => {
+  const iphone =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6.1 Mobile/15E148 Safari/604.1";
+  const mac =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15";
+  const chrome =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
+  assert.equal(
+    reloadFreesMemory({
+      userAgent: iphone,
+      platform: "iPhone",
+      maxTouchPoints: 5,
+    }),
+    false,
+  );
+  // An iPad asking for desktop pages.
+  assert.equal(
+    reloadFreesMemory({
+      userAgent: mac,
+      platform: "MacIntel",
+      maxTouchPoints: 5,
+    }),
+    false,
+  );
+  assert.equal(
+    reloadFreesMemory({
+      userAgent: mac,
+      platform: "MacIntel",
+      maxTouchPoints: 0,
+    }),
+    true,
+  );
+  assert.equal(
+    reloadFreesMemory({
+      userAgent: chrome,
+      platform: "Win32",
+      maxTouchPoints: 0,
+    }),
+    true,
+  );
 });
