@@ -430,11 +430,12 @@ pub struct Choices {
     /// Standard's alone: no other target has a combined view.
     #[serde(default, rename = "standardView")]
     pub standard_view: StandardView,
-    /// Ask a High Performance Mac whose picture is passed, in either codec, for one tile, each
-    /// picture the whole display, and not the four strips such a session is
-    /// offered ([`crate::vnc_apple_media::Receive`]). No picker names it:
-    /// it is a probe's, for a capture or a comparison of the two on one gateway.
-    /// Refused where no Mac's picture is passed.
+    /// Ask a High Performance Mac whose picture is passed for one tile, each
+    /// picture the whole display, and not the four strips a session passing the
+    /// HEVC is offered ([`crate::vnc_apple_media::Receive`]); the H.264 is
+    /// offered whole anyway. No picker names it: it is a probe's, for a capture
+    /// or a comparison of the two on one gateway. Refused where no Mac's picture
+    /// is passed.
     #[serde(default)]
     pub whole: bool,
 }

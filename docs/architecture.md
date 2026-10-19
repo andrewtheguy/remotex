@@ -1170,12 +1170,14 @@ Three controls with similar names therefore remain separate:
   take their share of `QUEUE_BUDGET` like any access unit. Every picture the Mac
   sends goes out, up to the virtual display's 30 a second, at the quality the
   offer and the rate reports bring.
-- **In strips.** A session is offered the display in Apple's four strips
-  ([In strips](apple-vnc-889.md#in-strips)), as Apple's viewer is, where its
-  height allows, whichever decoder the page takes it in. The one that is
-  offered it whole, each picture the display, is a session whose `connect` asks
-  for that (`Choices::whole`), which no picker does: `tests/ws_probe.py --whole`
-  does, for a capture or a comparison of the two on one gateway. The
+- **In strips.** A session passing the HEVC is offered the display in Apple's
+  four strips ([In strips](apple-vnc-889.md#in-strips)), as Apple's viewer is,
+  where its height allows, whichever decoder the page takes it in. One passing
+  the H.264 is offered it whole, each picture the display
+  ([The Mac's H.264](#the-macs-h264)), and so is one passing the HEVC whose
+  `connect` asks for that (`Choices::whole`), which no picker does:
+  `tests/ws_probe.py --whole` does, for a capture or a comparison of the two on
+  one gateway. The
   strips are one HEVC stream in one decoding order, and the receiver hands each
   strip's access unit on in that order as a unit of its own: under the
   display's size, not the strip's, with the strip's number and whether it is
@@ -1267,27 +1269,27 @@ Safari on a Mac.
 
 - **The offer names H.264 alone.** Offered both codecs, as Apple's viewer offers
   them, the Mac sends HEVC; offered payload 123 alone it sends H.264
-  (`Codec::H264` in `src/vnc_apple_media.rs`, which `Receive` carries to
-  the offer). The ports, the keys, the sound leg, the rate reports and the
-  four strips are the HEVC session's.
-- **The same strips, as RFC 6184 packets.** Each strip is a High profile 4:2:0
-  picture under the display's SSRC plus its number, and the four are one stream
-  in one decoding order, which `Strips` puts back as it does the HEVC's. A
-  picture comes as FU-B fragments, each with the order number, or as a STAP-B;
-  one sent whole, to a display too low for strips, as FU-A fragments and single
-  units with no number.
+  (`Receive::H264` in `src/vnc_apple_media.rs`, which carries the codec to
+  the offer). The ports, the keys, the sound leg and the rate reports are the
+  HEVC session's.
+- **Whole pictures, not strips.** The offer asks for one tile, each picture a
+  High profile 4:2:0 picture of the whole display, as RFC 6184 FU-A fragments
+  and single units. In strips the Mac codes the H.264 again from scratch every
+  frame and never settles: on a still screen of macvm, every strip came at a
+  keyframe's size, mostly intra blocks, about 25 Mbit/s against the HEVC
+  strips' 4 and the whole H.264's 0.1, with the rate target at its top
+  throughout. Whole, a still screen sends a picture a second or none.
 - **Its parameter sets come in a sample description.** The Mac sends none as
-  NAL units: each keyframe strip carries a unit of type 18 holding an MP4 `avc1`
+  NAL units: each keyframe carries a unit of type 18 holding an MP4 `avc1`
   sample description, and the receiver takes the sets out of its `avcC` box and
   puts them ahead of the picture (`h264_parameter_sets`), so what the browser is
   sent is Annex B with its parameter sets in band, a keyframe where it holds an
   IDR. The `videoFormat` names the stream by its own set: `avc1.` and the
-  profile, constraints and level, `avc1.640020` for a strip of a 1600×1000
-  display.
+  profile, constraints and level, `avc1.640028` for a 1600×1000 display.
 - **The set is written saying there is no reordering.** The Mac's sequence
   parameter set has a VUI with no bitstream restriction, which leaves a decoder
   free to hold back as many pictures as its buffer has room for before it shows
-  the first: sixteen strips, on a screen that may go still before they come. The
+  the first: sixteen pictures, on a screen that may go still before they come. The
   stream reorders nothing, each picture's order count being its place in the
   decoding order, so the gateway writes the set with the restriction that says so
   (`h264_in_decoding_order`: `max_num_reorder_frames` 0, a buffer of the set's own
@@ -1295,21 +1297,20 @@ Safari on a Mac.
   That is the one thing of the stream the gateway writes; every picture is the
   Mac's. A set that already says it, or that the gateway cannot read, passes as
   it came.
-- **A restart is an IDR, by a PLI alone.** The Mac answers a PLI with the first
-  strip's IDR and a picture of each other strip within tens of milliseconds, as
-  it does for the HEVC. No picture is acknowledged and no refresh asked for, in
-  strips or whole.
+- **A restart is an IDR, by a PLI alone.** The Mac answers a PLI with an IDR
+  within tens of milliseconds, as it does for the HEVC, and drops one that comes
+  within a second of its last keyframe, so the request is made again until the
+  IDR comes. No picture is acknowledged and no refresh asked for.
 - **An odd side is coded a pixel shorter.** 4:2:0 has no odd size to say: at
-  1281×801 the Mac sent strips 1280 wide, and one tile as 1280×800. So a strip
-  is taken as its display's where its width is the display's rounded down to
-  even, a whole picture where both its sides are, and the last column or row is
-  not sent.
+  1281×801 the Mac sent one tile as 1280×800. So a picture is taken as its
+  display's where both its sides are the display's rounded down to even, and
+  the last column or row is not sent.
 - **The browser is asked, the gateway is not.** The page asks its own
   `VideoDecoder` about the Mac's High profile H.264 once at load
   (`frontend/src/videoCodecs.ts`) and the picker greys it where the answer is
   no; the gateway serves it to any (`Decoders::takes`). The page decodes it in the
-  browser's own `VideoDecoder`, a strip a picture, and draws a frame's strips
-  as it draws the HEVC's from that decoder (`paintStrips`); there is no software
+  browser's own `VideoDecoder` and draws each picture as it draws a whole HEVC
+  picture from that decoder; there is no software
   decoder for it in the page. A browser that does not decode it says so in the
   session, by its decoder's error.
 

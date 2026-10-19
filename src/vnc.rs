@@ -2416,16 +2416,17 @@ async fn connect(
             read_apple_security_result(&mut reader).await?;
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
-            // The Mac's picture is passed in strips, to the page's own decoder
-            // and to the browser's alike, unless the session asked for it whole,
-            // and in the codec the session was started with. A High Performance
-            // session passes one or the other: the gateway decodes neither.
-            let codec = match plan.passthrough() {
-                Some(Passthrough::AppleMedia) => Some(vnc_apple_media::Codec::Hevc),
-                Some(Passthrough::AppleH264) => Some(vnc_apple_media::Codec::H264),
+            // The Mac's picture is passed in the codec the session was started
+            // with: the HEVC in strips, to the page's own decoder and to the
+            // browser's alike, unless the session asked for it whole, and the
+            // H.264 whole, whose strips the Mac codes again from scratch every
+            // frame on a still screen. A High Performance session passes one or
+            // the other: the gateway decodes neither.
+            let receive = match plan.passthrough() {
+                Some(Passthrough::AppleMedia) => Some(vnc_apple_media::Receive::Hevc { strips: !choices.whole }),
+                Some(Passthrough::AppleH264) => Some(vnc_apple_media::Receive::H264),
                 _ => None,
             };
-            let receive = codec.map(|codec| vnc_apple_media::Receive { codec, strips: !choices.whole });
             anyhow::ensure!(
                 receive.is_some() == config.media_stream(),
                 "a High Performance session passes the Mac's picture as its HEVC or its H.264, \
@@ -11803,7 +11804,7 @@ mod tests {
         let shared = test_shared(uplink, Arc::clone(&desktop), Arc::clone(&shadow));
 
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive { codec: vnc_apple_media::Codec::Hevc, strips: false }, 1).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Hevc { strips: false }, 1).0));
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, begins: true, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         assert!(sink.passing());
@@ -11849,7 +11850,7 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive { codec: vnc_apple_media::Codec::Hevc, strips: false }, 1).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Hevc { strips: false }, 1).0));
 
         // Not a keyframe: dropped for one, and the notice stays up.
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: false, strip: None, begins: true, data: vec![0; 16] };
@@ -11892,7 +11893,7 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive { codec: vnc_apple_media::Codec::Hevc, strips: true }, 1).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Hevc { strips: true }, 1).0));
         let strip = |index, ends| PassedUnit {
             size: (2, 2),
             decode: "hev1.4.10.L150.BE.8".into(),
@@ -11946,7 +11947,7 @@ mod tests {
         }
         let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive { codec: vnc_apple_media::Codec::Hevc, strips: false }, 1).0));
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Hevc { strips: false }, 1).0));
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, strip: None, begins: true, data: vec![0; 16] };
         pass_unit(&shared, 0, unit, &sink, &media).await.unwrap();
         sink.flush().await;
@@ -13183,7 +13184,7 @@ mod tests {
             d.covered = true;
         }
         let addr = "127.0.0.1:5900".parse().unwrap();
-        let receive = vnc_apple_media::Receive { codec: vnc_apple_media::Codec::Hevc, strips: true };
+        let receive = vnc_apple_media::Receive::Hevc { strips: true };
         let media: SharedMedia = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, receive, 1).0));
         let shared = Shared {
             media: Some(Arc::clone(&media)),
@@ -13334,7 +13335,7 @@ mod tests {
         }
         let addr = "127.0.0.1:5900".parse().unwrap();
         let media: SharedMedia =
-            Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive { codec: vnc_apple_media::Codec::Hevc, strips: true }, 1).0));
+            Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Hevc { strips: true }, 1).0));
         let tab = SharedTab::default();
 
         media.lock().unwrap().test_answered(&[(1600, 1200)]);
@@ -13378,7 +13379,7 @@ mod tests {
         }
         let addr = "127.0.0.1:5900".parse().unwrap();
         let media: SharedMedia =
-            Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive { codec: vnc_apple_media::Codec::Hevc, strips: true }, 2).0));
+            Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, vnc_apple_media::Receive::Hevc { strips: true }, 2).0));
         let shared = Shared {
             media: Some(Arc::clone(&media)),
             ..test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)))
@@ -13482,7 +13483,7 @@ mod tests {
         // brings the tab's notice down.
         let addr = "127.0.0.1:5900".parse().unwrap();
         let media: SharedMedia = Arc::new(std::sync::Mutex::new(
-            MediaStream::new(addr, addr, vnc_apple_media::Receive { codec: vnc_apple_media::Codec::Hevc, strips: false }, 2).0,
+            MediaStream::new(addr, addr, vnc_apple_media::Receive::Hevc { strips: false }, 2).0,
         ));
         let unit = |size: (u16, u16)| PassedUnit {
             size,
