@@ -47,12 +47,11 @@
 //! - the flags word carries [`FLAG_NO_CURSOR`], which makes the agent capture the
 //!   screen without the pointer (`send cursor with video 0`) — the pointer keeps
 //!   arriving as its own shape over RFB;
-//! - `tilesPerFrame` is Apple's 4, which codes the display as four strips
-//!   ([`Strips`]), for a stream decoded here and for one passed to the browser
-//!   alike, whatever the display's size. It is 1, each picture one HEVC picture
-//!   of the whole display, for a passed session that asked for it. A display the
-//!   Mac sends no picture of in strips is the Mac's to say
-//!   ([`MediaStream::withheld`]).
+//! - `tilesPerFrame` is Apple's 4 for the HEVC, which codes the display as four
+//!   strips ([`Strips`]), whatever the display's size. It is 1, each picture
+//!   one picture of the whole display, for the H.264 ([`Receive::H264`]), and
+//!   for the HEVC of a session that asked for it. A display the Mac sends no
+//!   picture of in strips is the Mac's to say ([`MediaStream::withheld`]).
 //!
 //! Its bitrate entries are Apple's, and so is what bounds them: the Mac's rate
 //! controller walks the picture's target between 20 and 60 Mbit/s by the one-way delay this
@@ -2053,8 +2052,7 @@ impl BitWriter {
 /// The Mac's set has a VUI without the bitstream restriction, and a decoder told
 /// nothing may hold as many pictures back as its buffer has room for before it
 /// shows the first (H.264 E.2.1 infers `max_num_reorder_frames` as the buffer's
-/// size): sixteen strips, four frames, which on a screen that goes still never
-/// come. The stream has no picture to reorder: each one's order count is its
+/// size): sixteen pictures, which on a screen that goes still never come. The stream has no picture to reorder: each one's order count is its
 /// place in the decoding order. So the set is written with the restriction, its
 /// other fields at the values their absence stood for, as WebRTC writes one for
 /// the same reason.

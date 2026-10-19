@@ -1280,7 +1280,7 @@ Safari on a Mac.
   strips' 4 and the whole H.264's 0.1, with the rate target at its top
   throughout. Whole, a still screen sends a picture a second or none.
 - **Its parameter sets come in a sample description.** The Mac sends none as
-  NAL units: each keyframe strip carries a unit of type 18 holding an MP4 `avc1`
+  NAL units: each keyframe carries a unit of type 18 holding an MP4 `avc1`
   sample description, and the receiver takes the sets out of its `avcC` box and
   puts them ahead of the picture (`h264_parameter_sets`), so what the browser is
   sent is Annex B with its parameter sets in band, a keyframe where it holds an

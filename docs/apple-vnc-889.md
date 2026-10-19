@@ -1290,7 +1290,7 @@ one field, and a second in a session that passes the picture:
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. It sets the frame rate the stream is configured for, which is 30 or 60 and nothing above: 60 with it, for a display the Mac's encoder can take at 60, judged from its pixel rate over the display's pixels, and 30 without it or for a larger display. The virtual display's refresh rate does not enter it. That rate is what the encoder spaces four strips by ([Rate control](#rate-control)). |
-| `tilesPerFrame` (video stream field 6) | 4 | 4, whatever the display's size; 1 for a session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the page puts together. One tile is one picture of the whole display on the one SSRC. |
+| `tilesPerFrame` (video stream field 6) | 4 | 4 for the HEVC, whatever the display's size; 1 for the H.264, and for an HEVC session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the page puts together. One tile is one picture of the whole display on the one SSRC. |
 | The video stream's codecs (field 3) | H.264 (123) and HEVC (100) | Both, and H.264 alone for a session started with the H.264 passthrough | Offered both the Mac sends HEVC; offered 123 alone, H.264. |
 
 The video offer names two codecs by their RTP payload numbers, 123 for H.264
@@ -1321,7 +1321,8 @@ at 1600×1000 with one tile, for 20 s a run:
   ([Rate control](#rate-control)).
 
 Passed through the gateway, which sends the rate reports, sessions were run
-with no input at 1440×900 in four strips, and what reached the browser counted
+with no input at 1440×900 in four strips, before remotex offered the H.264 one
+tile, and what reached the browser counted
 for 40 s from 25 s into the session. Two pages in full screen held what the
 screen showed: one drawn once and never again, and one with a quarter of the
 screen in a 4 s loop, bars sliding across it.
@@ -1347,8 +1348,9 @@ screen in a 4 s loop, bars sliding across it.
   kept to a rate would, which was not tested.
 
 Offered 123 alone with `tilesPerFrame` 4, the Mac sends the H.264 in four
-strips, laid out as the HEVC's are ([In strips](#in-strips)). At 1600×1000 each
-was a 1600×256 picture, High profile, level 3.2, under the display's SSRC plus
+strips. Remotex no longer offers it so (see the last point below), and what
+follows is what the Mac sends when it is. The strips are laid out as the
+HEVC's are ([In strips](#in-strips)). At 1600×1000 each was a 1600×256 picture, High profile, level 3.2, under the display's SSRC plus
 the strip's number, a frame's strips sharing its timestamp.
 
 - **One H.264 stream.** The strips share one set of parameter sets, which each
