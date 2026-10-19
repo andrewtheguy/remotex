@@ -134,8 +134,8 @@ announces late is still taken.
 - A listener that falls behind the queue loses its oldest units, as one of PCM
   does, but these were coded: the pump sends a gap frame
   ([Audio frames](architecture.md#audio-frames)) ahead of the next batch, and
-  the player resets its Opus decoder there. FLAC frames decode alone, and its
-  player takes no notice.
+  the player resets its decoder there. FLAC frames decode alone, so for them
+  the reset loses nothing more.
 - A declared frame length above 65,536 bytes is read past without allocating a
   frame, which keeps the RFB stream aligned. Of the frames that are read, only a
   nonempty one of at most 65,535 bytes fits the audio socket's 16-bit packet

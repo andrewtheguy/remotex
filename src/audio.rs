@@ -436,8 +436,8 @@ impl AudioListener {
     }
 }
 
-/// What `audioFormat` names lossless sound as. Not a WebCodecs registration's
-/// string to this client: the page decodes these frames itself.
+/// What `audioFormat` names lossless sound as, and the WebCodecs codec string the
+/// browser decodes these frames under, given a stream header the page writes.
 pub const FLAC_CODEC: &str = "flac";
 
 impl AudioListener {
