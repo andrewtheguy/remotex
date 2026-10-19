@@ -14,7 +14,10 @@ export interface PoolSeat {
   memory: WebAssembly.Memory;
 }
 
-/** What a pool worker says: seated, failed to be, or stopped. */
+/**
+ * What a pool worker says: seated, or failed to be; then stopped, or failed, its
+ * thread out of the module either way.
+ */
 export type PoolEvent =
   | { type: "seated" }
   | { type: "failed"; reason: string }
@@ -26,18 +29,23 @@ const scope = self as unknown as {
   onmessage: ((ev: MessageEvent<PoolSeat>) => void) | null;
 };
 
+const failed = (error: unknown) =>
+  scope.postMessage({
+    type: "failed",
+    reason: error instanceof Error ? error.message : String(error),
+  });
+
 scope.onmessage = ({ data }) => {
-  init({ module_or_path: data.module, memory: data.memory }).then(
-    () => {
-      scope.postMessage({ type: "seated" });
+  init({ module_or_path: data.module, memory: data.memory }).then(() => {
+    scope.postMessage({ type: "seated" });
+    // A thread that traps says so: thrown out of here it would be a rejection
+    // nobody hears, and the paint worker would wait for its `stopped` for good.
+    try {
       runPoolThread();
-      scope.postMessage({ type: "stopped" });
-    },
-    (error: unknown) => {
-      scope.postMessage({
-        type: "failed",
-        reason: error instanceof Error ? error.message : String(error),
-      });
-    },
-  );
+    } catch (error) {
+      failed(error);
+      return;
+    }
+    scope.postMessage({ type: "stopped" });
+  }, failed);
 };

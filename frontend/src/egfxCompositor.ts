@@ -169,8 +169,18 @@ export type EgfxFactory = () => EgfxCompositor;
 
 let loaded: Promise<EgfxFactory> | null = null;
 
+/**
+ * One of the pool's workers, and how its thread ended: stopped, or failed, as it
+ * said or as its `error` said, heard from the worker's start so that `stopEgfx`
+ * learns of an end that came before it asked.
+ */
+interface PoolThread {
+  worker: Worker;
+  ended: Promise<void>;
+}
+
 /** The pool's workers, held for as long as the pool is: until `stopEgfx`. */
-const workers: Worker[] = [];
+const poolThreads: PoolThread[] = [];
 
 /**
  * Start the pool: `threads` workers, each told what this instance is and heard
@@ -193,17 +203,28 @@ async function startThreads(
               new URL("./egfxPool.worker.ts", import.meta.url),
               { type: "module", name: "egfx-pool" },
             );
-            workers.push(worker);
-            worker.onmessage = ({ data }: MessageEvent<PoolEvent>) => {
-              if (data.type === "seated") {
-                resolve();
-              } else if (data.type === "failed") {
-                reject(new Error(data.reason));
-              }
-            };
-            worker.onerror = (event) => {
-              reject(new Error(event.message || "a thread did not start"));
-            };
+            // A failure before the seat is the start's; one after, the thread's.
+            const ended = new Promise<void>((stopped, broke) => {
+              const fail = (error: Error) => {
+                reject(error);
+                broke(error);
+              };
+              worker.onmessage = ({ data }: MessageEvent<PoolEvent>) => {
+                if (data.type === "seated") {
+                  resolve();
+                } else if (data.type === "stopped") {
+                  stopped();
+                } else {
+                  fail(new Error(data.reason));
+                }
+              };
+              worker.onerror = (event) => {
+                fail(new Error(event.message || "a thread failed"));
+              };
+            });
+            // Read by `stopEgfx`, or never, for a pool that is not stopped.
+            ended.catch(() => {});
+            poolThreads.push({ worker, ended });
             // Throws for a memory that cannot be shared, which is a page that is
             // not cross-origin isolated.
             worker.postMessage(seat);
@@ -211,7 +232,7 @@ async function startThreads(
       ),
     );
   } catch (error) {
-    for (const worker of workers.splice(0)) {
+    for (const { worker } of poolThreads.splice(0)) {
       worker.terminate();
     }
     throw error;
@@ -223,8 +244,9 @@ async function startThreads(
  * Stop the pool, if one was started, and end its workers once each thread has
  * returned out of the module: what ends the paint worker on an iPhone or an iPad
  * does this first (desktopPainter.ts). A module loaded after composes on a pool
- * of its own. A worker that fails instead of stopping is ended too, its thread
- * out of the module, and the failure thrown once every worker is.
+ * of its own. A worker whose thread failed, before or after this was asked, is
+ * ended too, its thread out of the module, and the failure thrown once every
+ * worker is.
  */
 export async function stopEgfx(): Promise<void> {
   const pending = loaded;
@@ -233,25 +255,15 @@ export async function stopEgfx(): Promise<void> {
   }
   // A load that failed has ended its workers already.
   await pending.catch(() => {});
-  const stopped = workers.splice(0).map(
-    (worker) =>
-      new Promise<void>((resolve, reject) => {
-        worker.onmessage = ({ data }: MessageEvent<PoolEvent>) => {
-          if (data.type === "stopped") {
-            worker.terminate();
-            resolve();
-          }
-        };
-        worker.onerror = (event) => {
-          worker.terminate();
-          reject(new Error(event.message || "a thread did not stop"));
-        };
-      }),
-  );
-  if (stopped.length > 0) {
+  const stopping = poolThreads.splice(0);
+  if (stopping.length > 0) {
     stopPool();
   }
-  const outcomes = await Promise.allSettled(stopped);
+  const outcomes = await Promise.allSettled(
+    stopping.map(({ worker, ended }) =>
+      ended.finally(() => worker.terminate()),
+    ),
+  );
   loaded = null;
   const failed = outcomes.find((outcome) => outcome.status === "rejected");
   if (failed) {
