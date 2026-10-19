@@ -2873,8 +2873,8 @@ socket; a closed tab only ends the feed. The root page is always the first
 display, so there is no `/display/1`.
 
 The tab has a menu of its own (`DisplayMenu.tsx`), the session page's button and
-drawer (`floatingButton.tsx`) with the display's number on the button where the
-session's shows ☰. It holds what is the tab's alone: immersive full screen, which
+drawer (`floatingButton.tsx`) with the display's number on the button, where the
+session's shows 1 rather than ☰ while the tab is there. It holds what is the tab's alone: immersive full screen, which
 is a window's and which the session page's button reaches only for its own
 window, and Disconnect. What the session has one of — sound, clipboard, the display picker, End
 session — stays in the menu on the session's page. The clipboard's automatic sync
