@@ -31,6 +31,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
-# SIMD is on (.cargo/config.toml), and wasm-opt is told so.
+# SIMD is on (.cargo/config.toml), and wasm-opt is told so. A function with
+# one caller is left a function of its own, as it is written: inlined, a
+# subframe and its Rice codes would share one with the whole frame, where V8
+# keeps fewer of their values in registers (bench/README.md).
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O3", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-simd"]
+wasm-opt = ["-O3", "--one-caller-inline-max-function-size=0", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-simd"]
