@@ -1305,10 +1305,10 @@ Safari on a Mac.
   1281×801 the Mac sent one tile as 1280×800. So a picture is taken as its
   display's where both its sides are the display's rounded down to even, and
   the last column or row is not sent.
-- **The browser is asked, the gateway is not.** The page asks its own
-  `VideoDecoder` about the Mac's High profile H.264 once at load
-  (`frontend/src/videoCodecs.ts`) and the picker greys it where the answer is
-  no; the gateway serves it to any (`Decoders::takes`). The page decodes it in the
+- **Neither the browser nor the gateway is asked.** The picker offers the Mac's
+  H.264 to any browser with a `VideoDecoder` and greys it only for one without
+  (`frontend/src/videoCodecs.ts`): one with a decoder and no H.264 is too
+  unlikely to grey for. The gateway serves it to any (`Decoders::takes`). The page decodes it in the
   browser's own `VideoDecoder` and draws each picture as it draws a whole HEVC
   picture from that decoder; there is no software
   decoder for it in the page. A browser that does not decode it says so in the
