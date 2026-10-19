@@ -48,7 +48,9 @@ function watchKeys(page: Page): Key[] {
 
 async function openKeyboard(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Open menu" }).click();
-  await page.getByRole("button", { name: "Soft keyboard", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Soft keyboard", exact: true })
+    .click();
   await expect(
     page.getByRole("button", { name: "Close soft keyboard" }),
   ).toBeVisible();
@@ -83,12 +85,9 @@ test.describe("the soft keyboard", () => {
     await shift.click();
     await expect(shift).toHaveAttribute("aria-pressed", "true");
     await key(page, "a").click();
-    await expect.poll(() => keys).toEqual([
-      down("ShiftLeft"),
-      down("KeyA"),
-      up("KeyA"),
-      up("ShiftLeft"),
-    ]);
+    await expect
+      .poll(() => keys)
+      .toEqual([down("ShiftLeft"), down("KeyA"), up("KeyA"), up("ShiftLeft")]);
     await expect(shift).toHaveAttribute("aria-pressed", "false");
 
     await key(page, "a").click();
@@ -116,10 +115,7 @@ test.describe("the soft keyboard", () => {
     await sticky.click();
     await expect(sticky).toHaveAttribute("aria-pressed", "false");
     await shift.click();
-    await expect.poll(() => keys).toEqual([
-      down("ShiftLeft"),
-      up("ShiftLeft"),
-    ]);
+    await expect.poll(() => keys).toEqual([down("ShiftLeft"), up("ShiftLeft")]);
     await key(page, "a").click();
     await expect.poll(() => keys.slice(2)).toEqual([down("KeyA"), up("KeyA")]);
 
@@ -170,21 +166,20 @@ test.describe("the soft keyboard on a phone", () => {
     // A tapped Ctrl wraps the next key.
     await key(page, "Ctrl").tap();
     await key(page, "c").tap();
-    await expect.poll(() => keys.slice(2)).toEqual([
-      down("ControlLeft"),
-      down("KeyC"),
-      up("KeyC"),
-      up("ControlLeft"),
-    ]);
+    await expect
+      .poll(() => keys.slice(2))
+      .toEqual([
+        down("ControlLeft"),
+        down("KeyC"),
+        up("KeyC"),
+        up("ControlLeft"),
+      ]);
 
     // The shortcut row's combos are sent as the combo.
     await key(page, "Alt+Tab").tap();
-    await expect.poll(() => keys.slice(6)).toEqual([
-      down("AltLeft"),
-      down("Tab"),
-      up("Tab"),
-      up("AltLeft"),
-    ]);
+    await expect
+      .poll(() => keys.slice(6))
+      .toEqual([down("AltLeft"), down("Tab"), up("Tab"), up("AltLeft")]);
 
     // With the row's Sticky key off, a tap on a modifier is a bare press of it.
     const sticky = key(page, "Sticky modifiers");
@@ -192,10 +187,9 @@ test.describe("the soft keyboard on a phone", () => {
     await sticky.tap();
     await expect(sticky).toHaveAttribute("aria-pressed", "false");
     await key(page, "Super").tap();
-    await expect.poll(() => keys.slice(10)).toEqual([
-      down("MetaLeft"),
-      up("MetaLeft"),
-    ]);
+    await expect
+      .poll(() => keys.slice(10))
+      .toEqual([down("MetaLeft"), up("MetaLeft")]);
 
     // The Sym page: a shifted symbol is Shift and its key, and the strip stays.
     await key(page, "?123").tap();
@@ -208,12 +202,14 @@ test.describe("the soft keyboard on a phone", () => {
     await sticky.tap();
     await expect(sticky).toHaveAttribute("aria-pressed", "true");
     await key(page, "_").tap();
-    await expect.poll(() => keys.slice(12)).toEqual([
-      down("ShiftLeft"),
-      down("Minus"),
-      up("Minus"),
-      up("ShiftLeft"),
-    ]);
+    await expect
+      .poll(() => keys.slice(12))
+      .toEqual([
+        down("ShiftLeft"),
+        down("Minus"),
+        up("Minus"),
+        up("ShiftLeft"),
+      ]);
     await key(page, "ABC").tap();
     await expect(key(page, "?123")).toBeVisible();
   });

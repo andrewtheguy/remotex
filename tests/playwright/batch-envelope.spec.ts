@@ -54,6 +54,37 @@ interface Batch {
   badOp?: number;
 }
 
+/// Where each kind keeps its size and its body's length, and how long its header
+/// is.
+interface Layout {
+  header: number;
+  size: number;
+  length: number;
+}
+
+const LAYOUTS: Record<number, Layout> = {
+  [OP_VIDEO]: { header: VIDEO_HEADER_LEN, size: 2, length: 6 },
+  [OP_STANDARD]: { header: STANDARD_HEADER_LEN, size: 5, length: 9 },
+  [OP_TILE]: { header: TILE_HEADER_LEN, size: 6, length: 10 },
+};
+
+/// The record at `at`, framed as `layout` says its kind is.
+function readRecord(
+  payload: Buffer,
+  at: number,
+  op: number,
+  layout: Layout,
+): BatchRecordFrame {
+  return {
+    op,
+    flags: op === OP_VIDEO ? payload.readUInt8(at + 1) : 0,
+    format: op === OP_TILE ? payload.readUInt8(at + 1) : 0,
+    w: payload.readUInt16LE(at + layout.size),
+    h: payload.readUInt16LE(at + layout.size + 2),
+    payloadLen: payload.readUInt32LE(at + layout.length),
+  };
+}
+
 function parseBatch(payload: Buffer): Batch {
   const count = payload.readUInt16LE(2);
   const records: BatchRecordFrame[] = [];
@@ -62,19 +93,11 @@ function parseBatch(payload: Buffer): Batch {
   let badOp: number | undefined;
   while (at < payload.length) {
     const op = payload.readUInt8(at);
-    // Where each kind keeps its size and its body's length, and how long its
-    // header is. An op this parser does not know stops it here, which is where
-    // the bad byte is. Both real parsers reject rather than guess:
-    // `decodeBatchFrame` drops the whole frame, and `batch_records` in
-    // tests/common/mod.rs refuses the op.
-    const layout =
-      op === OP_VIDEO
-        ? { header: VIDEO_HEADER_LEN, size: 2, length: 6 }
-        : op === OP_STANDARD
-          ? { header: STANDARD_HEADER_LEN, size: 5, length: 9 }
-          : op === OP_TILE
-            ? { header: TILE_HEADER_LEN, size: 6, length: 10 }
-            : undefined;
+    // An op this parser does not know stops it here, which is where the bad
+    // byte is. Both real parsers reject rather than guess: `decodeBatchFrame`
+    // drops the whole frame, and `batch_records` in tests/common/mod.rs refuses
+    // the op.
+    const layout: Layout | undefined = LAYOUTS[op];
     if (!layout) {
       badOp = op;
       exact = false;
@@ -84,16 +107,9 @@ function parseBatch(payload: Buffer): Batch {
       exact = false;
       break;
     }
-    const payloadLen = payload.readUInt32LE(at + layout.length);
-    records.push({
-      op,
-      flags: op === OP_VIDEO ? payload.readUInt8(at + 1) : 0,
-      format: op === OP_TILE ? payload.readUInt8(at + 1) : 0,
-      w: payload.readUInt16LE(at + layout.size),
-      h: payload.readUInt16LE(at + layout.size + 2),
-      payloadLen,
-    });
-    at += layout.header + payloadLen;
+    const record = readRecord(payload, at, op, layout);
+    records.push(record);
+    at += layout.header + record.payloadLen;
   }
   return {
     flags: payload.readUInt8(1),
@@ -103,6 +119,53 @@ function parseBatch(payload: Buffer): Batch {
     exact: exact && at === payload.length,
     badOp,
   };
+}
+
+/// What holds of every batch: its header, and records that exactly fill it.
+function expectFramed(batch: Batch): void {
+  expect(batch.flags, "reserved flags must be zero").toBe(0);
+  expect(
+    batch.records.length,
+    "the header's record count must match the records present",
+  ).toBe(batch.count);
+  expect(
+    batch.badOp,
+    "every record op must be one this build knows",
+  ).toBeUndefined();
+  expect(batch.exact, "records must exactly fill the frame").toBe(true);
+  for (const record of batch.records) {
+    expectRecordFramed(record);
+  }
+}
+
+/// What holds of every record, whatever its kind.
+function expectRecordFramed(record: BatchRecordFrame): void {
+  // A unit says whether it is a keyframe and, where the picture comes in
+  // strips, which strip it is and whether it ends its frame.
+  expect(
+    record.flags &
+      ~(VIDEO_KEYFRAME | VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS),
+    "the keyframe and strip bits are the only flags",
+  ).toBe(0);
+  if ((record.flags & VIDEO_STRIP) === 0) {
+    expect(
+      record.flags & (VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS),
+      "a strip's number and end only on a strip",
+    ).toBe(0);
+  }
+  if (record.op === OP_TILE) {
+    expect(
+      [TILE_JPEG, TILE_PNG],
+      "a tile's image is a JPEG or a PNG",
+    ).toContain(record.format);
+  }
+  // A Standard record is the Mac's rectangle as it sent it, which may
+  // be empty; a unit and a tile never are. Every record has a body.
+  if (record.op !== OP_STANDARD) {
+    expect(record.w).toBeGreaterThan(0);
+    expect(record.h).toBeGreaterThan(0);
+  }
+  expect(record.payloadLen).toBeGreaterThan(0);
 }
 
 test.describe("v4 batch envelope", () => {
@@ -159,44 +222,7 @@ test.describe("v4 batch envelope", () => {
     expect(badKinds, "binary frames that were not batches").toEqual([]);
 
     for (const batch of batches) {
-      expect(batch.flags, "reserved flags must be zero").toBe(0);
-      expect(
-        batch.records.length,
-        "the header's record count must match the records present",
-      ).toBe(batch.count);
-      expect(
-        batch.badOp,
-        "every record op must be one this build knows",
-      ).toBeUndefined();
-      expect(batch.exact, "records must exactly fill the frame").toBe(true);
-      for (const record of batch.records) {
-        // A unit says whether it is a keyframe and, where the picture comes in
-        // strips, which strip it is and whether it ends its frame.
-        expect(
-          record.flags &
-            ~(VIDEO_KEYFRAME | VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS),
-          "the keyframe and strip bits are the only flags",
-        ).toBe(0);
-        if ((record.flags & VIDEO_STRIP) === 0) {
-          expect(
-            record.flags & (VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS),
-            "a strip's number and end only on a strip",
-          ).toBe(0);
-        }
-        if (record.op === OP_TILE) {
-          expect(
-            [TILE_JPEG, TILE_PNG],
-            "a tile's image is a JPEG or a PNG",
-          ).toContain(record.format);
-        }
-        // A Standard record is the Mac's rectangle as it sent it, which may
-        // be empty; a unit and a tile never are. Every record has a body.
-        if (record.op !== OP_STANDARD) {
-          expect(record.w).toBeGreaterThan(0);
-          expect(record.h).toBeGreaterThan(0);
-        }
-        expect(record.payloadLen).toBeGreaterThan(0);
-      }
+      expectFramed(batch);
     }
 
     // A passed stream starts where a decoder that has seen nothing can start.

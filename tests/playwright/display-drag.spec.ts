@@ -57,7 +57,11 @@ interface Traffic {
 /// sends on its session socket, `/ws`, which is the first display's, and a tab
 /// on its display's socket. Registered before navigation.
 function watchTraffic(page: Page): Traffic {
-  const seen: Traffic = { size: new Map(), moves: new Map(), buttons: new Map() };
+  const seen: Traffic = {
+    size: new Map(),
+    moves: new Map(),
+    buttons: new Map(),
+  };
   page.on("websocket", (ws) => {
     const url = new URL(ws.url());
     if (url.pathname !== "/ws" && url.pathname !== "/ws/display") {
@@ -153,7 +157,16 @@ async function dragPast(
 function onMac(language: "AppleScript" | "JavaScript", script: string): string {
   return execFileSync(
     "ssh",
-    ["-o", "BatchMode=yes", MAC_SSH ?? "", "osascript", "-l", language, "-e", `'${script}'`],
+    [
+      "-o",
+      "BatchMode=yes",
+      MAC_SSH ?? "",
+      "osascript",
+      "-l",
+      language,
+      "-e",
+      `'${script}'`,
+    ],
     { encoding: "utf8", timeout: 20_000 },
   ).trim();
 }
@@ -175,7 +188,10 @@ function macPointer(): { screens: number[][]; mouse: [number, number] } {
 
 /// Press at the surface's centre and hold the pointer past the window at
 /// `clientX`; the release, for after the Mac has been asked where its pointer is.
-async function holdPast(page: Page, clientX: number): Promise<() => Promise<void>> {
+async function holdPast(
+  page: Page,
+  clientX: number,
+): Promise<() => Promise<void>> {
   const box = await surface(page);
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
@@ -207,8 +223,12 @@ test.describe("a drag held past the edge between two displays", () => {
     test.setTimeout(120_000);
     const traffic = watchTraffic(page);
     await logInAndConnectTo(page, TARGET ?? "", "", { resize: true });
-    await expect(page.locator("canvas").first()).toBeVisible({ timeout: 20_000 });
-    await expect.poll(() => traffic.size.get(1), { timeout: 20_000 }).toBeDefined();
+    await expect(page.locator("canvas").first()).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect
+      .poll(() => traffic.size.get(1), { timeout: 20_000 })
+      .toBeDefined();
     const first = traffic.size.get(1);
     if (!first) {
       throw new Error("unreachable");
@@ -221,7 +241,13 @@ test.describe("a drag held past the edge between two displays", () => {
     // One display shown, nothing beside it: held at the display's edge both ways.
     // Chosen, since two displays start shown beside each other.
     await chooseDisplay(page, "All Displays", "Display 1");
-    const alone = await dragPast(page, traffic, 1, viewport.width + PAST, false);
+    const alone = await dragPast(
+      page,
+      traffic,
+      1,
+      viewport.width + PAST,
+      false,
+    );
     const aloneLast = alone.held[alone.held.length - 1];
     expect(aloneLast).toEqual({ x: first.w - 1, y: 0 });
     expect(alone.held.every((m) => m.x <= first.w - 1 && m.y >= 0)).toBe(true);
@@ -231,9 +257,13 @@ test.describe("a drag held past the edge between two displays", () => {
     const tab = await context.newPage();
     const tabTraffic = watchTraffic(tab);
     await tab.goto(new URL("/display/2", BASE_URL).toString());
-    await expect(tab.locator("canvas").first()).toBeVisible({ timeout: 20_000 });
+    await expect(tab.locator("canvas").first()).toBeVisible({
+      timeout: 20_000,
+    });
     await expect(tab.getByRole("alert")).toHaveCount(0);
-    await expect.poll(() => tabTraffic.size.get(2), { timeout: 20_000 }).toBeDefined();
+    await expect
+      .poll(() => tabTraffic.size.get(2), { timeout: 20_000 })
+      .toBeDefined();
     const second = tabTraffic.size.get(2);
     if (!second) {
       throw new Error("unreachable");
@@ -241,21 +271,38 @@ test.describe("a drag held past the edge between two displays", () => {
 
     // From this page, past the right edge: through, towards the second display,
     // and past the top as well, which the engine holds on a display.
-    const across = await dragPast(page, traffic, 1, viewport.width + PAST, true);
-    const acrossLast = across.held[across.held.length - 1];
-    expect(acrossLast.x, "past the edge towards the second display").toBeGreaterThan(
-      first.w - 1,
+    const across = await dragPast(
+      page,
+      traffic,
+      1,
+      viewport.width + PAST,
+      true,
     );
-    expect(acrossLast.y, "past the top, for the engine to hold").toBeLessThan(0);
+    const acrossLast = across.held[across.held.length - 1];
+    expect(
+      acrossLast.x,
+      "past the edge towards the second display",
+    ).toBeGreaterThan(first.w - 1);
+    expect(acrossLast.y, "past the top, for the engine to hold").toBeLessThan(
+      0,
+    );
 
     // From the tab, past the left edge: through, towards the first display.
     const back = await dragPast(tab, tabTraffic, 2, -PAST, true);
     const backLast = back.held[back.held.length - 1];
-    expect(backLast.x, "past the edge towards the first display").toBeLessThan(0);
+    expect(backLast.x, "past the edge towards the first display").toBeLessThan(
+      0,
+    );
     expect(backLast.y, "past the top, for the engine to hold").toBeLessThan(0);
     // And past its right edge, where nothing is shown: through as well, for the
     // engine to hold on the second display.
-    const beyond = await dragPast(tab, tabTraffic, 2, viewport.width + PAST, true);
+    const beyond = await dragPast(
+      tab,
+      tabTraffic,
+      2,
+      viewport.width + PAST,
+      true,
+    );
     expect(beyond.held[beyond.held.length - 1].x).toBeGreaterThan(second.w - 1);
 
     if (MAC_SSH) {
@@ -271,7 +318,8 @@ test.describe("a drag held past the edge between two displays", () => {
       let release = await holdPast(page, viewport.width + PAST);
       await expect
         .poll(() => macPointer().mouse[0], {
-          message: "held past the right edge, the pointer is on the second display",
+          message:
+            "held past the right edge, the pointer is on the second display",
           timeout: MAC_TIMEOUT_MS,
         })
         .toBeGreaterThanOrEqual(first.w);
@@ -279,7 +327,8 @@ test.describe("a drag held past the edge between two displays", () => {
       release = await holdPast(tab, -PAST);
       await expect
         .poll(() => macPointer().mouse[0], {
-          message: "held past the left edge, the pointer is on the first display",
+          message:
+            "held past the left edge, the pointer is on the first display",
           timeout: MAC_TIMEOUT_MS,
         })
         .toBeLessThan(first.w);

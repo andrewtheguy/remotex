@@ -29,7 +29,12 @@
 //     bunx playwright test '/standard-combined\.spec\.ts$'
 import { expect, type Page, test } from "@playwright/test";
 
-import { faults, leaveSession, logInAndConnectTo, returnToPicker } from "./support";
+import {
+  faults,
+  leaveSession,
+  logInAndConnectTo,
+  returnToPicker,
+} from "./support";
 
 const STANDARD_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_TARGET;
 const COMBINED_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET;
@@ -69,25 +74,65 @@ interface Session {
   acked: number;
 }
 
+/// Count one tile where it lands: on the grid of the last `resize`, or misplaced.
+function onTile(seen: Session, x: number, y: number, w: number, h: number) {
+  const size = seen.resize;
+  if (
+    !size ||
+    x % TILE !== 0 ||
+    y % TILE !== 0 ||
+    x + w > size.w ||
+    y + h > size.h
+  ) {
+    seen.misplaced += 1;
+    return;
+  }
+  for (let col = x / TILE; col < Math.ceil((x + w) / TILE); col += 1) {
+    for (let row = y / TILE; row < Math.ceil((y + h) / TILE); row += 1) {
+      seen.covered.add(`${col},${row}`);
+    }
+  }
+}
+
+/// Keep what a control message says of the session.
+function onControl(
+  seen: Session,
+  message: { type: string; [key: string]: unknown },
+): void {
+  seen.controlTypes.push(message.type);
+  if (message.type === "connected") {
+    seen.connected = {
+      render: message.render as string,
+      passthrough: message.passthrough as string | null,
+    };
+  } else if (message.type === "resize") {
+    seen.resize = {
+      w: message.w as number,
+      h: message.h as number,
+      scale: message.scale as number,
+    };
+    seen.covered.clear();
+  } else if (message.type === "mosaic") {
+    seen.mosaics.push(message.regions as Region[]);
+  } else if (message.type === "oversize") {
+    seen.oversize = message.cause as string | null;
+    seen.oversizes.push(message.cause as string | null);
+  }
+}
+
 /// Read one batch's tiles, counting what does not hold.
 function onBatch(seen: Session, payload: Buffer): void {
   let at = BATCH_HEADER_LEN;
   while (at < payload.length) {
-    if (payload.readUInt8(at) !== OP_TILE || at + TILE_HEADER_LEN > payload.length) {
+    if (
+      payload.readUInt8(at) !== OP_TILE ||
+      at + TILE_HEADER_LEN > payload.length
+    ) {
       seen.strays += 1;
       return;
     }
     const [x, y, w, h] = [2, 4, 6, 8].map((o) => payload.readUInt16LE(at + o));
-    const size = seen.resize;
-    if (!size || x % TILE !== 0 || y % TILE !== 0 || x + w > size.w || y + h > size.h) {
-      seen.misplaced += 1;
-    } else {
-      for (let col = x / TILE; col < Math.ceil((x + w) / TILE); col += 1) {
-        for (let row = y / TILE; row < Math.ceil((y + h) / TILE); row += 1) {
-          seen.covered.add(`${col},${row}`);
-        }
-      }
-    }
+    onTile(seen, x, y, w, h);
     at += TILE_HEADER_LEN + payload.readUInt32LE(at + 10);
   }
   if (at !== payload.length) {
@@ -113,7 +158,10 @@ function watchSession(page: Page): Session {
       return;
     }
     ws.on("framesent", ({ payload }) => {
-      if (typeof payload === "string" && JSON.parse(payload).type === "paintAck") {
+      if (
+        typeof payload === "string" &&
+        JSON.parse(payload).type === "paintAck"
+      ) {
         seen.acked += 1;
       }
     });
@@ -127,20 +175,8 @@ function watchSession(page: Page): Session {
         return;
       }
       const message = JSON.parse(payload);
-      if (typeof message.type !== "string") {
-        return;
-      }
-      seen.controlTypes.push(message.type);
-      if (message.type === "connected") {
-        seen.connected = { render: message.render, passthrough: message.passthrough };
-      } else if (message.type === "resize") {
-        seen.resize = { w: message.w, h: message.h, scale: message.scale };
-        seen.covered.clear();
-      } else if (message.type === "mosaic") {
-        seen.mosaics.push(message.regions);
-      } else if (message.type === "oversize") {
-        seen.oversize = message.cause;
-        seen.oversizes.push(message.cause);
+      if (typeof message.type === "string") {
+        onControl(seen, message);
       }
     });
   });
@@ -150,9 +186,16 @@ function watchSession(page: Page): Session {
 /// What holds of a session of the gateway's tiles on a Standard Mac, one screen
 /// at a time or Combined Display: it passes nothing, starts as tiles, is never
 /// held, and every record is a tile on the grid.
-async function assertTheTilesHold(page: Page, seen: Session, render: RegExp): Promise<void> {
+async function assertTheTilesHold(
+  page: Page,
+  seen: Session,
+  render: RegExp,
+): Promise<void> {
   await expect
-    .poll(() => seen.acked, { message: "batches of tiles painted", timeout: 20_000 })
+    .poll(() => seen.acked, {
+      message: "batches of tiles painted",
+      timeout: 20_000,
+    })
     .toBeGreaterThan(0);
   expect(seen.connected?.render).toMatch(render);
   expect(seen.connected?.passthrough).toBe(null);
@@ -187,9 +230,18 @@ test.describe("a Standard Mac of one screen at a time, in the gateway's tiles", 
     page,
   }) => {
     const seen = watchSession(page);
-    await logInAndConnectTo(page, STANDARD_TARGET ?? "", "", { passthrough: null });
-    await assertTheTilesHold(page, seen, /^the Mac's Full quality, tiles q\d+$/);
-    expect(seen.mosaics.every((regions) => regions.length === 0), "one screen, no mosaic").toBe(true);
+    await logInAndConnectTo(page, STANDARD_TARGET ?? "", "", {
+      passthrough: null,
+    });
+    await assertTheTilesHold(
+      page,
+      seen,
+      /^the Mac's Full quality, tiles q\d+$/,
+    );
+    expect(
+      seen.mosaics.every((regions) => regions.length === 0),
+      "one screen, no mosaic",
+    ).toBe(true);
     // The whole screen arrives as tiles, as any VNC server's desktop does. The
     // session opens on a pixel of the combined view the Mac connects on, which
     // is never shown, so the screen's own `resize` may follow the first tile:
@@ -223,15 +275,23 @@ test.describe("a Standard Mac's Combined Display, composed by the gateway", () =
   }) => {
     test.setTimeout(120_000);
     const seen = watchSession(page);
-    await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", { standardView: "combined" });
+    await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", {
+      standardView: "combined",
+    });
     await expect.poll(() => seen.resize?.scale, { timeout: 20_000 }).toBe(1);
     await assertTheSessionHolds(page, seen);
-    expect(seen.mosaics.every((regions) => regions.length === 0), "no mosaic").toBe(true);
+    expect(
+      seen.mosaics.every((regions) => regions.length === 0),
+      "no mosaic",
+    ).toBe(true);
     expect(seen.oversize, "never held").toBeUndefined();
     // The gaps between unequal screens are sent too: the whole desktop is tiles.
     const size = seen.resize ?? { w: 0, h: 0 };
     await expect
-      .poll(() => seen.covered.size, { message: "every tile of the desktop", timeout: 30_000 })
+      .poll(() => seen.covered.size, {
+        message: "every tile of the desktop",
+        timeout: 30_000,
+      })
       .toBe(Math.ceil(size.w / TILE) * Math.ceil(size.h / TILE));
     await returnToPicker(page);
   });
@@ -239,10 +299,14 @@ test.describe("a Standard Mac's Combined Display, composed by the gateway", () =
   test.describe("at a 2x browser", () => {
     test.use({ deviceScaleFactor: 2 });
 
-    test("is the Mac's pixels with the mosaic the page composes them by", async ({ page }) => {
+    test("is the Mac's pixels with the mosaic the page composes them by", async ({
+      page,
+    }) => {
       test.setTimeout(120_000);
       const seen = watchSession(page);
-      await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", { standardView: "combined" });
+      await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", {
+        standardView: "combined",
+      });
       await expect
         .poll(() => seen.mosaics.at(-1)?.length ?? 0, { timeout: 20_000 })
         .toBe(2);

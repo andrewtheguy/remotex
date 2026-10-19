@@ -170,6 +170,31 @@ function noteDisplays(
   }
 }
 
+/// Keep a binary frame of the display socket: a batch of rectangles, counted
+/// against the size announced before it and against its socket's `standardStart`.
+function onDisplayFrame(seen: Session, payload: Buffer, started: boolean) {
+  const kind = payload.readUInt8(0);
+  if (kind !== BATCH_FRAME_KIND) {
+    seen.badKinds.push(kind);
+    return;
+  }
+  const batch = parseBatch(payload);
+  if (!started) {
+    seen.unannounced += batch.rects.length;
+  }
+  for (const rect of batch.rects) {
+    // Read where it arrived: not held past it.
+    rect.body = undefined;
+  }
+  const size = seen.size;
+  seen.outside.push(
+    ...batch.rects.filter(
+      (r) => !size || r.x + r.w > size.w || r.y + r.h > size.h,
+    ),
+  );
+  seen.batches.push(batch);
+}
+
 /// Watch the session socket, and the display socket that carries its picture.
 /// Registered before navigation, so nothing is missed.
 function watchSession(page: Page): Session {
@@ -237,26 +262,7 @@ function watchSession(page: Page): Session {
         }
         return;
       }
-      const kind = payload.readUInt8(0);
-      if (kind !== BATCH_FRAME_KIND) {
-        seen.badKinds.push(kind);
-        return;
-      }
-      const batch = parseBatch(payload);
-      if (!started) {
-        seen.unannounced += batch.rects.length;
-      }
-      for (const rect of batch.rects) {
-        // Read where it arrived: not held past it.
-        rect.body = undefined;
-      }
-      const size = seen.size;
-      seen.outside.push(
-        ...batch.rects.filter(
-          (r) => !size || r.x + r.w > size.w || r.y + r.h > size.h,
-        ),
-      );
-      seen.batches.push(batch);
+      onDisplayFrame(seen, payload, started);
     });
   });
   return seen;
@@ -477,63 +483,61 @@ test.describe("a Standard Mac of two screens shown one at a time", () => {
   test("passes its Adaptive picture of the main screen, and of the other once chosen", async ({
     page,
   }) => {
-      test.setTimeout(120_000);
-      const seen = watchSession(page);
-      await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", ADAPTIVE);
+    test.setTimeout(120_000);
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, COMBINED_TARGET ?? "", "", ADAPTIVE);
+    await expect
+      .poll(() => seen.displays?.displays.length ?? 0, {
+        message: "two screens",
+        timeout: 20_000,
+      })
+      .toBe(2);
+    expect(
+      seen.displays?.displays.map((display) => display.id),
+      "no Combined Display entry",
+    ).not.toContain(COMBINED);
+    const label = (id: number) =>
+      seen.displays?.displays.find((display) => display.id === id)?.label ?? "";
+
+    // The view the Mac names, then batches painted after it.
+    const shows = async (id: number) => {
       await expect
-        .poll(() => seen.displays?.displays.length ?? 0, {
-          message: "two screens",
+        .poll(() => seen.displays?.active, { timeout: 20_000 })
+        .toBe(id);
+      const painted = seen.acknowledged.length;
+      await expect
+        .poll(() => seen.acknowledged.length, {
+          message: `a batch of ${label(id)} painted`,
           timeout: 20_000,
         })
-        .toBe(2);
-      expect(
-        seen.displays?.displays.map((display) => display.id),
-        "no Combined Display entry",
-      ).not.toContain(COMBINED);
-      const label = (id: number) =>
-        seen.displays?.displays.find((display) => display.id === id)?.label ??
-        "";
+        .toBeGreaterThan(painted);
+    };
+    // The session starts on a screen, never on the combined view.
+    await expect
+      .poll(() => seen.displays?.active ?? COMBINED, { timeout: 20_000 })
+      .not.toBe(COMBINED);
+    const first = seen.displays?.active ?? 0;
+    await shows(first);
+    const other =
+      seen.displays?.displays.find((display) => display.id !== first)?.id ?? 0;
+    await chooseDisplay(page, label(first), label(other));
+    await shows(other);
+    await chooseDisplay(page, label(other), label(first));
+    await shows(first);
 
-      // The view the Mac names, then batches painted after it.
-      const shows = async (id: number) => {
-        await expect
-          .poll(() => seen.displays?.active, { timeout: 20_000 })
-          .toBe(id);
-        const painted = seen.acknowledged.length;
-        await expect
-          .poll(() => seen.acknowledged.length, {
-            message: `a batch of ${label(id)} painted`,
-            timeout: 20_000,
-          })
-          .toBeGreaterThan(painted);
-      };
-      // The session starts on a screen, never on the combined view.
-      await expect
-        .poll(() => seen.displays?.active ?? COMBINED, { timeout: 20_000 })
-        .not.toBe(COMBINED);
-      const first = seen.displays?.active ?? 0;
-      await shows(first);
-      const other =
-        seen.displays?.displays.find((display) => display.id !== first)?.id ??
-        0;
-      await chooseDisplay(page, label(first), label(other));
-      await shows(other);
-      await chooseDisplay(page, label(other), label(first));
-      await shows(first);
+    expect(
+      seen.mosaics.every((regions) => regions.length === 0),
+      "a screen presented whole",
+    ).toBe(true);
+    expect(seen.oversize, "a Mac's own picture has no ceiling").toBeUndefined();
+    expect(seen.controlTypes).not.toContain("videoFormat");
+    expect(seen.outside, "rectangles off the framebuffer").toEqual([]);
+    for (const batch of seen.batches) {
+      expect(batch.badOp).toBe(undefined);
+      expect(batch.exact).toBe(true);
+    }
 
-      expect(
-        seen.mosaics.every((regions) => regions.length === 0),
-        "a screen presented whole",
-      ).toBe(true);
-      expect(seen.oversize, "a Mac's own picture has no ceiling").toBeUndefined();
-      expect(seen.controlTypes).not.toContain("videoFormat");
-      expect(seen.outside, "rectangles off the framebuffer").toEqual([]);
-      for (const batch of seen.batches) {
-        expect(batch.badOp).toBe(undefined);
-        expect(batch.exact).toBe(true);
-      }
-
-      await returnToPicker(page);
+    await returnToPicker(page);
   });
 });
 
@@ -566,9 +570,7 @@ test.describe("a Mac's virtual display whose Adaptive picture is passed", () => 
       width: (viewport?.width ?? 1280) - 160,
       height: (viewport?.height ?? 720) - 120,
     });
-    await expect
-      .poll(() => seen.size, { timeout: 20_000 })
-      .not.toEqual(before);
+    await expect.poll(() => seen.size, { timeout: 20_000 }).not.toEqual(before);
     const resized = seen.batches.length;
     const acknowledged = seen.acknowledged.length;
 

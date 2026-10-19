@@ -113,7 +113,9 @@ test.describe("a target that passes its pipeline over two virtual displays", () 
     // announced at.
     const first = seen.controlTypes.get(1) ?? [];
     expect(first.indexOf("resize")).toBeGreaterThanOrEqual(0);
-    expect(first.indexOf("graphicsView")).toBeGreaterThan(first.indexOf("resize"));
+    expect(first.indexOf("graphicsView")).toBeGreaterThan(
+      first.indexOf("resize"),
+    );
     const shown = last(seen.views.get(1));
     expect(shown).toBeDefined();
     expect([shown?.x, shown?.y]).toEqual([0, 0]);
@@ -161,13 +163,20 @@ test.describe("a target that passes its pipeline over two virtual displays", () 
     // Its socket named the second column, beside its size, and carried no
     // picture of its own: nothing to decode in this tab.
     const second = tabSeen.controlTypes.get(2) ?? [];
-    expect(second.indexOf("graphicsView")).toBeGreaterThan(second.indexOf("resize"));
+    expect(second.indexOf("graphicsView")).toBeGreaterThan(
+      second.indexOf("resize"),
+    );
     const column = last(tabSeen.views.get(2));
     expect(column?.x).toBe(shown?.w);
     expect(column?.y).toBe(0);
     expect([column?.w, column?.h]).toEqual([shown?.w, shown?.h]);
-    expect(second, "a passed pipeline is no video stream").not.toContain("videoFormat");
-    expect(tabSeen.binary.get(2) ?? 0, "binary frames on the second display's socket").toBe(0);
+    expect(second, "a passed pipeline is no video stream").not.toContain(
+      "videoFormat",
+    );
+    expect(
+      tabSeen.binary.get(2) ?? 0,
+      "binary frames on the second display's socket",
+    ).toBe(0);
     expect(second, "a tab composes no pipeline").not.toContain("graphicsStart");
 
     // Another tab opening the display takes nothing by visiting: it asks, and
@@ -208,7 +217,9 @@ test.describe("a target that passes its pipeline over two virtual displays", () 
       .poll(() => last(seen.views.get(1))?.x, { timeout: 10_000 })
       .toBe(shown?.w);
     expect(
-      (seen.controlTypes.get(1) ?? []).filter((type) => type === "graphicsStart").length,
+      (seen.controlTypes.get(1) ?? []).filter(
+        (type) => type === "graphicsStart",
+      ).length,
       "the pipeline is not started over for a switch of display",
     ).toBe(1);
     await expect(tab.getByText("Display not available")).toBeVisible({
