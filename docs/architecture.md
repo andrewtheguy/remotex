@@ -2071,8 +2071,9 @@ and `GET /api/targets` carries it:
 - **A Mac's picture is one of two.** `choices.passthrough` names the stream
   passed, `apple-media` for a High Performance Mac's HEVC or `apple-h264` for its H.264
   (`Passthrough` in `src/config.rs`). The picker's Picture group shows them as
-  radios in that order, HEVC passed through, H.264 passed through, and takes
-  the first that is not greyed until somebody chooses another (`pictureOptions`
+  radios in that order, HEVC passed through, recommended for the best quality,
+  and H.264 (alpha) passed through, for compatibility, and
+  takes the first that is not greyed until somebody chooses another (`pictureOptions`
   in `frontend/src/targetChoices.ts`). A `connect` that names neither is
   refused: no picture of a High Performance Mac's is coded here. A Standard
   Mac's Picture group is Apple's Adaptive (beta) passed through, which `connect`
