@@ -1350,8 +1350,10 @@ screen in a 4 s loop, bars sliding across it.
 
 - **A still page is not silent.** The Mac sent 16 to 19 pictures a second of
   it for a while, then nothing for 5 to 18 s, then began again, in either
-  codec. No keyframe was among them and none was asked for. What sets the
-  spells off is not known.
+  codec. No keyframe was among them and none was asked for. Each spell is the
+  Mac's repeats after a change of the screen
+  ([Repeats of a still screen](#repeats-of-a-still-screen)), and these runs
+  acknowledged no strip.
 - **The H.264 was the heavier on both pages:** four to six times the HEVC on
   the still page, while pictures came and in the session's first 15 s alike,
   and a fifth more on the loop.
@@ -1403,8 +1405,10 @@ the strip's number, a frame's strips sharing its timestamp.
   Mbit/s throughout, the Mac sent about 17 frames a second in four strips, each
   strip at the same size frame after frame, 35–56 KB of mostly intra blocks:
   about 25 Mbit/s for a screen that did not change. Acknowledging each strip's
-  picture, as remotex acknowledges the HEVC's whole pictures, changed nothing.
-  The HEVC's strips repeat too, at about 3.7 Mbit/s. With one tile the H.264
+  picture changed nothing, by its timestamp or by its decoding order number,
+  and each strip predicts from another's
+  ([Repeats of a still screen](#repeats-of-a-still-screen)). The HEVC's strips
+  repeat too, at about 3.7 Mbit/s, until acknowledged. With one tile the H.264
   came about a picture a second, settling at pictures under 1 KB, about 0.1
   Mbit/s, and so remotex offers the H.264 one tile
   ([The Mac's H.264](architecture.md#the-macs-h264)).
@@ -1470,9 +1474,9 @@ other failures (see [Liveness](#the-stream)).
   A 30 Hz mode sent 30.0, across resizes, and logged `viewer set refreshRate 30`.
   Remotex asks for 30 Hz, because the browser is sent 30 frames a second and
   every picture has to be decoded whether it is shown or not. A still screen
-  is sent in spells: 16 to 19 pictures a second for a while, then none for 5 to
-  18 s, measured on a full-screen still page
-  ([Negotiation](#negotiation)), while the Mac's
+  sends repeats for some 20 s after each change, as many as the stream does not
+  drop, and then nothing
+  ([Repeats of a still screen](#repeats-of-a-still-screen)), while the Mac's
   sender reports go on. The receiver's debug log reports the
   pictures a second every 10 seconds.
 - **Receiving.** The Mac sends each picture as one burst at the link's speed. On
@@ -1540,8 +1544,10 @@ other failures (see [Liveness](#the-stream)).
     PLI's and an RFC 5104 FIR's came at about 110 KB, on a 1600×1000 display
     the encoder had spent seconds refining. The request is subject to the
     least gap above. A PLI and a FIR bring an IDR whatever was acknowledged.
-  - **Remotex acknowledges every picture of a stream of one tile that it
-    hands on,** and after lost packets asks for a refresh and drops pictures
+  - **Remotex acknowledges every HEVC picture that it hands on,** a strip's by
+    its decoding order number
+    ([Repeats of a still screen](#repeats-of-a-still-screen)), and in a stream
+    of one tile, after lost packets, asks for a refresh and drops pictures
     until the marked one or an IDR. With 0.3% of the picture's packets dropped
     on the way to a gateway decoding the stream, the Mac's encoder logged three
     refreshes and no IDR after the stream's first, and no picture failed to
@@ -1689,7 +1695,9 @@ four strips do not fit it sends no picture at all (below).
 - **Remotex takes any gap as the loss of everything since the last keyframe.**
   A packet missing from one strip's sequence, or a picture missing from the
   decoding order, drops every strip's pictures until strip 0's next IDR, and a
-  PLI asks for it. It sends no acknowledgement and asks for no refresh.
+  PLI asks for it. It asks for no refresh, and acknowledges each picture it
+  hands on, which is what stops a strip's repeats of a still screen
+  ([Repeats of a still screen](#repeats-of-a-still-screen)).
 - **The display is shown a frame at a time.** The gateway holds a frame's
   strips until it has all four for one timestamp, a strip of the next frame
   arrives, or 8 ms pass with no strip: the Mac codes a frame's strips one after
@@ -1705,6 +1713,53 @@ four strips do not fit it sends no picture at all (below).
   last strip cut by one came squeezed, with the rows past the display in it.
   A probe can ask for one tile instead (`Choices::whole`)
   ([Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through)).
+
+#### Repeats of a still screen
+
+A still screen is not silent. After any change of the screen, the Mac's
+capture hands its encoder the unchanged frame again, about 18 times a second,
+until it has spent a fixed count of 300 such idle frames, some 20 s, and then
+hands it nothing until the screen next changes. What goes out of the repeats is
+the encoder's to decide, and it decides by the tile count. Read from
+AVConference and VideoProcessing, and measured on macvm at 1440×900 under a
+full-screen still page, from the encoder's statistics, which the Mac logs once a
+second:
+
+| The stream | Repeats sent | The picture's rate during them |
+|---|---|---|
+| H.264, one tile | about one a second | about 7 kbit/s |
+| HEVC, four strips, not acknowledged | every one, four strips about 18 times a second | 3.3–4.9 Mbit/s |
+| HEVC, four strips, each strip picture acknowledged by its decoding order number | none, from about 2 s after the change | nothing |
+| H.264, four strips, acknowledged or not | every one | about 25 Mbit/s |
+
+- **One tile drops them on a clock.** A repeat, with no keyframe or refresh
+  owed, is dropped while the last picture sent came at a quantizer of 22 or
+  finer and is under a second old; after a second one goes out. Nothing the
+  viewer sends enters it.
+- **Strips drop them once acknowledged.** A strip's repeat is dropped only
+  when the strip's last picture sent came at a quantizer of 22 or finer, four
+  of its repeats have gone out, and one of its pictures has been acknowledged;
+  then all but one in a thousand are. Unacknowledged, every repeat goes out, and
+  the strips go on refining, to a quantizer of 6.
+- **A strip is acknowledged by its decoding order number.** With more than one
+  tile the Mac files each picture that asks to be acknowledged (the header
+  extension's `0x10` bit) under its 16-bit decoding order number, not under its
+  RTP timestamp, which the four strips of a frame share. The acknowledgement is
+  the APP packet of [The stream](#the-stream) with the number, zero-extended,
+  where one of one tile has the timestamp. One carrying the timestamp matches
+  nothing and is dropped, as four a frame of them were. Apple's viewer
+  acknowledges each tile picture it decodes, by what the Mac filed it under.
+- **An acknowledged still screen settles coarser.** Its repeats stop at a
+  picture of quantizer 22 or so, which came at about 40 dB PSNR against the
+  quantizer-6 picture that unacknowledged strips refine the same screen to.
+- **H.264 strips cannot be acknowledged.** None of their packets carries the
+  `0x10` bit, so nothing matches an acknowledgement, by either value. Each
+  strip picture predicts from one reference, the picture before it in the
+  decoding order, which is another strip's: the picture parameter set allows
+  one, no slice asks for more, and each slice's list is reordered to the
+  long-term picture before it. A repeat is so coded mostly intra.
+- **Remotex acknowledges each HEVC strip picture it hands on by its decoding
+  order number,** as it acknowledges a picture of one tile by its timestamp.
 
 ### Rate control
 
@@ -1806,8 +1861,8 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   delay too, which lowers the rate as a slow link would. What the browser's
   link does, the passed stream's queue answers, not the Mac's controller.
 - **Apple's viewer.** It offers up to 100 Mbit/s and four tiles, sends `RCTL`
-  every 50 ms, and acknowledges each decoded tile picture for the encoder's
-  long-term references ([The stream](#the-stream)). On a quiet link its target sat
+  every 50 ms, and acknowledges each decoded tile picture
+  ([Repeats of a still screen](#repeats-of-a-still-screen)). On a quiet link its target sat
   at 58.4 Mbit/s with a round-trip time of about 1 ms. Its session was encrypted,
   so its reports were not read: the layout above comes from AVConference's code
   that builds and parses them, confirmed by a probe whose reports the Mac took as
@@ -2003,8 +2058,8 @@ is 10 s overdue.
 - **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers
   the target over longer than 30 s, and whether any offer field lowers the
   20 Mbit/s floor ([Rate control](#rate-control)).
-- **Four-tile frames**: what Apple's viewer acknowledges a tile picture with,
-  and whether anything short of a keyframe mends a loss; a stream of them
+- **Four-tile frames**: whether anything short of a keyframe mends a loss,
+  and whether a still screen's repeats stop as early on a physical Mac; a stream of them
   under loss, on a physical Mac and at 4K
   ([In strips](#in-strips)).
 - **Cases the test Mac could not show:**

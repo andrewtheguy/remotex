@@ -1186,7 +1186,10 @@ Three controls with similar names therefore remain separate:
   strips its pictures come in (`strips`: 4, and 1 for whole pictures), which
   the Info panel's video row repeats. A keyframe is strip 0's IDR; the other
   strips' intra pictures follow it as ordinary units, so a restart drops to
-  that IDR as it drops to any. For the page's software decoder, each strip
+  that IDR as it drops to any. Each strip picture handed on is acknowledged to
+  the Mac by its decoding order number, without which the Mac sends every
+  repeat of a still screen for some 20 s after each change
+  ([Repeats of a still screen](apple-vnc-889.md#repeats-of-a-still-screen)). For the page's software decoder, each strip
   decodes to a picture of its own, which the decode worker answers with where
   its rows go in the display, and the paint worker uploads it there, into
   textures of the display's size, and draws the display at the frame's last
@@ -1301,10 +1304,14 @@ Safari on a Mac.
   within tens of milliseconds, as it does for the HEVC, and drops one that comes
   within a second of its last keyframe, so the request is made again until the
   IDR comes. No picture is acknowledged and no refresh asked for.
-- **An odd side is coded a pixel shorter.** 4:2:0 has no odd size to say: at
-  1281×801 the Mac sent one tile as 1280×800. So a picture is taken as its
-  display's where both its sides are the display's rounded down to even, and
-  the last column or row is not sent.
+- **An odd side is coded a pixel shorter, on macvm.** 4:2:0 has no odd size
+  to say: at 1281×801 macvm sent one tile as 1280×800. So a picture is taken as
+  its display's where both its sides are the display's rounded down to even,
+  and the last column or row is not sent. A physical Mac, macwork, sent no
+  picture of a 1864×983 display asked for whole, its reports saying it had sent
+  none, so the page said "No picture at this size", where the same display in
+  four strips had come; whether an even height brings the picture there has
+  not been tried.
 - **Neither the browser nor the gateway is asked.** The picker offers the Mac's
   H.264 to any browser with a `VideoDecoder` and greys it only for one without
   (`frontend/src/videoCodecs.ts`): one with a decoder and no H.264 is too
