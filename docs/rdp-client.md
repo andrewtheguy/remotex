@@ -4,7 +4,7 @@ The gateway speaks RDP with its own client, `src/rdp_client/`, down to the wire
 format. `rdp_client/proto/` encodes and decodes every PDU against [MS-RDPBCGR]
 and its extensions; the modules above it own one thread per session, a complete
 framebuffer painted from those decoders, and an event per damaged rectangle. The
-engine that consumes those events — damage into the video stream, `ClientMsg` into scancodes
+engine that consumes those events — damage into tiles, `ClientMsg` into scancodes
 — is `src/rdp.rs`, and the boundary between the two is the point of this document:
 everything below it is protocol, everything above it is this gateway's.
 
@@ -42,6 +42,7 @@ Every specification this client cites is kept, with its link and the revision
 read, in [andrewtheguy/ms-rdp-specs](https://github.com/andrewtheguy/ms-rdp-specs).
 
 [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
+[MS-RDPEDISP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/d2954508-f487-48bc-8731-39743e0854a9
 
 ## What it carries
 

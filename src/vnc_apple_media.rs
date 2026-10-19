@@ -181,8 +181,8 @@ const CODEC_ENTRIES: &[(u64, u64, Option<u64>)] = &[
     (0, 6_000_000, Some(131_072)),
 ];
 
-/// The strips Apple's own `tilesPerFrame` of 4 codes a display in, which a stream
-/// is offered where the display's height allows. The H.264, and one asked for
+/// The strips Apple's own `tilesPerFrame` of 4 codes a display in, which an HEVC
+/// stream is offered. The H.264, and one asked for
 /// whole ([`crate::config::Choices::whole`]), is offered 1: one picture of the
 /// whole display.
 const STRIPS: usize = 4;

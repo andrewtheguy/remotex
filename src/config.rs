@@ -853,7 +853,7 @@ pub struct TargetConfig {
     /// pipeline ends the session.
     ///
     /// `false` is the bitmap path: the host draws with bitmap updates, decoded here
-    /// and encoded as VP9, and the desktop keeps its opening size, so the picker
+    /// and sent as tiles, and the desktop keeps its opening size, so the picker
     /// offers no resize. That is the target for a browser that cannot compose the
     /// pipeline, the escape hatch for a host whose pipeline the page's decoders
     /// cannot yet paint, and the target for a server without the pipeline.

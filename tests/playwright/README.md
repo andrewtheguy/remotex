@@ -373,7 +373,7 @@ bunx playwright test '/input-held\.spec\.ts$'
 The picker spec also runs against a live RDP host, named the same way.
 
 `bun run test` runs all specs. `bun run test:clipboard`,
-`bun run test:oversized`, `bun run test:video` and `bun run test:hevc` run one
+`bun run test:oversized`, `bun run test:tiles` and `bun run test:hevc` run one
 each; their filters are anchored (`'/clipboard\.spec\.ts$'`) because a
 positional argument is a regex matched against the whole path, and the bare name `clipboard.spec.ts` also matches
 `oversized-clipboard.spec.ts`.

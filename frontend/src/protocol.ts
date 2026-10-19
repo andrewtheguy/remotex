@@ -517,7 +517,7 @@ const TILE_HEADER_LEN = 14;
 const TILE_FORMATS = { 1: "jpeg", 2: "png" } as const;
 // A VIDEO record's flags: a decoder that has seen nothing before it can start here;
 // the unit is one strip of the picture, its number in two bits, and whether it is the
-// first sent of its frame. Any other bit means a gateway newer than this client, and
+// last of its frame. Any other bit means a gateway newer than this client, and
 // the record is dropped rather than guessed at — the same strictness the batch's own
 // flags byte gets — as is a strip's number or frame bit on a unit that is no strip.
 const VIDEO_KEYFRAME = 0x01;

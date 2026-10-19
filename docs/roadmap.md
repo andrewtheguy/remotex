@@ -38,7 +38,7 @@ to the same rate control:
 wlshare's passed stream is coded and walked there, so the gateway knows each frame's
 size and whether it is a keyframe and nothing about the quality it went out at: the
 encode totals of such a session count its units, keyframes and bytes, and report no
-round coarsened and a lowest quality of 100 whatever wlshare did. Reporting it
+round coarsened whatever wlshare did. Reporting it
 wants wlshare to say what it coded each frame at: one change to the wire, made
 in wlshare and read here.
 
@@ -205,9 +205,8 @@ MS-RDPEI is a *dynamic* channel and that transport is already here:
 every Create Request it does not want with `NO_LISTENER` (`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
 touch event's contact frames — and the contact state machine are the work.
 
-The rest is waiting for it. A host that opens the channel becomes
-`Event::TouchReady`, which the engine forwards as `ServerMsg::TouchReady` and
-re-sends to each client that attaches; the browser offers the passthrough toggle
+The rest is waiting for it. A host that opens the channel is to be forwarded as
+`ServerMsg::TouchReady` and re-sent to each client that attaches; the browser offers the passthrough toggle
 only after that, and `rdp.rs` drops a `ClientMsg::Touch` today because no engine
 can report one. Held contacts must be released when a client goes away, or the
 remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
@@ -265,7 +264,7 @@ rather than coarser ones
 
 `caps_advertise` in the graphics crate's `proto/gfx.rs` sends versions 8 and 10 with the small cache
 and, on version 10, `AVC_DISABLED` — or, for an adaptive session, which takes H.264,
-every set to 10.7 without it — and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
+every set to 10.4, and 10.7, without it — and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
 unset either way. A current Windows host, the only host this client targets, ignores the
 flag; the hosts that acted on it, choosing the classic RemoteFX codec over the
 progressive form, are not supported, so there is nothing for the flag to change.

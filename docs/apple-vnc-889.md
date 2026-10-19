@@ -50,7 +50,7 @@ official modes alone.
 | Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density Combined Display view is composed at its points as Apple's viewer composes it: by the gateway for a 1x browser, by the browser for a 2x one. |
 | Picture and sound | `ard` inflates the Mac's Full quality and sends it as the gateway's tiles, or passes the Mac's own Adaptive picture where that was chosen, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Its ZRLE rectangles are stepped over unread and never shown, so a session that passes the stream builds no video encoder: until the stream is up and across display changes the page says the screen is not available and sends the Mac no input. |
-| Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
+| Not implemented | Apple's fixed resolution presets; authentication types other than 30. |
 
 ## Remote Management access
 
@@ -157,8 +157,8 @@ Both modes connect the same way until the record layer is up.
    never set, would ask for a session-select exchange remotex does not implement.
 4. **ServerInit**, extended (see below). High Performance ends here, before sending
    anything, when the Mac does not list `SetDisplayConfiguration`.
-5. **A cleartext prelude:** `ViewerInfo`, `SetMode(control)`, and
-   `AutoPasteboard(start)` when clipboard is on, then `SetEncryption` commands 1
+5. **A cleartext prelude:** `ViewerInfo`, `SetMode(control)` and
+   `AutoPasteboard(start)`, then `SetEncryption` commands 1
    and 2. The Mac answers with the rekey, and everything after it travels in
    records.
 6. **The mode.** High Performance sends `SetDisplayConfiguration`, both modes send
@@ -354,7 +354,7 @@ mode on a 1x and a 2x physical display, the 2x one also scaled by the Mac to a
 tiles, every rectangle inflating to exactly its 64-pixel tiles and no other
 edge.
 
-**zlib** (`0x06`), not listed, is the same stream holding raw
+**zlib** (`0x06`), listed only for Full quality, is the same stream holding raw
 `w × h × 4` pixels. On a static desktop it measured roughly 50:1, in either mode.
 
 **The cursor cache** (`0x450`) stores a shape when its compressed length is nonzero
@@ -1573,10 +1573,9 @@ other failures (see [Liveness](#the-stream)).
     watched.
   - **Remotex sends a PLI** where whoever is shown the stream has nothing left
     to predict from: when a stream starts without an IDR (the first packets
-    can arrive before the socket is bound), when a picture fails to decode,
-    when the decoder falls eight frames behind, which it warns about, and
-    when a display comes back into view; for a passed stream, when the
-    browser's link falls 15 behind and when the browser has to start over. It
+    can arrive before the socket is bound), when a display comes back into
+    view, when the browser's link falls 15 behind, which it warns about, and
+    when the browser has to start over. It
     sends either request again every 500 ms until a picture it can go on from
     arrives, since the Mac may have dropped it and a still screen sends
     nothing else to show that. It also sends the rate reports described under
@@ -1593,8 +1592,8 @@ other failures (see [Liveness](#the-stream)).
   once-a-second reports keep both legs alive, and the sound leg also sends a
   packet every 10 ms whether or not anything plays. Past any of them, the
   session ends, as it does when the Mac refuses the offer (message 3)
-  and when the receiver fails, on a socket error or an HEVC decoder
-  that cannot start or stops. A display change stops the stream and owes nothing
+  and when the receiver fails, on a socket error or a browser link
+  that stops. A display change stops the stream and owes nothing
   until its own offer, except the answer to an offer still out. When the Mac
   names its ports and nothing arrives within 5 s, the log names the port and the
   likely firewall or NAT.
@@ -1967,9 +1966,7 @@ link to a physical Mac has not been observed.
   silent, and it did the same under Apple's own viewer. Remotex decoded it as it
   came: 100 units a second, none concealed, the RMS falling while the peak held,
   then exact digital silence. That guest is laggy whenever it plays sound, so
-  judge sound quality and performance on a physical Mac. The receiver's debug log
-  reports the decoded level every second, which shows whether the Mac sent a
-  fault.
+  judge sound quality and performance on a physical Mac.
 
 ### RFB while the stream runs
 
