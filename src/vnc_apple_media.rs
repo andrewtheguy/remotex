@@ -183,9 +183,9 @@ const CODEC_ENTRIES: &[(u64, u64, Option<u64>)] = &[
 ];
 
 /// The strips Apple's own `tilesPerFrame` of 4 codes a display in, which a stream
-/// is offered where the display's height allows. One asked for whole
-/// ([`crate::config::Choices::whole`]) is offered 1: one picture of the whole
-/// display.
+/// is offered where the display's height allows. The H.264, and one asked for
+/// whole ([`crate::config::Choices::whole`]), is offered 1: one picture of the
+/// whole display.
 const STRIPS: usize = 4;
 
 /// Every strip's bit.
@@ -2286,7 +2286,7 @@ impl PassQueue {
 /// `codec`, which is what the Mac is offered, and in `strips` where the display's
 /// height allows. The page puts the display together from the strips, in its own
 /// decoder or from what the browser's decodes of each. Whole, each picture the
-/// display, only for a session that asked for it so
+/// display, for the H.264 and for a session that asked for it so
 /// ([`crate::config::Choices::whole`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Receive {

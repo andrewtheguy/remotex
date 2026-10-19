@@ -2416,16 +2416,21 @@ async fn connect(
             read_apple_security_result(&mut reader).await?;
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
-            // The Mac's picture is passed in strips, to the page's own decoder
-            // and to the browser's alike, unless the session asked for it whole,
-            // and in the codec the session was started with. A High Performance
-            // session passes one or the other: the gateway decodes neither.
+            // The Mac's picture is passed in the codec the session was started
+            // with: the HEVC in strips, to the page's own decoder and to the
+            // browser's alike, unless the session asked for it whole, and the
+            // H.264 whole, whose strips the Mac codes again from scratch every
+            // frame on a still screen. A High Performance session passes one or
+            // the other: the gateway decodes neither.
             let codec = match plan.passthrough() {
                 Some(Passthrough::AppleMedia) => Some(vnc_apple_media::Codec::Hevc),
                 Some(Passthrough::AppleH264) => Some(vnc_apple_media::Codec::H264),
                 _ => None,
             };
-            let receive = codec.map(|codec| vnc_apple_media::Receive { codec, strips: !choices.whole });
+            let receive = codec.map(|codec| vnc_apple_media::Receive {
+                codec,
+                strips: codec == vnc_apple_media::Codec::Hevc && !choices.whole,
+            });
             anyhow::ensure!(
                 receive.is_some() == config.media_stream(),
                 "a High Performance session passes the Mac's picture as its HEVC or its H.264, \

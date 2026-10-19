@@ -1305,9 +1305,9 @@ stream's colours: Display P3 primaries, sRGB transfer, BT.709 matrix. Its
 parameter sets do not come as NAL units of their own. A keyframe's first packet
 is a unit of type 18 (first byte `0x92`), four bytes and then an MP4 `avc1`
 sample description holding them in its `avcC` box, and the IDR follows as FU-A
-fragments; the pictures after it come a packet each. Remotex asks for it in a
-session started with the H.264 passthrough, and passes it to the browser
-([The Mac's H.264](architecture.md#the-macs-h264)).
+fragments; the pictures after it come a packet each. Remotex asks for it, with
+one tile, in a session started with the H.264 passthrough, and passes it to the
+browser ([The Mac's H.264](architecture.md#the-macs-h264)).
 
 A probe that sent no rate reports ran each codec alone against a virtual Mac,
 at 1600×1000 with one tile, for 20 s a run:
@@ -1383,6 +1383,16 @@ the strip's number, a frame's strips sharing its timestamp.
   from an acknowledgement or a refresh request to the encoder. Remotex
   acknowledges and asks for refreshes on the HEVC alone, so an H.264 loss costs
   a keyframe.
+- **On a detailed still picture the strips never settle.** At 1440×900, a
+  full-screen photograph in Chrome on macvm, with the rate target at 58.4
+  Mbit/s throughout, the Mac sent about 17 frames a second in four strips, each
+  strip at the same size frame after frame, 35–56 KB of mostly intra blocks:
+  about 25 Mbit/s for a screen that did not change. Acknowledging each strip's
+  picture, as remotex acknowledges the HEVC's whole pictures, changed nothing.
+  The HEVC's strips repeat too, at about 3.7 Mbit/s. With one tile the H.264
+  came about a picture a second, settling at pictures under 1 KB, about 0.1
+  Mbit/s, and so remotex offers the H.264 one tile
+  ([The Mac's H.264](architecture.md#the-macs-h264)).
 
 Seen at 1600×1000 and 2880×1800. Passed through remotex, Chrome on Linux
 decoded it in its software decoder, and Chrome and Safari on a Mac decoded it;
