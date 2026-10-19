@@ -64,17 +64,13 @@ rule as an exception, rather than refusing it or bending the rule unlisted.
 
 - [The client and its bundle](docs/architecture.md#the-client-and-its-bundle):
   one client, the browser SPA; one frontend build compiled into the gateway; its
-  WebAssembly modules, three built here; the pinned HEVC decoder archive as the
-  one file read at run time; no fallback browser paths.
+  WebAssembly modules and run-time assets; no fallback browser paths.
 - [Sessions](docs/architecture.md#sessions): one active session per gateway,
-  with takeover, and a fresh engine for every `connect`; size, sound, the Mac's
-  passthrough, a Standard Mac's view and how an RDP host draws its pipeline chosen
-  at the picker, not in the config, and held for the session's life; an RDP
-  host's pipeline passed in every session it is on.
+  with takeover, and a fresh engine for every `connect`; what a session is
+  started with, chosen at the picker and held for the session's life.
 - [Input and display](docs/architecture.md#input-and-display): the two touch
   layers, the display picker as the remote's, presentation at 100%, density as
-  the wire's word, and the Apple mosaic as the one rescale, made downward in the
-  gateway for Standard's Combined Display.
+  the wire's word, and rescaling.
 - [Media paths](docs/architecture.md#media-paths): passed untouched or the
   gateway's own tiles, a desktop past the ceiling, audio, camera and microphone.
 
