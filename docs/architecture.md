@@ -214,7 +214,7 @@ whose bitmap updates are sent as tiles by the gateway.
   bundle privately or stages that artifact. Do not add a web root, a
   `static_dir`, or any run-time path the SPA is read from. Every URL the page
   uses goes through `frontend/src/gateway.ts`.
-- The bundle holds three WebAssembly modules, each a directory of its own under
+- The bundle holds two WebAssembly modules, each a directory of its own under
   `frontend/wasm`, all built by the frontend's build for
   `wasm32-unknown-unknown`. `frontend/wasm/egfx` is the compositor, around
   `crates/remotex-rdp-graphics`, built with threads by the dated nightly that
@@ -222,26 +222,25 @@ whose bitmap updates are sent as tiles by the gateway.
   gateway and the graphics crate build on stable. Its threads share a memory, so
   every file `src/assets.rs` serves carries the two cross-origin isolation
   headers; keep them, and load nothing from another origin.
-  `frontend/wasm/flac` is the lossless sound's decoder, the page's
-  alone: the gateway's FLAC is libFLAC and shares no code with it, so it has no
-  crate under `crates/`. It has no threads, needs no shared memory, and builds
-  on stable. `frontend/wasm/apple-adaptive` is the decoder of a Mac's own
-  picture, the page's alone on the same terms: the gateway passes the Mac's
-  rectangles and decodes none of them. There is no VP9 module: every VP9 is
+  `frontend/wasm/apple-adaptive` is the decoder of a Mac's own picture, the
+  page's alone: the gateway passes the Mac's rectangles and decodes none of
+  them, so it has no crate under `crates/`. It has no threads, needs no shared
+  memory, and builds on stable. There is no VP9 module: every VP9 is
   sent at a chroma the browser's own decoder takes
   ([the codec](#the-codec)). Nor a module for the tiles: each is a JPEG or a PNG
-  the browser decodes itself (`createImageBitmap`). Do not fold one module into
-  another, or add a fourth without a stream that needs it.
+  the browser decodes itself (`createImageBitmap`). Nor for sound: Opus, a Mac's
+  AAC-ELD and FLAC are each the browser's `AudioDecoder`'s
+  ([Lossless sound](#lossless-sound)). Do not fold one module into another, or
+  add a third without a stream that needs it.
 - A page whose browser gives it less memory than a desktop's does loads as
-  little WebAssembly as it can. No browser says how much a page may have, so the
-  page goes by what they do say (`frontend/src/memoryBudget.ts`): an iPhone or
-  an iPad, whatever the browser, since iOS caps the memory each app's
-  processes may use whatever engine runs in them, and a device whose browser
-  reports 4 GB or less of `navigator.deviceMemory`. Do not go by touch: a
-  touchscreen says nothing of memory. Each module is loaded by the session that needs it, never at
-  start-up, and a choice that is an edge case on such a device and would load a
-  module for itself alone is greyed there with the reason rather than offered,
-  as lossless sound is ([Lossless sound](#lossless-sound)).
+  little WebAssembly as it can. No browser says how much a page may have, so go
+  by what they do say: an iPhone or an iPad, whatever the browser, since iOS
+  caps the memory each app's processes may use whatever engine runs in them, and
+  a device whose browser reports 4 GB or less of `navigator.deviceMemory`. Do
+  not go by touch: a touchscreen says nothing of memory. Each module is loaded
+  by the session that needs it, never at start-up, and a choice that is an edge
+  case on such a device and would load a module for itself alone is greyed there
+  with the reason rather than offered. No choice is one today.
 - On every page, what a session's picture alone loaded goes when the session
   leaves the page: at the gateway's `picker`, a takeover, or a logout. A
   WebAssembly memory grows and never
@@ -275,9 +274,8 @@ whose bitmap updates are sent as tiles by the gateway.
   asked of one (`frontend/src/videoCodecs.ts`), beside the HEVC's and the RDP
   pipeline's H.264's. The tiles, a Standard Mac's Adaptive picture and a
   pipeline without H.264 need none. A browser without `AudioDecoder`
-  starts and plays FLAC, which the page decodes itself, save on a page that
-  greys FLAC to keep its WebAssembly down (above) and so has no
-  sound there; what needs the decoder is greyed with the reason. Do not
+  starts with no sound, greyed with the reason, and one whose decoder fails a
+  FLAC frame is not offered FLAC (`frontend/src/flacSound.ts`). Do not
   add fallback browser paths.
 
 ### Sessions
@@ -514,8 +512,9 @@ or add a key or a choice that selects the stream or its chroma. See
 - The sound's format is part of that choice, Opus or lossless, and not a config
   key. Lossless is FLAC: a `wlshare` target is asked for FLAC frames,
   passed as they came like its Opus, and an `rdp` target's PCM is coded as FLAC
-  here by libFLAC; the page decodes either
-  in its own WebAssembly module (`frontend/wasm/flac`), never through WebCodecs.
+  here by libFLAC; the browser's own `AudioDecoder` decodes either, under a
+  stream header the page writes, and a browser whose decoder does not is not
+  offered it.
   No other target offers it: `ard-high-performance` passes the Mac's
   AAC-ELD and nothing else, and `ard` and a plain `vnc` target carry no sound.
   Do not transcode a passed frame, add a third format, give the FLAC a rate
@@ -767,7 +766,6 @@ wire format, no record and no second stream. See
 | `tiles.rs` | the tiles coded here: which of the desktop's 64×64 tiles the browser is owed, and their JPEG and PNG |
 | `vp9.rs` | what a passed wlshare frame needs: its header's profile and keyframe bit, and its codec string |
 | `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding by the `sound-opus` crate wlshare codes its own sound with, resampling, the FLAC coding of a lossless target's PCM, and the passing of a remote's own stream |
-| `frontend/wasm/flac/` | the page's FLAC decoder for a session's lossless sound, a WebAssembly module of its own |
 | `frontend/src/softwareDecoder.ts`, `softwareDecoder.worker.ts`, `softwareDecoderPool.worker.ts`, `softwareDecoderModule.ts` | the page's software HEVC decoder: the `VideoDecoder` shape, its decode worker and its pool's threads, and where its module is loaded from |
 | `frontend/src/planesPicture.ts`, `glPicture.ts` | a software decoder's planes, uploaded from the module's memory, only where the picture, or a strip of it, changed, as its decoder says, when the textures hold the picture before, and converted on the WebGL canvas over the desktop's |
 | `frontend/src/softwareSupport.ts` | which of its software decoders the page can run and present the pictures of |
@@ -2445,10 +2443,9 @@ as a set-bitrate; wlshare's encoder moves at its next packet. The walk starts
 from the ceiling with every listener, and so is wlshare told. Silence is not
 shed from a passed stream — its packets are a few bytes each already.
 
-The client decodes Opus and the Mac's AAC-ELD with WebCodecs and nothing of its
-own, so a codec a browser will not take surfaces as a decoder error naming it
-rather than as silence. FLAC is the one stream it decodes itself
-([Lossless sound](#lossless-sound)).
+The client decodes Opus, the Mac's AAC-ELD and FLAC with WebCodecs and nothing
+of its own, so a codec a browser will not take surfaces as a decoder error
+naming it rather than as silence.
 
 #### Lossless sound
 
@@ -2457,12 +2454,9 @@ on the same socket and in the same frames: `audioFormat` says `codec` `flac`, an
 empty `head`, the source's own `sampleRate` and a `packetFrames` of twenty
 milliseconds of it, and each packet is one FLAC frame. It is a choice at the picker, on an
 `rdp` or a `wlshare` target, and not a config key; the target's Opus keys do
-nothing in such a session, since there is no rate to set or walk. A device
-held to little memory greys it, with the reason, to load as little WebAssembly
-as it can
-([The client and its bundle](#the-client-and-its-bundle)): the module the page
-decodes FLAC in would be loaded for lossless alone, an edge case there, so it is
-never fetched.
+nothing in such a session, since there is no rate to set or walk. A browser
+whose decoder does not play FLAC greys it, with the reason, Safari's among
+them.
 
 | Target | What the gateway does | `audioFormat` |
 |---|---|---|
@@ -2478,7 +2472,7 @@ never fetched.
   ever, and the audio socket hands the units on (`vnc_audio::PASSED_FLAC`,
   `AudioListener::into_passed`). No decoder is made. Nothing
   here checks a frame but its length, which must fit the socket's 16-bit packet
-  length: the page's decoder is what refuses a bad one.
+  length: the browser's decoder is what refuses a bad one.
 - **An RDP host's PCM is coded here.** `AudioListener::into_flac` takes the wave
   buffers as they come, at the 44.1 kHz the host sends with no resampler in the
   way, and makes a frame of every 882, each a FLAC stream of its own as
@@ -2486,20 +2480,19 @@ never fetched.
   the next buffer, and is dropped with a buffer the queue dropped, so no frame
   joins samples that were never neighbours. libFLAC is linked into the gateway
   statically, so the host needs none installed.
-- **The page decodes in a module of its own.** `frontend/wasm/flac` is a Rust
-  FLAC frame decoder built to WebAssembly, loaded by the first FLAC stream
-  (`frontend/src/flacDecoder.ts`). It is written there, with no FLAC library
-  under it, and leaves a frame's samples in its own memory for the page to
-  copy into the `AudioBuffer`; what a frame costs, against libFLAC, is in
-  [its benchmark](../frontend/wasm/flac/bench/README.md). WebCodecs is not
-  asked: what travels is bare
-  frames with no stream header, each numbered zero. The decoder holds every
-  frame to what `audioFormat` announced — rate, channels, block, 16 bits — and
-  checks its CRCs; a frame it refuses is dropped with a console warning and
-  costs its twenty milliseconds. The samples become an `AudioBuffer` at the
-  stream's rate and go through the schedule every other stream uses, so the
-  lead clamp and the splice fades are unchanged. A page whose module does not
-  load plays the session without sound and says so under Audio.
+- **The browser decodes it.** Each frame goes to the browser's `AudioDecoder`
+  as Opus does, configured with `flac` and a `description` the page writes from
+  `audioFormat` (`frontend/src/flacSound.ts`): "fLaC" and a STREAMINFO of the
+  announced rate, channels and block, 16 bits a sample, its sizes, length and
+  MD5 unknown. What travels is bare frames with no stream header, each numbered
+  zero, and a decoder given that header decodes each alone. The decoded samples
+  go through the schedule every other stream uses, so the lead clamp and the
+  splice fades are unchanged, and a gap starts the decoder again as it does
+  Opus's. Whether the browser's decoder plays FLAC is asked once at load, by
+  decoding one of the gateway's frames, and not by `isConfigSupported`: Safari
+  27 says it takes the configuration and then fails every frame. Chrome and
+  Firefox decode the frames exactly. Where the decode fails, the picker greys
+  FLAC with the reason, and Opus is that browser's sound.
 - **There is no walk.** Music is roughly a megabit a second and silence a few
   bytes a frame. A link that cannot carry it loses whole buffers at the bridge,
   oldest first, as an Opus stream at its floor would; use Opus there.
@@ -3274,11 +3267,10 @@ any `.localhost` label), or a TLS-terminating reverse proxy. A LAN address over
 plain `http://` is the case this refuses,
 by name. Nor is `AudioDecoder`. Safari from 16.4 to 18 has
 `VideoDecoder` without it, and a desktop without sound is still the session somebody
-came for. Such a browser starts, and still plays the one sound that needs no audio
-decoder: FLAC, which the page decodes in a WebAssembly module of its own
-(`flacDecoder.ts`). Its answer (`decodesAudio`) greys what does need one, with the
-reason: Opus under the picker's Sound row, whose tick there takes FLAC, and a High
-Performance Mac's AAC-ELD, whose sound comes whatever was chosen. On such a Mac the
+came for. Such a browser starts without sound. Its answer (`decodesAudio`) greys
+every sound, with the reason: the picker's Sound row, and a High Performance
+Mac's AAC-ELD, whose sound comes whatever was chosen. A browser whose decoder
+fails a FLAC frame is offered Opus alone (`flacSound.ts`). On such a Mac the
 menu's Audio button reads *Audio not supported* and this browser never opens the
 audio socket. A browser with `AudioDecoder` that decodes that Mac's AAC-ELD in
 neither form (`appleMedia.ts`) is told the same way, at `connected`: the button

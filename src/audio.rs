@@ -19,8 +19,8 @@
 //!
 //! A session started with lossless sound is sent it as FLAC:
 //! wlshare's FLAC frames passed, or an RDP host's PCM coded as
-//! FLAC here ([`AudioListener::into_flac`]). The page decodes either in its
-//! WebAssembly module, and there is no rate to walk.
+//! FLAC here ([`AudioListener::into_flac`]). The browser's own decoder plays
+//! either, and there is no rate to walk.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};

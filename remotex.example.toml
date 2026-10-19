@@ -223,12 +223,12 @@ site_passwd = ""
 # "wlshare" target lists wlshare's audio extension. Started with it off, neither
 # is asked, and the host keeps playing where it did.
 #
-# Opus is sent at the rates the audio keys below hold. FLAC is lossless,
-# and the page decodes it in a WebAssembly module of its own: a "wlshare"
-# target's sound is coded by wlshare in whichever format was chosen and passed to
-# the browser as it came, so the gateway codes none of it, and an "rdp" target's
-# PCM is coded here, as FLAC by libFLAC. Music is roughly a megabit a second,
-# with no adaptive walk: for a link with room.
+# Opus is sent at the rates the audio keys below hold. FLAC is lossless, and
+# the browser's own decoder plays it, which Safari's does not, so Safari is not
+# offered it. A "wlshare" target's sound is coded by wlshare in whichever format
+# was chosen and passed to the browser as it came, so the gateway codes none of
+# it, and an "rdp" target's PCM is coded here, as FLAC by libFLAC. Music is
+# roughly a megabit a second, with no adaptive walk: for a link with room.
 #
 # A plain "vnc" target carries no sound, and neither does "ard": Standard mode leaves the Mac's sound output alone, playing on the
 # Mac or to whatever AirPlay receiver it picks. An "ard-high-performance" session

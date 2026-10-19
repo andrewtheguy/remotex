@@ -1,92 +1,24 @@
-// The player's lifecycle around a FLAC stream's module, which loads after the
-// player is made: what a load that ends late may still do.
+// The player as it drives WebCodecs' decoder: what it configures it with, and
+// what a gap in the packets does to it.
 //
 // No audio is played here. The context is the two calls the player makes of one
-// before any sound arrives, and the module's load is a promise the test settles.
+// before any sound arrives.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type AudioFormat, createAudioPlayer } from "./audioPlayer.ts";
-import type { FlacFactory } from "./flacDecoder.ts";
-
-const FLAC: AudioFormat = {
-  codec: "flac",
-  sampleRate: 48_000,
-  channels: 2,
-  packetFrames: 960,
-  head: new Uint8Array(0),
-};
 
 const context = () =>
   ({ currentTime: 0, close: async () => {} }) as unknown as AudioContext;
 
-/** A player on a load the test settles, and the errors it reported. */
-function playerOnPendingLoad() {
-  const errors: string[] = [];
-  let resolve: (make: FlacFactory) => void = () => {};
-  let reject: (error: Error) => void = () => {};
-  const promise = new Promise<FlacFactory>((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  const load = { promise, resolve, reject };
-  const player = createAudioPlayer(
-    FLAC,
-    context(),
-    { onError: (reason) => errors.push(reason) },
-    () => load.promise,
-  );
-  return { player, errors, load };
-}
-
-/** Let the load's callbacks run. */
-const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-test("a module that fails to load is reported", async () => {
-  const { errors, load } = playerOnPendingLoad();
-  load.reject(new Error("offline"));
-  await settled();
-  assert.deepEqual(errors, ["This browser could not load the FLAC decoder."]);
-});
-
-test("a load that fails after the player closed reports nothing", async () => {
-  // Muted, or replaced by another stream's player, while the module was still
-  // on its way: the handler would stop the stream that replaced this one.
-  const { player, errors, load } = playerOnPendingLoad();
-  player.close();
-  load.reject(new Error("offline"));
-  await settled();
-  assert.deepEqual(errors, []);
-});
-
-test("a load that ends after the player closed makes no decoder", async () => {
-  const { player, errors, load } = playerOnPendingLoad();
-  player.close();
-  let made = 0;
-  load.resolve(() => {
-    made += 1;
-    throw new Error("not reached");
-  });
-  await settled();
-  assert.equal(made, 0);
-  assert.deepEqual(errors, []);
-});
-
-test("a stream the module refuses is reported", async () => {
-  const { errors, load } = playerOnPendingLoad();
-  load.resolve(() => {
-    throw new Error("not a stream carried here");
-  });
-  await settled();
-  assert.deepEqual(errors, ["This browser could not load the FLAC decoder."]);
-});
-
 /** WebCodecs' decoder as far as the player drives it, and what it was asked. */
 class FakeAudioDecoder {
   static calls: string[] = [];
+  static configs: AudioDecoderConfig[] = [];
   state = "unconfigured";
-  configure(): void {
+  configure(config: AudioDecoderConfig): void {
     this.state = "configured";
     FakeAudioDecoder.calls.push("configure");
+    FakeAudioDecoder.configs.push(config);
   }
   decode(chunk: { data: Uint8Array }): void {
     FakeAudioDecoder.calls.push(`decode ${chunk.data[0]}`);
@@ -113,6 +45,7 @@ function withFakeWebCodecs(body: () => void): void {
   const scope = globalThis as Record<string, unknown>;
   const had = [scope.AudioDecoder, scope.EncodedAudioChunk];
   FakeAudioDecoder.calls = [];
+  FakeAudioDecoder.configs = [];
   scope.AudioDecoder = FakeAudioDecoder;
   scope.EncodedAudioChunk = class {
     data: Uint8Array;
@@ -146,11 +79,73 @@ test("a gap starts the decoder again before the packets after it", () => {
   });
 });
 
-test("a gap is nothing to a FLAC stream, whose frames decode alone", () => {
+const FLAC: AudioFormat = {
+  codec: "flac",
+  sampleRate: 44_100,
+  channels: 2,
+  packetFrames: 882,
+  head: new Uint8Array(0),
+};
+
+/**
+ * A STREAMINFO read the way the FLAC format lays it out, bit by bit, rather
+ * than the way the page writes it.
+ */
+function streamInfo(description: Uint8Array) {
+  const bits = (from: number, count: number) => {
+    let value = 0;
+    for (let at = from; at < from + count; at++) {
+      const bit = (description[at >> 3] >> (7 - (at & 7))) & 1;
+      value = value * 2 + bit;
+    }
+    return value;
+  };
+  return {
+    marker: new TextDecoder().decode(description.subarray(0, 4)),
+    last: bits(32, 1),
+    type: bits(33, 7),
+    length: bits(40, 24),
+    minBlock: bits(64, 16),
+    maxBlock: bits(80, 16),
+    rate: bits(144, 20),
+    channels: bits(164, 3) + 1,
+    sampleBits: bits(167, 5) + 1,
+    total: bits(172, 36),
+    size: description.length,
+  };
+}
+
+test("a FLAC stream is decoded by WebCodecs, under the header the page writes", () => {
   withFakeWebCodecs(() => {
-    const { player } = playerOnPendingLoad();
+    const player = createAudioPlayer(FLAC, context(), { onError: () => {} });
+    player.push([new Uint8Array([1])]);
     player.gap();
-    assert.deepEqual(FakeAudioDecoder.calls, []);
+    player.push([new Uint8Array([2])]);
+    // A frame decodes alone, and a gap starts the decoder again all the same.
+    assert.deepEqual(FakeAudioDecoder.calls, [
+      "configure",
+      "decode 1",
+      "reset",
+      "configure",
+      "decode 2",
+    ]);
+    const config = FakeAudioDecoder.configs[0];
+    assert.equal(config.codec, "flac");
+    assert.equal(config.sampleRate, 44_100);
+    assert.equal(config.numberOfChannels, 2);
+    assert.deepEqual(streamInfo(config.description as Uint8Array), {
+      marker: "fLaC",
+      last: 1,
+      type: 0,
+      length: 34,
+      minBlock: 882,
+      maxBlock: 882,
+      rate: 44_100,
+      channels: 2,
+      sampleBits: 16,
+      total: 0,
+      size: 42,
+    });
     player.close();
   });
 });

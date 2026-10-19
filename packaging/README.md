@@ -79,11 +79,10 @@ bash packaging/build-native-packages.sh
 ```
 
 The frontend's
-build compiles three WebAssembly modules: one from the gateway's graphics crate
+build compiles two WebAssembly modules: one from the gateway's graphics crate
 (`frontend/wasm/egfx` around
 `crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline),
-and the page's FLAC decoder for a session's lossless sound (`frontend/wasm/flac`)
-and its decoder for a Mac's Adaptive picture (`frontend/wasm/apple-adaptive`),
+and the page's decoder for a Mac's Adaptive picture (`frontend/wasm/apple-adaptive`),
 which the stable toolchain builds. So wherever the frontend is built — `bun run build`, or a
 Cargo build without `REMOTEX_PREBUILT_FRONTEND` — the compositor's module is built by the nightly
 toolchain `frontend/wasm/egfx/rust-toolchain.toml` pins, which its threads need and

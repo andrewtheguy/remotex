@@ -68,15 +68,9 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "frontend/wasm/egfx/src",
         "crates/remotex-rdp-graphics/Cargo.toml",
         "crates/remotex-rdp-graphics/src",
-        // The page's decoder for lossless sound, a module of its own
-        // (frontend/wasm/flac), named file by file for the same reason.
-        "frontend/wasm/flac/Cargo.toml",
-        "frontend/wasm/flac/Cargo.lock",
-        "frontend/wasm/flac/.cargo/config.toml",
-        "frontend/wasm/flac/rust-toolchain.toml",
-        "frontend/wasm/flac/src",
         // The page's decoder for a Mac's Adaptive picture, a module of its own
-        // (frontend/wasm/apple-adaptive), the same way.
+        // (frontend/wasm/apple-adaptive), named file by file for the same
+        // reason.
         "frontend/wasm/apple-adaptive/Cargo.toml",
         "frontend/wasm/apple-adaptive/Cargo.lock",
         "frontend/wasm/apple-adaptive/.cargo/config.toml",

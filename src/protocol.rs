@@ -1367,8 +1367,9 @@ pub enum ServerMsg {
     /// AudioSpecificConfig in `head`.
     ///
     /// A session started with its sound lossless says `flac` with an empty `head`:
-    /// each packet is one FLAC frame at the source's own rate, which the page
-    /// decodes itself ([`crate::audio::FLAC_CODEC`]).
+    /// each packet is one FLAC frame at the source's own rate, which the browser
+    /// decodes under a stream header the page writes from this message
+    /// ([`crate::audio::FLAC_CODEC`]).
     ///
     /// `packet_frames` is the one thing a client cannot work out for itself: 960
     /// samples in a 20 ms Opus packet, 480 in a 10 ms AAC-ELD unit, and 20 ms of

@@ -13,14 +13,13 @@
 # it. It is a default member beside the gateway, so a plain `cargo clippy` and
 # `cargo test` check it on every platform. The binding is not a member: it builds for
 # `wasm32-unknown-unknown` alone, with its own profile and lockfile, from the
-# frontend's build. Neither is frontend/wasm/flac, the page's own decoder for a
-# lossless target's sound, nor frontend/wasm/apple-adaptive, its decoder for a
-# Mac's Adaptive picture, which share no crate with the gateway.
+# frontend's build. Nor is frontend/wasm/apple-adaptive, the page's decoder for a
+# Mac's Adaptive picture, which shares no crate with the gateway.
 [workspace]
 resolver = "3"
 members = ["crates/remotex-rdp-graphics"]
 default-members = [".", "crates/remotex-rdp-graphics"]
-exclude = ["frontend/wasm/egfx", "frontend/wasm/flac", "frontend/wasm/apple-adaptive"]
+exclude = ["frontend/wasm/egfx", "frontend/wasm/apple-adaptive"]
 
 [package]
 name = "remotex"

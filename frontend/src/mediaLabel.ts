@@ -18,8 +18,7 @@ import type { HoldCause } from "./protocol.ts";
 
 /**
  * Why this browser cannot play a session's sound at all (useRemoteDesktop): it
- * has no audio decoder for what the session sends, which is anything but FLAC,
- * or the session is a High Performance Mac's, whose sound is always its AAC-ELD,
+ * has no audio decoder for what the session sends, or the session is a High Performance Mac's, whose sound is always its AAC-ELD,
  * and this browser decoded that in neither form at load (appleMedia.ts).
  */
 export type AudioBlock = "decoder" | "aac-eld";

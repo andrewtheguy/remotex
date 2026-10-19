@@ -1,32 +1,24 @@
-// Browser-owned remote audio: WebCodecs decodes an Opus packet into an
-// `AudioBuffer`, and Web Audio schedules it with bounded lead. The scheduling
-// half below is where the interesting behaviour is.
-//
-// The one stream WebCodecs is not asked for is a lossless one, FLAC, which the
-// page decodes in a WebAssembly module of its own (flacDecoder.ts) and schedules
-// the same way.
+// Browser-owned remote audio: WebCodecs decodes a packet into an `AudioBuffer`,
+// and Web Audio schedules it with bounded lead. The scheduling half below is
+// where the interesting behaviour is. Every stream is the browser's to decode:
+// Opus, a High Performance Mac's AAC-ELD, and lossless FLAC, whose header the page
+// writes (flacSound.ts).
 //
 // AudioContext creation stays in the enabling click wherever the browser needs one
-// (AUDIO_NEEDS_GESTURE). That `AudioDecoder` exists at all is not a question asked
-// here: a browser without one builds a player for FLAC alone (preflight.ts,
-// `decodesAudio`).
+// (AUDIO_NEEDS_GESTURE). That `AudioDecoder` exists at all, and decodes FLAC, are
+// not questions asked here: a browser without one is offered no sound, and one
+// whose decoder fails FLAC is not offered FLAC (preflight.ts, `decodesAudio`;
+// flacSound.ts, `decodesFlac`).
 
 import { APPLE_ELD_CODEC, appleEldConfig } from "./appleMedia.ts";
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
-import { type FlacDecoder, type FlacFactory, loadFlac } from "./flacDecoder.ts";
-
-/**
- * What `audioFormat` names lossless sound as, in a session started with it.
- * Each packet is one FLAC frame, decoded here rather than by WebCodecs.
- */
-export const FLAC_CODEC = "flac";
+import { FLAC_CODEC, flacConfig } from "./flacSound.ts";
 
 /** What `audioFormat` said, which is everything needed to play the packets. */
 export interface AudioFormat {
   /**
    * The WebCodecs codec string: `"opus"`, or `"mp4a.40.39"` for a High Performance
-   * Mac's AAC-ELD passed as it came. Or `"flac"` ({@link FLAC_CODEC}), which is
-   * not WebCodecs' to decode here.
+   * Mac's AAC-ELD passed as it came, or `"flac"` ({@link FLAC_CODEC}).
    */
   codec: string;
   /**
@@ -45,7 +37,7 @@ export interface AudioFormat {
   /**
    * The decoder's configuration: `OpusHead`, verbatim, which WebCodecs takes as the
    * config's `description`, or the Mac's AudioSpecificConfig. Empty for FLAC,
-   * whose frames each state their own shape.
+   * whose header the page writes from the rest (`flacConfig`).
    */
   head: Uint8Array;
 }
@@ -69,10 +61,9 @@ export interface AudioPlayer {
   /** One audio frame's encoded packets, in arrival order. */
   push(packets: Uint8Array[]): void;
   /**
-   * Packets were dropped before the next one pushed. A decoder that carries
-   * state between packets starts afresh, rather than decode what follows
-   * against history it was never given; a FLAC frame decodes alone, and
-   * nothing changes.
+   * Packets were dropped before the next one pushed. The decoder starts
+   * afresh, rather than decode what follows against history it was never
+   * given.
    */
   gap(): void;
   /**
@@ -185,6 +176,9 @@ function decoderConfig(format: AudioFormat): AudioDecoderConfig {
   if (format.codec === APPLE_ELD_CODEC) {
     return appleEldConfig(format);
   }
+  if (format.codec === FLAC_CODEC) {
+    return flacConfig(format);
+  }
   return {
     codec: format.codec,
     sampleRate: format.sampleRate,
@@ -214,16 +208,12 @@ export interface AudioHandlers {
  * Throws if the format is not one a decoder can be configured from — a `head` that
  * is not an `OpusHead`, a channel count nothing can play. An *unsupported codec* is
  * not a throw, because WebCodecs reports that asynchronously: it arrives at
- * `onError`. So does a FLAC stream whose module did not load.
- *
- * `loadFlacModule` is what fetches the FLAC decoder's module, for a test to stand
- * in for.
+ * `onError`.
  */
 export function createAudioPlayer(
   format: AudioFormat,
   context: AudioContext,
   handlers: AudioHandlers,
-  loadFlacModule: () => Promise<FlacFactory> = loadFlac,
 ): AudioPlayer {
   const packetUs = packetDurationUs(format);
   let nextAt = 0;
@@ -233,36 +223,7 @@ export function createAudioPlayer(
   // Each keeps its gain node so the stop can be a fade rather than a cut.
   let playing: { source: AudioBufferSourceNode; gain: GainNode }[] = [];
 
-  // A FLAC stream's decoder, once its module has loaded; packets before then are
-  // dropped, as sound that arrived before there was anything to play it.
-  let flac: FlacDecoder | null = null;
-  if (format.codec === FLAC_CODEC) {
-    loadFlacModule().then(
-      (make) => {
-        if (closed) {
-          return;
-        }
-        try {
-          flac = make(format);
-        } catch (e) {
-          fail(e);
-        }
-      },
-      (e: unknown) => fail(e),
-    );
-  }
-  function fail(e: unknown): void {
-    // A load that ends after this player closed has nothing to report: its
-    // handler would stop whatever stream replaced this one.
-    if (closed) {
-      return;
-    }
-    console.error("audio: the FLAC decoder could not be set up", e);
-    close();
-    handlers.onError("This browser could not load the FLAC decoder.");
-  }
-
-  const decoder = format.codec === FLAC_CODEC ? null : webCodecsDecoder(format);
+  const decoder = webCodecsDecoder(format);
 
   function webCodecsDecoder(format: AudioFormat): AudioDecoder {
     const decoder = new AudioDecoder({
@@ -358,50 +319,15 @@ export function createAudioPlayer(
       held.source.stop();
     }
     playing = [];
-    if (decoder && decoder.state !== "closed") {
+    if (decoder.state !== "closed") {
       decoder.close();
     }
-    flac?.close();
-    flac = null;
     void context.close();
-  }
-
-  function playFlac(packets: Uint8Array[]): void {
-    if (!flac) {
-      return;
-    }
-    for (const packet of packets) {
-      let buffer: AudioBuffer;
-      try {
-        const planes = flac.decode(packet);
-        buffer = context.createBuffer(
-          planes.length,
-          planes[0].length,
-          format.sampleRate,
-        );
-        for (const [channel, plane] of planes.entries()) {
-          buffer.copyToChannel(plane, channel);
-        }
-      } catch (e) {
-        // One frame's worth of sound, whether it did not decode or did not make
-        // a buffer: the next decodes on its own.
-        console.warn("audio: dropped a FLAC frame", e);
-        continue;
-      }
-      schedule(buffer);
-    }
   }
 
   return {
     push(packets) {
-      if (closed) {
-        return;
-      }
-      if (!decoder) {
-        playFlac(packets);
-        return;
-      }
-      if (decoder.state !== "configured") {
+      if (closed || decoder.state !== "configured") {
         return;
       }
       for (const packet of packets) {
@@ -416,7 +342,7 @@ export function createAudioPlayer(
       }
     },
     gap() {
-      if (closed || !decoder || decoder.state !== "configured") {
+      if (closed || decoder.state !== "configured") {
         return;
       }
       // What was queued to decode came before the gap and goes with it: sound

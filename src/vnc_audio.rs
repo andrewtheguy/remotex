@@ -36,7 +36,7 @@
 //! the encoder this gateway codes an RDP host's sound with (`sound-opus`), at
 //! the rate the target's audio keys and their walk arrive at. A FLAC frame goes
 //! the same way in a session started with lossless sound, for
-//! the page's own decoder ([`PASSED_FLAC`]). Neither stream's header is sent by
+//! the browser's decoder ([`PASSED_FLAC`]). Neither stream's header is sent by
 //! wlshare: everything in one follows from the format this client set and the
 //! extension's one rule, that every frame is [`BLOCK_FRAMES`] frames of it.
 //!
@@ -228,8 +228,8 @@ pub fn frame_length(header: [u8; FRAME_HEADER_LEN]) -> u32 {
 
 /// A lossless session's FLAC frames as the browser is told of them:
 /// [`SOURCE_FORMAT`] in blocks of [`BLOCK_FRAMES`],
-/// with no head, since each frame states its own shape and the page's decoder
-/// holds it to this one.
+/// with no head: the page writes the stream header the browser's decoder takes
+/// from this format.
 pub const PASSED_FLAC: crate::audio::PassedFormat = crate::audio::PassedFormat {
     codec: crate::audio::FLAC_CODEC,
     sample_rate: SOURCE_FORMAT.sample_rate,
