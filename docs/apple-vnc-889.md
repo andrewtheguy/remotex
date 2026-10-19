@@ -1295,7 +1295,20 @@ one field, and a second in a session that passes the picture:
 
 The video offer names two codecs by their RTP payload numbers, 123 for H.264
 and 100 for HEVC, each with its own feature string. Offered both, the Mac sends
-HEVC.
+HEVC. Read from AVConference, which both ends negotiate with:
+
+- **HEVC comes first.** A screen stream prefers HEVC, then H.264, and the answer
+  takes the first of them that both ends list.
+- **Each end lists H.264 always, and HEVC only where its Mac decodes HEVC.**
+  Apple's viewer offers what its own Mac lists, so between two Macs that both
+  decode HEVC, as every Apple silicon Mac does, Apple's viewer is never sent
+  H.264. It is sent H.264 only where one of the two Macs does not.
+- **The codec does not enter the tile count.** Apple's viewer offers four tiles
+  whatever the codec, and the count is negotiated without it
+  ([In strips](#in-strips)). Where Apple's viewer is sent H.264, it is sent it in
+  four strips, the layout remotex no longer asks for (below). Whether Apple's
+  viewer then sees the strips stay busy on a still screen, as below, has not
+  been tried.
 
 Offered 123 alone, the Mac sends H.264 instead, as RTP payload type 123 on the
 same leg and under the same keys, with the sound unchanged. On macOS 26.6 at
@@ -1568,7 +1581,7 @@ other failures (see [Liveness](#the-stream)).
 Offered `tilesPerFrame` 4, as Apple's viewer offers it, the Mac answers 4 and
 sends the display in four strips. Seen on the virtual Mac, at sizes from
 160×120 to 3840×2160. The Mac's own count for Screen Sharing is 4, a constant that
-neither the display's size nor the Mac's hardware enters, and it answers the
+neither the display's size, the Mac's hardware nor the codec enters, and it answers the
 lesser of that and the offer's:
 
 | Offered `tilesPerFrame` | The Mac's answer | What it sends |
