@@ -159,7 +159,7 @@ whether the notice is in the DOM.
 asserts which socket receives the format and packets, that a session started with
 sound opens that socket and one started without it does not, and that opening and
 closing it is the whole subscription, a mute surviving a reload. The deterministic
-tone harness in `src/server.rs` supplies audio without a remote.
+tone harness in `examples/test_tone.rs` supplies audio without a remote.
 
 `picker-options.spec.ts` is what a session is started with: that Start sends
 the choices made under the target and `connected` reports them back, that a
@@ -348,7 +348,7 @@ Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`.
 The audio and picker specs use the test-tone gateway instead of a live target:
 
 ```sh
-cargo test --lib serve_a_test_tone -- --ignored --nocapture
+cargo run --example test_tone
 ```
 
 Against the URL it prints, run:

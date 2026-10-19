@@ -11,7 +11,7 @@
 // It needs a gateway with a target that actually produces audio, which the tone
 // harness in `src/server.rs` provides deterministically and without a remote:
 //
-//     cargo test --lib serve_a_test_tone -- --ignored --nocapture
+//     cargo run --example test_tone
 //
 // then, against the address it prints:
 //

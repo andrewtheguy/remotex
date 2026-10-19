@@ -10,10 +10,10 @@
 // cannot start it. Nothing here looks at the canvas.
 //
 // It needs a gateway with an `rdp` target that configures a size, the one type that
-// offers all three choices. The tone harness in `src/server.rs` is one, with a
+// offers all three choices. The tone harness in `examples/test_tone.rs` is one, with a
 // scripted engine and no remote:
 //
-//     cargo test --lib serve_a_test_tone -- --ignored --nocapture
+//     cargo run --example test_tone
 //
 // then, against the address it prints:
 //

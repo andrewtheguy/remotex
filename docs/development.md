@@ -99,6 +99,12 @@ host, and [`rdp_link_probe`](../examples/rdp_link_probe.rs),
 [`rdp_repaint_probe`](../examples/rdp_repaint_probe.rs) measure one. `cargo test`
 builds them all, and runs the unit tests the link and protocol probes hold.
 
+[`test_tone`](../examples/test_tone.rs) is the same kind of tool for the browser's
+half of sound: the gateway's own router in front of a scripted engine that plays a
+440 Hz tone, served until it is stopped, for a browser to listen to and for the
+Playwright specs that need a target with sound and no remote
+([`tests/playwright`](../tests/playwright/README.md)).
+
 Stable headless browser checks for DOM/control-plane flows live under
 [`tests/playwright`](../tests/playwright/README.md). They intentionally do not
 assert framebuffer/canvas output, cursor rendering, or gesture timing.
