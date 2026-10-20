@@ -1,0 +1,19 @@
+# Dummy xrdp host for tests/xrdp_check.sh: the gateway's RDP client against xrdp,
+# with egfx = false. xorgxrdp gives a real Xorg session; an xterm opened after a
+# bare window manager, so it has the focus, is the desktop the check types into.
+# xclip is the check's reach into the session's clipboard.
+FROM debian:trixie-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        xrdp xorgxrdp xserver-xorg-core dbus-x11 xterm openbox ssl-cert xclip \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -s /bin/bash rdpuser && echo 'rdpuser:secret42' | chpasswd \
+    && adduser xrdp ssl-cert \
+    && printf '#!/bin/sh\nopenbox &\nsleep 1\nexec xterm\n' > /home/rdpuser/.xsession \
+    && chmod +x /home/rdpuser/.xsession && chown rdpuser: /home/rdpuser/.xsession
+# security_layer is overridable at run time: negotiate (default), tls or rdp.
+ENV XRDP_SECURITY_LAYER=negotiate
+EXPOSE 3389
+CMD sed -i "s/^security_layer=.*/security_layer=${XRDP_SECURITY_LAYER}/" /etc/xrdp/xrdp.ini \
+    && xrdp-sesman \
+    && exec xrdp --nodaemon
