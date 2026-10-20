@@ -239,8 +239,11 @@ LAN. Adaptive H.264 changes nothing on such a host: it draws no
 H.264 under Lossless. See [Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)
 for what was measured.
 
-Another RDP server, an older Windows or xrdp say, may happen to work but is not
-tested against. See [The RDP client](rdp-client.md).
+xrdp works as an `rdp` target with `egfx = false`, for the desktop, the keyboard
+and the clipboard. It has no NLA, so the client logs on to it inside TLS
+alone, with the target's username and password. Another RDP server, an older
+Windows say, may happen to work but is not tested against. See
+[The RDP client](rdp-client.md).
 
 ## Macs (`vnc` with an Apple subtype)
 

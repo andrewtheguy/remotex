@@ -124,40 +124,48 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     // `host_port` writes one, not a name either check understands.
     let server_name = config.host.trim_start_matches('[').trim_end_matches(']').to_owned();
 
-    // 1. The security negotiation, in the clear. Only NLA is offered, so only NLA
-    //    can be chosen — see the module doc on `proto`.
+    // 1. The security negotiation, in the clear. NLA and plain TLS are offered, as
+    //    mstsc and FreeRDP offer them: a Windows host chooses NLA, and a server
+    //    without CredSSP, xrdp say, chooses TLS — see the module doc on `proto`.
     let request = ConnectionRequest {
         cookie: Some(config.username.clone()),
-        protocols: Security::HYBRID,
+        protocols: Security::SSL | Security::HYBRID,
     };
     tcp.write_all(&request.encode()).await.context("sending the X.224 Connection Request")?;
     let frame = read_frame(&mut tcp).await.context("reading the X.224 Connection Confirm")?;
     let (protocol, confirmed) = match ConnectionConfirm::decode(&frame)? {
-        ConnectionConfirm::Negotiated { protocol, flags } if protocol == Security::HYBRID => {
+        ConnectionConfirm::Negotiated { protocol, flags }
+            if protocol == Security::HYBRID || protocol == Security::SSL =>
+        {
             (protocol, flags)
         }
         ConnectionConfirm::Negotiated { protocol, .. } => {
-            bail!("{dest} chose {protocol:?}, and this client speaks only NLA")
+            bail!("{dest} chose {protocol:?}, and this client speaks only NLA or TLS")
         }
         // A server that answers without negotiation data wants the legacy RDP
         // security this client does not implement, which is the same refusal.
         ConnectionConfirm::Unnegotiated => {
-            bail!("{dest} offered no security negotiation, and this client speaks only NLA")
+            bail!("{dest} offered no security negotiation, and this client speaks only NLA or TLS")
         }
         ConnectionConfirm::Refused(why) => bail!("{dest} refused the connection: {why:?}"),
     };
 
-    // 2. The TLS session everything after this lives inside, and 3. the credentials,
-    //    which CredSSP binds to that session's public key.
+    // 2. The TLS session everything after this lives inside, and 3. under NLA the
+    //    credentials, which CredSSP binds to that session's public key. Under plain
+    //    TLS they go in the Client Info PDU of step 7 alone.
     let mut stream = tls::upgrade(tcp, &server_name).await?;
-    let public_key = tls::public_key(&stream)?;
-    let credentials = Credentials {
-        username: &config.username,
-        password: &config.password,
-        domain: config.domain.as_deref(),
-    };
-    credssp::authenticate(&mut stream, &server_name, &credentials, public_key).await?;
-    debug!("rdp: authenticated as {}", config.username);
+    if protocol == Security::HYBRID {
+        let public_key = tls::public_key(&stream)?;
+        let credentials = Credentials {
+            username: &config.username,
+            password: &config.password,
+            domain: config.domain.as_deref(),
+        };
+        credssp::authenticate(&mut stream, &server_name, &credentials, public_key).await?;
+        debug!("rdp: authenticated as {}", config.username);
+    } else {
+        info!("rdp: {dest} has no NLA, so the credentials go to it inside TLS alone");
+    }
 
     let (reader, mut writer) = tokio::io::split(stream);
     let mut frames = Frames::new(reader);

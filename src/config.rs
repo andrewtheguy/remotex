@@ -2054,13 +2054,13 @@ impl ConfigFile {
                     target.name,
                     subtype.name()
                 ),
-                // The client offers only NLA, and CredSSP has nothing to log on
-                // with unless both are set.
+                // The client logs on with them, through CredSSP or the Client Info
+                // PDU's autologon, and has nothing to log on with unless both are set.
                 (Protocol::Rdp, None) => {
                     anyhow::ensure!(
                         !target.username.is_empty() && !target.password.is_empty(),
                         "target {:?} is protocol \"rdp\" and needs both username and password — \
-                         this client logs on only through NLA, which carries the two together",
+                         this client logs on with the two together",
                         target.name
                     );
                 }
@@ -4063,8 +4063,8 @@ vnc_password = \"x\"")).unwrap();
         }
     }
 
-    /// The RDP client logs on only through NLA, so a target without both halves of
-    /// its credential could never connect and is refused up front.
+    /// The RDP client logs on with both halves of its credential, so a target without
+    /// one could never connect and is refused up front.
     #[test]
     fn an_rdp_target_needs_username_and_password() {
         for keys in ["", "username = \"u\"", "password = \"p\""] {

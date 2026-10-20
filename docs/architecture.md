@@ -196,11 +196,15 @@ standard encodings, Tight and the other vendor or lossy ones are not listed. A w
 fallback for ordinary VNC clients. Plain VNC stays supported, and is worked on
 as needed rather than ahead of the prioritized servers.
 
-Another RDP server, an older Windows or xrdp say, may happen to work if it
-speaks what the client implements ([The RDP client](rdp-client.md)), but it is
-not a target: it is not tested against. Its picture follows Windows' rule: a
-pipeline it draws is passed, and one without the pipeline needs `egfx = false`,
-whose bitmap updates are sent as tiles by the gateway.
+xrdp is reached with `egfx = false` and nothing else: the client offers plain
+TLS beside NLA, which xrdp chooses, and paints the slow-path Bitmap Updates it
+sends ([The RDP client](rdp-client.md)). It is checked for the desktop, the
+keyboard and the clipboard; its sound, camera, microphone and pipeline are not
+worked on. Another RDP server, an older Windows say, may happen to work if it
+speaks what the client implements, but it is not a target: it is not tested
+against. Its picture follows Windows' rule: a pipeline it draws is passed, and
+one without the pipeline needs `egfx = false`, whose bitmap updates are sent as
+tiles by the gateway.
 
 ### The client and its bundle
 
