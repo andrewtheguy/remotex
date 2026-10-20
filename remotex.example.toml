@@ -223,7 +223,7 @@ site_passwd = ""
 # "wlshare" target lists wlshare's audio extension. Started with it off, neither
 # is asked, and the host keeps playing where it did.
 #
-# Opus is sent at the rates the audio keys below hold. FLAC is lossless, and
+# Opus follows the link, as described below. FLAC is lossless, and
 # the browser's own decoder plays it, which Safari's does not, so Safari is not
 # offered it. A "wlshare" target's sound is coded by wlshare in whichever format
 # was chosen and passed to the browser as it came, so the gateway codes none of
@@ -388,16 +388,14 @@ password = "change-me"
 # page is reached: the client refuses to start at all without a secure context
 # and a pair of WebCodecs decoders.
 #
-# Its bitrate is not a key: like a High Performance Mac's AAC-ELD, it is always
-# sent at the highest rate, 320 kbit/s. That is a ceiling, not a promise — and
-# an average, not a packet size: Opus is variable-rate, so silence costs a few
-# bytes a packet and music about this.
-#
-# Nor is whether it adapts: Opus always follows the audio socket's own
-# backpressure. Sustained slow sends walk the bitrate down, sustained clear
-# sends walk it back up to 320 kbit/s, and, where the sound is encoded here,
-# silence is shed while the link is behind so old sound does not accumulate; a
-# "wlshare" target's packets are passed as they came, and only the rate moves.
+# Its bitrate is not a key, and neither is whether it adapts: Opus always
+# follows the audio socket's own backpressure, with 320 kbit/s as its ceiling.
+# That ceiling is an average, not a packet size: Opus is variable-rate, so
+# silence costs a few bytes a packet and music about this. Sustained slow sends
+# walk the bitrate down, sustained clear sends walk it back up to the ceiling,
+# and, where the sound is encoded here, silence is shed while the link is behind
+# so old sound does not accumulate; a "wlshare" target's packets are passed as
+# they came, and only the rate moves.
 # Where the walk stops giving rate up is built into the sound coding, as in
 # every adaptive stream, so there is no floor to set: 32 kbit/s, degraded but
 # continuous, which is the point of giving bitrate up.
@@ -521,7 +519,7 @@ password = "change-me"
 # to hears nothing. The sound goes to the browser as the Mac's own AAC-ELD,
 # which the browser tries to decode, and only while it has not muted it. A browser
 # that cannot decode the AAC-ELD still runs the session without sound and says why
-# under Audio. No encoder touches it, so the audio_* keys are refused here.
+# under Audio. No encoder touches it, so it has no Opus walk.
 #
 # EXPERIMENTAL. The picture is always passed to the browser as the Mac sent it,
 # in the codec chosen at the picker: its HEVC, or its H.264. The gateway decodes
