@@ -330,8 +330,8 @@ password = "change-me"
 # The compositor is the gateway's own and is tested as it is there,
 # and what is passed is checked against a real host, in a headless browser and by
 # hand. That is a physical Windows 11 computer, from a desktop browser and from a
-# mobile browser on iOS, with sound and the clipboard beside it; `camera` and `microphone`
-# beside it have not been tried.
+# mobile browser on iOS, with sound and the clipboard beside it; the camera and the
+# microphone beside it have not been tried.
 #egfx = true
 
 # ALPHA. Ask the host for this many virtual displays, each the session's size.
@@ -399,41 +399,6 @@ password = "change-me"
 # on one that has none, and on "ard-high-performance", whose sound is passed as
 # the Mac's own AAC-ELD.
 #audio_adaptive = true
-
-# Camera redirection: offer the remote a virtual webcam whose frames are this
-# browser's, over MS-RDPECAM on "rdp" — or, on a "wlshare" target, over
-# wlshare's camera extension, which makes it a PipeWire camera on the wlroots
-# desktop (see docs/wlshare-camera.md). The rest of this note is about RDP.
-# EXPERIMENTAL. The socket's rules, its messages, and both channel wires are
-# checked, and the wlshare path has container coverage. Only a Windows host that
-# creates the camera enumeration channel has anywhere to test the RDP path: a
-# workstation, or a Windows Server carrying the Remote Desktop Session Host role.
-# `a_real_host_streams_the_camera` carries H.264 frames to such a host, but it is
-# ignored by default and does not check the pixels the host displays. The RDP
-# picture is verified by hand against such a host.
-#
-# Capability only. The device appears when a client turns the camera on from the
-# floating menu — explicitly, per session, never remembered — and is unplugged
-# when that client closes it, the session changes hands, or the engine ends. The
-# browser encodes H.264 and the gateway passes it through untranscoded, so there
-# is no codec key beside this one. Apple's Screen Sharing and a plain "vnc"
-# server have nowhere to put a camera, so those targets refuse the key rather
-# than ignoring it. A Windows Server without the
-# RDSH role never creates the enumeration channel, so an enabled camera against
-# one is simply never asked for a frame.
-#camera = false
-
-# Microphone redirection: offer the remote this browser's microphone over
-# MS-RDPEAI on "rdp" — or, on a "wlshare" target, over wlshare's microphone
-# extension, which makes it a PipeWire audio source on the wlroots desktop (see
-# docs/wlshare-microphone.md). EXPERIMENTAL, like `camera`. Capability only: the recording
-# device is fed when a client turns the microphone on from the floating menu —
-# per session, never remembered. The browser sends mono speech Opus at a fixed
-# low bitrate and the gateway decodes it to the PCM the host records in, so there
-# is no codec or quality key beside this one. The host starts recording only
-# once an application on it does. An Apple target and a plain "vnc" target
-# refuse the key.
-#microphone = false
 
 # A plain VNC target needs host and, usually, one of the two passwords; domain is
 # refused, and it is asked once for `size`, or 1440×900, as above.

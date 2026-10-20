@@ -145,10 +145,11 @@ fn connect_budget() -> Duration {
 /// host to redirect its sound and hands every buffer to the bridge from its own
 /// thread — see [`Sound`] — so the pictures' event queue below never carries a sample.
 ///
-/// `uplinks.camera` is `Some` exactly for a target with `camera = true`: the RDP client
-/// then takes the host's camera enumeration channel, and the bridge's control becomes the
-/// session's camera feed — see [`rdp_camera`]. `uplinks.microphone` is the same for
-/// `microphone = true` and the audio input channel — see [`rdp_mic`].
+/// `uplinks.camera` is `Some` exactly for a session started offering the browser's
+/// camera ([`crate::config::Choices::camera`]): the RDP client then takes the host's
+/// camera enumeration channel, and the bridge's control becomes the session's camera
+/// feed — see [`rdp_camera`]. `uplinks.microphone` is the same for a session started
+/// offering the microphone and the audio input channel — see [`rdp_mic`].
 ///
 /// The event channel from the RDP client is bounded, and a slow consumer makes the
 /// rectangles coarser rather than the queue longer: while it is full the client

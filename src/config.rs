@@ -424,6 +424,15 @@ pub struct Offers {
     /// Whether the session's view of a Standard Mac's screens is a choice
     /// ([`StandardView`]): on `ard` sharing its physical displays.
     pub standard_view: bool,
+    /// Whether offering the remote this browser's camera is a choice
+    /// ([`Choices::camera`]): on `rdp`, over MS-RDPECAM, and on `wlshare`, over
+    /// its camera extension. Neither Apple's Screen Sharing nor a VNC server read
+    /// as a plain one has anywhere to put one.
+    pub camera: bool,
+    /// Whether offering the remote this browser's microphone is a choice
+    /// ([`Choices::microphone`]): on `rdp`, over MS-RDPEAI, and on `wlshare`, over
+    /// its microphone extension, and nowhere else, as the camera.
+    pub microphone: bool,
 }
 
 /// What whoever started a session chose under its target at the picker, carried by
@@ -467,6 +476,38 @@ pub struct Choices {
     /// Standard's alone: no other target has a combined view.
     #[serde(default, rename = "standardView")]
     pub standard_view: StandardView,
+    /// Offer the remote a redirected camera whose frames are this browser's:
+    /// MS-RDPECAM on RDP, and on a `wlshare` target the wlshare camera extension
+    /// ([`crate::vnc_camera`]), listed the way its audio extension is. Refused on a
+    /// plain `vnc` target and on both Apple subtypes ([`Offers::camera`]).
+    ///
+    /// **Experimental.** The socket's session rules and message encodings are
+    /// unit tested, both wires are checked, and the wlshare path has container
+    /// coverage. The RDP redirection itself is exercised only against a real
+    /// Windows host, because only a host that creates the
+    /// `RDCamera_Device_Enumerator` channel — a workstation, or a Windows Server
+    /// carrying the Remote Desktop Session Host role — has anywhere to redirect
+    /// a camera to.
+    ///
+    /// The offer alone. The device itself appears when a client enables the
+    /// camera — explicitly, per session, never remembered — by opening
+    /// `/ws/camera`; a session started with the offer and no such client gives
+    /// the remote nothing. The browser encodes H.264 and the gateway passes it
+    /// through, so there is no codec choice beside this one.
+    #[serde(default)]
+    pub camera: bool,
+    /// Offer the remote this browser's microphone: MS-RDPEAI on RDP, and on a
+    /// `wlshare` target the wlshare microphone extension ([`crate::vnc_mic`]),
+    /// listed the way [`Self::camera`]'s is, and refused where it is
+    /// ([`Offers::microphone`]). Experimental, like the camera.
+    ///
+    /// The offer alone, like [`Self::camera`]: the recording device is fed when a
+    /// client enables its microphone — explicitly, per session — by opening
+    /// `/ws/mic`. The browser sends speech-grade Opus and the gateway decodes it to
+    /// the PCM the host records in, so there is no codec or quality choice beside
+    /// this one.
+    #[serde(default)]
+    pub microphone: bool,
     /// Ask a High Performance Mac whose picture is passed for one tile, each
     /// picture the whole display, and not the four strips a session passing the
     /// HEVC is offered ([`crate::vnc_apple_media::Receive`]); the H.264 is
@@ -922,37 +963,6 @@ pub struct TargetConfig {
     /// measured against Microsoft's or Apple's own client.
     #[serde(default = "one_display")]
     pub virtual_displays: u8,
-    /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a
-    /// `wlshare` target the wlshare camera extension ([`crate::vnc_camera`]),
-    /// listed the way its audio extension is. Rejected on a plain `vnc`
-    /// target and on both Apple subtypes: neither speaks such an extension.
-    ///
-    /// **Experimental.** The socket's session rules and message encodings are
-    /// unit tested, both wires are checked, and the wlshare path has container
-    /// coverage. The RDP redirection itself is exercised only against a real
-    /// Windows host, because only a host that creates the
-    /// `RDCamera_Device_Enumerator` channel — a workstation, or a Windows Server
-    /// carrying the Remote Desktop Session Host role — has anywhere to redirect
-    /// a camera to.
-    ///
-    /// Capability only. The device itself appears when a client enables the
-    /// camera — explicitly, per session, never remembered — by opening
-    /// `/ws/camera`; a target with this key and no such client offers the
-    /// remote nothing. The browser encodes H.264 and the gateway passes it
-    /// through, so there is no codec key beside this one.
-    #[serde(default)]
-    pub camera: bool,
-    /// Offer the remote this browser's microphone: MS-RDPEAI on RDP, and on a `wlshare`
-    /// target the wlshare microphone extension ([`crate::vnc_mic`]), listed the way
-    /// [`Self::camera`]'s is. Rejected on a plain `vnc` target and on both Apple
-    /// subtypes: neither speaks such an extension.
-    ///
-    /// Capability only, like [`Self::camera`]: the recording device is fed when a client
-    /// enables its microphone — explicitly, per session — by opening `/ws/mic`. The
-    /// browser sends speech-grade Opus and the gateway decodes it to the PCM the host
-    /// records in, so there is no codec or quality key beside this one.
-    #[serde(default)]
-    pub microphone: bool,
     /// Let the Opus bitrate, [`AUDIO_BITRATE_KBPS`], track the audio socket's
     /// own backpressure — on unless the operator turned it off, like
     /// [`Self::render_adaptive`].
@@ -1162,14 +1172,24 @@ impl TargetConfig {
                 placement: self.virtual_displays > 1,
                 pipeline: self.egfx(),
                 standard_view: false,
+                camera: true,
+                microphone: true,
             },
             // Read as any VNC server, which carries no sound and is shown at its
-            // own size.
-            (Protocol::Vnc, None) => {
-                Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false, standard_view: false }
-            }
+            // own size, and has nowhere to put a camera or a microphone.
+            (Protocol::Vnc, None) => Offers {
+                resize: false,
+                audio: false,
+                passthrough: &[],
+                placement: false,
+                pipeline: false,
+                standard_view: false,
+                camera: false,
+                microphone: false,
+            },
             // Its picture is wlshare's own, passed: its VP9, the picture of a
-            // session that names none, or its tiles, chosen at the picker.
+            // session that names none, or its tiles with motion, chosen at the
+            // picker. Its camera and microphone extensions take the browser's.
             (Protocol::Vnc, Some(Subtype::Wlshare)) => Offers {
                 resize: true,
                 audio: true,
@@ -1177,6 +1197,8 @@ impl TargetConfig {
                 placement: false,
                 pipeline: false,
                 standard_view: false,
+                camera: true,
+                microphone: true,
             },
             // Standard mode shares the Mac's physical displays, whose resolution
             // this gateway does not change, and never touches its sound. Its
@@ -1193,6 +1215,8 @@ impl TargetConfig {
                     placement: false,
                     pipeline: false,
                     standard_view: !self.virtual_display,
+                    camera: false,
+                    microphone: false,
                 }
             }
             // The sound comes with the picture, so it is not a choice, and the
@@ -1205,6 +1229,8 @@ impl TargetConfig {
                 placement: false,
                 pipeline: false,
                 standard_view: false,
+                camera: false,
+                microphone: false,
             },
         }
     }
@@ -1242,6 +1268,8 @@ impl TargetConfig {
                 choices.placement != Placement::default() && !offers.placement,
             ),
             ("adaptive H.264", choices.pipeline != Pipeline::HighQuality && !offers.pipeline),
+            ("a camera", choices.camera && !offers.camera),
+            ("a microphone", choices.microphone && !offers.microphone),
         ];
         match refused.into_iter().find(|(_, refused)| *refused) {
             Some((choice, _)) => Err(NotOffered { target: self.name.clone(), choice }),
@@ -2023,27 +2051,7 @@ impl ConfigFile {
                 target.name,
                 target.virtual_displays
             );
-            // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
-            // `wlshare` target. Neither Apple's Screen Sharing nor a VNC server read
-            // as a plain one speaks such an extension.
-            let carries_devices = target.protocol == Protocol::Rdp || target.wlshare();
             let kind = target.subtype.map_or("plain vnc", Subtype::name);
-            anyhow::ensure!(
-                !target.camera || carries_devices,
-                "target {:?} is {kind} and sets camera, which has nowhere to go there: the \
-                 camera rides MS-RDPECAM on rdp and wlshare's camera extension on a vnc target \
-                 with subtype = \"wlshare\". Remove the key.",
-                target.name
-            );
-            // The microphone likewise: MS-RDPEAI on RDP, wlshare's microphone extension on
-            // a `wlshare` target, and nothing anywhere else.
-            anyhow::ensure!(
-                !target.microphone || carries_devices,
-                "target {:?} is {kind} and sets microphone, which has nowhere to go there: \
-                 the microphone rides MS-RDPEAI on rdp and wlshare's microphone extension on a \
-                 vnc target with subtype = \"wlshare\". Remove the key.",
-                target.name
-            );
             // The adaptive switch tunes the Opus encoder, for the sessions that take
             // the target's sound: the one here for MS-RDPEA's PCM on RDP, and
             // wlshare's own on a `wlshare` target, which is told the rate over its
@@ -3594,7 +3602,10 @@ mod tests {
                 audio: false,
                 passthrough: &[Passthrough::AppleAdaptive],
                 placement: false,
-                pipeline: false, standard_view: true
+                pipeline: false,
+                standard_view: true,
+                camera: false,
+                microphone: false,
             }
         );
 
@@ -3647,7 +3658,10 @@ mod tests {
                 audio: false,
                 passthrough: &[Passthrough::AppleAdaptive],
                 placement: false,
-                pipeline: false, standard_view: false
+                pipeline: false,
+                standard_view: false,
+                camera: false,
+                microphone: false,
             },
             "a display to resize, and no sound on Standard's virtual display either"
         );
@@ -4214,121 +4228,50 @@ vnc_password = \"x\"")).unwrap();
         assert_eq!(rdp.audio_source_format(), crate::audio::PCM_CD_QUALITY);
     }
 
-    /// The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
-    /// `wlshare` target, so the key is accepted on both — opt-in (default off) on
-    /// each — and refused on both Apple subtypes and on a plain `vnc` target,
-    /// none of which speaks such an extension.
+    /// The camera and the microphone are offered at the picker on `rdp`, over
+    /// MS-RDPECAM and MS-RDPEAI, and on `wlshare`, over its camera and microphone
+    /// extensions, and refused on both Apple subtypes and on a plain `vnc` target,
+    /// none of which speaks such an extension. Either stands on its own: a remote
+    /// records with or without redirected sound.
     #[test]
-    fn camera_rides_rdp_and_wlshare_and_is_refused_elsewhere() {
-        let err = ConfigFile::parse(&format!(
-            "[server]\n{}\n[[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\ncamera = true\n",
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("is plain vnc and sets camera"), "{rendered}");
-        assert!(rendered.contains("subtype = \"wlshare\""), "{rendered}");
-
-        for subtype in APPLE_SUBTYPES {
-            let err = ConfigFile::parse(&format!(
-                r#"
-                [server]
-                {}
-
-                [[targets]]
-                name = "mac"
-                protocol = "vnc"
-                subtype = "{subtype}"
-                host = "10.0.0.5"
-                username = "andrew"
-                password = "h"
-                camera = true
-                "#,
-                site_passwd_line()
-            ))
-            .and_then(|file| file.resolve())
-            .unwrap_err();
-            let rendered = format!("{err:#}");
-            assert!(rendered.contains(&format!("is {subtype} and sets camera")), "{rendered}");
-            assert!(
-                rendered.contains("wlshare's camera extension"),
-                "the path a vnc target does have is named: {rendered}"
-            );
-        }
-
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            username = "u"
-            password = "p"
-            host = "10.0.0.5"
-            camera = true
-
-            [[targets]]
-            name = "desk"
-            protocol = "vnc"
-            subtype = "wlshare"
-            host = "10.0.0.7"
-            camera = true
-
-            [[targets]]
-            name = "quiet"
-            protocol = "rdp"
-            username = "u"
-            password = "p"
-            host = "10.0.0.6"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].camera);
-        assert!(config.targets[1].camera, "a wlshare target lists the extension");
-        assert!(!config.targets[2].camera, "the camera is opt-in");
-    }
-
-    /// The microphone rides MS-RDPEAI on RDP and wlshare's microphone extension on a
-    /// `wlshare` target, and is refused on both Apple subtypes and on a plain `vnc`
-    /// target. On either it stands on its own: a remote records with or without
-    /// redirected sound.
-    #[test]
-    fn microphone_rides_rdp_and_wlshare_and_is_refused_elsewhere() {
+    fn a_camera_and_a_microphone_are_offered_on_rdp_and_wlshare_alone() {
         let parse = |target: &str| {
             ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
                 .and_then(|file| file.resolve())
+                .unwrap()
+                .targets
+                .remove(0)
         };
-        for subtype in APPLE_SUBTYPES {
-            let mac = parse(&format!(
-                "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\nhost = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\nmicrophone = true"
-            ))
-            .unwrap_err();
-            let rendered = format!("{mac:#}");
-            assert!(rendered.contains(&format!("is {subtype} and sets microphone")), "{rendered}");
-            assert!(rendered.contains("wlshare's microphone extension"), "{rendered}");
+        let camera = Choices { camera: true, ..Choices::default() };
+        let microphone = Choices { microphone: true, ..Choices::default() };
+        let win = parse("name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"");
+        let desk = parse("name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"");
+        for target in [&win, &desk] {
+            let offers = target.offers();
+            assert!(offers.camera && offers.microphone, "{}", target.name);
+            target.accepts(camera).unwrap();
+            target.accepts(microphone).unwrap();
+            assert!(!target.sound(microphone), "the microphone does not need the remote's sound");
         }
-        let plain = parse("name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\nmicrophone = true").unwrap_err();
-        let rendered = format!("{plain:#}");
-        assert!(rendered.contains("is plain vnc and sets microphone"), "{rendered}");
-        let vnc = parse(
-            "name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"\nmicrophone = true",
-        )
-        .unwrap();
-        assert!(vnc.targets[0].microphone, "a wlshare target lists the extension");
-        let config = parse(
-            "name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"\nmicrophone = true",
-        )
-        .unwrap();
-        assert!(config.targets[0].microphone);
-        assert!(
-            !config.targets[0].sound(Choices::default()),
-            "the microphone does not need the remote's sound"
-        );
+        let plain = parse("name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"");
+        let macs: Vec<TargetConfig> = APPLE_SUBTYPES
+            .iter()
+            .map(|subtype| {
+                parse(&format!(
+                    "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\nhost = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\""
+                ))
+            })
+            .collect();
+        for target in std::iter::once(&plain).chain(&macs) {
+            let offers = target.offers();
+            assert!(!offers.camera && !offers.microphone, "{}", target.name);
+            // With a picture a High Performance Mac accepts, so the device is what is refused.
+            let picture = offers.passthrough.first().copied();
+            let camera = Choices { passthrough: picture, ..camera };
+            let microphone = Choices { passthrough: picture, ..microphone };
+            assert_eq!(target.accepts(camera).unwrap_err().choice, "a camera", "{}", target.name);
+            assert_eq!(target.accepts(microphone).unwrap_err().choice, "a microphone", "{}", target.name);
+        }
     }
 
     /// EGFX is RDP's, and refused on VNC by name — either value, since a key
@@ -4411,7 +4354,7 @@ vnc_password = \"x\"")).unwrap();
         let win = rdp("");
         assert_eq!(
             win.offers(),
-            Offers { resize: true, audio: true, passthrough: &[Passthrough::RdpGraphics], placement: false, pipeline: true, standard_view: false }
+            Offers { resize: true, audio: true, passthrough: &[Passthrough::RdpGraphics], placement: false, pipeline: true, standard_view: false, camera: true, microphone: true }
         );
         let composes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false, vp9_444: true };
         let plan = win.render_plan(passed, composes);
@@ -4443,7 +4386,7 @@ vnc_password = \"x\"")).unwrap();
         assert!(!win.render_plan(unasked, decodes).rdp_h264, "high quality unless chosen");
 
         let bitmap = rdp("egfx = false");
-        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false, standard_view: false });
+        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false, standard_view: false, camera: true, microphone: true });
         assert_eq!(
             bitmap.accepts(passed),
             Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })

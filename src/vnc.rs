@@ -2680,7 +2680,7 @@ async fn rfb38_preface(
             wlshare_beside_encoding_list()
         } else {
             let audio = config.sound(choices).then(|| config.lossless(choices));
-            wlshare_encoding_list(audio, config.camera, config.microphone)
+            wlshare_encoding_list(audio, choices.camera, choices.microphone)
         };
         let lists = Listing::new(encodings, plan);
         uplink.send(&set_encodings(lists.listed((server.width, server.height)))).await?;
@@ -2816,7 +2816,8 @@ fn rfb38_encoding_list() -> Vec<i32> {
 /// What a `wlshare` target lists: the generic list, and after it wlshare's own
 /// extensions. A plain target lists none of them, whatever server answers it.
 /// `audio` is `Some` in a session started with sound, and says whether that
-/// sound is lossless.
+/// sound is lossless; `camera` and `microphone` are whether the session was
+/// started offering the browser's ([`crate::config::Choices`]).
 fn wlshare_encoding_list(audio: Option<bool>, camera: bool, microphone: bool) -> Vec<i32> {
     let mut encodings = rfb38_encoding_list();
     if let Some(lossless) = audio {

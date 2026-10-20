@@ -93,8 +93,9 @@ https://github.com/user-attachments/assets/1b5dfc6f-8510-490b-bd88-d4c52c48b0a5
   Unicode. VNC carries Unicode with Extended Clipboard and otherwise falls back
   to Latin-1. Automatic browser clipboard sync is used where the browser permits
   it; the Clipboard panel remains available when it does not.
-- **Experimental camera and microphone redirection.** An RDP or wlshare target
-  can receive the browser's devices for a call or recording.
+- **Experimental camera and microphone redirection.** An RDP or wlshare session
+  started with them at the picker can receive the browser's devices for a call
+  or recording.
 - **Reattachment without losing the remote desktop.** The owning browser has a
   60-second grace period to reattach after a reload or dropped socket. A takeover
   or later connection starts a fresh gateway session, but the prioritized

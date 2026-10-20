@@ -58,17 +58,15 @@ async fn wait_for_vnc_port(port: u16) {
     .expect("wlshare never sent an RFB greeting");
 }
 
-/// Start the real server pointed at wlshare twice: a `wlshare` target with a
-/// camera and a microphone, and a plain `vnc` target with neither, which a plain
-/// target may not carry. The tests start the first following the window and the
-/// second at the size it keeps.
+/// Start the real server pointed at wlshare twice: a `wlshare` target, whose
+/// sessions may be started offering the browser's camera and microphone, and a
+/// plain `vnc` target, whose may not. The tests start the first following the
+/// window and the second at the size it keeps.
 async fn spawn_app(vnc_port: u16) -> SocketAddr {
     let wlshare = wlshare_target(vnc_port);
     let plain = TargetConfig {
         name: PLAIN_TARGET.to_owned(),
         subtype: None,
-        camera: false,
-        microphone: false,
         ..wlshare.clone()
     };
     let config = AppConfig {
@@ -104,8 +102,6 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         size: None,
         egfx: None,
         virtual_displays: 1,
-        camera: true,
-        microphone: true,
         video_quality: None,
         render_adaptive: None,
         virtual_display: false,
@@ -625,8 +621,8 @@ async fn uplink_signal(ws: &mut common::Socket) -> serde_json::Value {
 
 /// Connect to the target and read the session socket up to `connected`, which is
 /// returned; after it the socket is only drained, so nothing backs up behind it.
-async fn open_session(ws: &mut common::Ws) -> serde_json::Value {
-    common::connect_target_with(ws, TARGET, r#"{"size":"window"}"#).await;
+async fn open_session(ws: &mut common::Ws, choices: &str) -> serde_json::Value {
+    common::connect_target_with(ws, TARGET, choices).await;
     loop {
         if let Message::Text(text) = ws.next().await.expect("session socket open").expect("websocket receive") {
             let msg: serde_json::Value = serde_json::from_str(&text).expect("control message is JSON");
@@ -687,8 +683,8 @@ async fn wlshare_lends_the_desktop_the_browsers_microphone() {
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
-    let connected = open_session(&mut ws).await;
-    assert_eq!(connected["microphone"], true, "the target carries a microphone: {connected}");
+    let connected = open_session(&mut ws, r#"{"size":"window","microphone":true}"#).await;
+    assert_eq!(connected["microphone"], true, "the session offers a microphone: {connected}");
 
     // `connected` is sent as the engine starts, ahead of its RFB handshake, so the
     // microphone is plugged before the engine can have heard wlshare's answer. How far
@@ -832,8 +828,8 @@ async fn wlshare_lends_the_desktop_the_browsers_camera() {
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
-    let connected = open_session(&mut ws).await;
-    assert_eq!(connected["camera"], true, "the target carries a camera: {connected}");
+    let connected = open_session(&mut ws, r#"{"size":"window","camera":true}"#).await;
+    assert_eq!(connected["camera"], true, "the session offers a camera: {connected}");
 
     // As the page does, the format goes the moment the socket opens: ahead of the
     // engine's RFB handshake, as the microphone's plug does.

@@ -42,6 +42,10 @@
 //   not offered lossless.
 // - Where the second display sits is a choice on a target that asks its host for
 //   two and tells it where each is: see `PLACEMENTS`.
+// - This browser's camera and microphone are offered to the remote or not, each
+//   ticked where the target has somewhere to put it, an RDP host or wlshare:
+//   see `deviceRow`. Both experimental, and neither until somebody ticks it. The
+//   tick is the offer alone: the device is turned on from the session's menu.
 // - How the host draws an RDP pipeline, high quality or adaptive H.264 (alpha), is a
 //   choice on a target with the pipeline on, and under adaptive the whole desktop
 //   or by region: see `pipelineRow`. A browser that cannot decode the H.264 is
@@ -112,6 +116,10 @@ export interface TargetInfo {
    * Display: Screen Sharing Standard's alone.
    */
   standardView: boolean;
+  /** Whether offering the remote this browser's camera is a choice (experimental). */
+  camera: boolean;
+  /** Whether offering the remote this browser's microphone is a choice (experimental). */
+  microphone: boolean;
 }
 
 /** A desktop size in points. */
@@ -167,6 +175,10 @@ export interface Choices {
   placement: Placement;
   pipeline: Pipeline;
   standardView: StandardView;
+  /** Whether the remote is offered this browser's camera (experimental). */
+  camera: boolean;
+  /** Whether the remote is offered this browser's microphone (experimental). */
+  microphone: boolean;
 }
 
 /** What this browser can do with a target. */
@@ -231,6 +243,13 @@ export interface SoundRow {
   formats: SoundFormat[];
 }
 
+/** A device of this browser's the remote can be offered: the camera or the microphone. */
+export interface DeviceRow {
+  label: string;
+  note: string;
+  checked: boolean;
+}
+
 /** One way the host can draw the pipeline, or one way of drawing it adaptive. */
 export interface PipelineOption<V> {
   value: V;
@@ -288,6 +307,10 @@ export interface TargetOptions {
   sizes: SizeOption[];
   /** The target's sound, as a choice: null where it offers none. */
   soundRow: SoundRow | null;
+  /** This browser's camera, offered to the remote: null where the target has nowhere to put it. */
+  cameraRow: DeviceRow | null;
+  /** This browser's microphone, offered to the remote: null where the target has nowhere to put it. */
+  microphoneRow: DeviceRow | null;
   /**
    * Where the second display can sit, on a target whose host is told: null
    * where it is not a choice.
@@ -530,6 +553,36 @@ function soundRow(
   };
 }
 
+// This browser's devices, offered to the remote where the target has somewhere to
+// put them: an RDP host over its channels, wlshare over its extensions. The tick
+// is the offer; the session's menu turns the device on, and off.
+const DEVICES: Record<"camera" | "microphone", Omit<DeviceRow, "checked">> = {
+  camera: {
+    label: "Camera (experimental)",
+    note: "Offer the remote this browser's camera, as H.264, to turn on from the session's menu. For a call.",
+  },
+  microphone: {
+    label: "Microphone (experimental)",
+    note: "Offer the remote this browser's microphone, as speech Opus, to turn on from the session's menu. For a call or a recording.",
+  },
+};
+
+/**
+ * `target`'s `device` as the picker shows it: nothing where it has nowhere to put
+ * it, and otherwise a tick, off until somebody ticks it.
+ */
+function deviceRow(
+  target: TargetInfo,
+  device: "camera" | "microphone",
+  remembered: boolean | undefined,
+): { row: DeviceRow | null; offered: boolean } {
+  if (!target[device]) {
+    return { row: null, offered: false };
+  }
+  const offered = remembered === true;
+  return { row: { ...DEVICES[device], checked: offered }, offered };
+}
+
 // A Standard Mac's screens: one at a time, the Mac's own picture passed, or every
 // screen at once as Combined Display, which the gateway codes from the Mac's Full
 // quality, a screen denser than this display scaled down to it there.
@@ -673,6 +726,8 @@ export function targetOptions(
     abilities.lossless,
   );
   const drawn = pipelineRow(target, remembered?.pipeline, abilities.rdpH264);
+  const camera = deviceRow(target, "camera", remembered?.camera);
+  const microphone = deviceRow(target, "microphone", remembered?.microphone);
   // An RDP host's pipeline is passed whatever is chosen.
   const always = target.passthroughs.includes("rdp-graphics");
   const passed: PassedNote | null = always
@@ -707,10 +762,14 @@ export function targetOptions(
         ?.value ?? "right",
     pipeline: drawn.pipeline,
     standardView,
+    camera: camera.offered,
+    microphone: microphone.offered,
   };
   return {
     sizes,
     soundRow: sound.row,
+    cameraRow: camera.row,
+    microphoneRow: microphone.row,
     placements,
     pipelineRow: drawn.row,
     views,

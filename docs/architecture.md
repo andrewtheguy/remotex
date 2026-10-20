@@ -51,8 +51,9 @@ own, PNG where it holds few enough colours to be exact and JPEG at the target's
 quality where it does not, every changed tile a coarse JPEG where the link would
 take too long to carry them, and a JPEG tile sent again as PNG once it is still —
 see [The tiles](#the-tiles).
-How a session's desktop is sized, whether it takes the remote's sound, whether
-it passes the Mac's stream and how an RDP host draws its pipeline are chosen at
+How a session's desktop is sized, whether it takes the remote's sound, which of
+the Mac's or wlshare's streams it passes, how an RDP host draws its pipeline, and
+whether the remote is offered this browser's camera and microphone are chosen at
 the picker before it starts — see
 [What a session is started with](#what-a-session-is-started-with). Remote audio is encoded as
 Opus, save the Mac's passed AAC-ELD, wlshare's own Opus, passed too, and a target's lossless FLAC
@@ -2119,7 +2120,8 @@ These things about a session are chosen by whoever starts it, before it starts:
 how the desktop is sized, whether the remote's sound is taken and as what,
 which of a Mac's or wlshare's own streams is passed through if any, whether a Standard Mac's
 screens are shown one at a time or as Combined Display, where a second virtual display
-sits, how an RDP host draws its graphics pipeline, and whether a Mac's
+sits, how an RDP host draws its graphics pipeline, whether the remote is offered
+this browser's camera and its microphone, and whether a Mac's
 passed HEVC is decoded by the page's
 own software decoder ([Decoded in the page](#decoded-in-the-page)), which is the
 gateway's to offer as well as the target's. Picking a target at the picker opens it,
@@ -2131,15 +2133,15 @@ session.
 Which options a target shows is its type's to say, from `TargetConfig::offers`,
 and `GET /api/targets` carries it:
 
-| Target | Window drives the size | Sound | Passthrough | Graphics |
-|---|---|---|---|---|
-| `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: high quality or adaptive H.264 |
-| `rdp` with `egfx = false` | no | shown | hidden | hidden |
-| `vnc` | no | hidden | hidden | hidden |
-| `vnc`, `wlshare` | yes | shown | shown, as Picture: wlshare's VP9, passed, or its tiles with motion, passed | hidden |
-| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive picture, passed (beta), greyed under Combined Display, or the gateway's tiles of its Full quality; and as Displays: one at a time (beta) or Combined (alpha) | hidden |
-| `vnc`, `ard` with `virtual_display` | yes | hidden | shown, as for `ard` | hidden |
-| `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden |
+| Target | Window drives the size | Sound | Passthrough | Graphics | Camera and microphone |
+|---|---|---|---|---|---|
+| `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: high quality or adaptive H.264 | shown |
+| `rdp` with `egfx = false` | no | shown | hidden | hidden | shown |
+| `vnc` | no | hidden | hidden | hidden | hidden |
+| `vnc`, `wlshare` | yes | shown | shown, as Picture: wlshare's VP9, passed, or its tiles with motion, passed | hidden | shown |
+| `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive picture, passed (beta), greyed under Combined Display, or the gateway's tiles of its Full quality; and as Displays: one at a time (beta) or Combined (alpha) | hidden | hidden |
+| `vnc`, `ard` with `virtual_display` | yes | hidden | shown, as for `ard` | hidden | hidden |
+| `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden | hidden |
 
 - **The size is shown before Start.** A desktop is sized one of three ways
   (`Sizing` in `src/config.rs`): kept at the target's size, which is its
@@ -2221,6 +2223,16 @@ and `GET /api/targets` carries it:
   host's network detection. An adaptive session also claims UDP and answers at
   the page's pace; a high quality one claims none and answers with what the
   gateway's connection measures ([A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link)).
+- **The camera and the microphone are offered where the remote can take them.**
+  `choices.camera` and `choices.microphone`, each a tick labelled experimental,
+  on `rdp`, over MS-RDPECAM and MS-RDPEAI, and on `wlshare`, over its camera and
+  microphone extensions, and refused on a plain `vnc` target and on both Apple
+  subtypes, which have nowhere to put either. The tick is the offer alone, what
+  the session lists to the host; the device itself is turned on from the
+  session's menu, per session, which opens `/ws/camera` or `/ws/mic`
+  ([Camera frames](#camera-frames), [Microphone frames](#microphone-frames)).
+  Neither until somebody ticks it, and `connected` reports what the session was
+  started with as `camera` and `microphone`.
 - **The second display is placed once.** `choices.placement` says `right`,
   `left`, `top` or `bottom` (`Placement` in `src/config.rs`): where the second
   of two virtual displays sits against the first, so the remote's arrangement
@@ -2278,9 +2290,8 @@ the same build, and no second client is supported.
 Control and input messages are tagged JSON. Server messages cover picker and
 connected state, desktop size, display selection, cursor shape, clipboard,
 audio format, and errors. The `connected` message says what the session was
-started with — `resize`, `audio` and `passthrough` — and includes the
-`camera` and `microphone` capability flags, so clients
-expose only supported controls.
+started with — `resize`, `audio`, `passthrough`, `camera` and `microphone` — so
+clients expose only the controls the session has.
 
 It also carries two things a client cannot work out and nothing else reveals:
 `render`, the resolved picture — `tiles q90`, for wlshare's VP9
@@ -2628,12 +2639,12 @@ probe it is ignored by default, and it checks that the host started the stream
 and took samples, not the pixels the host displays. The displayed picture is
 verified by hand against a Windows host, and a change here needs a hand check.
 
-The browser's camera goes the other way, on a fourth socket, to an RDP target or a
-`wlshare` target that opted in with `camera = true` (refused on a plain `vnc`
-target and on both Apple subtypes at parse time: neither has anywhere to put a
-camera). **Opening
-`/ws/camera?session=<token>` is the enable** — explicit, per session, and never a
-remembered preference or something a session is started with, unlike sound. Its refusals add one
+The browser's camera goes the other way, on a fourth socket, in a session started
+with the picker's Camera tick, on an `rdp` or `wlshare` target (refused on a
+plain `vnc` target and on both Apple subtypes: neither has anywhere to put a
+camera). The tick is the offer, remembered at the picker as every choice is;
+**opening `/ws/camera?session=<token>` is the enable** — explicit, per session,
+and never remembered. Its refusals add one
 code to the family: 401 before the upgrade, 4000 for a stale token, 4001 on
 eviction, and **4002** when the running target carries no camera (or no engine is
 running at all). Where the audio socket is bound to the claim alone and survives a
@@ -2679,8 +2690,8 @@ most 15 frames a second — a host without a GPU was measured taking samples bel
 and a faster camera only fills the queue until it drops to a keyframe — the host's
 own camera stack decodes it, and the
 gateway advertises exactly one media type: the announced geometry. There is no
-codec key beside `camera`, and a browser that cannot encode H.264 reports that by
-name instead of falling back.
+codec key or choice beside the camera tick, and a browser that cannot encode H.264
+reports that by name instead of falling back.
 
 The channel is the RDP client's own: `src/rdp_client/proto/rdpecam.rs` speaks
 MS-RDPECAM on the session thread, and `src/rdp_camera.rs` adapts it to the
@@ -2702,9 +2713,9 @@ without the RDSH role. See
 #### Microphone frames
 
 **Experimental**, under the same testing boundary as the camera. The browser's
-microphone goes the other way on the fifth socket, to an RDP target or a
-`wlshare` target that opted in with `microphone = true`; a plain `vnc` target and
-both Apple subtypes refuse the key. Opening `/ws/mic?session=<token>` is the enable. It has the camera socket's
+microphone goes the other way on the fifth socket, in a session started with the
+picker's Microphone tick, on an `rdp` or `wlshare` target; a plain `vnc` target
+and both Apple subtypes refuse the choice. Opening `/ws/mic?session=<token>` is the enable. It has the camera socket's
 authentication, 4000/4001/4002 close codes, claim-and-engine binding, and
 per-session lifetime, so an engine end, takeover, or ordinary socket close stops
 the feed and the next session starts with the microphone off.
@@ -2723,7 +2734,7 @@ gateway decodes it at 48 kHz, groups it in 20 ms blocks, and resamples it to the
 the remote is not recording are dropped, and a close discards queued and partial
 audio so a later recording starts cleanly.
 
-On RDP, `microphone = true` lets the host open the MS-RDPEAI `AUDIO_INPUT`
+On RDP, a session started with the microphone lets the host open the MS-RDPEAI `AUDIO_INPUT`
 dynamic channel. The host speaks first: version, recording formats, then an Open
 when an application records. The client offers exactly one of the host's 16-bit
 PCM formats, preferring mono and 16 kHz, and cuts the decoded PCM into the
@@ -3111,8 +3122,8 @@ announced only by a host that opens MS-RDPEI, which this client never asks for. 
 [`roadmap.md`](roadmap.md).
 
 Static virtual channels are asked for by what the session needs: `drdynvc` for a
-session started with resize, the pipeline on (`egfx` left on), `camera = true`, or
-`microphone = true`; `cliprdr` always; and `rdpsnd` with `rdpdr`
+session started with resize, the pipeline on (`egfx` left on), the camera, or
+the microphone; `cliprdr` always; and `rdpsnd` with `rdpdr`
 for a session started with sound.
 
 `virtual_displays = 2` (alpha) asks the host for two monitors, each the

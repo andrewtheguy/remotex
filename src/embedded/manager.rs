@@ -751,6 +751,12 @@ fn describe_offers(target: &TargetConfig) -> String {
     if offers.audio {
         choices.push("sound".to_owned());
     }
+    if offers.camera {
+        choices.push("camera".to_owned());
+    }
+    if offers.microphone {
+        choices.push("microphone".to_owned());
+    }
     // One passed in every session is no choice, and the render line names it;
     // one passed where no other is named, wlshare's VP9, is part of the choice.
     let chosen = offers.passthrough.len() > 1;
@@ -1729,11 +1735,11 @@ mod tests {
             "the render plan describes itself: {page}"
         );
         assert!(
-            page.contains(&spec("picker", "offers resize, sound, high quality or adaptive H.264")),
+            page.contains(&spec("picker", "offers resize, sound, camera, microphone, high quality or adaptive H.264")),
             "what a session's starter chooses is the type's to offer, and the pipeline is passed unasked: {page}"
         );
         assert!(
-            page.contains(&spec("picker", "offers resize, sound, wlshare's VP9 passed through, wlshare's tiles with motion passed through")),
+            page.contains(&spec("picker", "offers resize, sound, camera, microphone, wlshare's VP9 passed through, wlshare's tiles with motion passed through")),
             "a wlshare target's picture is one of its two, the VP9 where none is named: {page}"
         );
 

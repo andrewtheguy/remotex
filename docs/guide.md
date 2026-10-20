@@ -132,6 +132,9 @@ config key.
   which keeps text sharp but adapts less. Adaptive is greyed in a browser whose
   `VideoDecoder` cannot decode the host's H.264. See
   [An exact picture](#an-exact-picture) for having the host draw losslessly.
+- **Camera** and **Microphone** (experimental). On an `rdp` or `wlshare` target,
+  ticks that offer the remote this browser's devices, which the session's menu
+  then turns on: see [Camera and microphone](#camera-and-microphone).
 
 One gateway holds one session. A reload or a dropped connection normally
 resumes it; an RDP session with the graphics pipeline on instead reconnects the engine,
@@ -353,7 +356,7 @@ password = "that-account's-password"
 server for wlroots-based Wayland desktops. The subtype makes the gateway list
 wlshare's private RFB extensions: its VP9 stream, which is passed through
 untouched and adapts to the browser's link, pixel density, the output list,
-sound, and with `camera = true` or `microphone = true` the browser's camera and
+sound, and, in a session started with them, the browser's camera and
 microphone as PipeWire devices on the desktop. Without the subtype the same
 server is read as any VNC server is.
 
@@ -400,13 +403,14 @@ that its pixels are HiDPI; see [HiDPI over standard RFB](standard-rfb-hidpi.md).
 
 ## Camera and microphone
 
-`camera = true` and `microphone = true` offer an `rdp` or `wlshare` target this
-browser's camera and microphone. Both are **experimental**, off by default,
-turned on per session from the floating menu and never remembered. They are for
+**Camera** and **Microphone** are ticks at the picker on an `rdp` or `wlshare`
+target, which offer the remote this browser's camera and microphone. Both are
+**experimental**, off until ticked and remembered per target as every choice is;
+the device itself is turned on per session from the floating menu. They are for
 someone who needs one for a while, a call or a recording, and are sent as
 cheaply as that allows: H.264 from the browser passed untranscoded, and mono
 speech Opus at a low fixed bitrate. An Apple target and a plain `vnc` target
-refuse the keys.
+offer neither.
 
 On RDP the camera needs a Windows host that redirects cameras: a workstation, or
 a Windows Server carrying the Remote Desktop Session Host role. A Windows host

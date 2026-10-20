@@ -85,8 +85,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             size: None,
             egfx: None,
             virtual_displays: 1,
-            camera: false,
-            microphone: false,
             video_quality: None,
             render_adaptive: None,
             virtual_display: false,

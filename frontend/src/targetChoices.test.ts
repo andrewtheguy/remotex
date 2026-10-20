@@ -59,6 +59,8 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     placement: false,
     pipeline: false,
     standardView: false,
+    camera: false,
+    microphone: false,
     ...offers,
   };
 }
@@ -71,6 +73,8 @@ const RDP = target({
   audioAdaptive: true,
   passthroughs: ["rdp-graphics"],
   pipeline: true,
+  camera: true,
+  microphone: true,
 });
 const HIGH_PERFORMANCE = target({
   subtype: "ard-high-performance",
@@ -92,6 +96,8 @@ const WLSHARE = target({
   audio: true,
   audioAdaptive: true,
   passthroughs: ["wlshare-vp9", "wlshare-tiles-motion"],
+  camera: true,
+  microphone: true,
 });
 
 const SIZED = { w: 1920, h: 1080 };
@@ -221,6 +227,8 @@ test("only what the target's type offers has a row", () => {
     placement: "right",
     pipeline: "high-quality",
     standardView: "one",
+    camera: false,
+    microphone: false,
   });
   assert.equal(standard.blocked, null);
 });
@@ -335,6 +343,8 @@ test("no sound is taken until somebody ticks it", () => {
     placement: "right",
     pipeline: "high-quality",
     standardView: "one",
+    camera: false,
+    microphone: false,
   });
   assert.equal(rdp.sound, false);
   assert.equal(rdp.soundRow?.checked, false);
@@ -350,6 +360,8 @@ test("what was chosen last time is what Start sends", () => {
     placement: "right",
     pipeline: "high-quality",
     standardView: "one",
+    camera: false,
+    microphone: false,
   });
   assert.equal(options.sound, true);
   assert.equal(options.soundRow?.checked, true);
@@ -376,6 +388,8 @@ test("what was chosen last time is what Start sends", () => {
     placement: "right",
     pipeline: "high-quality",
     standardView: "one",
+    camera: false,
+    microphone: false,
   });
   // Nor is something this page never wrote there.
   const stale = targetOptions(RDP, { audio: true as never }, ABLE);
@@ -539,6 +553,40 @@ test("a wlshare target's picture is its VP9 passed or its tiles with motion pass
       .passthrough,
     "wlshare-vp9",
   );
+});
+
+test("the camera and the microphone are offered where the remote can take them, off until ticked", () => {
+  // An RDP host and wlshare have somewhere to put them; a plain server and a
+  // Mac do not, and have no row.
+  for (const target of [RDP, WLSHARE]) {
+    const options = targetOptions(target, undefined, ABLE);
+    assert.equal(options.cameraRow?.checked, false);
+    assert.equal(options.microphoneRow?.checked, false);
+    assert.match(options.cameraRow?.label ?? "", /experimental/);
+    assert.equal(options.choices.camera, false);
+    assert.equal(options.choices.microphone, false);
+    const ticked = targetOptions(
+      target,
+      { camera: true, microphone: true },
+      ABLE,
+    );
+    assert.equal(ticked.cameraRow?.checked, true);
+    assert.equal(ticked.microphoneRow?.checked, true);
+    assert.equal(ticked.choices.camera, true);
+    assert.equal(ticked.choices.microphone, true);
+  }
+  for (const other of [target({}), STANDARD, HIGH_PERFORMANCE]) {
+    const options = targetOptions(
+      other,
+      { camera: true, microphone: true },
+      ABLE,
+    );
+    assert.equal(options.cameraRow, null);
+    assert.equal(options.microphoneRow, null);
+    // Remembered from another kind of target, and not sent to one with no row.
+    assert.equal(options.choices.camera, false);
+    assert.equal(options.choices.microphone, false);
+  }
 });
 
 test("a wlshare target needs a browser that decodes its VP9", () => {

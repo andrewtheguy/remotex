@@ -165,6 +165,19 @@ async def main() -> int:
         "passes in every session and is not named",
     )
     parser.add_argument(
+        "--camera",
+        action="store_true",
+        help="start the session offering the remote this client's camera (experimental), "
+        "on an rdp or wlshare target; the device itself appears only when a camera "
+        "socket opens, which this probe does not",
+    )
+    parser.add_argument(
+        "--microphone",
+        action="store_true",
+        help="start the session offering the remote this client's microphone "
+        "(experimental), on an rdp or wlshare target; the probe opens no mic socket",
+    )
+    parser.add_argument(
         "--placement",
         choices=("right", "left", "top", "bottom"),
         default="right",
@@ -432,6 +445,8 @@ async def main() -> int:
         "passthrough": args.passthrough,
         "whole": args.whole,
         "placement": args.placement,
+        "camera": args.camera,
+        "microphone": args.microphone,
     }
     # A display socket carries no token: the login cookie is what lets it in.
     headers = {"Cookie": f"remotex_session={cookie}"}

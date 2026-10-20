@@ -248,12 +248,14 @@ export type ControlMsg =
       // "apple-media", "apple-h264", "apple-adaptive", "wlshare-vp9" or
       // "wlshare-tiles-motion" — or null for a desktop the gateway encodes.
       passthrough: string | null;
-      // Whether this target redirects the browser's camera to the remote.
-      // Capability only — enabling is this client's move, made afresh each
-      // session by opening /ws/camera, never persisted.
+      // Whether this session offers the remote the browser's camera, as it was
+      // started with at the picker (experimental). The offer alone — enabling is
+      // this client's move, made afresh each session by opening /ws/camera,
+      // never persisted.
       camera: boolean;
-      // Whether this target redirects the browser's microphone to the remote. The
-      // camera's twin: enabled afresh each session by opening /ws/mic.
+      // Whether this session offers the remote the browser's microphone, as it
+      // was started with. The camera's twin: enabled afresh each session by
+      // opening /ws/mic.
       microphone: boolean;
       // The picture this session resolved to, in one line — `tiles q90`, or
       // `VP9 q90 · 4:4:4 · adaptive` for wlshare's. The *resolved plan* rather than the config keys,

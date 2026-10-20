@@ -293,7 +293,7 @@ a session that has gone out of scope has really stopped.
 ## Static virtual channels
 
 Each is asked for by what the session needs: `drdynvc` for a session started with
-resize, the pipeline on (`egfx` left on), `camera = true`, or `microphone = true`, which is the transport Display Control,
+resize, the pipeline on (`egfx` left on), the camera, or the microphone, which is the transport Display Control,
 the graphics pipeline, the camera's two channels, and the microphone's channel
 ride on; `cliprdr` always, and `rdpsnd` with `rdpdr` for a session started with sound — see
 [Sound](#sound-ms-rdpea).
@@ -922,7 +922,7 @@ the specification's own examples and checked against a real host by the probe, a
 the stream itself — an application on the host opening the camera — is checked by
 hand.
 
-`camera = true` gives the session a camera to offer, and asks for `drdynvc` when
+A session started with the camera, the picker's Camera tick, has a camera to offer, and asks for `drdynvc` when
 nothing else did: MS-RDPECAM is two dynamic channels, and the host opens both. The
 first, `RDCamera_Device_Enumerator`, a Windows host creates by itself for a client
 with the dynamic channel transport. A Windows Server without the Remote Desktop
@@ -998,7 +998,7 @@ and this end's answers.
 
 ## Microphone (MS-RDPEAI)
 
-**Experimental.** `microphone = true` tells the logon that the client captures
+**Experimental.** A session started with the microphone, the picker's Microphone tick, tells the logon that the client captures
 audio, asks for `drdynvc` when nothing else did, and accepts the one dynamic
 channel MS-RDPEAI uses, `AUDIO_INPUT`. A Windows host opens that channel only
 once an application starts recording. The browser's microphone is enabled

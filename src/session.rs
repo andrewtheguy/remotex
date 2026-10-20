@@ -568,8 +568,8 @@ impl Selected {
             resize: choices.resize(),
             audio: target.sound(*choices),
             passthrough: plan.passthrough().map(Passthrough::name),
-            camera: target.camera,
-            microphone: target.microphone,
+            camera: choices.camera,
+            microphone: choices.microphone,
             render: plan.describe(),
         }
     }
@@ -1810,13 +1810,14 @@ impl SessionManager {
         // queue of its own, which [`Self::arm_audio`] reads (see [`crate::audio`]), and
         // a socket of its own beyond that.
         let audio = target.sound(*choices).then(|| Arc::new(AudioBridge::new()));
-        // The camera bridge is per-engine, like the engine's own audio half — and
-        // there is no arm/re-arm machinery beside it: the camera socket that would
-        // use it does not exist yet, because every engine end closed the previous
-        // one and the browser must enable the camera afresh.
+        // The camera bridge is per-engine, like the engine's own audio half, and
+        // exists for a session started with the camera offered — and there is no
+        // arm/re-arm machinery beside it: the camera socket that would use it does
+        // not exist yet, because every engine end closed the previous one and the
+        // browser must enable the camera afresh. The microphone's is the same.
         let uplinks = Uplinks {
-            camera: target.camera.then(|| Arc::new(CameraBridge::new())),
-            microphone: target.microphone.then(|| Arc::new(MicBridge::new())),
+            camera: choices.camera.then(|| Arc::new(CameraBridge::new())),
+            microphone: choices.microphone.then(|| Arc::new(MicBridge::new())),
         };
         let (ended_tx, ended) = oneshot::channel();
         // A fresh engine's picture has lost nothing yet.
@@ -2255,11 +2256,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, whole: false };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, camera: false, microphone: false, whole: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, whole: false };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, camera: false, microphone: false, whole: false };
     /// A session started with nothing but a Mac's HEVC passed.
-    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, whole: false };
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, camera: false, microphone: false, whole: false };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -2292,7 +2293,7 @@ mod tests {
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
             let size = if self.resize { Sizing::Window } else { Sizing::Target };
-            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, whole: false }
+            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: None, placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, camera: self.camera, microphone: self.microphone, whole: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -2342,8 +2343,6 @@ mod tests {
             size: Some((1, 1)),
             egfx: meta.bitmap.then_some(false),
             virtual_displays: 1,
-            camera: meta.camera,
-            microphone: meta.microphone,
             video_quality: None,
             render_adaptive: None,
             virtual_display: false,
@@ -2788,7 +2787,7 @@ mod tests {
                 },
             );
             let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, whole: false };
+            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: Some(Passthrough::AppleMedia), placement: Placement::Right, pipeline: Pipeline::HighQuality, standard_view: crate::config::StandardView::One, camera: false, microphone: false, whole: false };
 
             let token_a = mgr.claim(false, None, "login").unwrap();
             let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();
@@ -4399,7 +4398,7 @@ mod tests {
         let token = mgr.claim(false, None, "login").unwrap();
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-camera", None, Choices::default()).await.unwrap();
+        mgr.connect(att.id, "rdp-camera", None, Meta::of(Protocol::Rdp).camera().choices()).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-camera", Meta::of(Protocol::Rdp).camera())
             .await;
         let ends = hooks.try_recv().unwrap();
@@ -4584,7 +4583,7 @@ mod tests {
         let token = mgr.claim(false, None, "login").unwrap();
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "rdp-mic", None, Choices::default()).await.unwrap();
+        mgr.connect(att.id, "rdp-mic", None, Meta::of(Protocol::Rdp).microphone().choices()).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-mic", Meta::of(Protocol::Rdp).microphone()).await;
         let ends = hooks.try_recv().unwrap();
         let bridge = ends.3.microphone.clone().expect("a microphone target's engine is given a bridge");
@@ -4602,7 +4601,7 @@ mod tests {
         let mut att = mgr.attach(&token, None, Decoders::ALL).await.unwrap();
         expect_picker(&mut att.events).await;
         assert!(matches!(mgr.attach_mic(&token), Err(UplinkRefused::Unsupported)));
-        mgr.connect(att.id, "rdp-camera", None, Choices::default()).await.unwrap();
+        mgr.connect(att.id, "rdp-camera", None, Meta::of(Protocol::Rdp).camera().choices()).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-camera", Meta::of(Protocol::Rdp).camera()).await;
         let _ends = hooks.try_recv().unwrap();
         assert!(matches!(mgr.attach_mic(&token), Err(UplinkRefused::Unsupported)));

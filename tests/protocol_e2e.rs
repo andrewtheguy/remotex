@@ -1264,8 +1264,6 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         size: Some((1280, 800)),
         egfx: None,
         virtual_displays: 1,
-        camera: false,
-        microphone: false,
         video_quality: None,
         render_adaptive: None,
         virtual_display: false,
