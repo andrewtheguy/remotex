@@ -254,6 +254,14 @@ async def main() -> int:
         "move, which it needs, and a second after each other (repeatable; DX and DY "
         "are positive right and down)",
     )
+    parser.add_argument(
+        "--click",
+        action="append",
+        default=[],
+        choices=["left", "middle", "right"],
+        help="a click of this button where --mouse put the pointer, sent a second after "
+        "the move and any --wheel, and a second after each other (repeatable)",
+    )
     parser.add_argument("--mouse-width", type=int, default=None)
     parser.add_argument(
         "--mouse-delay",
@@ -394,6 +402,8 @@ async def main() -> int:
     args = parser.parse_args()
     if args.wheel and args.mouse is None:
         parser.error("--wheel scrolls where --mouse put the pointer; give --mouse too")
+    if args.click and args.mouse is None:
+        parser.error("--click clicks where --mouse put the pointer; give --mouse too")
 
     password = args.password or getpass.getpass("Gateway password: ")
     base = f"http://127.0.0.1:{args.port}"
@@ -649,8 +659,8 @@ async def main() -> int:
         sweep_task = None
         move_tasks = []
 
-        async def move_later(to, prefix: str, position: tuple[int, int], wheels=()) -> None:
-            """Send one pointer move on `to`, after --mouse-delay, then `wheels`."""
+        async def move_later(to, prefix: str, position: tuple[int, int], wheels=(), clicks=()) -> None:
+            """Send one pointer move on `to`, after --mouse-delay, then `wheels`, then `clicks`."""
             await asyncio.sleep(args.mouse_delay)
             x, y = position
             print(f"  {prefix}-> mouseMove {x},{y}")
@@ -659,6 +669,14 @@ async def main() -> int:
                 await asyncio.sleep(1.0)
                 print(f"  {prefix}-> wheel {dx},{dy}")
                 await to.send(json.dumps({"type": "wheel", "dx": dx, "dy": dy, "unit": "pixel"}))
+            for button in clicks:
+                await asyncio.sleep(1.0)
+                print(f"  {prefix}-> click {button}")
+                for pressed in (True, False):
+                    await to.send(
+                        json.dumps({"type": "mouseButton", "button": button, "pressed": pressed, "clicks": 1})
+                    )
+                    await asyncio.sleep(0.05)
 
         page_task = None
         audio_task = None
@@ -799,7 +817,7 @@ async def main() -> int:
                                 or data["w"] == args.mouse_width
                             )
                         ):
-                            move_tasks.append(asyncio.create_task(move_later(socket, "", args.mouse, args.wheel)))
+                            move_tasks.append(asyncio.create_task(move_later(socket, "", args.mouse, args.wheel, args.click)))
                             mouse_sent = True
                     elif kind == "displays":
                         print(f"  displays  active={data['active']:#x}")

@@ -1,11 +1,13 @@
 # Dummy xrdp host for tests/xrdp_check.sh: the gateway's RDP client against xrdp,
 # with egfx = false. xorgxrdp gives a real Xorg session; an xterm opened after a
 # bare window manager, so it has the focus, is the desktop the check types into.
-# xclip is the check's reach into the session's clipboard.
+# xclip is the check's reach into the session's clipboard, xinput and xdotool its
+# view of the pointer.
 FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         xrdp xorgxrdp xserver-xorg-core dbus-x11 xterm openbox ssl-cert xclip \
+        xinput xdotool \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd -m -s /bin/bash rdpuser && echo 'rdpuser:secret42' | chpasswd \
     && adduser xrdp ssl-cert \

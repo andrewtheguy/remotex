@@ -199,8 +199,8 @@ as needed rather than ahead of the prioritized servers.
 xrdp is at the same tier as plain VNC: an `rdp` target with `egfx = false` and
 nothing else, sent as the gateway's tiles at the size it opened with. The client
 offers plain TLS beside NLA, which xrdp chooses, and paints the slow-path Bitmap
-Updates it sends ([The RDP client](rdp-client.md)). The desktop, input and the
-clipboard are what it carries, checked by
+Updates it sends ([The RDP client](rdp-client.md)). The desktop, the keyboard,
+mouse and the clipboard are what it carries, checked by
 [`tests/xrdp_check.sh`](../tests/xrdp_check.sh); its sound, camera, microphone
 and pipeline are not worked on. Like plain VNC it stays supported, and is worked
 on as needed rather than ahead of the prioritized servers. Another RDP server,

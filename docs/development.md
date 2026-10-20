@@ -90,8 +90,8 @@ xrdp, supported at the tier of plain VNC, does have a container:
 [`tests/xrdp_check.sh`](../tests/xrdp_check.sh) builds
 [`tests/xrdp-dummy`](../tests/xrdp-dummy/Containerfile), starts the gateway on a
 config of its own under `tmp/xrdp/`, and drives a session with
-`tests/ws_probe.py`, printing PASS or FAIL for the picture, typing, and the
-clipboard both ways. It needs podman or docker, cargo and uv.
+`tests/ws_probe.py`, printing PASS or FAIL for the picture, typing, the mouse's
+move, wheel and clicks, and the clipboard both ways. It needs podman or docker, cargo and uv.
 
 The Windows probes:
 

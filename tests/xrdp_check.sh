@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The gateway against xrdp, with egfx = false: the desktop arrives as tiles,
-# typing reaches the session, and the clipboard goes both ways. Nothing else is
+# typing and the mouse reach the session, and the clipboard goes both ways. Nothing else is
 # asked for; xrdp is supported as a plain VNC server is.
 #
 #   tests/xrdp_check.sh                          # xrdp's security_layer=negotiate
@@ -70,24 +70,38 @@ gw_pid=$!
 listening "$gw_port"
 
 # The probe pushes its clipboard text and, after --key-delay, types
-# `touch /tmp/typed` and Enter into the xterm. Meanwhile the remote side is
-# checked from inside the container.
+# `touch /tmp/typed` and Enter into the xterm. Once that is done, after
+# --mouse-delay, it moves the pointer to $mouse, scrolls down, and clicks left
+# then right there. Meanwhile the remote side is checked from inside the
+# container.
+mouse=700,500
 typed=(KeyT KeyO KeyU KeyC KeyH Space Slash KeyT KeyM KeyP Slash KeyT KeyY KeyP KeyE KeyD Enter)
 chords=()
 for code in "${typed[@]}"; do chords+=(--chord "$code"); done
 REMOTEX_PROBE_PASSWORD=$gw_password uv run tests/ws_probe.py \
     --port "$gw_port" --target xrdp --user admin --seconds 20 \
     --clipboard "hello from remotex" \
-    --key-delay 4 --chord-gap 0.1 "${chords[@]}" >"$out/probe.out" 2>&1 &
+    --key-delay 4 --chord-gap 0.1 "${chords[@]}" \
+    --mouse "$mouse" --mouse-delay 9 --wheel 0,120 --click left --click right \
+    >"$out/probe.out" 2>&1 &
 probe_pid=$!
 
 in_session() {
     "$runtime" exec -u rdpuser -e DISPLAY=:10 -e XAUTHORITY=/home/rdpuser/.Xauthority \
         "$container" "$@"
 }
-sleep 10
+# Raw XI2 events reach the root window whatever is under the pointer, so the
+# log has every button press, wheel notches included, once the session is up.
+for _ in $(seq 1 20); do
+    in_session xdotool getmouselocation >/dev/null 2>&1 && break
+    sleep 0.5
+done
+in_session sh -c 'timeout 25 xinput test-xi2 --root >/tmp/xi2.log 2>&1' &
+sleep 8
 pasted=$(in_session timeout 5 xclip -o -selection clipboard 2>&1 || true)
 in_session sh -c 'printf "hello from xrdp" | timeout 5 xclip -i -selection clipboard -loops 1' &
+sleep 7
+location=$(in_session xdotool getmouselocation 2>&1 || true)
 probe_status=0
 wait "$probe_pid" || probe_status=$?
 probe_pid=
@@ -103,6 +117,15 @@ grep -q tilesStart "$out/probe.out" && grep -qE '^ *[1-9][0-9]* binary frames' "
     && pass "keyboard: the typed command ran" || fail "keyboard: /tmp/typed is missing"
 [[ $pasted == "hello from remotex" ]] \
     && pass "clipboard to remote: xclip read the pushed text" || fail "clipboard to remote: got '$pasted'"
+[[ $location == "x:${mouse%,*} y:${mouse#*,} "* ]] \
+    && pass "mouse move: the pointer is at $mouse" || fail "mouse move: xdotool says '$location'"
+# The detail of every RawButtonPress, in order: X numbers left 1, right 3, and
+# a wheel notch down 5.
+"$runtime" exec "$container" cat /tmp/xi2.log >"$out/xi2.log" 2>/dev/null || true
+presses=$(awk '/RawButtonPress/ { p = 1; next } p && /detail:/ { print $2; p = 0 }' "$out/xi2.log" | tr '\n' ' ')
+[[ " $presses" == *" 5 "* ]] && pass "mouse wheel: scrolled down" || fail "mouse wheel: presses were '$presses'"
+[[ " $presses" == *" 1 "* ]] && pass "mouse click: left" || fail "mouse click left: presses were '$presses'"
+[[ " $presses" == *" 3 "* ]] && pass "mouse click: right" || fail "mouse click right: presses were '$presses'"
 grep -q "clipboard (pushed).*hello from xrdp" "$out/probe.out" \
     && pass "clipboard from remote: the probe got the copy" || fail "clipboard from remote: nothing arrived"
 

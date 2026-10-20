@@ -240,7 +240,7 @@ H.264 under Lossless. See [Lossless, by the host's policy](rdp-client.md#lossles
 for what was measured.
 
 xrdp is supported at the same tier as a plain VNC server: an `rdp` target with
-`egfx = false`, for the desktop, input and the clipboard, at the
+`egfx = false`, for the desktop, the keyboard, mouse and the clipboard, at the
 size it opened with and without sound. It has no NLA, so the client logs on to it
 inside TLS alone, with the target's username and password. Another RDP server, an older
 Windows say, may happen to work but is not tested against. See

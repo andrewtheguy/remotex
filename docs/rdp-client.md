@@ -31,7 +31,7 @@ is Windows 10 and Windows 11. xrdp is reached with `egfx = false`, through the
 two things it does differently from Windows: it has no NLA, so it chooses plain
 TLS, and it sends its desktop as slow-path Bitmap Updates, which are painted as
 the fast path's are. It is at the tier of a plain VNC server: supported for the
-desktop, input and the clipboard, and worked on as needed.
+desktop, the keyboard, mouse and the clipboard, and worked on as needed.
 [`tests/xrdp_check.sh`](../tests/xrdp_check.sh) checks those against xrdp 0.10.1
 in a container. An older Windows is not a target. Where [MS-RDPBCGR] is silent
 or wrong about what such a host really does — and it is, in places, about both —
