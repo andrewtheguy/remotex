@@ -426,6 +426,7 @@ pub enum ClientMsg {
 /// 0x04 GRAPHICS  u32 len | commands[len]
 /// 0x05 STANDARD  u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
 /// 0x06 TILE      u8 format | u16 x | u16 y | u16 w | u16 h | u32 len | image[len]
+/// 0x07 REGION    u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len | payload[len]
 /// ```
 ///
 /// A `VIDEO` record's flags are `0x01` for a keyframe and, for a picture sent in strips, `0x02`
@@ -447,6 +448,11 @@ pub enum ClientMsg {
 /// [`batch::TILE_JPEG`] or [`batch::TILE_PNG`], and a receiver rejects any other, an
 /// empty rectangle and one with no image.
 ///
+/// A `REGION` record is an access unit of one moving region's VP9 stream in wlshare's
+/// tiles, passed as wlshare sent it — see [`RegionUnit`]. Its flags are
+/// [`batch::REGION_KEYFRAME`] and nothing else, and a receiver rejects any other bit,
+/// an empty rectangle and one with no payload.
+///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
@@ -456,6 +462,7 @@ pub mod batch {
     pub const OP_GRAPHICS: u8 = 0x04;
     pub const OP_STANDARD: u8 = 0x05;
     pub const OP_TILE: u8 = 0x06;
+    pub const OP_REGION: u8 = 0x07;
 
     /// Bytes a `VIDEO` record costs besides its payload.
     pub const VIDEO_HEADER_LEN: usize = 10;
@@ -472,6 +479,11 @@ pub mod batch {
     pub const TILE_JPEG: u8 = 0x01;
     /// A `TILE` record's image is a PNG.
     pub const TILE_PNG: u8 = 0x02;
+
+    /// Bytes a `REGION` record costs besides its payload.
+    pub const REGION_HEADER_LEN: usize = 15;
+    /// A `REGION` record's flag: its stream's decoder can start here.
+    pub const REGION_KEYFRAME: u8 = 0x01;
 
     /// A `VIDEO` record's flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
@@ -965,6 +977,51 @@ impl TileUnit {
     }
 }
 
+/// An access unit of one moving region's VP9 stream in wlshare's tiles
+/// ([`ServerMsg::TilesStart`] on a `wlshare` target that asks for them), carried as a
+/// `REGION` record inside a [`batch`] frame, as wlshare sent it.
+///
+/// The contract every client implements:
+///
+/// - [`ServerMsg::RegionFormat`] for `stream` arrives first and names the decoder's
+///   configuration, ahead of the stream's first unit, a keyframe. A stream's
+///   rectangle is fixed for its life.
+/// - The decoded picture's top-left `w`×`h` is drawn at `(x, y)`, cut to that
+///   rectangle, in its turn among the `TILE` records around it.
+/// - Every unit of a stream is a link in its chain, in order, until its
+///   [`ServerMsg::RegionEnd`]; a `TILE` over its rectangle comes only after that.
+#[derive(Debug, Clone)]
+pub struct RegionUnit {
+    pub stream: u8,
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub keyframe: bool,
+    pub data: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
+}
+
+impl RegionUnit {
+    /// What this unit will cost inside a batch, its payload included.
+    pub fn record_len(&self) -> usize {
+        batch::REGION_HEADER_LEN + self.data.len()
+    }
+
+    /// Append this unit as a `REGION` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_REGION);
+        out.push(self.stream);
+        out.push(if self.keyframe { batch::REGION_KEYFRAME } else { 0 });
+        for value in [self.x, self.y, self.w, self.h] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.data);
+    }
+}
+
 /// Largest cursor edge a client is asked to draw. Real pointers are 32x32 or
 /// 64x64; a shape past this is dropped rather than sent, because a CSS cursor
 /// that big is ignored by the browser and would leave no pointer at all.
@@ -1160,6 +1217,19 @@ pub enum ServerMsg {
     /// pipeline or a Mac's own picture before it is done with. `engine` is the engine
     /// that sent it ([`ServerMsg::stamped`]).
     TilesStart { engine: u64 },
+    /// An access unit of one moving region's stream in wlshare's tiles. A binary
+    /// record like [`ServerMsg::Video`], ordered the same way.
+    Region(RegionUnit),
+    /// Build the decoder for moving region `stream` of wlshare's tiles with this
+    /// configuration: ahead of the stream's first [`ServerMsg::Region`], and of the
+    /// first of a new stream on an id that was ended. `engine` is the engine that
+    /// sent it ([`ServerMsg::stamped`]).
+    RegionFormat { stream: u8, decode: String, engine: u64 },
+    /// Moving region `stream` has stopped: no [`ServerMsg::Region`] follows on its id
+    /// until a [`ServerMsg::RegionFormat`] starts another, and what it last drew stays
+    /// until the tiles sent after this draw over it. `engine` is the engine that sent
+    /// it ([`ServerMsg::stamped`]).
+    RegionEnd { stream: u8, engine: u64 },
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1497,6 +1567,8 @@ enum ControlMsg<'a> {
     GraphicsView { x: u16, y: u16, w: u16, h: u16 },
     StandardStart { engine: u64 },
     TilesStart { engine: u64 },
+    RegionFormat { stream: u8, decode: &'a str, engine: u64 },
+    RegionEnd { stream: u8, engine: u64 },
     Connected {
         name: &'a str,
         protocol: &'a str,
@@ -1587,6 +1659,8 @@ impl ServerMsg {
         if let ServerMsg::GraphicsStart { engine: slot }
         | ServerMsg::StandardStart { engine: slot, .. }
         | ServerMsg::TilesStart { engine: slot }
+        | ServerMsg::RegionFormat { engine: slot, .. }
+        | ServerMsg::RegionEnd { engine: slot, .. }
         | ServerMsg::VideoFormat { engine: slot, .. } = &mut self
         {
             *slot = engine;
@@ -1609,6 +1683,9 @@ impl ServerMsg {
                 | ServerMsg::StandardStart { .. }
                 | ServerMsg::Tile(_)
                 | ServerMsg::TilesStart { .. }
+                | ServerMsg::Region(_)
+                | ServerMsg::RegionFormat { .. }
+                | ServerMsg::RegionEnd { .. }
                 | ServerMsg::VideoFormat { .. }
                 | ServerMsg::Resize { .. }
                 | ServerMsg::Cursor(_)
@@ -1635,6 +1712,7 @@ impl ServerMsg {
             | ServerMsg::Graphics(_)
             | ServerMsg::Standard(_)
             | ServerMsg::Tile(_)
+            | ServerMsg::Region(_)
             | ServerMsg::Audio(_)
             | ServerMsg::AudioGap => {
                 return None;
@@ -1644,6 +1722,10 @@ impl ServerMsg {
                 control(&ControlMsg::StandardStart { engine: *engine })
             }
             ServerMsg::TilesStart { engine } => control(&ControlMsg::TilesStart { engine: *engine }),
+            ServerMsg::RegionFormat { stream, decode, engine } => {
+                control(&ControlMsg::RegionFormat { stream: *stream, decode, engine: *engine })
+            }
+            ServerMsg::RegionEnd { stream, engine } => control(&ControlMsg::RegionEnd { stream: *stream, engine: *engine }),
             ServerMsg::GraphicsView { x, y, w, h } => {
                 control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
             }
@@ -2529,6 +2611,37 @@ mod tests {
         TileUnit { format: crate::tiles::Format::Jpeg, ..unit.clone() }.write_record(&mut jpeg);
         assert_eq!(jpeg[1], batch::TILE_JPEG);
         assert!((ServerMsg::Tile(unit)).text_frame().is_none(), "a tile has no standalone frame");
+    }
+
+    #[test]
+    fn region_record_layout_is_op_stream_flags_le_rect_len_payload() {
+        let unit = RegionUnit { stream: 3, x: 0x0102, y: 0x0304, w: 0x0506, h: 0x0708, keyframe: true, data: vec![0xAA, 0xBB], held: Held::default() };
+        let mut out = Vec::new();
+        unit.write_record(&mut out);
+        assert_eq!(out.len(), unit.record_len());
+        assert_eq!(
+            out,
+            [batch::OP_REGION, 3, batch::REGION_KEYFRAME, 0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x08, 0x07, 2, 0, 0, 0, 0xAA, 0xBB]
+        );
+        let mut delta = Vec::new();
+        RegionUnit { keyframe: false, ..unit.clone() }.write_record(&mut delta);
+        assert_eq!(delta[2], 0);
+        assert!((ServerMsg::Region(unit)).text_frame().is_none(), "a region's unit has no standalone frame");
+    }
+
+    /// A region's format and end name their stream and are stamped with their engine,
+    /// as a picture's start is.
+    #[test]
+    fn a_regions_format_and_end_are_stamped_display_messages() {
+        let format = ServerMsg::RegionFormat { stream: 2, decode: "vp09.00.40.08.01.06.06.06.00".to_owned(), engine: 0 }.stamped(7);
+        assert!(format.is_display());
+        assert_eq!(
+            format.text_frame().as_deref(),
+            Some(r#"{"type":"regionFormat","stream":2,"decode":"vp09.00.40.08.01.06.06.06.00","engine":7}"#)
+        );
+        let end = ServerMsg::RegionEnd { stream: 2, engine: 0 }.stamped(7);
+        assert!(end.is_display());
+        assert_eq!(end.text_frame().as_deref(), Some(r#"{"type":"regionEnd","stream":2,"engine":7}"#));
     }
 
     /// What a payload is owed is said once, wherever the payload ends, and a copy of

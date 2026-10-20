@@ -1269,6 +1269,7 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         microphone: false,
         video_quality: None,
         render_adaptive: None,
+        render_tiles: None,
         virtual_display: false,
         audio_adaptive: None,
     }
@@ -1477,6 +1478,7 @@ async fn expect_fake_tiles(ws: &mut Ws, starts: bool) {
                         match record {
                             common::BatchRecord::Tile(tile) => assert!(tile.w > 0 && tile.h > 0, "an empty tile"),
                             common::BatchRecord::Video(_) => panic!("a passed record in a session of the gateway's tiles"),
+                            common::BatchRecord::Region(_) => panic!("a region in a session of the gateway's tiles"),
                         }
                     }
                     ws.display_socket().send(Message::text(common::paint_ack(&frame))).await.expect("acknowledge a batch");

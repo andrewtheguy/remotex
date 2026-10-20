@@ -279,7 +279,7 @@ mod tests {
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
-            wlshare: false,
+            wlshare: false, wlshare_tiles: false,
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());

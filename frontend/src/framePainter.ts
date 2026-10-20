@@ -18,11 +18,13 @@ import {
   type BatchRecord,
   decodeBatchFrame,
   type GraphicsMsg,
+  type RegionMsg,
   type StandardMsg,
   stripRows,
   type TileMsg,
   type VideoMsg,
 } from "./protocol.ts";
+import { createRegionStreams, type RegionStreams } from "./regionStreams.ts";
 import { type DecodedPicture, isSoftwarePlanes } from "./softwareDecoder.ts";
 import type { PageDecoding } from "./softwareSupport.ts";
 import {
@@ -37,9 +39,11 @@ import {
 } from "./videoDecoder.ts";
 
 // The browser SPA's batch draw loop: each batch's records — access units, runs
-// of an RDP host's graphics pipeline, a Mac's own rectangles and the gateway's
-// tiles — decoded or composed in wire order and drawn onto the canvas. The decoder lives here rather than beside each caller:
-// it belongs to exactly one attachment, and `clear` is the one place that ends it.
+// of an RDP host's graphics pipeline, a Mac's own rectangles, tiles and the
+// moving regions of wlshare's (regionStreams.ts) — decoded or composed in wire
+// order and drawn onto the canvas. The decoder lives here rather than beside
+// each caller: it belongs to exactly one attachment, and `clear` is the one
+// place that ends it.
 
 // The destination's 2D context. A union rather than the element's alone because
 // the painter runs inside the paint worker, drawing through an `OffscreenCanvas` —
@@ -81,11 +85,23 @@ export interface FramePainter {
    */
   startStandard(): void;
   /**
-   * Adopt a `tilesStart`: the picture is the gateway's tiles from here, the TILE
-   * records after it each an image drawn on the desktop's canvas where it says.
-   * Whatever decoder or compositor stood before is done with.
+   * Adopt a `tilesStart`: the picture is tiles from here, the gateway's or
+   * wlshare's, the TILE records after it each an image drawn on the desktop's
+   * canvas where it says. Whatever decoder or compositor stood before is done
+   * with, every moving region's of the tiles before it included.
    */
   startTiles(): void;
+  /**
+   * Adopt a `regionFormat`: build the decoder of wlshare's moving region
+   * `stream`, whose REGION records follow, each drawn in its place among the
+   * tiles. Dropped where the picture is no tiles.
+   */
+  setRegionFormat(stream: number, format: VideoFormat): void;
+  /**
+   * Adopt a `regionEnd`: moving region `stream` has stopped, and what it last
+   * drew stays on the canvas.
+   */
+  endRegion(stream: number): void;
   /**
    * Adopt a `graphicsView` on the page that composes the pipeline: the part of
    * its picture this display is, shown from now, by this pipeline and the next.
@@ -168,6 +184,8 @@ export function createFramePainter(options: {
   onGraphicsShown?: (shown: boolean) => void;
   /** How this page decodes (see `createDesktopVideo`). */
   decoding?: PageDecoding;
+  /** How long a region's decoder outlives its stream (regionStreams.ts): injectable for a test. */
+  regionRetireMs?: number;
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and
   // is not queued behind draws — an eviction closes the socket from under whatever
@@ -213,9 +231,17 @@ export function createFramePainter(options: {
   }
   let standard: Standard | null = null;
   const loadStandardPicture = options.loadStandard ?? (() => loadStandard());
-  // Whether the picture is the gateway's tiles, from its `tilesStart`: a tile is
-  // drawn only then, so one of a picture since replaced is not.
+  // Whether the picture is tiles, from its `tilesStart`: a tile is drawn only
+  // then, so one of a picture since replaced is not.
   let tiles = false;
+  // The moving regions of wlshare's tiles, from the same `tilesStart`, which
+  // ends the ones before: a decoder for each, built by its `regionFormat`.
+  let regions: RegionStreams | null = null;
+
+  const releaseRegions = () => {
+    regions?.close();
+    regions = null;
+  };
 
   // The desktop's size in pixels, from the last resize: what a Mac's own
   // picture's framebuffer is, the resize coming ahead of the picture's start.
@@ -352,6 +378,7 @@ export function createFramePainter(options: {
 
   const releaseVideo = () => {
     tiles = false;
+    releaseRegions();
     releasePipeline();
     releaseStandard();
     releaseMirror();
@@ -474,6 +501,7 @@ export function createFramePainter(options: {
     }
     releaseStrips();
     video?.restart();
+    regions?.restart();
     options.onVideoNeedsKeyframe("a malformed batch was dropped");
   };
 
@@ -609,8 +637,12 @@ export function createFramePainter(options: {
 
   // One unit's picture. Null when there is nothing to draw — a decoder that dropped
   // the unit has said so itself. A run of the pipeline has no picture of its own: it
-  // is composed in its turn.
+  // is composed in its turn. A region's unit with no picture of tiles is of one that
+  // has ended, and is dropped.
   const decode = (record: BatchRecord): Promise<DecodedPicture | null> => {
+    if (record.kind === "region") {
+      return regions ? regions.decode(record) : Promise.resolve(null);
+    }
     if (record.kind !== "video") {
       return Promise.resolve(null);
     }
@@ -754,6 +786,39 @@ export function createFramePainter(options: {
     }
   };
 
+  // One region's picture, drawn in its turn on the desktop's own canvas, where
+  // the tiles are: null where its decoder gave none.
+  const showRegion = (
+    record: RegionMsg,
+    image: DecodedPicture | null,
+    born: number,
+  ) => {
+    if (!image) {
+      return;
+    }
+    const context = options.context();
+    if (generation !== born || !regions || !context) {
+      // Of an attachment or a picture that has ended, or with nowhere to go.
+      image.close();
+      return;
+    }
+    if (regions.draw(context, record, image)) {
+      // The desktop's own canvas is the picture again.
+      hidePlanes();
+      painted();
+    }
+  };
+
+  // A format announced, of the desktop's stream or a region's, said of a refusal.
+  const announce = (format: VideoFormat) => {
+    if (refused !== null && format.decode !== refused) {
+      // Not the configuration that was refused, so the refusal no longer stands —
+      // but the banner stays until a frame paints, as any other complaint's does.
+      refused = null;
+      videoComplained = true;
+    }
+  };
+
   // One unit's picture, shown or held: null where its decoder gave none.
   const show = (
     record: VideoMsg,
@@ -798,6 +863,33 @@ export function createFramePainter(options: {
     }
   };
 
+  // One record drawn in its turn, out of the decode or the image its batch
+  // started for it.
+  const drawRecord = async (
+    record: BatchRecord,
+    decoding: Promise<DecodedPicture | null>,
+    image: Promise<ImageBitmap> | null,
+    born: number,
+  ) => {
+    switch (record.kind) {
+      case "graphics":
+        await compose(record, born);
+        return;
+      case "standard":
+        await paintStandard(record, born);
+        return;
+      case "tile":
+        await paintTile(record, image, born);
+        return;
+      case "region":
+        showRegion(record, await decoding, born);
+        return;
+      case "video":
+        show(record, await decoding, born);
+        return;
+    }
+  };
+
   return {
     async draw(frame: ArrayBuffer) {
       const records = decodeBatchFrame(frame);
@@ -813,20 +905,7 @@ export function createFramePainter(options: {
       const decodes = records.map(decode);
       const images = records.map(tileImage);
       for (let i = 0; i < records.length; i += 1) {
-        const record = records[i];
-        if (record.kind === "graphics") {
-          await compose(record, born);
-          continue;
-        }
-        if (record.kind === "standard") {
-          await paintStandard(record, born);
-          continue;
-        }
-        if (record.kind === "tile") {
-          await paintTile(record, images[i], born);
-          continue;
-        }
-        show(record, await decodes[i], born);
+        await drawRecord(records[i], decodes[i], images[i], born);
       }
     },
     clear() {
@@ -910,6 +989,24 @@ export function createFramePainter(options: {
     startTiles() {
       releaseVideo();
       tiles = true;
+      regions = createRegionStreams({
+        handlers: {
+          onError: complainAboutVideo,
+          onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
+        },
+        retireMs: options.regionRetireMs,
+      });
+    },
+    setRegionFormat(stream, format) {
+      if (!regions) {
+        // Of a picture of tiles that has ended, or of none.
+        return;
+      }
+      announce(format);
+      regions.setFormat(stream, format);
+    },
+    endRegion(stream) {
+      regions?.end(stream);
     },
     setGraphicsView(part) {
       graphicsPart = part;
@@ -997,19 +1094,15 @@ export function createFramePainter(options: {
       }
     },
     setVideoFormat(format) {
-      // A stream takes the picture from whatever else was painted: the
-      // gateway's tiles, a pipeline, the Mac's own picture, or in a tab the
+      // A stream takes the picture from whatever else was painted: tiles and
+      // their moving regions, a pipeline, the Mac's own picture, or in a tab the
       // mirror of the session page's picture, which shows the display no more.
       tiles = false;
+      releaseRegions();
       releasePipeline();
       releaseStandard();
       releaseMirror();
-      if (refused !== null && format.decode !== refused) {
-        // Not the configuration that was refused, so the refusal no longer stands —
-        // but the banner stays until a frame paints, as any other complaint's does.
-        refused = null;
-        videoComplained = true;
-      }
+      announce(format);
       // A stream announced starts at a keyframe: strips held are the one before's.
       releaseStrips();
       desktopVideo().setFormat(format);

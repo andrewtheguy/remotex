@@ -141,6 +141,93 @@ test("a tile record is its format, where its rectangle is, then its image, whole
   );
 });
 
+test("a region record is its stream, its flags, where its rectangle is, then its unit, whole", () => {
+  // Transcribed from `RegionUnit::write_record` in src/protocol.rs: op 0x07,
+  // the stream, the flags (0x01 a keyframe), x, y, w and h as u16, a u32 length,
+  // the unit, little-endian.
+  const frame = (flags: number, w: number, unit: number[]) =>
+    new Uint8Array([
+      0x02,
+      0x00,
+      0x02,
+      0x00,
+      0x09,
+      0x00,
+      0x00,
+      0x00,
+      0x07,
+      0x03,
+      flags,
+      0x00,
+      0x01,
+      0x2c,
+      0x01,
+      w & 0xff,
+      w >> 8,
+      0xc9,
+      0x00,
+      unit.length,
+      0x00,
+      0x00,
+      0x00,
+      ...unit,
+      // A tile after it, which a region's length must not run into.
+      0x06,
+      0x02,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x08,
+      0x00,
+      0x08,
+      0x00,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      0x89,
+    ]).buffer;
+  const records = decodeBatchFrame(frame(0x01, 0x0101, [0xaa, 0xbb]));
+  assert.deepEqual(records?.[0], {
+    kind: "region",
+    stream: 3,
+    x: 256,
+    y: 300,
+    w: 257,
+    h: 201,
+    keyframe: true,
+    data: new Uint8Array([0xaa, 0xbb]),
+  });
+  assert.equal(records?.[1]?.kind, "tile");
+  const delta = decodeBatchFrame(frame(0x00, 0x0101, [0xaa]))?.[0];
+  assert.equal(delta?.kind === "region" && delta.keyframe, false);
+  for (const flags of [0x02, 0x80, 0x81]) {
+    assert.equal(
+      decodeBatchFrame(frame(flags, 0x0101, [0xaa])),
+      null,
+      `a flag this client does not know: ${flags}`,
+    );
+  }
+  assert.equal(
+    decodeBatchFrame(frame(0x01, 0, [0xaa])),
+    null,
+    "an empty rectangle",
+  );
+  assert.equal(
+    decodeBatchFrame(frame(0x01, 0x0101, [])),
+    null,
+    "a unit of nothing",
+  );
+  // Cut short of its unit, and of its header.
+  const lone = frame(0x01, 0x0101, [0xaa, 0xbb]).slice(0, 8 + 15 + 2);
+  const one = new Uint8Array(lone);
+  one[2] = 0x01;
+  assert.equal(decodeBatchFrame(one.buffer)?.length, 1);
+  assert.equal(decodeBatchFrame(one.slice(0, one.byteLength - 1).buffer), null);
+  assert.equal(decodeBatchFrame(one.slice(0, 8 + 10).buffer), null);
+});
+
 test("a video record's flags say a keyframe, and which strip of its picture it is", () => {
   // Transcribed from `VideoUnit::write_record` in src/protocol.rs: op 0x03, flags,
   // the size and the length little-endian, the unit.

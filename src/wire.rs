@@ -2,7 +2,7 @@
 //! messages flush the pending batch to preserve ordering against the records
 //! around them, and batches are bounded.
 
-use crate::protocol::{self, GraphicsUnit, ServerMsg, StandardUnit, TileUnit, VideoUnit, WireFrame, batch};
+use crate::protocol::{self, GraphicsUnit, RegionUnit, ServerMsg, StandardUnit, TileUnit, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead.
@@ -77,6 +77,7 @@ impl Wire {
                     ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames)?,
                     ServerMsg::Standard(unit) => self.push(Record::Standard(unit), &mut frames)?,
                     ServerMsg::Tile(unit) => self.push(Record::Tile(unit), &mut frames)?,
+                    ServerMsg::Region(unit) => self.push(Record::Region(unit), &mut frames)?,
                     // A frame's last run is its batch's last record: the browser
                     // shows a batch once it has drawn all of it, and acknowledges
                     // it then, which is this frame's acknowledgement to the host.
@@ -163,6 +164,12 @@ impl Wire {
                     painted.push(unit.painted);
                     unit.held
                 }
+                // A moving region's unit is video, as a passed stream's is.
+                Record::Region(unit) => {
+                    self.totals.video(unit.record_len());
+                    unit.write_record(&mut frame);
+                    unit.held
+                }
             });
         }
         self.pending_bytes = 0;
@@ -178,6 +185,7 @@ enum Record {
     Graphics(GraphicsUnit),
     Standard(StandardUnit),
     Tile(TileUnit),
+    Region(RegionUnit),
 }
 
 impl Record {
@@ -187,6 +195,7 @@ impl Record {
             Record::Graphics(unit) => unit.record_len(),
             Record::Standard(unit) => unit.record_len(),
             Record::Tile(unit) => unit.record_len(),
+            Record::Region(unit) => unit.record_len(),
         }
     }
 }

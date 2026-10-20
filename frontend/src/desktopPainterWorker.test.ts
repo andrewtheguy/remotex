@@ -60,6 +60,12 @@ function harness() {
     startTiles() {
       calls.push("tiles");
     },
+    setRegionFormat(stream, format) {
+      calls.push(`region:${stream} ${format.decode}`);
+    },
+    endRegion(stream) {
+      calls.push(`end:${stream}`);
+    },
     setGraphicsView(part) {
       calls.push(`view:${part.x},${part.y} ${part.w}x${part.h}`);
     },
@@ -279,6 +285,45 @@ test("a Mac's own picture starts in its place, behind the frames before it", asy
   h.release();
   await settled();
   assert.deepEqual(h.calls, ["draw", "standard", "draw"]);
+});
+
+test("wlshare's tiles and their regions hold their place among the frames", async () => {
+  // A region's decoder must be built before its first unit and retired after its
+  // last, and a picture started over must not land on frames before it.
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(1),
+    sequence: 1,
+    generation: 1,
+  });
+  await settled();
+  h.host.handle({ type: "tilesStart" });
+  h.host.handle({
+    type: "regionFormat",
+    stream: 2,
+    format: { decode: "vp09.00.21.08.01.06.06.06.00" },
+  });
+  h.unstall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(2),
+    sequence: 2,
+    generation: 1,
+  });
+  h.host.handle({ type: "regionEnd", stream: 2 });
+  await settled();
+  assert.deepEqual(h.calls, ["draw"]);
+  h.release();
+  await settled();
+  assert.deepEqual(h.calls, [
+    "draw",
+    "tiles",
+    "region:2 vp09.00.21.08.01.06.06.06.00",
+    "draw",
+    "end:2",
+  ]);
 });
 
 test("the part a display shows, and a tab's mirror, hold their place behind a stalled draw", async () => {

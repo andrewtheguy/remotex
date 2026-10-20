@@ -309,12 +309,28 @@ export type ControlMsg =
   // Mac's own 8x8 tiles. Whatever it held of a video stream before is done with.
   // `engine` as a format's.
   | { type: "standardStart"; engine: number }
-  // The picture is the tiles the gateway codes from here, the whole of it following
-  // in TILE records, each an image this page decodes and draws where it says.
-  // Whatever it held of a stream, a pipeline or a Mac's own picture before is done
-  // with. It comes again whenever the gateway sends the whole picture again.
-  // `engine` as a format's.
+  // The picture is tiles from here, the whole of it following in TILE records,
+  // each an image this page decodes and draws where it says. Whatever it held of
+  // a stream, a pipeline or a Mac's own picture before is done with. It comes
+  // again whenever the whole picture is sent again. `engine` as a format's.
+  //
+  // The tiles are the gateway's own, or a wlshare target's (`render_tiles`),
+  // wlshare's own passed through: exact PNG tiles where the desktop is still,
+  // and a VP9 stream of its own for each region that moves, as REGION records.
+  // Every region stream of the tiles picture before it ends here, and its
+  // decoder goes: it comes ahead of the first record, and again wherever the
+  // picture starts over, a reattach or a resize.
   | { type: "tilesStart"; engine: number }
+  // Build the decoder for moving region `stream` of wlshare's tiles with this
+  // WebCodecs string (`vp09.00.LL.08.01.06.06.06.00`, always profile 0 at
+  // 4:2:0): in order on the display socket, as a `videoFormat` is, ahead of
+  // the stream's first REGION record, which is a keyframe. The stream's
+  // rectangle is fixed for its life. `engine` as a format's.
+  | { type: "regionFormat"; stream: number; decode: string; engine: number }
+  // Moving region `stream` has stopped: what it last drew stays on the canvas,
+  // and no REGION record follows on its id until a `regionFormat` starts
+  // another. `engine` as a format's.
+  | { type: "regionEnd"; stream: number; engine: number }
   // The part of a passed pipeline's picture this display is, in the picture's
   // pixels: the host draws its virtual displays as one span, and this names one
   // display's column of it, `w` by `h` from `x`, `y`. Only a session started with
@@ -489,7 +505,29 @@ export interface TileMsg {
   data: Uint8Array;
 }
 
-export type BatchRecord = VideoMsg | GraphicsMsg | StandardMsg | TileMsg;
+// One VP9 access unit of moving region `stream` in wlshare's tiles: a link in
+// that stream's chain, as a VIDEO record is in the desktop's, decoded by the
+// decoder its `regionFormat` built. The decoded picture's top-left `w`×`h` is
+// drawn at `(x, y)` — a VP9 picture of an odd side is a pixel larger — in its
+// place among the batch's TILE records; a stream's rectangle is fixed for its
+// life. See `RegionUnit` in src/protocol.rs.
+export interface RegionMsg {
+  kind: "region";
+  stream: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  keyframe: boolean;
+  data: Uint8Array;
+}
+
+export type BatchRecord =
+  | VideoMsg
+  | GraphicsMsg
+  | StandardMsg
+  | TileMsg
+  | RegionMsg;
 
 // Why a desktop has no picture: see `oversize`.
 export type HoldCause = "size";
@@ -514,6 +552,11 @@ const TILE_HEADER_LEN = 14;
 // A TILE record's format byte. Any other means a gateway newer than this client,
 // and the batch is dropped rather than guessed at.
 const TILE_FORMATS = { 1: "jpeg", 2: "png" } as const;
+const OP_REGION = 0x07;
+const REGION_HEADER_LEN = 15;
+// A REGION record's one flag: its stream's decoder can start here. Any other bit
+// drops the batch, as a VIDEO record's unknown bits do.
+const REGION_KEYFRAME = 0x01;
 // A VIDEO record's flags: a decoder that has seen nothing before it can start here;
 // the unit is one strip of the picture, its number in two bits, and whether it is the
 // last of its frame. Any other bit means a gateway newer than this client, and
@@ -539,6 +582,8 @@ const VIDEO_STRIP_FLAGS = VIDEO_STRIP | VIDEO_STRIP_INDEX | VIDEO_STRIP_ENDS;
 //   GRAPHICS (op 0x04):  u32 len | message[len]
 //   STANDARD (op 0x05):  u16 x | u16 y | u16 w | u16 h | u32 len | body[len]
 //   TILE (op 0x06):      u8 format | u16 x | u16 y | u16 w | u16 h | u32 len | image[len]
+//   REGION (op 0x07):    u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h
+//                        | u32 len | payload[len]
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
@@ -593,6 +638,8 @@ function decodeRecord(
       return decodeStandard(view, buf, at);
     case OP_TILE:
       return decodeTile(view, buf, at);
+    case OP_REGION:
+      return decodeRegion(view, buf, at);
     default:
       return decodeVideo(view, buf, at);
   }
@@ -674,6 +721,41 @@ function decodeTile(
       y,
       w,
       h,
+      data: new Uint8Array(buf, start, len),
+    },
+    next: start + len,
+  };
+}
+
+function decodeRegion(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: RegionMsg; next: number } | null {
+  if (at + REGION_HEADER_LEN > buf.byteLength) {
+    return null;
+  }
+  const flags = view.getUint8(at + 2);
+  if ((flags & ~REGION_KEYFRAME) !== 0) {
+    return null;
+  }
+  const field = (i: number) => view.getUint16(at + 3 + 2 * i, true);
+  const len = view.getUint32(at + 11, true);
+  const start = at + REGION_HEADER_LEN;
+  const [x, y, w, h] = [field(0), field(1), field(2), field(3)];
+  // An empty rectangle, or a unit of nothing, is one the gateway never sends.
+  if (w === 0 || h === 0 || len === 0 || start + len > buf.byteLength) {
+    return null;
+  }
+  return {
+    record: {
+      kind: "region",
+      stream: view.getUint8(at + 1),
+      x,
+      y,
+      w,
+      h,
+      keyframe: (flags & REGION_KEYFRAME) !== 0,
       data: new Uint8Array(buf, start, len),
     },
     next: start + len,

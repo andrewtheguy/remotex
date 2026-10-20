@@ -90,6 +90,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             microphone: false,
             video_quality: None,
             render_adaptive: None,
+            render_tiles: None,
             virtual_display: false,
             audio_adaptive: None,
         }],
@@ -113,6 +114,7 @@ fn check_tile_frame(frame: &[u8], coverage: &mut common::Coverage) {
         match record {
             common::BatchRecord::Tile(tile) => coverage.add(&tile),
             common::BatchRecord::Video(_) => panic!("a plain target was sent a stream"),
+            common::BatchRecord::Region(_) => panic!("a plain target was sent a region"),
         }
     }
 }

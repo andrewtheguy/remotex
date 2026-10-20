@@ -367,6 +367,13 @@ sound, and with `camera = true` or `microphone = true` the browser's camera and
 microphone as PipeWire devices on the desktop. Without the subtype the same
 server is read as any VNC server is.
 
+- **`render_tiles = true`** has wlshare send its tiles instead of its VP9: what is
+  still as exact PNG, and a VP9 stream of its own for each region that moves,
+  sent exact again once it stops. It is for a link with room to spare: wlshare
+  spends a fraction of the VP9's time on it and the picture ends exact, for
+  several times the bytes — tens of Mbit/s while something large moves. Its
+  regions are held at `video_quality`, so the target takes no `render_adaptive`.
+
 - **Alpha:** a desktop with exactly two outputs, monitors or headless ones, is
   listed with *All Displays* and starts on it: the first stays here and the second opens at
   `/display/2` in a new tab of the same browser, with its own pointer and

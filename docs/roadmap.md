@@ -251,6 +251,11 @@ and the host's own Adaptive H.264 for a slow link. On a Mac, Standard mode's
 Adaptive quality, the Mac's own codecs, covers a slow link with fewer updates
 rather than coarser ones
 ([Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)).
+Its rules are wlshare's now, as its tiles beside `WLSV` that a `wlshare` target
+with `render_tiles` passes
+([wlshare's tiles, passed through](architecture.md#wlshares-tiles-passed-through)):
+there the compositor's pixels are coded once and no native protocol stands
+between, so the gateway codes nothing.
 
 ### `THINCLIENT` in the graphics capability advertise
 
