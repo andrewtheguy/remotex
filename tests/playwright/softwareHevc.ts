@@ -196,10 +196,10 @@ async function expectPassedPicture(page: Page, seen: Session): Promise<void> {
   expect(seen.refreshes, "repaints the page asked for").toEqual([]);
 }
 
-/// The Mac's HEVC as the page asks its browser about it: macwork's stream,
-/// Range Extensions, level 5.0, the 4:4:4 constraint flags (APPLE_HEVC_PROBE in
-/// frontend/src/appleMedia.ts), copied rather than imported.
-const MAC_HEVC = "hev1.4.10.L150.BE.8";
+/// The Mac's HEVC as the page asks its browser about it: a 4K display's stream,
+/// Range Extensions, High tier, level 5.1, the 4:4:4 constraint flags
+/// (APPLE_HEVC_PROBE in frontend/src/appleMedia.ts), copied rather than imported.
+const MAC_HEVC = "hev1.4.10.H153.BE.8";
 
 /// Whether this browser's own decoder takes the Mac's HEVC, asked of it here and
 /// not read from the page: a definite yes, as the page counts one.

@@ -41,11 +41,13 @@
 // the picture itself.
 
 /**
- * The picture asked about: macwork's stream, 1600×1000, as its sequence parameter
- * set names it (`parse_sps` in src/vnc_apple_media.rs) — Range Extensions, level 5.0,
- * the 4:4:4 constraint flags.
+ * The picture asked about: the largest the Mac announces, a 3840×2160 display's, as
+ * its sequence parameter set names it (`parse_sps` in src/vnc_apple_media.rs) —
+ * Range Extensions, High tier, level 5.1, the 4:4:4 constraint flags. The Mac
+ * names the level by the display's size (docs/apple-vnc-889.md, The stream), and a
+ * smaller display's string is taken wherever this one is.
  */
-const APPLE_HEVC_PROBE = "hev1.4.10.L150.BE.8";
+const APPLE_HEVC_PROBE = "hev1.4.10.H153.BE.8";
 
 /** The codec string the gateway names the Mac's passed sound with (`PASSED_SOUND`). */
 export const APPLE_ELD_CODEC = "mp4a.40.39";
