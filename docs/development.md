@@ -84,16 +84,7 @@ want a moving picture on its desktop first, which
 [`tests/rdp_motion.ps1`](../tests/rdp_motion.ps1) `start`s and `stop`s. So
 they are not tests that a run of the ignored ones would reach and wait on, but
 examples run on demand, each with the cases named on its command line, under
-`examples/`.
-
-xrdp, supported at the tier of plain VNC, does have a container:
-[`tests/xrdp_check.sh`](../tests/xrdp_check.sh) builds
-[`tests/xrdp-dummy`](../tests/xrdp-dummy/Containerfile), starts the gateway on a
-config of its own under `tmp/xrdp/`, and drives a session with
-`tests/ws_probe.py`, printing PASS or FAIL for the picture, typing, the mouse's
-move, wheel and clicks, and the clipboard both ways. It needs podman or docker, cargo and uv.
-
-The Windows probes:
+`examples/`:
 
 ```sh
 REMOTEX_UAT_TARGET=windows-ent-sandbox \

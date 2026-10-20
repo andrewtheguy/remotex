@@ -1,20 +1,19 @@
 //! The TLS session everything after the negotiation happens inside.
 //!
-//! Once the server has answered the X.224 negotiation with `HYBRID` or `SSL`, the
-//! connection stops being RDP for a moment: a TLS handshake runs over the same socket,
-//! under `HYBRID` CredSSP runs inside it, and only then does the MCS connection
-//! sequence start — still inside the TLS session, which carries every PDU for the rest
-//! of the connection.
+//! Once the server has answered the X.224 negotiation with `HYBRID`, the connection
+//! stops being RDP for a moment: a TLS handshake runs over the same socket, CredSSP
+//! runs inside it, and only then does the MCS connection sequence start — still inside
+//! the TLS session, which carries every PDU for the rest of the connection.
 //!
 //! # The certificate chain is not verified — the handshake still is
 //!
-//! Any certificate is accepted, for the session only and without storing it. Under
-//! NLA that is defensible: CredSSP binds the credential exchange to the public key of
-//! the certificate that terminated this very handshake, so a machine in the middle
-//! holding a certificate of its own cannot complete the exchange, and cannot replay
-//! the credentials onward. Under plain TLS, offered only without the graphics
-//! pipeline and chosen by a server without CredSSP, nothing does: the credentials travel in the logon PDU to whoever answered, as they
-//! do from mstsc once its certificate warning is clicked through.
+//! Any certificate is accepted, for the session only and without storing it. That is
+//! defensible *because* this client insists on NLA: CredSSP binds the credential
+//! exchange to the public key of the certificate that terminated this very handshake,
+//! so a machine in the middle holding a certificate of its own cannot complete the
+//! exchange, and cannot replay the credentials onward. It would not be defensible
+//! under plain TLS, where the credentials travel in the logon PDU to whoever answered
+//! — which is one of the reasons this client does not offer plain TLS.
 //!
 //! What makes that argument hold is that the handshake signature *is* checked, with
 //! the provider's own algorithms. Skipping it would let a machine in the middle

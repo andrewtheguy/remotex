@@ -42,10 +42,6 @@ pub struct Connect {
     pub username: String,
     pub password: String,
     pub domain: Option<String>,
-    /// Whether the host may be at a public address. Off, a host whose address is
-    /// not loopback, private, link-local or shared (100.64.0.0/10) is refused once
-    /// the socket is up, before anything is sent on it.
-    pub public_address: bool,
     /// The desktop size to ask for — one monitor's. The server may answer with
     /// something else, which arrives as [`Event::Connected`] and, later, as
     /// [`Event::Resize`].
@@ -1461,29 +1457,7 @@ impl<'a> Active<'a> {
         Ok(())
     }
 
-    /// A slow-path Graphics Update. A bitmap is painted as the fast path's is, and
-    /// dropped beside the pipeline the same way.
-    fn on_slow_update(&mut self, body: &[u8]) -> Result<()> {
-        let kind = body.get(..2).map(|kind| u16::from_le_bytes([kind[0], kind[1]]));
-        if kind != Some(u16::from(fastpath::BITMAP)) {
-            debug!("rdp: ignoring a slow-path graphics update of type {kind:?}");
-            return Ok(());
-        }
-        if self.graphics.is_some() {
-            if !std::mem::replace(&mut self.bitmaps_dropped, true) {
-                info!("rdp: the host drew with bitmap updates outside the graphics pipeline; they are dropped");
-            }
-            return Ok(());
-        }
-        let mut painted = Vec::new();
-        blit(body, &mut self.scratch, &mut self.pixels, self.framebuffer, &mut painted)?;
-        for rect in painted {
-            self.paint(rect);
-        }
-        Ok(())
-    }
-
-    /// The slow path on the I/O channel: everything but the fast path's updates.
+    /// The slow path on the I/O channel: everything that is not a picture.
     async fn on_share(&mut self, payload: &[u8]) -> Result<Option<Result<()>>> {
         match share::decode(payload)? {
             // Nothing this client asks for rebuilds the share: a resize is asked for
@@ -1503,13 +1477,6 @@ impl<'a> Active<'a> {
                         Ok(Some(Err(reported.into())))
                     }
                 }
-            }
-            // A Bitmap Update sent the slow way, as xrdp sends its desktop: the same
-            // rectangles the fast path carries ([MS-RDPBCGR] 2.2.9.1.1.3.1.2). The
-            // other graphics updates are what `draw` leaves alone on the fast path.
-            Pdu::Data(data) if data.kind == share::UPDATE => {
-                self.on_slow_update(data.body)?;
-                Ok(None)
             }
             // Who logged on, how the server's own monitors are arranged, what it
             // measured the link at, what it would like the keyboard lights to do:
@@ -2164,7 +2131,18 @@ fn draw(
 ) -> Result<Option<Cursor>> {
     match update.code {
         fastpath::BITMAP => {
-            blit(update.data, scratch, pixels, framebuffer, painted)?;
+            for rectangle in bitmap::update(update.data)? {
+                rectangle.decode(scratch, pixels)?;
+                let rect = Rect {
+                    x: u32::from(rectangle.x),
+                    y: u32::from(rectangle.y),
+                    width: u32::from(rectangle.paint_width),
+                    height: u32::from(rectangle.paint_height),
+                };
+                if !rect.is_empty() && framebuffer.blit(pixels, rect) {
+                    painted.push(rect);
+                }
+            }
             Ok(None)
         }
         fastpath::POINTER_HIDDEN
@@ -2187,30 +2165,6 @@ fn draw(
             Ok(None)
         }
     }
-}
-
-/// One Bitmap Update, on either path, painted into the framebuffer with each
-/// rectangle's bounds appended to `painted`.
-fn blit(
-    body: &[u8],
-    scratch: &mut bitmap::Scratch,
-    pixels: &mut Vec<u8>,
-    framebuffer: &Framebuffer,
-    painted: &mut Vec<Rect>,
-) -> Result<()> {
-    for rectangle in bitmap::update(body)? {
-        rectangle.decode(scratch, pixels)?;
-        let rect = Rect {
-            x: u32::from(rectangle.x),
-            y: u32::from(rectangle.y),
-            width: u32::from(rectangle.paint_width),
-            height: u32::from(rectangle.paint_height),
-        };
-        if !rect.is_empty() && framebuffer.blit(pixels, rect) {
-            painted.push(rect);
-        }
-    }
-    Ok(())
 }
 
 /// What to say back to one clipboard PDU, and what to tell the caller about it.

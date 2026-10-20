@@ -83,7 +83,6 @@ fn connect() -> (Session, Page) {
         username: target.username.clone(),
         password: target.password.clone(),
         domain: target.domain.clone(),
-        public_address: target.public_address(),
         width: SIZE.0,
         height: SIZE.1,
         scale_percent: 0,

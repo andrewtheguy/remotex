@@ -857,16 +857,6 @@ pub struct TargetConfig {
     /// accepted and left inert ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
-    /// Whether an `rdp` target may be reached at a public address: one that is
-    /// not loopback, private (RFC 1918, IPv6 unique local), link-local, or the
-    /// shared address space Tailscale and carrier NAT use (100.64.0.0/10). Off
-    /// unless set, and checked against the address the host name resolved to,
-    /// before anything is sent: the client accepts any certificate, so a host
-    /// out on the internet is opted into by name.
-    ///
-    /// `Option` for the same reason as `egfx`: on a VNC target it is refused.
-    #[serde(default)]
-    pub public_address: Option<bool>,
     /// ALPHA. How many virtual displays the remote is asked to lay out for the
     /// session, side by side at the session's size: `virtual_displays = 2`.
     /// One, the default, is the single desktop every target has always opened;
@@ -1061,11 +1051,6 @@ impl TargetConfig {
     /// Whether RDP's graphics pipeline is on: unless the operator turned it off.
     pub fn egfx(&self) -> bool {
         self.egfx.unwrap_or(true)
-    }
-
-    /// Whether this `rdp` target may be reached at a public address.
-    pub fn public_address(&self) -> bool {
-        self.public_address.unwrap_or(false)
     }
 
     /// The ceiling this target's stream holds to, resolved: what the operator
@@ -1972,13 +1957,6 @@ impl ConfigFile {
                 target.name,
                 target.protocol.name()
             );
-            anyhow::ensure!(
-                target.public_address.is_none() || target.protocol == Protocol::Rdp,
-                "target {:?} sets public_address on a {} target, and only rdp targets are \
-                 held to private addresses. Remove the key.",
-                target.name,
-                target.protocol.name()
-            );
             // A count of virtual displays is a count the engine asks the remote
             // for, and two remotes create them: a Windows host and a Mac in High
             // Performance mode. On any other target the key would be read and
@@ -2118,13 +2096,13 @@ impl ConfigFile {
                     target.name,
                     subtype.name()
                 ),
-                // The client logs on with them, through CredSSP or the Client Info
-                // PDU's autologon, and has nothing to log on with unless both are set.
+                // The client offers only NLA, and CredSSP has nothing to log on
+                // with unless both are set.
                 (Protocol::Rdp, None) => {
                     anyhow::ensure!(
                         !target.username.is_empty() && !target.password.is_empty(),
                         "target {:?} is protocol \"rdp\" and needs both username and password — \
-                         this client logs on with the two together",
+                         this client logs on only through NLA, which carries the two together",
                         target.name
                     );
                 }
@@ -2688,7 +2666,6 @@ mod tests {
         assert_eq!(t.kept_size(), DEFAULT_SIZE);
         assert_eq!((t.username.as_str(), t.password.as_str(), t.domain.as_deref()), ("u", "p", None));
         assert!(t.egfx(), "the graphics pipeline is on unless turned off");
-        assert!(!t.public_address(), "a public address is reached only by opt-in");
         assert!(!t.sound(Choices::default()), "the remote's sound is taken only where it is chosen");
     }
 
@@ -4128,8 +4105,8 @@ vnc_password = \"x\"")).unwrap();
         }
     }
 
-    /// The RDP client logs on with both halves of its credential, so a target without
-    /// one could never connect and is refused up front.
+    /// The RDP client logs on only through NLA, so a target without both halves of
+    /// its credential could never connect and is refused up front.
     #[test]
     fn an_rdp_target_needs_username_and_password() {
         for keys in ["", "username = \"u\"", "password = \"p\""] {
@@ -4329,16 +4306,6 @@ vnc_password = \"x\"")).unwrap();
             !config.targets[0].sound(Choices::default()),
             "the microphone does not need the remote's sound"
         );
-    }
-
-    /// Only an `rdp` target is held to private addresses, so only it takes the key.
-    #[test]
-    fn public_address_belongs_to_rdp_and_is_refused_on_vnc() {
-        let config = ConfigFile::parse(&rdp_toml("public_address = true")).unwrap();
-        assert!(config.targets[0].public_address());
-        let err = ConfigFile::parse(&vnc_toml("public_address = true")).unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("public_address"), "{rendered}");
     }
 
     /// EGFX is RDP's, and refused on VNC by name — either value, since a key

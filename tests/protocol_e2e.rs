@@ -1263,7 +1263,6 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         domain: None,
         size: Some((1280, 800)),
         egfx: None,
-        public_address: None,
         virtual_displays: 1,
         camera: false,
         microphone: false,
