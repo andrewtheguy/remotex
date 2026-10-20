@@ -245,8 +245,8 @@ export type ControlMsg =
       resize: boolean;
       audio: boolean;
       // The remote's own stream this session passes untouched — "rdp-graphics",
-      // "apple-media", "apple-h264" or "apple-adaptive" — or null for a desktop
-      // the gateway encodes.
+      // "apple-media", "apple-h264", "apple-adaptive", "wlshare-vp9" or
+      // "wlshare-tiles-motion" — or null for a desktop the gateway encodes.
       passthrough: string | null;
       // Whether this target redirects the browser's camera to the remote.
       // Capability only — enabling is this client's move, made afresh each
@@ -314,8 +314,8 @@ export type ControlMsg =
   // a stream, a pipeline or a Mac's own picture before is done with. It comes
   // again whenever the whole picture is sent again. `engine` as a format's.
   //
-  // The tiles are the gateway's own, or a wlshare target's (`render_tiles`),
-  // wlshare's own passed through: exact PNG tiles where the desktop is still,
+  // The tiles are the gateway's own, or a wlshare session's started with its
+  // tiles with motion, wlshare's own passed through: exact PNG tiles where the desktop is still,
   // and a VP9 stream of its own for each region that moves, as REGION records.
   // Every region stream of the tiles picture before it ends here, and its
   // decoder goes: it comes ahead of the first record, and again wherever the

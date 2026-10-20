@@ -181,8 +181,9 @@ const ENCODING_WLSHARE_VP9_SUBSAMPLED: i32 = 0x574c_5353;
 /// desktop the ceiling admits at the finest quantizer is a few megabytes; a length
 /// past this is a server that has lost its framing.
 const MAX_WLSHARE_VP9_FRAME: u32 = 64 << 20;
-/// wlshare's tiles encoding, `WLST`, its other picture, which a target with
-/// `render_tiles` lists in place of [`ENCODING_WLSHARE_VP9`]: the desktop as exact PNG
+/// wlshare's tiles encoding, `WLST`, its other picture, tiles with motion, which a
+/// session started with it ([`crate::config::Passthrough::WlshareTilesMotion`]) lists
+/// in place of [`ENCODING_WLSHARE_VP9`]: the desktop as exact PNG
 /// tiles where it is still and a VP9 stream of its own, 4:2:0, for each region that
 /// moves, each rectangle of an update one of them, passed through untouched
 /// ([`VideoSink::pass_tile`], [`VideoSink::pass_region`]). The dial beside it,
@@ -2710,13 +2711,13 @@ struct Listing {
     plain: Vec<i32>,
     /// The same with wlshare's picture and the plan it is asked for at their head:
     /// its VP9 ([`with_wlshare_vp9`]), or its tiles for a plan that asks for them
-    /// ([`with_wlshare_tiles`]).
+    /// ([`with_wlshare_tiles_motion`]).
     wlshare: Vec<i32>,
 }
 
 impl Listing {
     fn new(plain: Vec<i32>, plan: RenderPlan) -> Self {
-        let wlshare = if plan.wlshare_tiles { with_wlshare_tiles(&plain, plan) } else { with_wlshare_vp9(&plain, plan) };
+        let wlshare = if plan.wlshare_tiles_motion { with_wlshare_tiles_motion(&plain, plan) } else { with_wlshare_vp9(&plain, plan) };
         Self { plain, wlshare }
     }
 
@@ -2736,7 +2737,7 @@ impl Listing {
     }
 
     /// Whether `encoding` is the wlshare picture this session lists, its VP9 or its
-    /// tiles, which [`with_wlshare_vp9`] and [`with_wlshare_tiles`] put at the head:
+    /// tiles, which [`with_wlshare_vp9`] and [`with_wlshare_tiles_motion`] put at the head:
     /// the other is never listed, so the server sending it is a protocol violation.
     fn picture(&self, encoding: i32) -> bool {
         self.wlshare[0] == encoding
@@ -2745,7 +2746,7 @@ impl Listing {
 
 /// `encodings` with wlshare's tiles encoding ahead of them, and beside it the dial
 /// its regions are held at, from the plan: the same `WLQ` the VP9 is asked at.
-fn with_wlshare_tiles(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
+fn with_wlshare_tiles_motion(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
     let mut listed = vec![ENCODING_WLSHARE_TILES, ENCODING_WLSHARE_VP9_QUALITY_BASE + i32::from(plan.quality)];
     listed.extend_from_slice(encodings);
     listed
@@ -9020,9 +9021,9 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: false, chroma: crate::vp9::Chroma::Yuv444 };
+        let walked = RenderPlan { quality: 60, adaptive: true, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles_motion: false, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(with_wlshare_vp9(&rest, walked), [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
-        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: false, chroma: crate::vp9::Chroma::Yuv444 };
+        let held = RenderPlan { quality: 90, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles_motion: false, chroma: crate::vp9::Chroma::Yuv444 };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -9042,11 +9043,11 @@ mod tests {
         use crate::config::RenderPlan;
         assert_eq!(ENCODING_WLSHARE_TILES, i32::from_be_bytes(*b"WLST"));
         let rest = vec![ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let tiles = RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: true, chroma: crate::vp9::Chroma::Yuv420 };
+        let tiles = RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles_motion: true, chroma: crate::vp9::Chroma::Yuv420 };
         let lists = Listing::new(rest.clone(), tiles);
         assert_eq!(lists.listed((1280, 800)), [ENCODING_WLSHARE_TILES, 0x574c_5150, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
         assert_eq!(lists.listed((7680, 4320)), rest, "the tiles past the ceiling");
-        let vp9 = Listing::new(rest.clone(), RenderPlan { wlshare_tiles: false, ..tiles });
+        let vp9 = Listing::new(rest.clone(), RenderPlan { wlshare_tiles_motion: false, ..tiles });
         assert_eq!(vp9.listed((1280, 800))[0], ENCODING_WLSHARE_VP9);
         assert_eq!(vp9.listed((7680, 4320)), rest, "the VP9 past the ceiling");
     }
@@ -10267,7 +10268,7 @@ mod tests {
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
-            wlshare: true, wlshare_tiles: false,
+            wlshare: true, wlshare_tiles_motion: false,
             chroma: crate::vp9::Chroma::Yuv444,
         };
         Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
@@ -10284,7 +10285,7 @@ mod tests {
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
-            wlshare: true, wlshare_tiles: true,
+            wlshare: true, wlshare_tiles_motion: true,
             chroma: crate::vp9::Chroma::Yuv420,
         };
         Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
@@ -10323,7 +10324,7 @@ mod tests {
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
-            wlshare: true, wlshare_tiles: false,
+            wlshare: true, wlshare_tiles_motion: false,
             chroma: crate::vp9::Chroma::Yuv444,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Refuse);
@@ -12922,7 +12923,7 @@ mod tests {
         for oversize in [Oversize::Hold, Oversize::Refuse] {
             let (uplink, sent) = test_uplink();
             let (frame_tx, mut rx) = mpsc::channel(64);
-            let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: true, chroma: crate::vp9::Chroma::Yuv420 };
+            let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles_motion: true, chroma: crate::vp9::Chroma::Yuv420 };
             let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), oversize);
             sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
             let mut shared = test_shared(uplink, shared_desktop(small, None, None), test_shadow(small));
@@ -13106,7 +13107,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, wlshare_tiles: false, chroma: crate::vp9::Chroma::Yuv420 };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, wlshare_tiles_motion: false, chroma: crate::vp9::Chroma::Yuv420 };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -13703,7 +13704,7 @@ mod tests {
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
-            wlshare: false, wlshare_tiles: false,
+            wlshare: false, wlshare_tiles_motion: false,
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let (frames, mut tab_rx) = mpsc::channel(8);
@@ -13746,7 +13747,7 @@ mod tests {
             apple_standard: None, apple_combined: false,
             rdp_graphics: false,
             rdp_h264: false,
-            wlshare: false, wlshare_tiles: false,
+            wlshare: false, wlshare_tiles_motion: false,
             chroma: crate::vp9::Chroma::Yuv420,
         };
         let feed = || {

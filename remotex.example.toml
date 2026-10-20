@@ -594,7 +594,7 @@ password = "change-me"
 # changed tile of few colours sent exactly as PNG and any other as JPEG, sent again
 # exactly as PNG once it has stopped changing. Tiles go as fast as the browser
 # paints them, and a change the link would take too long to carry comes first as a
-# coarse JPEG that sharpens to the exact picture once it is still. A `wlshare` target's picture is wlshare's own VP9, passed through.
+# coarse JPEG that sharpens to the exact picture once it is still. A `wlshare` target's picture is wlshare's own, passed through: its VP9, or its tiles with motion, chosen at the picker.
 # A passed Mac media stream or RDP graphics pipeline keeps the remote's own quality,
 # so the keys are refused on "ard-high-performance", but for `video_quality` on an
 # "ard" target, which is the quality of the gateway's tiles of the Mac's Full
@@ -613,14 +613,8 @@ password = "change-me"
 # `subtype = "wlshare"` only: wlshare's VP9 walks `video_quality` on the browser's
 # queueing — on unless this turns it off, which holds wlshare at `video_quality`.
 # The configured quality remains the ceiling, and a desktop that has gone quiet is
-# sharpened back at it. Refused on every other target: tiles have no walk.
+# sharpened back at it. Refused on every other target: tiles have no walk, and
+# nor have wlshare's tiles with motion, chosen at the picker, which hold their
+# regions at `video_quality` whatever this says.
 #render_adaptive = true
-
-# `subtype = "wlshare"` only: have wlshare send its tiles in place of its VP9 —
-# what is still as exact PNG, and a VP9 stream of its own for each region that
-# moves, made exact again once it stops. For a link with room to spare: a
-# fraction of wlshare's encoding time and a picture that ends exact, for several
-# times the bytes. Its regions are held at `video_quality`, so it is refused
-# beside `render_adaptive`. Off by default.
-#render_tiles = false
 

@@ -1088,7 +1088,6 @@ mod tests {
                 microphone: false,
                 video_quality: None,
                 render_adaptive: None,
-                render_tiles: None,
                 virtual_display: false,
                 audio_adaptive: None,
             }],
@@ -1298,8 +1297,8 @@ mod tests {
         );
         // Where the second display sits is offered by a host asked for two.
         assert!(entry("two").ends_with(r#""placement":true,"pipeline":true,"standardView":false}"#));
-        // wlshare's picture is no choice.
-        assert!(entry("sway").ends_with(r#""pipeline":false,"standardView":false}"#));
+        // wlshare's picture is its VP9, or its tiles with motion, both passed.
+        assert!(entry("sway").ends_with(r#""passthroughs":["wlshare-vp9","wlshare-tiles-motion"],"placement":false,"pipeline":false,"standardView":false}"#), "{}", entry("sway"));
         // Opus held at its one rate is said so.
         let held = crate::config::ConfigFile::parse(&format!(
             "[server]\nsite_passwd = \"{passwd}\"\n\n{}audio_adaptive = false\n",

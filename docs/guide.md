@@ -108,7 +108,10 @@ config key.
   sends as its tiles at `video_quality`, as it sends any VNC server's desktop:
   JPEG while a region changes, exact once it has settled, fitted to the link,
   and resumed when the browser comes back. Apple's Adaptive is greyed under
-  Combined Display (below), which is the gateway's tiles too.
+  Combined Display (below), which is the gateway's tiles too. On a `wlshare`
+  target the Picture group is *Video, passed through*, the default, wlshare's
+  VP9 of the whole desktop, or *Tiles with motion, passed through*, wlshare's
+  own tiles, for a LAN: see [wlshare](#wlshare-vnc-subtype--wlshare).
 - **Displays.** On an `ard` target sharing the Mac's physical screens: *One at a
   time* (beta), the default, starts on the main screen and offers the others in the
   display menu, in the picture chosen above; *Combined* (alpha) shows every
@@ -354,12 +357,14 @@ sound, and with `camera = true` or `microphone = true` the browser's camera and
 microphone as PipeWire devices on the desktop. Without the subtype the same
 server is read as any VNC server is.
 
-- **`render_tiles = true`** has wlshare send its tiles instead of its VP9: what is
-  still as exact PNG, and a VP9 stream of its own for each region that moves,
-  sent exact again once it stops. It is for a link with room to spare: wlshare
-  spends a fraction of the VP9's time on it and the picture ends exact, for
-  several times the bytes — tens of Mbit/s while something large moves. Its
-  regions are held at `video_quality`, so the target takes no `render_adaptive`.
+- **Picture.** The picker's Picture group is *Video, passed through*, the
+  default: wlshare's VP9 of the whole desktop, which it fits to the browser's
+  link. Or *Tiles with motion, passed through*: what is still as exact PNG, and a
+  VP9 stream of its own for each region that moves, sent exact again once it
+  stops. The tiles are for a link with room to spare: wlshare spends a fraction
+  of the VP9's time on them and the picture ends exact, for several times the
+  bytes — tens of Mbit/s while something large moves. Their regions are held at
+  `video_quality`, which `render_adaptive` does not reach.
 
 - **Alpha:** a desktop with exactly two outputs, monitors or headless ones, is
   listed with *All Displays* and starts on it: the first stays here and the second opens at

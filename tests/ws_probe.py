@@ -154,13 +154,15 @@ async def main() -> int:
         "--passthrough",
         nargs="?",
         const="apple-media",
-        choices=["apple-media", "apple-h264", "apple-adaptive"],
+        choices=["apple-media", "apple-h264", "apple-adaptive", "wlshare-vp9", "wlshare-tiles-motion"],
         help="start the session with the target's own stream passed, by its name: a "
         "High Performance Mac's HEVC (apple-media, the default, to a client that states "
         "--apple-media) or its H.264 (apple-h264), one of which such a target's session "
         "has to name, or a Standard Mac's Adaptive picture (apple-adaptive); a Standard "
-        "session that names none is the gateway's tiles of the Mac's Full quality. An RDP "
-        "host's graphics pipeline passes in every session and is not named",
+        "session that names none is the gateway's tiles of the Mac's Full quality, or a "
+        "wlshare target's VP9 (wlshare-vp9, what a session that names none is sent) or "
+        "its tiles with motion (wlshare-tiles-motion). An RDP host's graphics pipeline "
+        "passes in every session and is not named",
     )
     parser.add_argument(
         "--placement",

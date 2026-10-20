@@ -2346,7 +2346,6 @@ mod tests {
             microphone: meta.microphone,
             video_quality: None,
             render_adaptive: None,
-            render_tiles: None,
             virtual_display: false,
             audio_adaptive: None,
         }
@@ -2456,8 +2455,13 @@ mod tests {
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
                 assert_eq!(got_resize, meta.resize, "resize metadata for {name}");
                 assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
-                // An RDP fake with the pipeline on passes it in every session.
-                let passed = (meta.protocol == Protocol::Rdp && !meta.bitmap).then_some("rdp-graphics");
+                // An RDP fake with the pipeline on passes it in every session, and
+                // the wlshare fake its VP9, the picture of a session that named none.
+                let passed = match meta.protocol {
+                    Protocol::Rdp if !meta.bitmap => Some("rdp-graphics"),
+                    Protocol::Vnc if name == "vnc-resize" => Some("wlshare-vp9"),
+                    _ => None,
+                };
                 assert_eq!(got_passthrough, passed, "passthrough for {name}");
                 assert_eq!(got_camera, meta.camera, "camera metadata for {name}");
                 assert_eq!(got_microphone, meta.microphone, "microphone metadata for {name}");

@@ -336,8 +336,8 @@ export default function TargetPicker({
                         )
                       }
                     />
-                    {/* How a Mac's picture reaches this browser, where the
-                        target has one to choose. */}
+                    {/* How the target's picture reaches this browser, where
+                        it has one to choose: a Mac's or a wlshare desktop's. */}
                     <PictureChoice
                       target={t.name}
                       pictures={options.pictures}
@@ -439,9 +439,9 @@ function ViewChoice({
   );
 }
 
-// How a Mac's picture reaches this browser: which of its own streams is passed
-// through. One that cannot be had here is greyed, with the reason. Nothing on a
-// target with no such choice.
+// How a Mac's or a wlshare desktop's picture reaches this browser: which of its
+// own streams is passed through. One that cannot be had here is greyed, with the
+// reason. Nothing on a target with no such choice.
 function PictureChoice({
   target,
   pictures,

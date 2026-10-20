@@ -84,6 +84,16 @@ const STANDARD = target({
   standardView: true,
 });
 
+// As the gateway lists a `wlshare` target: its VP9 and its tiles with motion,
+// both wlshare's own, passed.
+const WLSHARE = target({
+  subtype: "wlshare",
+  resize: true,
+  audio: true,
+  audioAdaptive: true,
+  passthroughs: ["wlshare-vp9", "wlshare-tiles-motion"],
+});
+
 const SIZED = { w: 1920, h: 1080 };
 
 /** A target's picture options as value and whether it is greyed, in the order shown. */
@@ -188,13 +198,13 @@ test("only what the target's type offers has a row", () => {
   const plain = targetOptions(target({}), undefined, ABLE);
   assert.equal(plain.pictures, null);
   assert.equal(plain.soundRow, null);
-  // wlshare's VP9 is the subtype's picture, not a choice. Its sound is.
-  const wlshare = targetOptions(
-    target({ subtype: "wlshare", resize: true, audio: true }),
-    undefined,
-    ABLE,
-  );
-  assert.equal(wlshare.pictures, null);
+  // wlshare's picture is one of its two, its VP9 first, and its sound a choice.
+  const wlshare = targetOptions(WLSHARE, undefined, ABLE);
+  assert.deepEqual(pictures(wlshare), [
+    ["wlshare-vp9", false],
+    ["wlshare-tiles-motion", false],
+  ]);
+  assert.equal(wlshare.choices.passthrough, "wlshare-vp9");
   assert.deepEqual(formats(wlshare), ["opus", "flac"]);
   // Standard Screen Sharing on the Mac's physical displays offers its picture
   // alone: the Mac's Adaptive one passed, until the gateway's tiles are chosen.
@@ -507,10 +517,33 @@ test("a Mac neither of whose pictures this browser takes cannot start", () => {
   assert.match(options.blocked ?? "", /neither of the Mac's pictures/);
 });
 
+test("a wlshare target's picture is its VP9 passed or its tiles with motion passed", () => {
+  // The VP9 until the tiles are chosen, and the choice is remembered; neither is
+  // greyed, since both are VP9 and the target cannot start without it.
+  const options = targetOptions(WLSHARE, undefined, ABLE);
+  assert.deepEqual(pictures(options), [
+    ["wlshare-vp9", false],
+    ["wlshare-tiles-motion", false],
+  ]);
+  assert.equal(options.choices.passthrough, "wlshare-vp9", "the first");
+  const tiles = targetOptions(
+    WLSHARE,
+    { passthrough: "wlshare-tiles-motion" },
+    ABLE,
+  );
+  assert.equal(tiles.choices.passthrough, "wlshare-tiles-motion");
+  assert.equal(tiles.blocked, null);
+  // A picture remembered from another target's kind is not this one's.
+  assert.equal(
+    targetOptions(WLSHARE, { passthrough: "apple-media" }, ABLE).choices
+      .passthrough,
+    "wlshare-vp9",
+  );
+});
+
 test("a wlshare target needs a browser that decodes its VP9", () => {
-  const wlshare = target({ subtype: "wlshare", resize: true, audio: true });
-  assert.equal(targetOptions(wlshare, undefined, ABLE).blocked, null);
-  const unable = targetOptions(wlshare, undefined, { ...ABLE, vp9: false });
+  assert.equal(targetOptions(WLSHARE, undefined, ABLE).blocked, null);
+  const unable = targetOptions(WLSHARE, undefined, { ...ABLE, vp9: false });
   assert.match(unable.blocked ?? "", /does not decode VP9/);
   // A plain target, read through the RFB baseline, is sent the tiles.
   assert.equal(targetOptions(target({}), undefined, UNABLE).blocked, null);

@@ -28,9 +28,10 @@ every session of a target with the pipeline on, the default — see
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 wlshare, reached as `subtype = "wlshare"`, codes its own VP9 stream, at the
 quality and walk the target's render plan resolves to, at 4:4:4 for a browser
-whose own decoder takes it and 4:2:0 for one that does not — or, on a target
-with `render_tiles`, its own tiles, exact PNG where the desktop is still and a
-VP9 stream of its own for each region that moves, passed the same way. A `wlshare` desktop
+whose own decoder takes it and 4:2:0 for one that does not — or, in a session
+started with its tiles with motion, chosen at the picker, its own tiles, exact PNG
+where the desktop is still and a VP9 stream of its own for each region that moves,
+passed the same way. A `wlshare` desktop
 too large for that stream, in a session that does not resize it, has no picture:
 the session stays up and the page offers the server's outputs — see
 [past the ceiling](#past-the-ceiling). A Mac is reached over Apple's own RFB
@@ -396,8 +397,8 @@ A session's picture reaches the browser one of two ways, both ordinary:
   compose: today an RDP host's graphics pipeline in every session of a target
   with it on, a High Performance Mac's HEVC or its H.264 in every session,
   whichever it was started with, a Standard Mac's Adaptive picture in a session
-  started with it, and wlshare's VP9 or its tiles on a `wlshare` target, each
-  with its rule below. Another stream the user
+  started with it, and wlshare's VP9 or its tiles with motion on a `wlshare`
+  target, whichever a session was started with, each with its rule below. Another stream the user
   asks to pass joins them with a rule of its own; do not refuse it on this
   rule's account.
 - **Coded here** as tiles ([The tiles](#the-tiles)): the desktop in 64×64 tiles,
@@ -460,7 +461,7 @@ Preserve the announced configuration and color-space behavior in
 #### A desktop past the ceiling
 
 The picture ceiling is a passed video stream's, 3840×2400 either way up
-(`video::MAX_LONG_SIDE`): wlshare's VP9 and its tiles, whose moving regions are
+(`video::MAX_LONG_SIDE`): wlshare's VP9 and its tiles with motion, whose moving regions are
 streams up to the whole desktop, a High Performance Mac's HEVC or H.264, and an
 RDP host's graphics pipeline. A desktop past it has no such stream. On a
 `wlshare` target started without resize the session stays up and the page says
@@ -490,25 +491,22 @@ here at 1x on the output it opened with, which is the fallback wlshare keeps for
 ordinary VNC clients. Do not list a wlshare extension on a plain target, or
 detect wlshare on one.
 
-A `wlshare` target lists the VP9 encoding for every browser, with the plan's
-dial, walk and chroma as pseudo-encodings beside it, and passes its frames
-untouched; the stream is the subtype's picture, with no choice at the picker
-beside it. A server that ignores the listing is sent as tiles from its
-ZRLE. Do not transcode a passed frame, pass one at a
-chroma other than the plan's, ask wlshare for the plan with a client message,
-or add a key or a choice that selects the stream or its chroma. See
-[wlshare's stream, passed through](#wlshares-stream-passed-through).
-
-- **Exception: `render_tiles`.** A target's key, off by default, lists wlshare's
-  tiles encoding in place of its VP9: exact PNG tiles where the desktop is still
-  and a 4:2:0 VP9 stream of its own for each region that moves, passed as they
-  come. It is wlshare's picture for a link with room to spare — a fraction of
-  the VP9's encoder time and a picture that ends exact, for several times its
-  bytes — where the VP9 stays the picture for a slow one, and which suits a
-  target is the operator's to know, as `video_quality` is; it is a key and not a
-  choice at the picker for that reason. It selects no chroma: the regions are
-  4:2:0 for every browser. See
-  [wlshare's tiles, passed through](#wlshares-tiles-passed-through).
+A `wlshare` target lists one of wlshare's two pictures for every browser,
+whichever the session was started with, chosen at the picker's Picture group
+(`Passthrough::WlshareVp9`, `Passthrough::WlshareTilesMotion`), and passes its
+frames untouched. Its VP9, *Video*, is the picture of a session that names
+none, listed with the plan's dial, walk and chroma as pseudo-encodings beside
+it. Its tiles with motion, exact PNG tiles where the desktop is still and a
+4:2:0 VP9 stream of its own for each region that moves, are wlshare's picture
+for a link with room to spare — a fraction of the VP9's encoder time and a
+picture that ends exact, for several times its bytes — listed with the dial
+alone, which its regions are held at: they select no chroma, 4:2:0 for every
+browser, and take no walk. A server that ignores the listing is sent as tiles
+from its ZRLE. Do not transcode a passed frame, pass one at a chroma other than
+the plan's, ask wlshare for the plan with a client message, or add a key that
+selects the picture, or a key or a choice that selects its chroma. See
+[wlshare's stream, passed through](#wlshares-stream-passed-through) and
+[wlshare's tiles with motion, passed through](#wlshares-tiles-with-motion-passed-through).
 
 #### Remote audio
 
@@ -807,7 +805,7 @@ the engine's own task.
 Each target has one full-desktop picture path. Where the remote makes a picture
 of its own, it is passed: every session of an RDP target with the pipeline on
 passes the host's graphics pipeline for the browser to compose, a `wlshare`
-target wlshare's own VP9 stream, or with `render_tiles` its own tiles, an `ard-high-performance` session the Mac's
+session wlshare's own VP9 stream, or its tiles with motion, chosen at the picker, an `ard-high-performance` session the Mac's
 HEVC or its H.264, chosen at the picker, and an `ard` session started with it
 the Mac's own Adaptive picture. Otherwise it is the tiles the gateway codes: a
 plain `vnc` server's desktop, an RDP host's bitmap path and a Standard Mac's
@@ -823,14 +821,10 @@ A target's picture keys are per target, and every one has a default:
   has no use for it, so it is refused on `ard-high-performance`.
 - `render_adaptive` (on unless a target writes `false`), a `wlshare` target's
   alone, lets wlshare's VP9 walk its quality on the browser's link — see
-  [wlshare's stream, passed through](#wlshares-stream-passed-through).
-- `render_tiles` (off unless a target writes `true`), a `wlshare` target's alone,
-  has wlshare send its tiles in place of its VP9, its moving regions held at
-  `video_quality`, so it is refused beside `render_adaptive` — see
-  [wlshare's tiles, passed through](#wlshares-tiles-passed-through). The tiles
-  have no walk: they follow the browser's painting at the one quality, with a
-  coarse first pass on a slow link
-  ([what the link will bear](#colour-and-what-the-link-will-bear)).
+  [wlshare's stream, passed through](#wlshares-stream-passed-through). It does
+  not reach a session started with wlshare's tiles with motion, whose moving
+  regions are held at `video_quality` — see
+  [wlshare's tiles with motion, passed through](#wlshares-tiles-with-motion-passed-through).
 
 There is no chroma key: wlshare's chroma follows the browser
 (`RenderPlan::chroma`, [the codec](#the-codec)).
@@ -842,9 +836,9 @@ such a target. Which passed streams follow the browser's link, and how, is in
 [A passed stream and the browser's link](#a-passed-stream-and-the-browsers-link).
 
 The engines never see the config keys. They and the session's choices collapse
-to one `RenderPlan` (`quality`, `adaptive`, `wlshare`, `apple_media`, `apple_h264`,
-`hevc_instead`, `apple_standard`, `apple_combined`, `rdp_graphics`, `rdp_h264`,
-`chroma`) at the config boundary in
+to one `RenderPlan` (`quality`, `adaptive`, `wlshare`, `wlshare_tiles_motion`,
+`apple_media`, `apple_h264`, `hevc_instead`, `apple_standard`, `apple_combined`,
+`rdp_graphics`, `rdp_h264`, `chroma`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the coder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
@@ -965,7 +959,7 @@ display socket, and every tile of the desktop follows it.
 The picture ceiling is a passed video stream's (`video::check_picture`): a
 picture of the whole desktop the remote codes and the gateway passes, wlshare's
 VP9, a High Performance Mac's HEVC or H.264, and an RDP host's graphics
-pipeline, and wlshare's tiles, any of whose moving regions may be the whole
+pipeline, and wlshare's tiles with motion, any of whose moving regions may be the whole
 desktop. The gateway sizes every desktop such a stream carries under it, so
 only a remote it cannot size gets there: a wlshare server on a physical output
 whose desktop is simply that large. A picture that is no stream has no ceiling:
@@ -1079,10 +1073,11 @@ listing sends.
   ceiling in one started with it. Back within the ceiling, the encoding is listed again and wlshare
   starts over at a keyframe.
 
-#### wlshare's tiles, passed through
+#### wlshare's tiles with motion, passed through
 
 wlshare has a second picture encoding, `WLST` (`0x574c5354`), which a `wlshare`
-target with `render_tiles` lists in place of `WLSV`: the desktop as exact PNG
+session started with its tiles with motion, chosen at the picker as *Tiles with
+motion* against its VP9, lists in place of `WLSV`: the desktop as exact PNG
 tiles where it is still, and a VP9 stream of its own, 4:2:0, VP9 profile 0, for
 each region that moves, at most four at once, each region's encoder at
 libvpx's least search and every tile a stream carried sent again as PNG once it
@@ -1095,9 +1090,9 @@ stream's first frame, its next, or its end. Nothing is coded here.
 
 - **Listed with the dial beside it.** `WLST` goes at the head of the list with
   `WLQ` plus `video_quality`, the dial wlshare holds every region's stream at:
-  there is no walk, so the plan has no `adaptive` and the target takes no
-  `render_adaptive`, and no `WLSD` or `WLSS`, since every region is 4:2:0 for
-  every browser.
+  there is no walk, so the plan has no `adaptive` whatever the target's
+  `render_adaptive` says, and no `WLSD` or `WLSS`, since every region is 4:2:0
+  for every browser.
 - **Within the ceiling, as the VP9 is.** A moving region is a stream, and may be
   as large as the desktop, so the tiles are listed only for a desktop within the
   ceiling and come off the list past it, as the VP9 does
@@ -1119,7 +1114,7 @@ stream's first frame, its next, or its end. Nothing is coded here.
   always, and the first record after it goes behind a `tilesStart`, which tells the
   page every region it held is over. The full update a reattach asks for makes
   wlshare end its streams and send the whole picture as PNG; a resize starts
-  wlshare's tiles over at the new size with no ends, and its whole picture after
+  wlshare's tiles with motion over at the new size with no ends, and its whole picture after
   the size. A frame of a region the page was not told of since the `tilesStart`, one
   coded before it, is dropped, and so is its end.
 - **The fence carries the browser's queue,** as for the VP9: while the picture is
@@ -2122,7 +2117,7 @@ instead of a reconnect.
 
 These things about a session are chosen by whoever starts it, before it starts:
 how the desktop is sized, whether the remote's sound is taken and as what,
-which of a Mac's own streams is passed through if any, whether a Standard Mac's
+which of a Mac's or wlshare's own streams is passed through if any, whether a Standard Mac's
 screens are shown one at a time or as Combined Display, where a second virtual display
 sits, how an RDP host draws its graphics pipeline, and whether a Mac's
 passed HEVC is decoded by the page's
@@ -2141,7 +2136,7 @@ and `GET /api/targets` carries it:
 | `rdp` | yes | shown | said, not offered: the graphics pipeline, always passed | shown: high quality or adaptive H.264 |
 | `rdp` with `egfx = false` | no | shown | hidden | hidden |
 | `vnc` | no | hidden | hidden | hidden |
-| `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture | hidden |
+| `vnc`, `wlshare` | yes | shown | shown, as Picture: wlshare's VP9, passed, or its tiles with motion, passed | hidden |
 | `vnc`, `ard` | no | hidden | shown, as Picture: the Mac's Adaptive picture, passed (beta), greyed under Combined Display, or the gateway's tiles of its Full quality; and as Displays: one at a time (beta) or Combined (alpha) | hidden |
 | `vnc`, `ard` with `virtual_display` | yes | hidden | shown, as for `ard` | hidden |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown, as Picture: the Mac's HEVC or its H.264, always passed | hidden |
@@ -2192,15 +2187,18 @@ and `GET /api/targets` carries it:
   Mac's Picture group is Apple's Adaptive (beta) passed through, which `connect`
   names as `apple-adaptive`, taken first, and the gateway's tiles of the Mac's
   Full quality, which settle to lossless and which `connect` names as no
-  passthrough at all.
+  passthrough at all. A `wlshare` target's Picture group is Video, passed
+  through, wlshare's VP9, which `connect` names as `wlshare-vp9` and which a
+  session that names none is sent, taken first, and Tiles with motion, passed
+  through, `wlshare-tiles-motion`.
 - **Offered but unavailable is greyed, with the reason.** The Mac's HEVC
   is greyed wherever the browser cannot take it: one that does not decode the
   Mac's HEVC, or a gateway with no HEVC decoder archive to serve a browser that
   needs it. The Mac's H.264 is greyed where the browser has no `VideoDecoder`,
   which is taken to decode it unasked, and a High Performance Mac neither of whose pictures it takes cannot
-  start, with the reason. A Standard Mac's own pictures are never greyed. A
-  `wlshare` target, whose VP9 is its picture in every session, cannot start in a
-  browser whose decoder refuses it. `/api/targets` says which streams a target can pass, as
+  start, with the reason. A Standard Mac's own pictures are never greyed, nor
+  are a `wlshare` target's, both VP9: the target cannot start in a browser
+  whose decoder refuses it. `/api/targets` says which streams a target can pass, as
   `passthroughs`; a target with any has no picture coded here. For the pipeline the picker says the stream is always
   passed, as a note
   with nothing to choose, and where the
@@ -2286,7 +2284,7 @@ expose only supported controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
 `render`, the resolved picture — `tiles q90`, for wlshare's VP9
-`VP9 q90 · 4:4:4 · adaptive`, and for its tiles `tiles · VP9 regions q90 · 4:2:0` — and `subtype`, the target's `wlshare`, `ard`
+`VP9 q90 · 4:4:4 · adaptive`, and for its tiles with motion `tiles with motion q90 · 4:2:0` — and `subtype`, the target's `wlshare`, `ard`
 or `ard-high-performance` where it has one. The
 last is there because `protocol` is not an answer on VNC — a plain server, a
 wlshare one and a Mac on either subtype all say `vnc`, and they differ in whether
@@ -2333,7 +2331,7 @@ any other bit is rejected the same way, as is a number or a frame bit without
 64×64 tiles, its `format` `0x01` for a baseline JPEG and `0x02` for a PNG, any
 other rejected, as are an empty rectangle and one with no image. Each replaces what
 the canvas held there and depends on no other
-([The tiles](#the-tiles)). A session of wlshare's tiles sends `TILE` records too, all
+([The tiles](#the-tiles)). A session of wlshare's tiles with motion sends `TILE` records too, all
 PNG, and among them `REGION` records: an access unit of one moving region's VP9
 stream, its flags `0x01` for a keyframe and any other bit rejected, as are an empty
 rectangle and one with no payload. A `regionFormat` (`stream`, `decode`, `engine`)
@@ -2341,7 +2339,7 @@ comes ahead of a stream's first unit and builds its decoder, the unit's decoded
 picture is drawn at its rectangle, cut to it, in its turn among the tiles, and a
 `regionEnd` (`stream`, `engine`) says the stream is over, its last picture staying
 until the tiles after it draw over it; a `tilesStart` ends every region
-([wlshare's tiles, passed through](#wlshares-tiles-passed-through)). A session's records are `VIDEO` where its picture is a
+([wlshare's tiles with motion, passed through](#wlshares-tiles-with-motion-passed-through)). A session's records are `VIDEO` where its picture is a
 passed stream. Where its target passes an RDP host's
 [graphics pipeline](#rdps-graphics-pipeline-passed-through), a `GRAPHICS` record
 is one message of that pipeline as the host sent it, in its bulk compression,
