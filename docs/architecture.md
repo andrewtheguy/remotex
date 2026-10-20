@@ -483,7 +483,8 @@ ceiling.
 `subtype = "wlshare"` on a `vnc` target says the server is wlshare, and is the
 one thing that lists any of wlshare's extensions to it: its VP9 encoding, the
 density and output-list requests, the audio extension in a session started with
-sound, and with their keys the camera and microphone extensions. It is also what
+sound, and the camera and microphone extensions in a session started with them.
+It is also what
 sends a glide's scroll as wlshare's distance message rather than as wheel-button
 notches. A plain `vnc` target lists none of them and scrolls by the notch,
 whatever server

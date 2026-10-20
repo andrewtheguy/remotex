@@ -88,15 +88,24 @@ def coordinates(value: str) -> tuple[int, int]:
 def batch_records(frame: bytes) -> int:
     """Print one screen batch's records and return how many there were.
 
-    Parsed here rather than trusted from anywhere: a VIDEO record is
-    ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``, and a STANDARD one
-    ``0x05 | u16 x | u16 y | u16 w | u16 h | u32 len | body``, a rectangle of a
-    Mac's Adaptive picture whose first byte says what it is."""
+    Parsed here rather than trusted from anywhere, each record by its op: a VIDEO
+    record is ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``; a GRAPHICS
+    one ``0x04 | u32 len | commands``, a run of an RDP host's pipeline; a STANDARD
+    one ``0x05 | u16 x | u16 y | u16 w | u16 h | u32 len | body``, a rectangle of a
+    Mac's Adaptive picture whose first byte says what it is; a TILE one
+    ``0x06 | u8 format | u16 x | u16 y | u16 w | u16 h | u32 len | image``, the
+    gateway's tiles or wlshare's; and a REGION one
+    ``0x07 | u8 stream | u8 flags | u16 x | u16 y | u16 w | u16 h | u32 len | payload``,
+    an access unit of one moving region's VP9 in wlshare's tiles with motion."""
     count = int.from_bytes(frame[2:4], "little")
     sequence = int.from_bytes(frame[4:8], "little")
     at = 8
-    video = 0
+    records = 0
     parts = []
+
+    def rect(start: int) -> tuple[int, int, int, int]:
+        return tuple(int.from_bytes(frame[start + 2 * i : start + 2 + 2 * i], "little") for i in range(4))
+
     while at < len(frame):
         op = frame[at]
         if op == 0x03:
@@ -105,22 +114,38 @@ def batch_records(frame: bytes) -> int:
             length = int.from_bytes(frame[at + 6 : at + 10], "little")
             key = " key" if frame[at + 1] & 1 else ""
             parts.append(f"video {w}x{h}{key} {length}B")
-            video += 1
             at += 10 + length
+        elif op == 0x04:
+            length = int.from_bytes(frame[at + 1 : at + 5], "little")
+            parts.append(f"graphics {length}B")
+            at += 5 + length
         elif op == 0x05:
-            x, y, w, h = (int.from_bytes(frame[at + 1 + 2 * i : at + 3 + 2 * i], "little") for i in range(4))
+            x, y, w, h = rect(at + 1)
             length = int.from_bytes(frame[at + 9 : at + 13], "little")
             kind = {0: "full", 1: "partial", 2: "tables"}.get(frame[at + 13], "?")
             parts.append(f"adaptive {kind} {w}x{h}+{x}+{y} {length}B")
-            video += 1
             at += 13 + length
+        elif op == 0x06:
+            image = {1: "jpeg", 2: "png"}.get(frame[at + 1], "?")
+            x, y, w, h = rect(at + 2)
+            length = int.from_bytes(frame[at + 10 : at + 14], "little")
+            parts.append(f"tile {image} {w}x{h}+{x}+{y} {length}B")
+            at += 14 + length
+        elif op == 0x07:
+            stream = frame[at + 1]
+            key = " key" if frame[at + 2] & 1 else ""
+            x, y, w, h = rect(at + 3)
+            length = int.from_bytes(frame[at + 11 : at + 15], "little")
+            parts.append(f"region {stream} {w}x{h}+{x}+{y}{key} {length}B")
+            at += 15 + length
         else:
             raise AssertionError(f"unknown record op {op:#x}")
+        records += 1
     assert at == len(frame), "records must exactly fill the frame"
-    assert video == count, "the header's count must match the records"
+    assert records == count, "the header's count must match the records"
     shown = ", ".join(parts[:6]) + (f", ... ({len(parts)} records)" if len(parts) > 6 else "")
     print(f"  batch #{sequence}: {shown}")
-    return video
+    return records
 
 
 async def main() -> int:
@@ -404,7 +429,7 @@ async def main() -> int:
     parser.add_argument(
         "--records",
         action="store_true",
-        help="print each screen batch's VIDEO records",
+        help="print each screen batch's records: VIDEO, GRAPHICS, STANDARD, TILE and REGION",
     )
     args = parser.parse_args()
     if args.wheel and args.mouse is None:
@@ -939,7 +964,7 @@ async def main() -> int:
         if args.tab:
             print(f"  [2] {tab_frames} binary frames")
         if args.records:
-            print(f"  {video_units} video and standard records")
+            print(f"  {video_units} records")
         if args.audio:
             print(f"  {audio_frames} audio frames; format={audio_format}")
             if audio_error is not None:

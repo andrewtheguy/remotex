@@ -97,8 +97,8 @@ pub enum Subtype {
     /// listed. Its picture is its own VP9 stream, passed to the browser untouched
     /// ([`crate::vnc`]), the output's pixel density and the compositor's output
     /// list come over extensions of their own, and a session started with sound,
-    /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] ask for the
-    /// extensions that carry them.
+    /// the camera ([`Choices::camera`]) or the microphone ([`Choices::microphone`])
+    /// asks for the extensions that carry them.
     ///
     /// The subtype is what lists any of it. A plain `vnc` target pointed at the
     /// same server lists none, and wlshare serves it as it serves any VNC client:
@@ -287,8 +287,8 @@ pub enum Passthrough {
     /// host, by the probe, by a headless browser and by hand. That is a physical
     /// Windows 11 computer, from a desktop browser and from a mobile browser on iOS, with sound
     /// and the clipboard beside it;
-    /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] beside it have not
-    /// been tried.
+    /// the camera and the microphone ([`Choices::camera`], [`Choices::microphone`])
+    /// beside it have not been tried.
     RdpGraphics,
     /// A High Performance Mac's picture as its HEVC, Range Extensions 4:4:4.
     /// Offered by `ard-high-performance` beside its H.264. The Mac's sound is not

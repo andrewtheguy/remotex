@@ -415,8 +415,8 @@ password = "change-me"
 # `subtype = "wlshare"`, which makes the gateway list wlshare's extensions: its own
 # VP9 stream, passed to the browser untouched; its pixel density, so a `scale 2`
 # output is shown at 2x and a window it follows is asked for in points × scale; its
-# output list; its sound, in a session started with it; and, with the keys above,
-# the camera and the microphone.
+# output list; its sound, in a session started with it; and, in a session started
+# with them at the picker, the camera and the microphone.
 # Without the subtype the same server is a plain target, read as any VNC server
 # is. With a username and password, wlshare checks the account it runs as through
 # PAM over RSA-AES, encrypting the session; a password_file on the server is its
