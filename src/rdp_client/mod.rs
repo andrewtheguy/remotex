@@ -75,9 +75,10 @@
 //! - **No touch.** MS-RDPEI is never asked for.
 //! - **No decoding of the pipeline.** Its codecs, H.264 among them where
 //!   [`Connect::h264`] lets the host draw with it, are the compositor's.
-//! - **NLA or TLS, and nothing older.** The security negotiation offers `HYBRID`
-//!   and `SSL`, as mstsc and FreeRDP do: a Windows host chooses NLA, and a server
-//!   without CredSSP, xrdp say, chooses TLS. Legacy RDP security is refused.
+//! - **NLA, or TLS without the pipeline, and nothing older.** The security
+//!   negotiation offers `HYBRID`, and `SSL` beside it only when [`Connect::egfx`] is
+//!   off, as mstsc and FreeRDP do: a Windows host chooses NLA, and a server without
+//!   CredSSP, xrdp say, chooses TLS. Legacy RDP security is refused.
 //! - **No certificate verification.** Any server certificate is accepted, for the
 //!   session only and without storing it. Under NLA, CredSSP binds the server's TLS
 //!   public key into the credential exchange so an interceptor cannot replay the

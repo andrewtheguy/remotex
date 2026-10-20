@@ -12,8 +12,8 @@
 //! NLA that is defensible: CredSSP binds the credential exchange to the public key of
 //! the certificate that terminated this very handshake, so a machine in the middle
 //! holding a certificate of its own cannot complete the exchange, and cannot replay
-//! the credentials onward. Under plain TLS, which a server without CredSSP chooses,
-//! nothing does: the credentials travel in the logon PDU to whoever answered, as they
+//! the credentials onward. Under plain TLS, offered only without the graphics
+//! pipeline and chosen by a server without CredSSP, nothing does: the credentials travel in the logon PDU to whoever answered, as they
 //! do from mstsc once its certificate warning is clicked through.
 //!
 //! What makes that argument hold is that the handshake signature *is* checked, with

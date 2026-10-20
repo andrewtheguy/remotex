@@ -58,8 +58,9 @@
 //! # One kind of server
 //!
 //! The target is a current Windows host. This client asks for `HYBRID` — TLS with
-//! the credentials checked first — and plain TLS beside it, which a server without
-//! CredSSP such as xrdp chooses: the same sequence with the CredSSP step left out.
+//! the credentials checked first — and, for a session without the graphics
+//! pipeline, plain TLS beside it, which a server without CredSSP such as xrdp
+//! chooses: the same sequence with the CredSSP step left out.
 //! Nothing else: no legacy RDP encryption, no Kerberos, no RDSTLS. Every protocol a
 //! server might also speak is one more sequence to get right and to keep right.
 //!

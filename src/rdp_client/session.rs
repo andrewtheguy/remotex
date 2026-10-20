@@ -42,6 +42,10 @@ pub struct Connect {
     pub username: String,
     pub password: String,
     pub domain: Option<String>,
+    /// Whether the host may be at a public address. Off, a host whose address is
+    /// not loopback, private, link-local or shared (100.64.0.0/10) is refused once
+    /// the socket is up, before anything is sent on it.
+    pub public_address: bool,
     /// The desktop size to ask for — one monitor's. The server may answer with
     /// something else, which arrives as [`Event::Connected`] and, later, as
     /// [`Event::Resize`].

@@ -63,8 +63,8 @@ logon, the licence, the capability exchange, and the four PDUs that make the sha
 live. `rdp_client/connect.rs` is that order, written as one function on purpose —
 the steps share nothing but the socket and what the last one said.
 
-The security negotiation offers `HYBRID` and `SSL`, as mstsc and FreeRDP do. A
-Windows host chooses NLA; a server without CredSSP, xrdp say, chooses plain TLS,
+The security negotiation offers `HYBRID`, and with `egfx = false` `SSL` beside
+it, as mstsc and FreeRDP do. A Windows host chooses NLA; a server without CredSSP, xrdp say, chooses plain TLS,
 and the credentials then travel only in the Client Info PDU, whose
 `INFO_AUTOLOGON` logs on with them. Legacy RDP security, which a server chooses
 by answering with no negotiation or with `PROTOCOL_RDP`, is refused. The TLS certificate
@@ -86,11 +86,19 @@ the implementation checks.
 
 Plain TLS has no such binding, and offering it is a trade made for servers
 without CredSSP: a machine in the middle that terminates TLS itself can answer
-`SSL` for a Windows host too, and is then handed the credentials. The server's
+`SSL` for a Windows host too, and is then handed the credentials. So it is
+offered only to a target with `egfx = false`, the one setting xrdp needs; a
+target with the pipeline, which only Windows serves, offers NLA alone. The server's
 record of the offer inside TLS ([MS-RDPBCGR] 3.2.5.3.4, checked in
 `connect.rs`) catches a negotiation rewritten on its way to the real host, not
 an endpoint that is the machine in the middle. It is the trade mstsc and FreeRDP
 make by default.
+
+For the same reason the address the socket reached is checked before anything is
+sent on it: a host that is not at a private address (loopback, RFC 1918, IPv6
+unique local, link-local, or RFC 6598's 100.64.0.0/10) is refused unless its
+target sets `public_address = true`. A host name is judged by the address it
+resolved to.
 
 The socket comes from `engine::tcp_connect`, so an RDP host that goes silent is
 noticed on the same keepalive schedule as every other engine's.

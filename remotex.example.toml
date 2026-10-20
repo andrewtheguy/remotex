@@ -269,9 +269,17 @@ protocol = "rdp"           # required: "rdp" or "vnc"
 # one. Only "vnc" has any: "wlshare" for a wlshare server, and "ard" and
 # "ard-high-performance" for macOS Screen Sharing (see the targets below).
 #subtype = "ard"
+# An IP address or a host name, which the system resolver looks up at connect.
 host = "192.0.2.10"
+#host = "workstation.lan"
 # Default: the protocol's standard port (3389 rdp, 5900 vnc).
 #port = 3389
+# An "rdp" target connects only to a private address: loopback, 10/8, 172.16/12,
+# 192.168/16, link-local 169.254/16, 100.64/10 (Tailscale, carrier NAT), and IPv6
+# fc00::/7 and fe80::/10. A host name is judged by the address it resolved to,
+# before anything is sent. The client accepts any TLS certificate, so a host out
+# on the internet is opted into here. RDP only, rejected elsewhere.
+#public_address = true
 
 # Credentials (used server-side only; never sent to the browser).
 username = "Administrator"
