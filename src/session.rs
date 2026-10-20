@@ -1523,25 +1523,21 @@ impl SessionManager {
                     None
                 }
             });
-            // wlshare's Opus is coded at a rate it can be told, so the target's
-            // plan holds for it as for an encoder here; no other passed stream
-            // has one.
+            // wlshare's Opus is coded at a rate it can be told, so the walk holds
+            // for it as for an encoder here; no other passed stream has one.
             let remote_plan = st
                 .selected
                 .as_ref()
                 .filter(|selected| selected.target.wlshare() && !selected.target.lossless(selected.choices))
-                .map(|selected| selected.target.audio_plan());
+                .map(|_| AudioPlan::default());
             // An RDP host's PCM in such a session is coded as FLAC here.
             let lossless =
                 st.selected.as_ref().is_some_and(|selected| selected.target.lossless(selected.choices));
-            // The Opus rate is the target's, not a session setting: a property of
-            // the link to this desktop, which is what the operator configured it
-            // from.
-            let (plan, source_format) = st
+            let source_format = st
                 .selected
                 .as_ref()
-                .map(|selected| (selected.target.audio_plan(), selected.target.audio_source_format()))
-                .unwrap_or((AudioPlan::default(), crate::audio::PCM_CD_QUALITY));
+                .map_or(crate::audio::PCM_CD_QUALITY, |selected| selected.target.audio_source_format());
+            let plan = AudioPlan::default();
             (bridge, out, audio_id, st.audio_epoch, plan, source_format, passed, remote_plan, lossless)
         };
 
@@ -2346,7 +2342,6 @@ mod tests {
             video_quality: None,
             render_adaptive: None,
             virtual_display: false,
-            audio_adaptive: None,
         }
     }
 

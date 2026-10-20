@@ -2308,8 +2308,7 @@ one. Both appear on the client's session card, which
 
 `GET /api/targets` carries `subtype` too, beside the options each target offers
 (`resize`, `audio`, `passthroughs`, `placement`,
-`pipeline` and `standardView`), whether its Opus follows the link
-(`audioAdaptive`, so the picker can say so), and the sizes it keeps
+`pipeline` and `standardView`), and the sizes it keeps
 (`size`, the configured one, and `defaultSize`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
 not something to discover after connecting. The row uses the config spelling
@@ -2478,8 +2477,8 @@ is TCP, nothing is lost, and the adaptive walk already sheds silence.
 
 The rate is not a key. Like AAC-ELD's, it is always the highest the sound is
 sent at, `AUDIO_BITRATE_KBPS` in `src/config.rs`: a ceiling the link may fall
-below, on by default like `render_adaptive`, with `audio_adaptive = false`
-holding it whatever the link does. The walk is
+below, and whether it walks is not a key either: Opus always follows the
+link. The walk is
 sound-opus's (`sound_opus::walk::BitrateWalk`), the one crate that codes a
 desktop's sound as Opus for this gateway and for wlshare, so nothing adaptive
 about sound is this gateway's own: `AudioWalk` (`src/audio.rs`) owns one beside

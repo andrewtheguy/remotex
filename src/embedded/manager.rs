@@ -787,13 +787,8 @@ fn describe_audio(target: &TargetConfig) -> String {
     if !target.offers().audio {
         return "none".to_owned();
     }
-    let plan = target.audio_plan();
-    let ceiling = plan.bitrate_bps / 1000;
-    if plan.adaptive {
-        format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s, or flac", sound_opus::walk::BITRATE_FLOOR / 1000)
-    } else {
-        format!("opus at {ceiling} kbit/s, or flac")
-    }
+    let ceiling = crate::config::AUDIO_BITRATE_KBPS;
+    format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s, or flac", sound_opus::walk::BITRATE_FLOOR / 1000)
 }
 
 /// One `label   value` row of a specs page, indented under its heading.

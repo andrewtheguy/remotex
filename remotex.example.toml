@@ -392,21 +392,15 @@ password = "change-me"
 # sent at the highest rate, 320 kbit/s. That is a ceiling, not a promise — and
 # an average, not a packet size: Opus is variable-rate, so silence costs a few
 # bytes a packet and music about this.
-
-# Let that bitrate follow the audio socket's own backpressure — on by default,
-# like `render_adaptive`. Sustained slow sends walk the bitrate down, sustained
-# clear sends walk it back up to 320 kbit/s, and, where the sound is encoded
-# here, silence is shed while the link is behind so old sound does not
-# accumulate; a "wlshare" target's packets are passed as they came, and only the
-# rate moves. Where the walk stops giving rate up is built into the sound
-# coding, as in every adaptive stream, so there is no floor to set: 32 kbit/s,
-# degraded but continuous, which is the point of giving bitrate up. `false`
-# holds 320 kbit/s whatever the link does. Valid on a target whose sound is Opus
-# at a rate the gateway chooses — "rdp", encoded here, and "wlshare", which
-# encodes its own at the rate the gateway tells it — and refused, either value,
-# on one that has none, and on "ard-high-performance", whose sound is passed as
-# the Mac's own AAC-ELD.
-#audio_adaptive = true
+#
+# Nor is whether it adapts: Opus always follows the audio socket's own
+# backpressure. Sustained slow sends walk the bitrate down, sustained clear
+# sends walk it back up to 320 kbit/s, and, where the sound is encoded here,
+# silence is shed while the link is behind so old sound does not accumulate; a
+# "wlshare" target's packets are passed as they came, and only the rate moves.
+# Where the walk stops giving rate up is built into the sound coding, as in
+# every adaptive stream, so there is no floor to set: 32 kbit/s, degraded but
+# continuous, which is the point of giving bitrate up.
 
 # A plain VNC target needs host and, usually, one of the two passwords; domain is
 # refused, and it is asked once for `size`, or 1440×900, as above.

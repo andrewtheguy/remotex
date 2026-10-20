@@ -155,34 +155,34 @@ impl Protocol {
     }
 }
 
-/// A target's audio key as the encoder consumes it, resolved by
-/// [`TargetConfig::audio_plan`]. In bits per second because that is libopus's
-/// unit.
+/// What an Opus encoder is built from. In bits per second because that is
+/// libopus's unit.
+///
+/// Every Opus stream walks its bitrate on the audio socket's own backpressure;
+/// there is no key to hold it. A send that blocks means the previous packets
+/// are still unwritten, and sustained blocking walks the bitrate down toward
+/// the floor; a clear stretch walks it back up to [`Self::bitrate_bps`]. The
+/// walk is sound-opus's (`sound_opus::walk`), shared with wlshare, and so is its
+/// floor, fixed there where a lower rate stops being the same sound. While
+/// behind, wave buffers that are pure silence are shed instead of queued —
+/// silence is the one content whose loss is free, and dropping it is how the
+/// client catches up without a trimmed or resampled note anywhere (see
+/// [`crate::audio`]). On a `wlshare` target the walk is the same and the
+/// encoder is wlshare's, told each rate the walk arrives at; its packets are
+/// passed, so no silence is shed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioPlan {
     /// The Opus target bitrate — the average the encoder holds to, and the
-    /// ceiling of the walk when the plan is adaptive. Always
-    /// [`AUDIO_BITRATE_KBPS`] from a target; a test may build a plan at another.
+    /// ceiling of the walk. Always [`AUDIO_BITRATE_KBPS`] in a session; a test
+    /// may build a plan at another.
     pub bitrate_bps: i32,
-    /// Whether the bitrate tracks the audio socket's backpressure, walking
-    /// between sound-opus's floor and [`Self::bitrate_bps`] — and silence is
-    /// shed while the link is behind. See [`TargetConfig::audio_adaptive`].
-    pub adaptive: bool,
-}
-
-impl AudioPlan {
-    /// The one rate with no walk — what `audio_adaptive = false` resolves to.
-    pub fn fixed() -> Self {
-        Self { adaptive: false, ..Self::default() }
-    }
 }
 
 impl Default for AudioPlan {
-    /// What an unset switch means: Opus at [`AUDIO_BITRATE_KBPS`], walking down
-    /// to the floor when the link is behind. The fallback [`crate::session`] uses when
-    /// no target is selected, where there is no config to read.
+    /// Opus at [`AUDIO_BITRATE_KBPS`], walking down to the floor when the link
+    /// is behind.
     fn default() -> Self {
-        Self { bitrate_bps: AUDIO_BITRATE_KBPS as i32 * 1000, adaptive: true }
+        Self { bitrate_bps: AUDIO_BITRATE_KBPS as i32 * 1000 }
     }
 }
 
@@ -963,26 +963,6 @@ pub struct TargetConfig {
     /// measured against Microsoft's or Apple's own client.
     #[serde(default = "one_display")]
     pub virtual_displays: u8,
-    /// Let the Opus bitrate, [`AUDIO_BITRATE_KBPS`], track the audio socket's
-    /// own backpressure — on unless the operator turned it off, like
-    /// [`Self::render_adaptive`].
-    ///
-    /// A send that blocks means the previous packets are still unwritten, and
-    /// sustained blocking walks the bitrate down toward the floor; a clear
-    /// stretch walks it back up to the ceiling. The walk is sound-opus's
-    /// (`sound_opus::walk`), shared with wlshare, and so is its floor, fixed
-    /// there where a lower rate stops being the same sound, as the render
-    /// walk's is fixed in its encoder: there is no floor key. While behind,
-    /// wave buffers that are pure silence are shed instead of queued — silence
-    /// is the one content whose loss is free, and dropping it is how the
-    /// client catches up without a trimmed or resampled note anywhere (see
-    /// [`crate::audio`]). On a `wlshare` target the walk is the same and the
-    /// encoder is wlshare's, told each rate the walk arrives at; its packets
-    /// are passed, so no silence is shed.
-    ///
-    /// Resolved by the accessor of the same name.
-    #[serde(default)]
-    pub audio_adaptive: Option<bool>,
     /// The quality (1–100) of this target's picture. `None` reads as
     /// [`DEFAULT_VIDEO_QUALITY`].
     ///
@@ -1342,21 +1322,6 @@ impl TargetConfig {
         self.offers().audio && choices.audio == Sound::Flac
     }
 
-    /// Whether the Opus bitrate walks with the link — on unless the operator
-    /// wrote `audio_adaptive = false`.
-    pub fn audio_adaptive(&self) -> bool {
-        self.audio_adaptive.unwrap_or(true)
-    }
-
-    /// The audio switch collapsed to what the encoder is built from, the same
-    /// way [`Self::render_plan`] collapses the render dial: the one rate in the
-    /// bits libopus speaks, and whether there is a walk. Callers gate on
-    /// [`Self::sound`] — a session without sound has no plan to resolve, and
-    /// neither has a Mac's passed sound, which no encoder touches.
-    pub fn audio_plan(&self) -> AudioPlan {
-        AudioPlan { adaptive: self.audio_adaptive(), ..AudioPlan::default() }
-    }
-
     /// The one PCM format this target's sound can be in, known before the
     /// remote has said anything: what the RDP engine asks a server to redirect
     /// ([`crate::audio::PCM_CD_QUALITY`]), or what a `wlshare` target
@@ -1366,7 +1331,7 @@ impl TargetConfig {
     /// session builds an RDP target's encoder from this when the audio socket opens
     /// before the remote's channel is up, so it has to be the source's — an encoder
     /// built for the wrong rate plays every note at the wrong pitch. Callers gate on
-    /// [`Self::sound`], as with [`Self::audio_plan`].
+    /// [`Self::sound`].
     pub fn audio_source_format(&self) -> PcmFormat {
         match self.protocol {
             Protocol::Rdp => crate::audio::PCM_CD_QUALITY,
@@ -2052,21 +2017,6 @@ impl ConfigFile {
                 target.virtual_displays
             );
             let kind = target.subtype.map_or("plain vnc", Subtype::name);
-            // The adaptive switch tunes the Opus encoder, for the sessions that take
-            // the target's sound: the one here for MS-RDPEA's PCM on RDP, and
-            // wlshare's own on a `wlshare` target, which is told the rate over its
-            // audio extension ([`crate::vnc_audio`]). On `ard` and on a plain `vnc`
-            // target no session has any, and `ard-high-performance`'s is passed as
-            // the Mac's own AAC-ELD ([`crate::vnc_apple_media`]), so the key could
-            // not do anything there. Either way: `false` without sound is as
-            // unreadable as `true`, and a key nothing reads is a mistake to report,
-            // not a preference to keep.
-            anyhow::ensure!(
-                target.audio_adaptive.is_none() || target.offers().audio,
-                "target {:?} is {kind} and sets audio_adaptive — adapting means moving the \
-                 encoder's bitrate, and no session there has sound to encode. Remove the key.",
-                target.name
-            );
             // `video_quality` is the tiles' JPEG quality and wlshare's dial. A High
             // Performance Mac's picture is passed as it came, the Mac's own rate
             // control behind it; a Standard Mac's Full quality is the tiles.
@@ -4402,8 +4352,8 @@ vnc_password = \"x\"")).unwrap();
     }
 
     /// Standard mode never touches the Mac's sound, so an `ard` target has none to
-    /// offer and no use for the keys that tune it, and its picture is the Mac's
-    /// own but for Combined Display's tiles, whose quality alone it takes.
+    /// offer, and its picture is the Mac's own but for Combined Display's tiles,
+    /// whose quality alone it takes.
     #[test]
     fn a_standard_mac_carries_no_sound() {
         let target = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\n\
@@ -4415,12 +4365,9 @@ vnc_password = \"x\"")).unwrap();
         assert!(!config.targets[0].offers().audio);
         assert!(!config.targets[0].sound(Choices { audio: Sound::Opus, ..Choices::default() }));
 
-        for key in ["audio_adaptive = false", "render_adaptive = false"] {
-            let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
-                .unwrap_err();
-            let rendered = format!("{err:#}");
-            assert!(rendered.contains(key.split(' ').next().unwrap()), "{rendered}");
-        }
+        let err = ConfigFile::parse(&format!("[server]\n{}\n{target}render_adaptive = false\n", site_passwd_line()))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("render_adaptive"), "{err:#}");
         // The quality of the tiles coded from the Mac's Full quality, on the
         // physical screens and on the unofficial virtual display alike.
         for extra in ["", "virtual_display = true\n"] {
@@ -4448,10 +4395,9 @@ vnc_password = \"x\"")).unwrap();
         assert!(mac.sound(Choices::default()), "the sound leg comes with the picture");
         assert!(!mac.offers().audio, "so there is nothing to choose");
 
-        // The sound is the Mac's own AAC-ELD, so the Opus encoder's switch has
-        // nothing to tune, and the picture the Mac's HEVC or H.264, so nor have
-        // the picture's keys.
-        for key in ["audio_adaptive = false", "video_quality = 60", "render_adaptive = false"] {
+        // The picture is the Mac's HEVC or H.264, so the picture's keys have
+        // nothing to tune.
+        for key in ["video_quality = 60", "render_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");
@@ -4643,26 +4589,6 @@ vnc_password = \"x\"")).unwrap();
         assert!(format!("{err:#}").contains("render_adaptive_min"), "{err:#}");
     }
 
-    /// The rate is the one AAC-ELD runs at, and the walk is on unless it was
-    /// turned off — a target that names nothing already adapts.
-    #[test]
-    fn the_audio_plan_is_the_one_rate_and_the_walk() {
-        let cfg = parse_audio_target("").expect("bare audio");
-        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
-        assert_eq!(
-            cfg.targets[0].audio_plan(),
-            AudioPlan { bitrate_bps: 320_000, adaptive: true },
-            "adaptive by default, from the one ceiling"
-        );
-
-        let cfg = parse_audio_target("audio_adaptive = false").expect("fixed");
-        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::fixed(), "turned off, the plan has no walk");
-        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan { bitrate_bps: 320_000, adaptive: false });
-
-        let cfg = parse_audio_target("audio_adaptive = true").expect("adaptive");
-        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
-    }
-
     /// The bitrate key is gone: every Opus session is sent at the one rate, and a
     /// file that still writes it is refused as any unknown key is.
     #[test]
@@ -4680,14 +4606,11 @@ vnc_password = \"x\"")).unwrap();
         assert!(format!("{err:#}").contains("audio_adaptive_min"), "{err:#}");
     }
 
-    /// The adaptive switch is refused, in either position, on a target none of
-    /// whose sessions has sound to encode.
+    /// The walk's switch is gone: every Opus stream walks with the link, and a
+    /// file that still writes it is refused as any unknown key is.
     #[test]
-    fn the_adaptive_switch_needs_a_target_that_carries_sound() {
-        let plain = |key: &str| ConfigFile::parse(&vnc_toml(key)).unwrap_err();
-        for switch in ["true", "false"] {
-            let err = plain(&format!("audio_adaptive = {switch}"));
-            assert!(format!("{err:#}").contains("sets audio_adaptive"), "{err:#}");
-        }
+    fn an_audio_walk_switch_is_no_longer_a_key() {
+        let err = parse_audio_target("audio_adaptive = false").unwrap_err();
+        assert!(format!("{err:#}").contains("audio_adaptive"), "{err:#}");
     }
 }

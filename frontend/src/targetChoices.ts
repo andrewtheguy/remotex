@@ -92,11 +92,6 @@ export interface TargetInfo {
   /** Whether the remote's sound is a choice. */
   audio: boolean;
   /**
-   * Whether that sound's Opus rate follows the link, or is held at its one
-   * rate: the target's `audio_adaptive`. False where sound is no choice.
-   */
-  audioAdaptive: boolean;
-  /**
    * Whether a page whose own decoder refuses this target's passed HEVC can
    * decode it in the software decoder the gateway serves.
    */
@@ -519,9 +514,7 @@ function soundRow(
       label: "Opus",
       note: !plays
         ? "This browser has no WebCodecs AudioDecoder to play it with."
-        : target.audioAdaptive
-          ? "Compressed, up to 320 kbit/s, lower while the link is behind."
-          : "Compressed, at 320 kbit/s whatever the link.",
+        : "Compressed, up to 320 kbit/s, lower while the link is behind.",
       disabled: !plays,
     },
     {
