@@ -524,7 +524,7 @@ selects the picture, or a key or a choice that selects its chroma. See
   came and the gateway never decodes; do not add a decoder for the Mac's sound.
   A `wlshare` target's is always passed too: wlshare codes it, as Opus with the
   encoder the gateway codes an RDP host's with (`sound-opus`) at the rate the
-  target's audio keys and their walk arrive at, or as FLAC in a lossless session.
+  gateway's walk arrives at, or as FLAC in a lossless session.
   Do not decode or re-encode wlshare's sound here, and do not give wlshare a
   codec key of its own: the format is the gateway's to ask for.
   Preserve claim-bound eviction and the source-format/resampling
@@ -2465,7 +2465,7 @@ band, in `audioFormat`. It is Opus encoded here: `codec` is `opus`, `sampleRate`
 sound-opus fixes, 32 kbit/s. The one exception is a High Performance Mac's AAC-ELD, passed in
 every session on such a target: `codec` `mp4a.40.39`, `packetFrames` 480 (10 ms), `head`
 the Mac's AudioSpecificConfig, and each packet one of the Mac's units, with no
-encoder and neither the rate nor the switch below reaching it
+encoder and neither the rate nor the walk below reaching it
 ([Apple's media stream, passed through](#apples-media-stream-passed-through)).
 
 Opus is encoded in `Application::Audio` mode under constrained VBR, set
@@ -2475,10 +2475,9 @@ than the number, and the running rate stays close enough to it that the
 number is what the link sees. There is no FEC and no DTX — the socket
 is TCP, nothing is lost, and the adaptive walk already sheds silence.
 
-The rate is not a key. Like AAC-ELD's, it is always the highest the sound is
-sent at, `AUDIO_BITRATE_KBPS` in `src/config.rs`: a ceiling the link may fall
-below, and whether it walks is not a key either: Opus always follows the
-link. The walk is
+The rate is not a key, and neither is whether it walks. Like AAC-ELD's, the
+rate is the highest the sound is sent at, `AUDIO_BITRATE_KBPS` in
+`src/config.rs`, and Opus always walks below it with the link. The walk is
 sound-opus's (`sound_opus::walk::BitrateWalk`), the one crate that codes a
 desktop's sound as Opus for this gateway and for wlshare, so nothing adaptive
 about sound is this gateway's own: `AudioWalk` (`src/audio.rs`) owns one beside
@@ -2495,10 +2494,6 @@ is re-announced. While the link is *behind*, wave buffers that are pure silence
 are shed before the encoder instead of queued — silence is the one content whose
 loss cannot be heard, the client just receives no packets for a while (what a
 quiet remote already produces), and the backlog drains by exactly that much.
-Both keys are refused on a target none of whose sessions can carry sound, which
-is `ard` and a plain `vnc` target, and on `ard-high-performance`, whose sound is
-the Mac's own AAC-ELD; a ceiling at or under the floor keeps a walk
-with nothing to give up rather than being refused.
 
 The RDP engine carries sound over MS-RDPEA (`rdp_client/proto/rdpsnd.rs`).
 A session started with sound names the `rdpsnd` and `rdpdr` static channels and
