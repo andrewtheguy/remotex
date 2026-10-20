@@ -1145,7 +1145,7 @@ walks its encoder between those bounds by the link between it and the gateway.
 That is the only walk a passed stream has. Unlike wlshare's
 stream, which walks its quality by the fence round trip to the browser, the
 delay the Mac hears ends at the gateway: nothing reports the browser's queue
-back to it ([roadmap](roadmap.md#apples-passed-hevc-at-4k)).
+back to it.
 
 Three controls with similar names therefore remain separate:
 
