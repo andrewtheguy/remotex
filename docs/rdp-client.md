@@ -28,7 +28,7 @@ hosts. Only what such a host was seen
 to send is implemented, and anything else — a codec, subcodec or PDU this client
 lacks — is refused by name in the log rather than guessed at, so it shows up as a
 named refusal instead of a wrong picture. What "current" has been tested against
-is Windows 10 and Windows 11. An older Windows and xrdp are not targets: one that
+is Windows 10 and Windows 11. An older Windows and Linux RDP are not targets: one that
 speaks what this client implements may happen to work, but that is neither
 tested nor promised. Where [MS-RDPBCGR] is silent
 or wrong about what such a host really does — and it is, in places, about both —
