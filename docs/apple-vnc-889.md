@@ -562,11 +562,10 @@ A backing size twice the logical one makes a 2x display.
   it answered with a display of its own choosing, 800×600 points for 320×30
   and 960×600 for 640×400, and after the first of those its screen capture
   lost the display and no picture came at all, with no encoder error. Remotex's
-  page reports a Mac no window under 800×600 points, so neither is asked for:
-  the bound is on what the browser reports, and a smaller window scrolls the
-  display. The gateway does not raise a smaller size to it: it refuses one,
-  whether a window report, a client's screen at connect or a configured
-  `size`, and sends the Mac only sizes a client asked for. What the Mac says
+  gateway asks a Mac for no display under 800×600 points, so neither is asked
+  for: a window or a client's screen under it is raised to it side by side,
+  and a smaller window scrolls the display. A configured `size` under it fails
+  `check-config`. What the Mac says
   of a display it sends no picture of is still read
   ([In strips](#in-strips)).
 - **Ask for 1x or 2x only.** The Mac does not round a fractional ratio. 1.5x and
@@ -1639,7 +1638,7 @@ four strips do not fit it sends no picture at all (below).
   remotex ask for, 800×600 points, 600 rows at 1x
   ([The High Performance virtual display](#the-high-performance-virtual-display)),
   and below any minimum near it: 640×480 would be 480 rows. Such displays are
-  not supported. The gateway refuses a size under 800×600 points, so they never
+  not supported. The gateway raises a size under 800×600 points to it, so they never
   come in a session, and what follows was found only by probing the virtual
   Mac below the minimum. It is kept as a record of the Mac's behaviour, and
   nothing in the gateway or the page depends on it.

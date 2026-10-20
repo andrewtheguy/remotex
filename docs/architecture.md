@@ -2692,17 +2692,14 @@ toggle and no manual button in the session. Standard `ard` does not offer
 resize, because it shares physical displays, and a plain `vnc` target does not,
 because its server's answer is not known before it is dialled.
 
-A Mac is reported no window under 800×600 points, the smallest Apple's own
-client allows (`remoteMinimum.ts`). The page holds that bound on every size it
-reports, the session's window, a second display's tab and a tablet's one
-request, and a window smaller than the display scrolls. The gateway never
-adjusts a size on its way to the Mac: what it sends is a size a client asked
-for, or nothing. Behind the page it refuses what is under the minimum where it
-arrives (`vnc_apple::MIN_DISPLAY_POINTS`): a window report for a Mac's virtual
-display is logged and dropped and the display keeps its size, a `connect` that
-would open the display at a client screen that small is refused with an error
-and starts nothing (`TargetConfig::opens_on`), never opened at the default in
-its place, and a configured `size` that small fails `check-config`. Behind that, a Mac that sends no picture of a display says so
+A Mac's virtual display is asked for no less than 800×600 points, the smallest
+window Apple's own client allows (`vnc_apple::MIN_DISPLAY_POINTS`). The gateway
+alone holds that bound; the page reports every window as it is. A size under it
+is raised to it side by side where it becomes a size for the Mac: a report of
+the session's window, a second display's tab or a tablet's one request where it
+arrives, and a client screen a session opens at in `TargetConfig::opening_size`.
+A window smaller than the display it is given scrolls. A configured `size` that
+small fails `check-config`. Behind that, a Mac that sends no picture of a display says so
 in its stream, which the gateway reads and tells the page
 (`pictureWithheld`, [Apple VNC](apple-vnc-889.md#in-strips)).
 

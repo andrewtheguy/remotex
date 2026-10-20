@@ -267,11 +267,11 @@ pub enum ClientMsg {
     /// follows the window, and dropped by every other. A desktop client
     /// sends one when it connects and on every window change after
     /// [`ServerMsg::Connected`] says `resize`; the backend simply applies each
-    /// valid report it receives, as it is. The page reports a Mac no window
-    /// under 800×600 points, the least Apple's own client asks for; one that
-    /// arrives all the same is refused for a Mac's virtual display, not raised
-    /// ([`crate::vnc_apple::MIN_DISPLAY_POINTS`]), and what a Mac says of a
-    /// display it sends no picture of is read ([`ServerMsg::PictureWithheld`]).
+    /// valid report it receives, as it is — except that a report under 800×600
+    /// points, the least Apple's own client asks for, is raised to it for a
+    /// Mac's virtual display ([`crate::vnc_apple::MIN_DISPLAY_POINTS`]). What a
+    /// Mac says of a display it sends no picture of is read
+    /// ([`ServerMsg::PictureWithheld`]).
     Viewport { w: u16, h: u16 },
     /// The screen this client's window is on: its full resolution in points
     /// (`w`/`h`, CSS pixels) and its density in hundredths — 100 for a 1x
