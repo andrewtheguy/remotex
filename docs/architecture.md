@@ -468,16 +468,16 @@ Preserve the announced configuration and color-space behavior in
 #### A desktop past the ceiling
 
 The picture ceiling is a passed video stream's, 3840×2400 either way up
-(`video::MAX_LONG_SIDE`): wlshare's VP9, a High Performance Mac's HEVC or H.264,
-and an RDP host's graphics pipeline. A desktop past it has no such stream. On a
+(`video::MAX_LONG_SIDE`): wlshare's VP9 and its tiles, whose moving regions are
+streams up to the whole desktop, a High Performance Mac's HEVC or H.264, and an
+RDP host's graphics pipeline. A desktop past it has no such stream. On a
 `wlshare` target started without resize the session stays up and the page says
 so, offering the server's outputs; every other source of a stream ends on the
 ceiling's refusal. Do not carry such a desktop some other way, in the gateway or
 the page: rectangles as images, a scaled or a cropped picture. See
 [Past the ceiling](#past-the-ceiling). A picture that is no stream has no
 ceiling: the tiles coded here, of a plain `vnc` server's desktop, an RDP
-host's bitmap path (`egfx = false`) or a Standard Mac's Full quality, wlshare's
-own tiles, whose moving regions are each held to the ceiling as a stream, and a
+host's bitmap path (`egfx = false`) or a Standard Mac's Full quality, and a
 Standard Mac's Adaptive rectangles, passed one by one, are shown at whatever size
 the remote has, a screen past 4K or a Combined Display of several screens
 included. Do not hold or shrink one of these
@@ -973,7 +973,8 @@ display socket, and every tile of the desktop follows it.
 The picture ceiling is a passed video stream's (`video::check_picture`): a
 picture of the whole desktop the remote codes and the gateway passes, wlshare's
 VP9, a High Performance Mac's HEVC or H.264, and an RDP host's graphics
-pipeline. The gateway sizes every desktop such a stream carries under it, so
+pipeline, and wlshare's tiles, any of whose moving regions may be the whole
+desktop. The gateway sizes every desktop such a stream carries under it, so
 only a remote it cannot size gets there: a wlshare server on a physical output
 whose desktop is simply that large. A picture that is no stream has no ceiling:
 the tiles coded here, of a plain VNC server's desktop or an RDP host's bitmap
@@ -1104,9 +1105,13 @@ stream's first frame, its next, or its end. Nothing is coded here.
   `WLQ` plus `video_quality`, the dial wlshare holds every region's stream at:
   there is no walk, so the plan has no `adaptive` and the target takes no
   `render_adaptive`, and no `WLSD` or `WLSS`, since every region is 4:2:0 for
-  every browser. The tiles are no stream of the whole desktop and have no
-  ceiling: they are listed at any size and a desktop is shown at whatever size
-  wlshare has, held by no `Oversize`.
+  every browser.
+- **Within the ceiling, as the VP9 is.** A moving region is a stream, and may be
+  as large as the desktop, so the tiles are listed only for a desktop within the
+  ceiling and come off the list past it, as the VP9 does
+  ([past the ceiling](#past-the-ceiling)): held in a session started without
+  resize, refused in one started with it. A desktop within it is what holds every
+  region to it, so wlshare splits or drops none for its size.
 - **Passed as they came** (`VideoSink::pass_tile`, `pass_region`,
   `pass_region_end`). A PNG becomes a `TILE` record, a region's frame a `REGION`
   record, behind a `regionFormat` for the first of its stream, whose

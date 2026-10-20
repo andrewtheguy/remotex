@@ -405,7 +405,7 @@ pub enum Oversize {
     /// which only the remote can do: [`VideoSink::damage`] drops what it is handed
     /// while [`VideoSink::oversized`] says so, and the browser is told
     /// ([`ServerMsg::Oversize`]). A `wlshare` target on a physical output, whose VP9
-    /// comes off the encoding list past the ceiling.
+    /// or tiles come off the encoding list past the ceiling.
     Hold,
     /// The desktop is shown at whatever size the remote has: the tiles coded here
     /// of a plain VNC server's desktop or an RDP host's bitmap path, and a

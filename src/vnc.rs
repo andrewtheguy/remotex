@@ -1882,14 +1882,7 @@ impl BesidePlan {
     ) -> Beside {
         let (input, input_rx) = mpsc::unbounded_channel();
         let BesidePlan { config, choices, display: screen } = self.clone();
-        // wlshare's tiles are no stream of the whole desktop, and have no ceiling.
-        let oversize = if plan.wlshare_tiles {
-            Oversize::Shown
-        } else if choices.resize() {
-            Oversize::Refuse
-        } else {
-            Oversize::Hold
-        };
+        let oversize = if choices.resize() { Oversize::Refuse } else { Oversize::Hold };
         // On a thread and a runtime of its own, as the session's engine is on
         // its: a session's future is not one a runtime may move between threads.
         let over = ended.clone();
@@ -2143,7 +2136,7 @@ pub async fn run(
     // and have no ceiling: they are shown at whatever size the remote has.
     let oversize = if choices.resize() || config.media_stream() {
         Oversize::Refuse
-    } else if config.wlshare() && !config.render_tiles() {
+    } else if config.wlshare() {
         Oversize::Hold
     } else {
         Oversize::Shown
@@ -2710,7 +2703,7 @@ async fn rfb38_preface(
 }
 
 /// The two encoding lists a `wlshare` session switches between as the desktop
-/// crosses the ceiling, where its picture has one.
+/// crosses the ceiling.
 #[derive(Debug, PartialEq, Eq)]
 struct Listing {
     /// The encodings alone, for a desktop past the ceiling.
@@ -2719,24 +2712,22 @@ struct Listing {
     /// its VP9 ([`with_wlshare_vp9`]), or its tiles for a plan that asks for them
     /// ([`with_wlshare_tiles`]).
     wlshare: Vec<i32>,
-    /// The picture is wlshare's VP9, a stream of the whole desktop, which has the
-    /// ceiling; its tiles have none.
-    whole: bool,
 }
 
 impl Listing {
     fn new(plain: Vec<i32>, plan: RenderPlan) -> Self {
         let wlshare = if plan.wlshare_tiles { with_wlshare_tiles(&plain, plan) } else { with_wlshare_vp9(&plain, plan) };
-        Self { plain, wlshare, whole: !plan.wlshare_tiles }
+        Self { plain, wlshare }
     }
 
-    /// Whether wlshare's picture is listed for a desktop of this size: its VP9 only
-    /// within the video ceiling, since the stream is a picture of the whole desktop
-    /// and one past the ceiling is not video, and its tiles at any size. Past it the
+    /// Whether wlshare's picture is listed for a desktop of this size: only within
+    /// the video ceiling. The VP9 is a stream of the whole desktop, and one past the
+    /// ceiling is not video; the tiles' moving regions are streams up to the whole
+    /// desktop, so a desktop within it is what holds every region to it. Past it the
     /// desktop comes as ZRLE, held or refused, and the read loop lists the encoding
     /// again when a resize brings the desktop back within.
     fn lists(&self, (w, h): (u16, u16)) -> bool {
-        !self.whole || crate::video::within_ceiling((u32::from(w), u32::from(h)))
+        crate::video::within_ceiling((u32::from(w), u32::from(h)))
     }
 
     /// The list for a desktop of this size.
@@ -9023,16 +9014,17 @@ mod tests {
     }
 
     /// A plan that asks for wlshare's tiles lists them in place of its VP9, with the
-    /// dial beside them, at any size: they are no stream of the whole desktop.
+    /// dial beside them, and off the list past the ceiling as the VP9 is: a moving
+    /// region may be the whole desktop.
     #[test]
-    fn the_tiles_asked_of_wlshare_are_the_plan_at_any_size() {
+    fn the_tiles_asked_of_wlshare_are_the_plan_within_the_ceiling() {
         use crate::config::RenderPlan;
         assert_eq!(ENCODING_WLSHARE_TILES, i32::from_be_bytes(*b"WLST"));
         let rest = vec![ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
         let tiles = RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: true, chroma: crate::vp9::Chroma::Yuv420 };
         let lists = Listing::new(rest.clone(), tiles);
         assert_eq!(lists.listed((1280, 800)), [ENCODING_WLSHARE_TILES, 0x574c_5150, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]);
-        assert_eq!(lists.listed((7680, 4320)), lists.listed((1280, 800)), "past the ceiling");
+        assert_eq!(lists.listed((7680, 4320)), rest, "the tiles past the ceiling");
         let vp9 = Listing::new(rest.clone(), RenderPlan { wlshare_tiles: false, ..tiles });
         assert_eq!(vp9.listed((1280, 800))[0], ENCODING_WLSHARE_VP9);
         assert_eq!(vp9.listed((7680, 4320)), rest, "the VP9 past the ceiling");
