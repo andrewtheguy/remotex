@@ -176,20 +176,20 @@ site_passwd = ""
 # profile is served; the browser picks one from a picker after login (there is
 # no --target selector).
 #
-# Four things about a session are not keys here. Whoever starts it chooses them
+# What a session is started with is not a key here. Whoever starts it chooses it
 # at the picker: picking a target opens it, its options show under it, and Start
 # connects with what is chosen. They hold for the life of the session — a browser
 # that takes it over gets it as it was started — and the browser remembers them
 # per target for the next time. Which a target shows is its type's to say:
 #
-#   target                           window   sound            passthrough   graphics
-#   rdp                              yes      shown            always        shown
-#   rdp with egfx = false            —        shown            —             —
-#   vnc                              —        —                —             —
-#   vnc, wlshare                     yes      shown            —             —
-#   vnc, ard                         —        —                shown         —
-#   vnc, ard with virtual_display    yes      —                shown         —
-#   vnc, ard-high-performance        yes      always carried   shown         —
+#   target                           window   sound            passthrough   graphics   camera, microphone
+#   rdp                              yes      shown            always        shown      shown
+#   rdp with egfx = false            —        shown            —             —          shown
+#   vnc                              —        —                —             —          —
+#   vnc, wlshare                     yes      shown            shown         —          shown
+#   vnc, ard                         —        —                shown         —          —
+#   vnc, ard with virtual_display    yes      —                shown         —          —
+#   vnc, ard-high-performance        yes      always carried   shown         —          —
 #
 # A Standard "ard" target on the Mac's physical screens also shows Displays: one
 # screen at a time (beta), in the picture chosen above, or Combined (alpha), every
@@ -238,11 +238,19 @@ site_passwd = ""
 #
 # Passthrough sends the remote's own stream to the browser as it came: an
 # "ard-high-performance" Mac's HEVC, for a LAN, where it is a choice greyed for a
-# browser that cannot take it, or an "rdp" host's graphics pipeline for the page
-# to compose, which is no choice: with `egfx` on every session passes it, and a
-# browser that cannot compose it cannot start the target. Each is described with
-# its target below. A browser that cannot take a session somebody else started
-# is shown why and offered End session, not a different session.
+# browser that cannot take it, or its H.264; a "wlshare" target's VP9, or its
+# tiles with motion; an "ard" Mac's Adaptive picture; or an "rdp" host's graphics
+# pipeline for the page to compose, which is no choice: with `egfx` on every
+# session passes it, and a browser that cannot compose it cannot start the
+# target. Each is described with its target below. A browser that cannot take a
+# session somebody else started is shown why and offered End session, not a
+# different session.
+#
+# Camera and Microphone, EXPERIMENTAL, offer the remote this browser's devices, on
+# an "rdp" target over MS-RDPECAM and MS-RDPEAI and on a "wlshare" target over
+# wlshare's extensions: the tick is the offer, and the session's floating menu
+# turns the device on, per session. Described under Camera and microphone in
+# docs/guide.md.
 #
 # Graphics is how an "rdp" host draws its pipeline: High quality, the pipeline's
 # codecs without H.264, for a LAN, where a slow link
