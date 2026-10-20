@@ -67,7 +67,7 @@ use std::time::{Duration, Instant};
 
 use remotex::rdp_client::proto::gfx::{self, H264, Message};
 use remotex::rdp_client::proto::wire::{Malformed, Reader};
-use remotex::rdp_client::{Compositor, Connect, Event, Session};
+use remotex::rdp_client::{Compositor, Connect, Event, Session, private_address};
 
 const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 const H264_ENV: &str = "REMOTEX_UAT_H264";
@@ -88,7 +88,17 @@ const WINDOW: Duration = Duration::from_secs(5);
 /// A relay to `host:port` that is a slow link: what the host sends is read at
 /// `kbps`, or as it comes without one, through a small receive buffer, and what
 /// is sent to the host is held for `delay`. Returns the local port it listens on, for one connection.
-async fn throttle(host: &str, port: u16, kbps: Option<u64>, delay: Duration, buffer_kb: u32, lift: Option<Duration>) -> u16 {
+/// The session reaches the relay on loopback, so the relay holds the host to
+/// private addresses itself, as [`Connect`] would, unless `public_address`.
+async fn throttle(
+    host: &str,
+    port: u16,
+    public_address: bool,
+    kbps: Option<u64>,
+    delay: Duration,
+    buffer_kb: u32,
+    lift: Option<Duration>,
+) -> u16 {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let bare = host.trim_start_matches('[').trim_end_matches(']').to_owned();
     let address = tokio::net::lookup_host((bare, port))
@@ -96,6 +106,11 @@ async fn throttle(host: &str, port: u16, kbps: Option<u64>, delay: Duration, buf
         .expect("resolving the host")
         .next()
         .expect("an address for the host");
+    assert!(
+        public_address || private_address(address.ip()),
+        "{host} is at the public address {}; set public_address = true on the target to connect to it",
+        address.ip()
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("binding the relay");
     let local = listener.local_addr().expect("the relay's address").port();
     tokio::spawn(async move {
@@ -439,7 +454,7 @@ async fn a_real_host_draws_for_a_slow_client() {
     );
     let (host, port) = match throttled {
         Some((kbps, delay, buffer_kb, lift)) => {
-            ("127.0.0.1".to_owned(), throttle(&target.host, target.port, kbps, delay, buffer_kb, lift).await)
+            ("127.0.0.1".to_owned(), throttle(&target.host, target.port, target.public_address(), kbps, delay, buffer_kb, lift).await)
         }
         None => (target.host.clone(), target.port),
     };

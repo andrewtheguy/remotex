@@ -100,6 +100,7 @@ pub mod proto;
 mod session;
 
 pub use camera::{Camera, CameraFeed, CameraSink, Fed};
+pub use connect::private_address;
 pub use microphone::{MicrophoneFeed, MicrophoneSink};
 pub use error::Error;
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};

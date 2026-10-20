@@ -79,7 +79,7 @@ fn offered(egfx: bool) -> Security {
 /// (RFC 1918, IPv6 unique local fc00::/7), link-local, or the shared address space
 /// of RFC 6598 (100.64.0.0/10), which Tailscale and carrier NAT use. An IPv4 address
 /// mapped into IPv6 is judged as the IPv4 address it is.
-fn private(ip: IpAddr) -> bool {
+pub fn private_address(ip: IpAddr) -> bool {
     match ip.to_canonical() {
         IpAddr::V4(v4) => {
             let [a, b, ..] = v4.octets();
@@ -148,7 +148,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     // The address the name resolved to, checked before a byte goes out: the TLS
     // certificate is never verified, so a public one is reached only by opt-in.
     let peer = tcp.peer_addr().context("reading the host's address")?.ip();
-    if !config.public_address && !private(peer) {
+    if !config.public_address && !private_address(peer) {
         bail!(
             "{dest} is at the public address {peer}; set public_address = true on the \
              target to connect to it"
@@ -519,13 +519,13 @@ mod tests {
             "169.254.1.1", "100.64.0.1", "100.127.255.255", "::1", "fd12::1", "fc00::1",
             "fe80::1", "::ffff:192.168.1.1",
         ] {
-            assert!(private(ip.parse().unwrap()), "{ip} is private");
+            assert!(private_address(ip.parse().unwrap()), "{ip} is private");
         }
         for ip in [
             "8.8.8.8", "172.32.0.1", "192.169.0.1", "100.63.255.255", "100.128.0.1",
             "2001:4860::8888", "fec0::1", "::ffff:8.8.8.8", "0.0.0.0", "::",
         ] {
-            assert!(!private(ip.parse().unwrap()), "{ip} is public");
+            assert!(!private_address(ip.parse().unwrap()), "{ip} is public");
         }
     }
 }
