@@ -4435,8 +4435,8 @@ mod tests {
         // The picker: nothing is running, so there is nothing to plug into.
         assert!(matches!(mgr.attach_camera(&token), Err(UplinkRefused::Unsupported)));
 
-        // A connected target without `camera = true` refuses the same way, which is
-        // the "camera disabled means the socket is disabled" rule on the wire.
+        // A session started without the camera offered refuses the same way, which
+        // is the "camera disabled means the socket is disabled" rule on the wire.
         mgr.connect(att.id, "fake", None, Choices::default()).await.unwrap();
         expect_connected(&mut att.events, "fake").await;
         let _ends = hooks.try_recv().unwrap();

@@ -7,7 +7,8 @@
 //! (`WLSC`) and message type [`MSG_CAMERA`] are the whole of it, in both
 //! directions:
 //!
-//! - A target with `camera = true` lists the pseudo-encoding in `SetEncodings`.
+//! - A session started with the camera offered ([`crate::config::Choices::camera`],
+//!   the picker's Camera tick) lists the pseudo-encoding in `SetEncodings`.
 //!   wlshare answers with an *available* message; any other server ignores the
 //!   encoding and says nothing, and the camera the browser enables is then never
 //!   plugged — discovered, not configured, like the density report.

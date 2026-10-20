@@ -828,8 +828,8 @@ function CameraSection({
   );
 }
 
-// The microphone toggle: the camera's twin, and the same rules — a target
-// without `microphone = true` omits the row, the click is the `getUserMedia`
+// The microphone toggle: the camera's twin, and the same rules — a session
+// started without the microphone offered omits the row, the click is the `getUserMedia`
 // gesture, nothing is remembered, and the label says "experimental" for the
 // same lack of coverage.
 function MicSection({
@@ -1105,9 +1105,10 @@ export default function FloatingMenu({
   // null on every other session, which shows no such row.
   hostPicture: HostPicture | null;
   onAudioChange: (enabled: boolean) => void;
-  // The camera, under Audio's hide-don't-disable rule: `camera = true` is
-  // RDP's and a wlshare target's (wlshare's camera extension) alone, so on every other
-  // target there is nothing that could be switched on. `cameraEnabled` is per
+  // The camera, under Audio's hide-don't-disable rule: the picker's Camera tick
+  // is RDP's and a wlshare target's (wlshare's camera extension) alone, so on every
+  // other target, and in a session started without it, there is nothing that
+  // could be switched on. `cameraEnabled` is per
   // session and never remembered — see
   // useRemoteDesktop — and `cameraStreaming` is whether the remote is
   // consuming, which is the half the camera light cannot say.
@@ -1116,8 +1117,8 @@ export default function FloatingMenu({
   cameraError: string | null;
   cameraStreaming: boolean;
   onCameraChange: (enabled: boolean) => void;
-  // The microphone, under the camera's rules: `microphone = true` is RDP's and
-  // a wlshare target's (wlshare's microphone extension) alone, enabled per session, and
+  // The microphone, under the camera's rules: the picker's Microphone tick is RDP's
+  // and a wlshare target's (wlshare's microphone extension) alone, enabled per session, and
   // `micStreaming` is whether the remote records.
   canMic: boolean;
   micEnabled: boolean;
