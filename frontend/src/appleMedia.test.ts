@@ -127,8 +127,8 @@ test("a browser that decodes the bare configuration, as Chrome does, is played w
   );
   assert.equal(await choose(), true);
   assert.equal(decodesAppleMedia(), true);
-  // The configuration macwork's stream announces: Range Extensions 4:4:4.
-  assert.deepEqual(asked.probes, ["hev1.4.10.L150.BE.8"]);
+  // The largest configuration the Mac announces: Range Extensions 4:4:4 at 4K.
+  assert.deepEqual(asked.probes, ["hev1.4.10.H153.BE.8"]);
   assert.deepEqual(asked.tried, [{ codec: "mp4a.40.2", description: CONFIG }]);
   const config = appleEldConfig({
     sampleRate: 48_000,

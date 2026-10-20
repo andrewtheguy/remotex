@@ -48,37 +48,6 @@ Reporting it wants wlshare to say what it coded each frame at: one addition to
 the wire, made in wlshare and read here. Nothing the gateway decides would change
 on it; it is a line in the session log, for judging wlshare on a slow link.
 
-### Apple's passed HEVC at 4K
-
-High Performance is not made for a slow link. Apple's
-[guide](https://support.apple.com/guide/remote-desktop/use-high-performance-screen-sharing-apdf8e09f5a9/mac)
-asks for high bandwidth and consistently low latency, recommends a wired
-connection, and names 75 Mbit/s for a single 4K display, the largest its virtual
-display makes (3840×2160, within the gateway's ceiling). The Mac's own rate
-controller walks its target between 20 and 60 Mbit/s by the delay between the
-Mac and the gateway ([Rate control](apple-vnc-889.md#rate-control)), and that is
-all the adapting a passed stream
-([Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through))
-does. So what it is adapted for next is resolution: carrying a 4K display, not a
-link that cannot carry the stream.
-
-- **The level the page asks about.** The stream reaches the page under the level
-  the Mac announces, read from its parameter sets. The page's capability probe
-  (`appleMedia.ts`) still asks the browser's decoder about level 5.0 (`L150`),
-  macwork's stream at 1600×1000. 5.0 carries 4K at 30 pictures a second; 4K at 60
-  needs 5.1 (`L153`), which macvm announced at 2880×1800 and 30 Hz already. Whether
-  a browser that takes 5.0 also takes 5.1 is to be measured in Chrome and Safari,
-  and the probe moved to the level the Mac announces if it does not.
-- **60 Hz.** The gateway asks for a 30 Hz display, because the browser decodes
-  every picture it is sent ([The stream](apple-vnc-889.md#the-stream)). A passed
-  stream could carry 60, since nothing here decodes it. But the Mac codes at 60
-  only where its encoder's pixel rate allows, and at 30 for a larger display, so
-  whether a 4K display is coded at 60 at all is the first thing to find out.
-
-None of it has been measured at 4K. The virtual Mac's backing ceiling is
-3840×2160, so a 4K session can be smoke-tested there; judging it needs a physical
-Mac.
-
 ### The Mac's H.264 mended by refresh pictures
 
 A passed HEVC stream of one tile acknowledges each picture it hands on and, after

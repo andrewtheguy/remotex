@@ -1163,8 +1163,9 @@ Three controls with similar names therefore remain separate:
   passthrough to a page that said yes, or that will decode the picture itself on
   a gateway that serves the decoder, and greys it for any other, and the
   gateway holds each to it
-  ([What a session is started with](#what-a-session-is-started-with)). For the picture it asks its `VideoDecoder` about the configuration
-  macwork's stream announces, `hev1.4.10.L150.BE.8`. For the sound it decodes one of
+  ([What a session is started with](#what-a-session-is-started-with)). For the picture it asks its `VideoDecoder` about the largest configuration
+  the Mac announces, a 3840×2160 display's `hev1.4.10.H153.BE.8`
+  ([The stream](apple-vnc-889.md#the-stream)). For the sound it decodes one of
   the Mac's own units, because no question answers it: Chrome and Safari both
   refuse `mp4a.40.39`, both decode AAC-ELD as `mp4a.40.2`, and they need the
   AudioSpecificConfig in different forms — Chrome as it is, Safari inside an MPEG-4

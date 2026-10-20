@@ -1482,7 +1482,14 @@ other failures (see [Liveness](#the-stream)).
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
   transfer, Display P3 primaries, with wavefront parallel processing
   (`entropy_coding_sync_enabled_flag`) and no HEVC tiles, whatever
-  `tilesPerFrame` is. The browser decodes it, in its own decoder or the page's
+  `tilesPerFrame` is. The parameter sets name a level by the display's size, not
+  the picture's, and above what the picture needs: level 5.0 (`hev1.4.10.L150.BE.8`)
+  at 1440×900 and 1600×1000, Main tier 5.1 (`L153`) at 2880×1800, whole or in
+  strips, and High tier 5.1 (`H153`) at 3840×2160, the largest the virtual display
+  makes, where each strip is 3840×544. The page asks its decoder about that
+  largest string once, at load (`frontend/src/appleMedia.ts`); Chrome 155 and
+  Safari 27 on the virtual Mac decoded the 4K strips under all three strings
+  alike. The browser decodes it, in its own decoder or the page's
   software one; a unit it fails to decode brings a keyframe request.
 - **Rate.** A picture goes out when the screen changes, at most once per refresh
   of the virtual display. Under a full-screen animation, a 60 Hz display sent
