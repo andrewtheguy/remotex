@@ -151,6 +151,13 @@ username = "Administrator"
 password = "change-me"
 ```
 
+`host` is an IP address or a host name. An `rdp` target connects only to a
+private address: loopback, 10/8, 172.16/12, 192.168/16, link-local, 100.64/10
+(Tailscale, carrier NAT), and IPv6 unique local and link-local. A host name is
+judged by the address it resolved to, before anything is sent. The client does
+not verify the host's certificate, so a host out on the internet takes
+`public_address = true`.
+
 The RDP client is the gateway's own, tested against Windows 10 and 11's Remote
 Desktop over NLA. It carries the desktop, pointer, keyboard, mouse, resize, the
 clipboard, sound, and the browser's camera and microphone. It does not carry
@@ -239,8 +246,14 @@ LAN. Adaptive H.264 changes nothing on such a host: it draws no
 H.264 under Lossless. See [Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy)
 for what was measured.
 
-Another RDP server, an older Windows or xrdp say, may happen to work but is not
-tested against. See [The RDP client](rdp-client.md).
+xrdp is supported at the same tier as a plain VNC server: an `rdp` target with
+`egfx = false`, for the desktop, the keyboard, mouse and the clipboard, at the
+size it opened with and without sound. It has no NLA, so the client logs on to it
+inside TLS alone, with the target's username and password. That is why a target
+with `egfx = false` offers TLS beside NLA, which a Windows host turns down; one
+with the pipeline offers NLA alone. Another RDP server, an older
+Windows say, may happen to work but is not tested against. See
+[The RDP client](rdp-client.md).
 
 ## Macs (`vnc` with an Apple subtype)
 

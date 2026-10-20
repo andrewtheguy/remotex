@@ -7,11 +7,13 @@
 //!
 //! # Credentials, again
 //!
-//! The user name and password are in here even though CredSSP has already proved them
-//! ([`super::credssp`]). That is not a second authentication: the server has the
-//! credentials from CredSSP and uses them, and what this PDU adds is `INFO_AUTOLOGON`
-//! — *use them* rather than showing a logon screen with the name filled in. A client
-//! that omits them reaches the desktop only after someone types the password again.
+//! The user name and password are in here even though under NLA CredSSP has already
+//! proved them ([`super::credssp`]). That is not a second authentication: the server
+//! has the credentials from CredSSP and uses them, and what this PDU adds is
+//! `INFO_AUTOLOGON` — *use them* rather than showing a logon screen with the name
+//! filled in. A client that omits them reaches the desktop only after someone types
+//! the password again. Under plain TLS this PDU is the only place they travel, and
+//! `INFO_AUTOLOGON` is what logs a server such as xrdp on with them.
 //!
 //! # What the session is told to be
 //!

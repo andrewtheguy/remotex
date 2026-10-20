@@ -10,6 +10,7 @@
 //! reader wants — what is sent, and what has to come back — would be the one thing not
 //! written down anywhere.
 
+use std::net::IpAddr;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
@@ -59,6 +60,36 @@ fn wanted_channels(config: &Connect) -> Vec<Channel> {
         channels.push(Channel::DEVICES);
     }
     channels
+}
+
+/// The security protocols a session offers. NLA always; plain TLS beside it only
+/// without the graphics pipeline, as mstsc and FreeRDP offer it: a Windows host still
+/// chooses NLA, and a server without CredSSP, xrdp say, chooses TLS. Under the
+/// pipeline, which only a Windows host serves, NLA alone is offered, so a machine in
+/// the middle cannot answer TLS and be handed the credentials — see the module doc on
+/// `proto`.
+fn offered(egfx: bool) -> Security {
+    match egfx {
+        true => Security::HYBRID,
+        false => Security::SSL | Security::HYBRID,
+    }
+}
+
+/// Whether an address is one a host on the internet cannot hold: loopback, private
+/// (RFC 1918, IPv6 unique local fc00::/7), link-local, or the shared address space
+/// of RFC 6598 (100.64.0.0/10), which Tailscale and carrier NAT use. An IPv4 address
+/// mapped into IPv6 is judged as the IPv4 address it is.
+pub fn private_address(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+        }
+    }
 }
 
 /// A static virtual channel this session joined.
@@ -114,6 +145,15 @@ impl Connected {
 pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     let dest = engine::host_port(&config.host, config.port);
     let mut tcp = engine::tcp_connect(&dest).await?;
+    // The address the name resolved to, checked before a byte goes out: the TLS
+    // certificate is never verified, so a public one is reached only by opt-in.
+    let peer = tcp.peer_addr().context("reading the host's address")?.ip();
+    if !config.public_address && !private_address(peer) {
+        bail!(
+            "{dest} is at the public address {peer}; set public_address = true on the \
+             target to connect to it"
+        );
+    }
     let socket = match config.egfx && config.paced {
         true => Some(PassedSocket::of(&tcp).context("keeping the socket for its receive buffer")?),
         false => None,
@@ -124,40 +164,50 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     // `host_port` writes one, not a name either check understands.
     let server_name = config.host.trim_start_matches('[').trim_end_matches(']').to_owned();
 
-    // 1. The security negotiation, in the clear. Only NLA is offered, so only NLA
-    //    can be chosen — see the module doc on `proto`.
+    // 1. The security negotiation, in the clear: see `offered`.
     let request = ConnectionRequest {
         cookie: Some(config.username.clone()),
-        protocols: Security::HYBRID,
+        protocols: offered(config.egfx),
     };
     tcp.write_all(&request.encode()).await.context("sending the X.224 Connection Request")?;
     let frame = read_frame(&mut tcp).await.context("reading the X.224 Connection Confirm")?;
     let (protocol, confirmed) = match ConnectionConfirm::decode(&frame)? {
-        ConnectionConfirm::Negotiated { protocol, flags } if protocol == Security::HYBRID => {
+        ConnectionConfirm::Negotiated { protocol, flags }
+            if protocol == Security::HYBRID
+                || (protocol == Security::SSL && request.protocols.contains(Security::SSL)) =>
+        {
             (protocol, flags)
         }
         ConnectionConfirm::Negotiated { protocol, .. } => {
-            bail!("{dest} chose {protocol:?}, and this client speaks only NLA")
+            bail!("{dest} chose {protocol:?}, and this client offered {:?}", request.protocols)
         }
         // A server that answers without negotiation data wants the legacy RDP
         // security this client does not implement, which is the same refusal.
         ConnectionConfirm::Unnegotiated => {
-            bail!("{dest} offered no security negotiation, and this client speaks only NLA")
+            bail!(
+                "{dest} offered no security negotiation, and this client offered {:?}",
+                request.protocols
+            )
         }
         ConnectionConfirm::Refused(why) => bail!("{dest} refused the connection: {why:?}"),
     };
 
-    // 2. The TLS session everything after this lives inside, and 3. the credentials,
-    //    which CredSSP binds to that session's public key.
+    // 2. The TLS session everything after this lives inside, and 3. under NLA the
+    //    credentials, which CredSSP binds to that session's public key. Under plain
+    //    TLS they go in the Client Info PDU of step 7 alone.
     let mut stream = tls::upgrade(tcp, &server_name).await?;
-    let public_key = tls::public_key(&stream)?;
-    let credentials = Credentials {
-        username: &config.username,
-        password: &config.password,
-        domain: config.domain.as_deref(),
-    };
-    credssp::authenticate(&mut stream, &server_name, &credentials, public_key).await?;
-    debug!("rdp: authenticated as {}", config.username);
+    if protocol == Security::HYBRID {
+        let public_key = tls::public_key(&stream)?;
+        let credentials = Credentials {
+            username: &config.username,
+            password: &config.password,
+            domain: config.domain.as_deref(),
+        };
+        credssp::authenticate(&mut stream, &server_name, &credentials, public_key).await?;
+        debug!("rdp: authenticated as {}", config.username);
+    } else {
+        info!("rdp: {dest} has no NLA, so the credentials go to it inside TLS alone");
+    }
 
     let (reader, mut writer) = tokio::io::split(stream);
     let mut frames = Frames::new(reader);
@@ -448,4 +498,34 @@ async fn read_frame(tcp: &mut TcpStream) -> Result<Vec<u8>> {
 /// wrapping: nothing real exceeds RDP's own 8192 a side.
 fn narrow(v: u32) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plain TLS is offered only to a target without the pipeline; one with it keeps
+    /// NLA alone.
+    #[test]
+    fn plain_tls_is_offered_only_without_the_pipeline() {
+        assert_eq!(offered(true), Security::HYBRID);
+        assert_eq!(offered(false), Security::SSL | Security::HYBRID);
+    }
+
+    #[test]
+    fn private_addresses_are_the_ones_no_internet_host_holds() {
+        for ip in [
+            "127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.64.20",
+            "169.254.1.1", "100.64.0.1", "100.127.255.255", "::1", "fd12::1", "fc00::1",
+            "fe80::1", "::ffff:192.168.1.1",
+        ] {
+            assert!(private_address(ip.parse().unwrap()), "{ip} is private");
+        }
+        for ip in [
+            "8.8.8.8", "172.32.0.1", "192.169.0.1", "100.63.255.255", "100.128.0.1",
+            "2001:4860::8888", "fec0::1", "::ffff:8.8.8.8", "0.0.0.0", "::",
+        ] {
+            assert!(!private_address(ip.parse().unwrap()), "{ip} is public");
+        }
+    }
 }

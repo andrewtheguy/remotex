@@ -75,14 +75,15 @@
 //! - **No touch.** MS-RDPEI is never asked for.
 //! - **No decoding of the pipeline.** Its codecs, H.264 among them where
 //!   [`Connect::h264`] lets the host draw with it, are the compositor's.
-//! - **NLA and nothing else.** The security negotiation offers `HYBRID` alone, so a
-//!   server that cannot do CredSSP is refused rather than logged on to some other
-//!   way.
+//! - **NLA, or TLS without the pipeline, and nothing older.** The security
+//!   negotiation offers `HYBRID`, and `SSL` beside it only when [`Connect::egfx`] is
+//!   off, as mstsc and FreeRDP do: a Windows host chooses NLA, and a server without
+//!   CredSSP, xrdp say, chooses TLS. Legacy RDP security is refused.
 //! - **No certificate verification.** Any server certificate is accepted, for the
-//!   session only and without storing it. That is defensible under NLA, where
-//!   CredSSP binds the server's TLS public key into the credential exchange so an
-//!   interceptor cannot replay the credentials; it is **not** defensible under
-//!   plain TLS security, where the credentials go to whoever answered.
+//!   session only and without storing it. Under NLA, CredSSP binds the server's TLS
+//!   public key into the credential exchange so an interceptor cannot replay the
+//!   credentials; under plain TLS nothing does, and the credentials go to whoever
+//!   answered.
 //! - **No Kerberos.** CredSSP runs NTLM with the target's user name and password.
 //! - **One monitor, or a second against it.** [`Connect::monitors`] asks for
 //!   same-sized monitors at connect, the second against the edge of the first that
@@ -99,6 +100,7 @@ pub mod proto;
 mod session;
 
 pub use camera::{Camera, CameraFeed, CameraSink, Fed};
+pub use connect::private_address;
 pub use microphone::{MicrophoneFeed, MicrophoneSink};
 pub use error::Error;
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};

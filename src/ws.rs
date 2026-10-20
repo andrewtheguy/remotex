@@ -2311,6 +2311,7 @@ mod tests {
             domain: None,
             size: Some((1, 1)),
             egfx: None,
+            public_address: None,
             virtual_displays: 1,
             camera: false,
             microphone: false,

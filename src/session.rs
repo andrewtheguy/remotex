@@ -2341,6 +2341,7 @@ mod tests {
             domain: None,
             size: Some((1, 1)),
             egfx: meta.bitmap.then_some(false),
+            public_address: None,
             virtual_displays: 1,
             camera: meta.camera,
             microphone: meta.microphone,

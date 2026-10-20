@@ -50,6 +50,7 @@ use remotex::rdp_client::proto::{channel, cliprdr, display, dvc};
 use remotex::rdp_client::proto::input::{self, Button, Event};
 use remotex::rdp_client::proto::pointer::{self, Pointer};
 use remotex::rdp_client::proto::info::ClientInfo;
+use remotex::rdp_client::private_address;
 use remotex::rdp_client::proto::share::{self, Pdu};
 use remotex::rdp_client::proto::{license, mcs, tls};
 use remotex::rdp_client::proto::x224::{
@@ -107,6 +108,13 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
         let mut tcp = TcpStream::connect((server_name.as_str(), target.port))
             .await
             .expect("connect to the host");
+        // Held to private addresses as `Connect` holds a session, since this
+        // sequence sends the credentials without it.
+        let peer = tcp.peer_addr().expect("the host's address").ip();
+        assert!(
+            target.public_address() || private_address(peer),
+            "{server_name} is at the public address {peer}; set public_address = true on the target to connect to it"
+        );
         // This end of the socket, which the Client Info PDU tells the server about.
         let client_address = tcp.local_addr().expect("the local address of the socket").ip();
 
