@@ -2315,7 +2315,6 @@ mod tests {
             video_quality: None,
             render_adaptive: None,
             virtual_display: false,
-            audio_adaptive: None,
         }
     }
 

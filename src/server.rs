@@ -674,10 +674,6 @@ struct TargetInfo {
     default_size: Option<Points>,
     /// Whether the picker offers the remote's sound as a choice.
     audio: bool,
-    /// Whether that sound's Opus rate follows the link, so the picker can say
-    /// which: the target's `audio_adaptive`, `false` where sound is no choice.
-    #[serde(rename = "audioAdaptive")]
-    audio_adaptive: bool,
     /// Whether a page whose own decoder refuses this target's passed HEVC
     /// can decode it in the software decoder this gateway serves.
     software: bool,
@@ -728,7 +724,6 @@ impl TargetInfo {
             size: target.size.map(Points::from),
             default_size: target.sized().then(|| crate::config::DEFAULT_SIZE.into()),
             audio: offers.audio,
-            audio_adaptive: offers.audio && target.audio_adaptive(),
             software: target.software(page_hevc),
             passthroughs: offers.passthrough,
             placement: offers.placement,
@@ -1095,7 +1090,6 @@ mod tests {
                 video_quality: None,
                 render_adaptive: None,
                 virtual_display: false,
-                audio_adaptive: None,
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -1283,13 +1277,13 @@ mod tests {
         // no session sizes, and no sound.
         assert_eq!(
             entry("mac"),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"audioAdaptive":false,"software":false,"passthroughs":["apple-adaptive"],"placement":false,"pipeline":false,"standardView":true,"camera":false,"microphone":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"software":false,"passthroughs":["apple-adaptive"],"placement":false,"pipeline":false,"standardView":true,"camera":false,"microphone":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win"),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"audioAdaptive":true,"software":false,"passthroughs":["rdp-graphics"],"placement":false,"pipeline":true,"standardView":false,"camera":true,"microphone":true}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"software":false,"passthroughs":["rdp-graphics"],"placement":false,"pipeline":true,"standardView":false,"camera":true,"microphone":true}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // picture is, in either codec, and is always passed, so it has no VP9 to
@@ -1297,7 +1291,7 @@ mod tests {
         let fast = entry("fast");
         assert!(
             fast.ends_with(
-                r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"audioAdaptive":false,"software":false,"passthroughs":["apple-media","apple-h264"],"placement":false,"pipeline":false,"standardView":false,"camera":false,"microphone":false}"#
+                r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"software":false,"passthroughs":["apple-media","apple-h264"],"placement":false,"pipeline":false,"standardView":false,"camera":false,"microphone":false}"#
             ),
             "{fast}"
         );
@@ -1305,15 +1299,6 @@ mod tests {
         assert!(entry("two").ends_with(r#""placement":true,"pipeline":true,"standardView":false,"camera":true,"microphone":true}"#));
         // wlshare's picture is its VP9, or its tiles with motion, both passed.
         assert!(entry("sway").ends_with(r#""passthroughs":["wlshare-vp9","wlshare-tiles-motion"],"placement":false,"pipeline":false,"standardView":false,"camera":true,"microphone":true}"#), "{}", entry("sway"));
-        // Opus held at its one rate is said so.
-        let held = crate::config::ConfigFile::parse(&format!(
-            "[server]\nsite_passwd = \"{passwd}\"\n\n{}audio_adaptive = false\n",
-            target("win", "protocol = \"rdp\"", "192.0.2.11")
-        ))
-        .expect("the target parses")
-        .targets;
-        let held = serde_json::to_string(&TargetInfo::of(&held[0], false)).unwrap();
-        assert!(held.contains(r#""audio":true,"audioAdaptive":false,"#), "{held}");
         // The page's HEVC decoder is a choice where the gateway has it and the
         // target has a Mac's picture to pass.
         assert!(entry("fast").contains(r#""software":false,"#));

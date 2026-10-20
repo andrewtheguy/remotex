@@ -248,10 +248,9 @@ impl AudioListener {
         struct State {
             encoder: OpusStream,
             waves: broadcast::Receiver<Bytes>,
-            /// The adaptive walk's verdict, written by whoever sends the packets;
-            /// `None` on a fixed-rate plan. Read here because this is the side
-            /// holding the encoder.
-            signals: Option<Arc<AudioSignals>>,
+            /// The adaptive walk's verdict, written by whoever sends the packets.
+            /// Read here because this is the side holding the encoder.
+            signals: Arc<AudioSignals>,
             /// The bitrate the encoder is actually at, so the desired rate is
             /// applied once per change rather than re-set per buffer.
             applied_bps: i32,
@@ -264,12 +263,12 @@ impl AudioListener {
         let (encoder, head) = OpusStream::new(format, plan.bitrate_bps)
             .with_context(|| format!("cannot carry {format:?} as opus"))?;
         let packet_frames = encoder.packet_frames();
-        let signals = plan.adaptive.then(|| Arc::new(AudioSignals::new(plan.bitrate_bps)));
+        let signals = Arc::new(AudioSignals::new(plan.bitrate_bps));
 
         let state = State {
             encoder,
             waves: self.waves,
-            signals: signals.clone(),
+            signals: Arc::clone(&signals),
             applied_bps: plan.bitrate_bps,
             started: tokio::time::Instant::now(),
         };
@@ -288,44 +287,39 @@ impl AudioListener {
                         // which is the link behind by the whole queue's depth — no
                         // send measurement needed to know shedding should be on,
                         // and the walk is told at the sender's next send.
-                        if let Some(signals) = &state.signals {
-                            signals.note_lag();
-                        }
+                        state.signals.note_lag();
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => return None,
                 };
-                if let Some(signals) = &state.signals {
-                    let desired = signals.desired_bps();
-                    if desired != state.applied_bps {
-                        match state.encoder.set_bitrate(desired) {
-                            Ok(()) => {
-                                info!(
-                                    "audio: opus bitrate moved to {} kbit/s (from {})",
-                                    desired / 1000,
-                                    state.applied_bps / 1000
-                                );
-                                state.applied_bps = desired;
-                            }
-                            // The stream is still perfectly good at the rate it
-                            // already had; losing the ability to adapt is not a
-                            // reason to stop the sound.
-                            Err(e) => warn!("audio: could not move the opus bitrate: {e:#}"),
+                let desired = state.signals.desired_bps();
+                if desired != state.applied_bps {
+                    match state.encoder.set_bitrate(desired) {
+                        Ok(()) => {
+                            info!(
+                                "audio: opus bitrate moved to {} kbit/s (from {})",
+                                desired / 1000,
+                                state.applied_bps / 1000
+                            );
+                            state.applied_bps = desired;
                         }
+                        // The stream is still perfectly good at the rate it
+                        // already had; losing the ability to adapt is not a
+                        // reason to stop the sound.
+                        Err(e) => warn!("audio: could not move the opus bitrate: {e:#}"),
                     }
-                    // The catch-up the operator asked for: while the link is
-                    // behind, silence is the one content whose loss cannot be
-                    // heard, so it is shed *before* the encoder instead of
-                    // queued behind everything else. The client simply receives
-                    // no packets for a while — exactly what a quiet remote
-                    // already produces — and the backlog drains by that much.
-                    if signals.behind() && is_silence(&samples) {
-                        debug!(
-                            "audio: shed {} bytes of silence so the link can catch up",
-                            samples.len()
-                        );
-                        continue;
-                    }
+                }
+                // The catch-up: while the link is behind, silence is the one
+                // content whose loss cannot be heard, so it is shed *before* the
+                // encoder instead of queued behind everything else. The client
+                // simply receives no packets for a while — exactly what a quiet
+                // remote already produces — and the backlog drains by that much.
+                if state.signals.behind() && is_silence(&samples) {
+                    debug!(
+                        "audio: shed {} bytes of silence so the link can catch up",
+                        samples.len()
+                    );
+                    continue;
                 }
                 // Four numbers, and between them they say whether this gateway is
                 // adding delay: the buffer size and the queue depth locate a backlog,
@@ -361,7 +355,7 @@ impl AudioListener {
             packet_frames,
             head,
             passthrough: false,
-            signals,
+            signals: Some(signals),
             gap: Arc::default(),
             packets: stream,
         })
@@ -375,8 +369,8 @@ impl AudioListener {
     /// queued when one is read goes in the same batch.
     ///
     /// `plan` is a remote's that codes Opus at a rate it can be told
-    /// (wlshare's), and `None` for a stream with no rate to move. An adaptive
-    /// one gets the walk's signals, as an encoder here would: the sender
+    /// (wlshare's), and `None` for a stream with no rate to move. A plan gets
+    /// the walk's signals, as an encoder here would: the sender
     /// reports its sends through them, and what the walk asks for goes to the
     /// remote ([`AudioBridge::ask_rate`]) in place of an encoder.
     ///
@@ -385,7 +379,7 @@ impl AudioListener {
     /// never saw them. [`EncodedAudio::gap`] is raised when that happens, for
     /// the sender to tell the client before the next batch.
     pub fn into_passed(self, format: PassedFormat, plan: Option<AudioPlan>) -> EncodedAudio<impl Stream<Item = Vec<Bytes>>> {
-        let signals = plan.filter(|plan| plan.adaptive).map(|plan| Arc::new(AudioSignals::new(plan.bitrate_bps)));
+        let signals = plan.map(|plan| Arc::new(AudioSignals::new(plan.bitrate_bps)));
         let gap = Arc::new(AtomicBool::new(false));
         // The flag, and whether units were lost after the batch last yielded,
         // which is a gap before the next one rather than before that one.
@@ -866,7 +860,7 @@ mod tests {
         let bridge = AudioBridge::new();
         let opus = bridge
             .take_listener()
-            .into_packets(PCM_CD_QUALITY, AudioPlan::fixed())
+            .into_packets(PCM_CD_QUALITY, AudioPlan::default())
             .expect("opus");
         assert_eq!(opus.codec, "opus");
         assert!(!opus.passthrough);
@@ -877,8 +871,7 @@ mod tests {
 
     /// A passed stream whose remote codes Opus at a rate it can be told walks
     /// as an encoder here does, and what the walk asks for is the remote's to
-    /// hear: the queue hands it to whoever passes the stream. A fixed plan has
-    /// no walk.
+    /// hear: the queue hands it to whoever passes the stream.
     #[tokio::test]
     async fn a_passed_opus_stream_walks_the_remotes_rate() {
         let bridge = AudioBridge::new();
@@ -887,7 +880,7 @@ mod tests {
         assert_eq!((passed.codec, passed.sample_rate, passed.channels, passed.packet_frames), ("opus", 48_000, 2, 960));
         assert_eq!(&passed.head[0..8], b"OpusHead");
         assert!(passed.passthrough);
-        let signals = passed.signals.expect("an adaptive plan walks");
+        let signals = passed.signals.expect("a plan walks");
         assert_eq!(signals.desired_bps(), plan.bitrate_bps);
 
         let mut asked = bridge.asked_rate();
@@ -900,9 +893,6 @@ mod tests {
         bridge.ask_rate(lower);
         assert!(asked.has_changed().unwrap());
         assert_eq!(*asked.borrow_and_update(), Some(lower));
-
-        let fixed = bridge.take_listener().into_passed(crate::vnc_audio::PASSED_OPUS, Some(AudioPlan::fixed()));
-        assert!(fixed.signals.is_none(), "a fixed rate is named once and never walked");
     }
 
     /// A passed stream that fell behind the queue says so: the units it lost
@@ -1064,9 +1054,9 @@ mod tests {
         pcm
     }
 
-    /// The adaptive plan every walk test runs on: the default Opus rate, walked.
+    /// The plan every walk test runs on.
     fn adaptive_plan() -> AudioPlan {
-        AudioPlan { bitrate_bps: 96_000, adaptive: true }
+        AudioPlan { bitrate_bps: 96_000 }
     }
 
     /// A send that blocked a packet's length: behind, to the walk.

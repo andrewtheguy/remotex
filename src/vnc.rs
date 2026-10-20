@@ -2225,7 +2225,7 @@ async fn session(
             apple,
             virtual_display,
             wlshare_audio,
-            audio_rate: config.audio_plan().bitrate_bps,
+            audio_rate: crate::config::AudioPlan::default().bitrate_bps,
             camera,
             microphone,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),

@@ -37,9 +37,9 @@ username = "me"
 password = "…"
 ```
 
-`audio_adaptive` means on this target what it means on an `rdp` one, with
-wlshare's encoder in place of the gateway's: Opus at 320 kbit/s, walked down toward the floor sound-opus fixes while the
-browser's link is behind. They tune a session started with its sound as Opus;
+Its Opus is what an `rdp` target's is, with wlshare's encoder in place of the
+gateway's: 320 kbit/s, walked down toward the floor sound-opus fixes while the
+browser's link is behind. That is a session started with its sound as Opus;
 one started with it lossless is sent FLAC, which has no rate. The
 format is chosen at the picker and is the gateway's to ask for on the wire;
 wlshare has no key for it, and neither has the target.
@@ -123,7 +123,7 @@ announces late is still taken.
   past the audio socket's 16-bit packet length, or one outside a begin and an
   end is dropped with a warning.
 - The Opus bitrate is the gateway's one rate, 320 kbit/s, named to wlshare with
-  the enable, and where `audio_adaptive` is on, the walk that would move an encoder
+  the enable, and the walk that would move an encoder
   here — sound-opus's, the crate wlshare codes with too — moves wlshare's
   instead. The pump that feeds `/ws/audio` measures how
   long its sends block, as for any target, and each rate the walk arrives at

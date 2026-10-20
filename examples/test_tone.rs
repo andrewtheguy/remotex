@@ -80,7 +80,6 @@ async fn main() {
         video_quality: None,
         render_adaptive: None,
         virtual_display: false,
-        audio_adaptive: None,
     };
 
     // The scripted engine: announce a desktop size so the SPA leaves its
