@@ -198,19 +198,11 @@ standard encodings, Tight and the other vendor or lossy ones are not listed. A w
 fallback for ordinary VNC clients. Plain VNC stays supported, and is worked on
 as needed rather than ahead of the prioritized servers.
 
-xrdp is at the same tier as plain VNC: an `rdp` target with `egfx = false` and
-nothing else, sent as the gateway's tiles at the size it opened with. The client
-offers plain TLS beside NLA, which xrdp chooses, and paints the slow-path Bitmap
-Updates it sends ([The RDP client](rdp-client.md)). The desktop, the keyboard,
-mouse and the clipboard are what it carries, checked by
-[`tests/xrdp_check.sh`](../tests/xrdp_check.sh); its sound, camera, microphone
-and pipeline are not worked on. Like plain VNC it stays supported, and is worked
-on as needed rather than ahead of the prioritized servers. Another RDP server,
-an older Windows say, may happen to work if it
-speaks what the client implements, but it is not a target: it is not tested
-against. Its picture follows Windows' rule: a pipeline it draws is passed, and
-one without the pipeline needs `egfx = false`, whose bitmap updates are sent as
-tiles by the gateway.
+Another RDP server, an older Windows or xrdp say, may happen to work if it
+speaks what the client implements ([The RDP client](rdp-client.md)), but it is
+not a target: it is not tested against. Its picture follows Windows' rule: a
+pipeline it draws is passed, and one without the pipeline needs `egfx = false`,
+whose bitmap updates are sent as tiles by the gateway.
 
 ### The client and its bundle
 
@@ -3758,8 +3750,7 @@ or counted from both memory and the database.
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
 flow and protocol engines. Containerized dummy servers cover plain VNC and
-wlshare, and xrdp through a script; RDP end-to-end probes borrow a real Windows
-host.
+wlshare; RDP end-to-end probes borrow a real Windows host.
 [Development](development.md) says how each is run.
 
 Stable headless browser tests under

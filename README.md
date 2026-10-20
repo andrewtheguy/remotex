@@ -10,7 +10,7 @@ connects to:
   Performance.
 - **Linux**, through [wlshare](https://github.com/andrewtheguy/wlshare), our own
   VNC server for wlroots compositors.
-- Other VNC servers and xrdp, through each protocol's baseline.
+- Other RDP and VNC servers, through each protocol's baseline.
 
 Windows and macOS need nothing installed on the host, only their own sharing
 switched on. The gateway serves one web page that shows the desktop, so anything
@@ -139,8 +139,6 @@ seamlessly of the three, since what RFB lacks is added to it.
 
 Every other VNC server is a plain `vnc` target reached through the RFB
 baseline: one framebuffer at 1x, not resized, no sound, tiles from the gateway.
-xrdp is an `rdp` target with `egfx = false`, at the same tier: the desktop as
-tiles from the gateway, the keyboard, mouse and clipboard, not resized, no sound.
 Another RDP server may happen to work but is not tested against. See
 [Prioritized servers](docs/architecture.md#prioritized-servers) for the
 comparison table, what they share, and what each passes.

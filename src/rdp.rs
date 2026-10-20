@@ -403,7 +403,6 @@ fn connect_config(
         username: config.username.clone(),
         password: config.password.clone(),
         domain: config.domain.clone(),
-        public_address: config.public_address(),
         width: opening.w,
         height: opening.h,
         monitors: u32::from(config.virtual_displays),

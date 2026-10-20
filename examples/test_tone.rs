@@ -76,7 +76,6 @@ async fn main() {
         domain: None,
         size: Some((640, 480)),
         egfx: None,
-        public_address: None,
         virtual_displays: 1,
         camera: false,
         microphone: false,

@@ -22,18 +22,15 @@ The only thing under that boundary not written here is the CredSSP exchange
 itself (`sspi`), because NLA is not optional on a current Windows host and NTLM is
 the one mechanism a user name and a password can drive.
 
-The target is the Remote Desktop server built into a current Windows: no legacy
-fallbacks for older hosts. Only what such a host was seen
+The target is the Remote Desktop server built into a current Windows and only
+that: no xrdp or other RDP server's behavior, and no legacy fallbacks for older
+hosts. Only what such a host was seen
 to send is implemented, and anything else — a codec, subcodec or PDU this client
 lacks — is refused by name in the log rather than guessed at, so it shows up as a
 named refusal instead of a wrong picture. What "current" has been tested against
-is Windows 10 and Windows 11. xrdp is reached with `egfx = false`, through the
-two things it does differently from Windows: it has no NLA, so it chooses plain
-TLS, and it sends its desktop as slow-path Bitmap Updates, which are painted as
-the fast path's are. It is at the tier of a plain VNC server: supported for the
-desktop, the keyboard, mouse and the clipboard, and worked on as needed.
-[`tests/xrdp_check.sh`](../tests/xrdp_check.sh) checks those against xrdp 0.10.1
-in a container. An older Windows is not a target. Where [MS-RDPBCGR] is silent
+is Windows 10 and Windows 11. An older Windows and xrdp are not targets: one that
+speaks what this client implements may happen to work, but that is neither
+tested nor promised. Where [MS-RDPBCGR] is silent
 or wrong about what such a host really does — and it is, in places, about both —
 the reference is FreeRDP's `libfreerdp/core`, and the arbiter is a real host:
 `examples/rdp_proto_probe.rs` and `examples/rdp_client_probe.rs` drive one named in the
@@ -63,11 +60,8 @@ logon, the licence, the capability exchange, and the four PDUs that make the sha
 live. `rdp_client/connect.rs` is that order, written as one function on purpose —
 the steps share nothing but the socket and what the last one said.
 
-The security negotiation offers `HYBRID`, and with `egfx = false` `SSL` beside
-it, as mstsc and FreeRDP do. A Windows host chooses NLA; a server without CredSSP, xrdp say, chooses plain TLS,
-and the credentials then travel only in the Client Info PDU, whose
-`INFO_AUTOLOGON` logs on with them. Legacy RDP security, which a server chooses
-by answering with no negotiation or with `PROTOCOL_RDP`, is refused. The TLS certificate
+The security negotiation offers `HYBRID` and nothing else, so a server that cannot
+do NLA is refused rather than logged on to some other way. The TLS certificate
 chain and host name are **not** verified, and there is no certificate prompt or
 pin. TLS therefore proves possession of the private key for the certificate the
 endpoint presented; it does not establish that the endpoint is the host the
@@ -83,22 +77,6 @@ that can itself complete authentication, or a server whose key is compromised.
 Targets therefore have to be identified by the operator's network and name
 configuration, not by this client's certificate handling. `proto/tls.rs` records
 the implementation checks.
-
-Plain TLS has no such binding, and offering it is a trade made for servers
-without CredSSP: a machine in the middle that terminates TLS itself can answer
-`SSL` for a Windows host too, and is then handed the credentials. So it is
-offered only to a target with `egfx = false`, the one setting xrdp needs; a
-target with the pipeline, which only Windows serves, offers NLA alone. The server's
-record of the offer inside TLS ([MS-RDPBCGR] 3.2.5.3.4, checked in
-`connect.rs`) catches a negotiation rewritten on its way to the real host, not
-an endpoint that is the machine in the middle. It is the trade mstsc and FreeRDP
-make by default.
-
-For the same reason the address the socket reached is checked before anything is
-sent on it: a host that is not at a private address (loopback, RFC 1918, IPv6
-unique local, link-local, or RFC 6598's 100.64.0.0/10) is refused unless its
-target sets `public_address = true`. A host name is judged by the address it
-resolved to.
 
 The socket comes from `engine::tcp_connect`, so an RDP host that goes silent is
 noticed on the same keepalive schedule as every other engine's.

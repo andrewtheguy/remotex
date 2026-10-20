@@ -80,7 +80,6 @@ const COMPRESSED: u8 = 0xF0;
 
 /// Share data PDU types this client knows by name. The rest arrive as numbers and are
 /// refused where they arrive, so that a PDU is never silently dropped.
-pub const UPDATE: u8 = 0x02;
 pub const CONTROL: u8 = 0x14;
 pub const SYNCHRONIZE: u8 = 0x1F;
 pub const SAVE_SESSION_INFO: u8 = 0x26;
