@@ -2734,6 +2734,13 @@ impl Listing {
     fn listed(&self, size: (u16, u16)) -> &[i32] {
         if self.lists(size) { &self.wlshare } else { &self.plain }
     }
+
+    /// Whether `encoding` is the wlshare picture this session lists, its VP9 or its
+    /// tiles, which [`with_wlshare_vp9`] and [`with_wlshare_tiles`] put at the head:
+    /// the other is never listed, so the server sending it is a protocol violation.
+    fn picture(&self, encoding: i32) -> bool {
+        self.wlshare[0] == encoding
+    }
 }
 
 /// `encodings` with wlshare's tiles encoding ahead of them, and beside it the dial
@@ -5937,7 +5944,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // A frame of wlshare's VP9, which is the whole desktop: passed to the browser
         // untouched, or dropped while the desktop is past the ceiling, until the list
         // the read loop sends without the encoding brings the desktop again as ZRLE.
-        ENCODING_WLSHARE_VP9 if shared.passthrough.is_some() => {
+        ENCODING_WLSHARE_VP9 if shared.passthrough.as_ref().is_some_and(|l| l.picture(ENCODING_WLSHARE_VP9)) => {
             let len = reader.read_u32().await?;
             anyhow::ensure!(
                 len <= MAX_WLSHARE_VP9_FRAME,
@@ -5961,7 +5968,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
         }
         // A rectangle of wlshare's tiles: a PNG of it, a frame of a moving region's
         // stream over it, or that stream's end, each passed to the browser untouched.
-        ENCODING_WLSHARE_TILES if shared.passthrough.is_some() => {
+        // Past the ceiling, those wlshare sent of the resized desktop before the list
+        // without them reached it are dropped while the picture is held, as the VP9's
+        // are, and refused in a session that sized the remote; the list it answers
+        // brings the whole desktop again as ZRLE.
+        ENCODING_WLSHARE_TILES if shared.passthrough.as_ref().is_some_and(|l| l.picture(ENCODING_WLSHARE_TILES)) => {
             let size = desktop.lock().unwrap().size;
             anyhow::ensure!(
                 w > 0 && h > 0 && u32::from(x) + u32::from(w) <= u32::from(size.0) && u32::from(y) + u32::from(h) <= u32::from(size.1),
@@ -5975,17 +5986,27 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 WLSHARE_TILE_START | WLSHARE_TILE_FRAME | WLSHARE_TILE_END => Some(reader.read_u8().await?),
                 other => anyhow::bail!("server sent a tiles rectangle of kind {other}, which is none of wlshare's"),
             };
+            let body = if kind == WLSHARE_TILE_END {
+                Vec::new()
+            } else {
+                let len = reader.read_u32().await?;
+                anyhow::ensure!(
+                    len > 0 && len <= MAX_WLSHARE_VP9_FRAME,
+                    "server sent a {len}-byte tiles rectangle, where one is 1 to {MAX_WLSHARE_VP9_FRAME} bytes"
+                );
+                let mut body = vec![0u8; len as usize];
+                reader.read_exact(&mut body).await?;
+                body
+            };
+            if sink.oversized() {
+                debug!("vnc: dropping a {w}x{h} tiles rectangle past the video ceiling");
+                return Ok(RectEffect::NOTHING);
+            }
+            crate::video::check_picture(size)?;
             if kind == WLSHARE_TILE_END {
                 sink.pass_region_end(stream.expect("read for its kind")).await?;
                 return Ok(RectEffect::NOTHING);
             }
-            let len = reader.read_u32().await?;
-            anyhow::ensure!(
-                len > 0 && len <= MAX_WLSHARE_VP9_FRAME,
-                "server sent a {len}-byte tiles rectangle, where one is 1 to {MAX_WLSHARE_VP9_FRAME} bytes"
-            );
-            let mut body = vec![0u8; len as usize];
-            reader.read_exact(&mut body).await?;
             match stream {
                 None => sink.pass_tile(x, y, w, h, body).await?,
                 Some(stream) => sink.pass_region(stream, x, y, w, h, kind == WLSHARE_TILE_START, body).await?,
@@ -10252,6 +10273,23 @@ mod tests {
         Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
     }
 
+    /// The lists of a session that may be sent wlshare's tiles in place of its VP9.
+    fn test_tiles_listing() -> Arc<Listing> {
+        let plan = crate::config::RenderPlan {
+            quality: 60,
+            adaptive: false,
+            apple_media: false,
+            apple_h264: false,
+            hevc_instead: false,
+            apple_standard: None, apple_combined: false,
+            rdp_graphics: false,
+            rdp_h264: false,
+            wlshare: true, wlshare_tiles: true,
+            chroma: crate::vp9::Chroma::Yuv420,
+        };
+        Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
+    }
+
     /// The same, for a session that asked for the desktop's sound: the bridge
     /// the read loop feeds is what makes the extension readable at all.
     fn test_shared_with_audio(shared: Shared, audio: &Arc<crate::audio::AudioBridge>) -> Shared {
@@ -12838,7 +12876,7 @@ mod tests {
         let (uplink, sent) = test_uplink();
         let (sink, mut rx) = sized_sink((64, 32)).await;
         let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
-        shared.passthrough = Some(test_listing());
+        shared.passthrough = Some(test_tiles_listing());
         let task = open_read_loop(wlshare_tiles_update(64, b"t1"), shared, sink);
 
         assert!(matches!(rx.recv().await, Some(ServerMsg::TilesStart { .. })));
@@ -12856,6 +12894,59 @@ mod tests {
         .await
         .expect("the fence was never echoed");
         task.abort();
+    }
+
+    /// A session lists one of wlshare's pictures, and the other arriving is refused as
+    /// any encoding not listed is: tiles in a VP9 session, VP9 in a tiles session.
+    #[tokio::test]
+    async fn the_wlshare_picture_not_listed_is_refused() {
+        for (listing, wire) in [
+            (test_listing(), wlshare_tiles_update(64, b"t1")),
+            (test_tiles_listing(), wlshare_vp9_update(64, 32, 0xa0, b"f1")),
+        ] {
+            let (uplink, _sent) = test_uplink();
+            let (sink, _rx) = sized_sink((64, 32)).await;
+            let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
+            shared.passthrough = Some(listing);
+            let err = read_loop(std::io::Cursor::new(wire), shared, false, None, sink).await.unwrap_err();
+            assert!(format!("{err:#}").contains("not advertised"), "{err:#}");
+        }
+    }
+
+    /// The tiles wlshare sends of a desktop resized past the ceiling before the list
+    /// without them reaches it are dropped while the picture is held, and refuse the
+    /// desktop in a session that sized the remote.
+    #[tokio::test]
+    async fn wlshares_tiles_past_the_ceiling_are_dropped_or_refused() {
+        let (small, big) = ((64, 32), (5376, 2288));
+        for oversize in [Oversize::Hold, Oversize::Refuse] {
+            let (uplink, sent) = test_uplink();
+            let (frame_tx, mut rx) = mpsc::channel(64);
+            let plan = crate::config::RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: true, chroma: crate::vp9::Chroma::Yuv420 };
+            let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), oversize);
+            sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
+            let mut shared = test_shared(uplink, shared_desktop(small, None, None), test_shadow(small));
+            shared.passthrough = Some(test_tiles_listing());
+            let mut wire = update(&[geometry(0, 0, big.0, big.1, ENCODING_DESKTOP_SIZE)]);
+            wire.extend_from_slice(&wlshare_tiles_update(big.0, b"t1"));
+            let result = read_loop(std::io::Cursor::new(wire), shared, false, None, sink).await;
+            match oversize {
+                Oversize::Hold => {
+                    let echo = client_fence(0, b"t1");
+                    assert!(written(&sent).windows(echo.len()).any(|window| window == echo), "the fence was not echoed");
+                }
+                _ => {
+                    let err = result.unwrap_err();
+                    assert!(format!("{err:#}").contains("will not show"), "{err:#}");
+                }
+            }
+            while let Ok(msg) = rx.try_recv() {
+                assert!(
+                    !matches!(msg, ServerMsg::TilesStart { .. } | ServerMsg::Tile(_) | ServerMsg::RegionFormat { .. } | ServerMsg::Region(_) | ServerMsg::RegionEnd { .. }),
+                    "{oversize:?}: {msg:?}"
+                );
+            }
+        }
     }
 
     /// A read loop over a connection that stays open, so a held echo is not cut off by

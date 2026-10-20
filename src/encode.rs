@@ -470,8 +470,9 @@ struct Shared {
     /// The configuration string last announced for the passed stream.
     pass_announced: Mutex<Option<(String, u8)>>,
     /// The moving regions of wlshare's tiles the browser was told of
-    /// ([`VideoSink::pass_region`]) since the tiles last started, by stream id.
-    regions: Mutex<std::collections::HashSet<u8>>,
+    /// ([`VideoSink::pass_region`]) since the tiles last started, by stream id, each
+    /// with the rectangle it started at and keeps for its life: `(x, y, w, h)`.
+    regions: Mutex<std::collections::HashMap<u8, (u16, u16, u16, u16)>>,
     /// The browser's notice that the screen is not available is to come down
     /// behind the next unit queued — see [`VideoSink::uncover`].
     uncover_owed: AtomicBool,
@@ -894,8 +895,9 @@ impl VideoSink {
     /// decoder.
     ///
     /// Held to what wlshare promises of a region — 4:2:0, profile 0, a keyframe where
-    /// and only where a stream starts, within the ceiling every passed stream is held
-    /// to ([`crate::vp9::pass`]) — and a frame of a stream the browser was not told of
+    /// and only where a stream starts, the rectangle it started at for its life,
+    /// within the ceiling every passed stream is held to ([`crate::vp9::pass`]) — and
+    /// a frame of a stream the browser was not told of
     /// since the tiles started over is dropped: one coded before a reattach or a
     /// resize, of a stream the browser no longer has.
     #[allow(clippy::too_many_arguments)]
@@ -911,10 +913,19 @@ impl VideoSink {
         {
             let mut regions = self.shared.regions.lock().unwrap();
             if start {
-                anyhow::ensure!(regions.insert(stream), "the server started region {stream} while it was live");
-            } else if !regions.contains(&stream) {
-                debug!("{}: dropping a frame of region {stream}, which the browser does not hold", self.engine);
-                return Ok(());
+                anyhow::ensure!(
+                    regions.insert(stream, (x, y, w, h)).is_none(),
+                    "the server started region {stream} while it was live"
+                );
+            } else {
+                let Some(&(rx, ry, rw, rh)) = regions.get(&stream) else {
+                    debug!("{}: dropping a frame of region {stream}, which the browser does not hold", self.engine);
+                    return Ok(());
+                };
+                anyhow::ensure!(
+                    (x, y, w, h) == (rx, ry, rw, rh),
+                    "the server sent a frame of region {stream} at {w}x{h}+{x}+{y}, where its stream is {rw}x{rh}+{rx}+{ry}"
+                );
             }
         }
         if start {
@@ -938,7 +949,7 @@ impl VideoSink {
     /// it holds the stream.
     pub async fn pass_region_end(&self, stream: u8) -> anyhow::Result<()> {
         self.tiles_begin().await?;
-        if self.shared.regions.lock().unwrap().remove(&stream) {
+        if self.shared.regions.lock().unwrap().remove(&stream).is_some() {
             self.push(Pending::Msg(ServerMsg::RegionEnd { stream, engine: 0 })).await?;
         }
         Ok(())
@@ -1920,7 +1931,8 @@ mod tests {
     }
 
     /// A region is held to what wlshare promises of one: profile 0, a keyframe where
-    /// and only where its stream starts, a stream started once, and the ceiling.
+    /// and only where its stream starts, a stream started once, its rectangle fixed,
+    /// and the ceiling.
     #[tokio::test]
     async fn a_region_wlshare_did_not_promise_is_refused() {
         let (sink, _frame_rx) = video_sink_at(1280, 800, PASSED).await;
@@ -1930,6 +1942,9 @@ mod tests {
         assert!(sink.pass_region(0, 0, 0, 3841, 64, true, region_frame(true, 100)).await.is_err(), "past the ceiling");
         sink.pass_region(0, 0, 0, 320, 320, true, region_frame(true, 100)).await.unwrap();
         assert!(sink.pass_region(0, 0, 0, 320, 320, true, region_frame(true, 100)).await.is_err(), "a stream started twice");
+        assert!(sink.pass_region(0, 64, 0, 320, 320, false, region_frame(false, 40)).await.is_err(), "a stream moved");
+        assert!(sink.pass_region(0, 0, 0, 320, 256, false, region_frame(false, 40)).await.is_err(), "a stream resized");
+        sink.pass_region(0, 0, 0, 320, 320, false, region_frame(false, 40)).await.unwrap();
     }
 
     /// A frame the remote encoded goes out as it came, behind the announcement a
