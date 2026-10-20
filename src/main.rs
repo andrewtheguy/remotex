@@ -11,8 +11,9 @@ use remotex::server;
 // its own and encodes on tokio's blocking pool, and glibc gives each allocating
 // thread an arena that keeps what it frees: over six motion sessions against one RDP
 // target the gateway sat at 289 MB between sessions and still climbing, where
-// jemalloc held 31–37 MB for the same run. Windows' heap has no such arenas.
-#[cfg(not(windows))]
+// jemalloc held 31–37 MB for the same run. The arenas are glibc's, so only Linux
+// takes jemalloc: macOS's and Windows' allocators keep the system's.
+#[cfg(target_os = "linux")]
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 

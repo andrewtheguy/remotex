@@ -161,9 +161,13 @@ export interface VideoStreamInfo {
   // Not a stream either: a Mac's Adaptive picture, decoded by this page
   // (`standardStart`). No decoder is configured and `decode` names nothing.
   standard?: boolean;
-  // Nor this: the gateway's tiles, images this page decodes (`tilesStart`). No
-  // decoder is configured and `decode` names nothing.
+  // Nor this: tiles, the gateway's or wlshare's, images this page decodes
+  // (`tilesStart`). `decode` names nothing.
   tiles?: boolean;
+  // wlshare's tiles' moving regions, a VP9 stream each: the first region's
+  // `regionFormat`, and absent until one has moved, as it always is of the
+  // gateway's tiles, which have none.
+  regions?: string;
   // Decoded by the page's WebAssembly decoder (softwareDecoder.ts) and not by
   // the browser's own: a Mac's HEVC where the browser's own does not take it.
   software?: boolean;
@@ -196,7 +200,10 @@ export function videoLabel(
     return "Not in use: the host's graphics pipeline is composed by this browser";
   }
   if (stream.tiles) {
-    return "Not in use: the gateway's tiles are images this page decodes";
+    // Every region is VP9, which the browser's own decoder decodes.
+    return stream.regions
+      ? `VP9 regions where the desktop moves (${stream.regions}), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder`
+      : "Not in use: the tiles are images this page decodes";
   }
   const strips = (stream.strips ?? 1) > 1 ? ` in ${stream.strips} strips` : "";
   const decoder = stream.software

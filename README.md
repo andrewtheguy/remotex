@@ -133,7 +133,8 @@ seamlessly of the three, since what RFB lacks is added to it.
   ours, what RFB lacks is added to it: it switches outputs, follows the window
   at its density, carries Opus or FLAC sound and the browser's camera and
   microphone, and codes its own VP9 for the gateway to pass through, adapting
-  to the browser's link. Two outputs can be shown at once, the second in a
+  to the browser's link — or, for a link with room to spare, its own exact
+  tiles with a VP9 stream for each region that moves. Two outputs can be shown at once, the second in a
   browser tab of its own (alpha).
 
 Every other VNC server is a plain `vnc` target reached through the RFB

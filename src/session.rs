@@ -2347,6 +2347,7 @@ mod tests {
             microphone: meta.microphone,
             video_quality: None,
             render_adaptive: None,
+            render_tiles: None,
             virtual_display: false,
             audio_adaptive: None,
         }

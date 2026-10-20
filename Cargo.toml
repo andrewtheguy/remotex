@@ -23,7 +23,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/apple-adaptive"]
 
 [package]
 name = "remotex"
-version = "0.0.439"
+version = "0.0.440"
 license = "MIT"
 edition = "2024"
 
@@ -214,14 +214,14 @@ hmac = "0.13"
 [build-dependencies]
 anyhow = "1"
 
-# The global allocator on every Unix build (src/main.rs): glibc's per-thread arenas
-# kept freed session memory, and the gateway grew with every session. Windows' heap
-# has no such arenas and keeps the system allocator.
+# The global allocator on Linux (src/main.rs): glibc's per-thread arenas kept freed
+# session memory, and the gateway grew with every session. macOS and Windows have no
+# glibc arenas and keep the system allocator.
 #
 # Unprefixed, so jemalloc is `malloc` itself and not only Rust's allocator: libopus
 # and libFLAC call `malloc`, and with Rust alone on jemalloc the gateway grew faster
 # than it did on glibc.
-[target.'cfg(not(windows))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = "0.7"
 tikv-jemalloc-sys = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }
 

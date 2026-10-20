@@ -624,3 +624,11 @@ password = "change-me"
 # sharpened back at it. Refused on every other target: tiles have no walk.
 #render_adaptive = true
 
+# `subtype = "wlshare"` only: have wlshare send its tiles in place of its VP9 —
+# what is still as exact PNG, and a VP9 stream of its own for each region that
+# moves, made exact again once it stops. For a link with room to spare: a
+# fraction of wlshare's encoding time and a picture that ends exact, for several
+# times the bytes. Its regions are held at `video_quality`, so it is refused
+# beside `render_adaptive`. Off by default.
+#render_tiles = false
+

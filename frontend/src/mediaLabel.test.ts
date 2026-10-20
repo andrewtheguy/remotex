@@ -177,10 +177,10 @@ test("the video row waits for the format, then names it and its decoder", () => 
     videoLabel({ decode: "", standard: true }, null),
     "Not in use: the Mac's Adaptive picture is decoded by this page",
   );
-  // The gateway's tiles are no stream.
+  // Tiles are no stream: the gateway's ever, and wlshare's until a region moves.
   assert.equal(
     videoLabel({ decode: "", tiles: true }, null),
-    "Not in use: the gateway's tiles are images this page decodes",
+    "Not in use: the tiles are images this page decodes",
   );
   assert.equal(
     videoLabel({ decode: "vp09.00.40.08" }, "size"),
@@ -193,10 +193,22 @@ test("the video row waits for the format, then names it and its decoder", () => 
   );
 });
 
+test("wlshare's tiles say what is drawn where once a region has moved, and which decoder takes the motion", () => {
+  assert.equal(
+    videoLabel(
+      { decode: "", tiles: true, regions: "vp09.00.21.08.01.06.06.06.00" },
+      null,
+    ),
+    "VP9 regions where the desktop moves (vp09.00.21.08.01.06.06.06.00), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder",
+  );
+});
+
 test("the Render row waits for the target, then names its dial", () => {
-  const plan = "tiles q90";
   assert.equal(renderLabel(""), "Waiting for the target");
-  assert.equal(renderLabel(plan), plan);
+  // The gateway's tiles, and wlshare's: the plan is said as it came.
+  for (const plan of ["tiles q90", "tiles · VP9 regions q90 · 4:2:0"]) {
+    assert.equal(renderLabel(plan), plan);
+  }
 });
 
 test("an RDP host's picture says whether it is lossless, and with what", () => {

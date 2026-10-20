@@ -312,11 +312,25 @@ pub struct BatchTile {
     pub image: Vec<u8>,
 }
 
+/// One `REGION` record parsed out of a batch frame: an access unit of a moving
+/// region's stream in wlshare's tiles, passed.
+#[allow(dead_code)]
+pub struct BatchRegion {
+    pub stream: u8,
+    pub keyframe: bool,
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub payload: Vec<u8>,
+}
+
 /// One picture record of a batch frame.
 #[allow(dead_code)]
 pub enum BatchRecord {
     Video(BatchUnit),
     Tile(BatchTile),
+    Region(BatchRegion),
 }
 
 /// The acknowledgment a browser's painter sends once it has drawn the batch `frame`,
@@ -381,6 +395,24 @@ pub fn batch_records(frame: &[u8]) -> Vec<BatchRecord> {
                 records.push(BatchRecord::Tile(BatchTile { format, x: le(2), y: le(4), w: le(6), h: le(8), image }));
                 at = start + len;
             }
+            batch::OP_REGION => {
+                let flags = frame[at + 2];
+                assert_eq!(flags & !batch::REGION_KEYFRAME, 0, "unknown region flags {flags:#x}");
+                let len = le32(11);
+                let start = at + batch::REGION_HEADER_LEN;
+                let payload = frame[start..start + len].to_vec();
+                assert!(!payload.is_empty(), "a region's unit with no payload");
+                records.push(BatchRecord::Region(BatchRegion {
+                    stream: frame[at + 1],
+                    keyframe: flags & batch::REGION_KEYFRAME != 0,
+                    x: le(3),
+                    y: le(5),
+                    w: le(7),
+                    h: le(9),
+                    payload,
+                }));
+                at = start + len;
+            }
             op => panic!("unknown record op {op}"),
         }
     }
@@ -397,6 +429,7 @@ pub fn batch_units(frame: &[u8]) -> Vec<BatchUnit> {
         .map(|record| match record {
             BatchRecord::Video(unit) => unit,
             BatchRecord::Tile(tile) => panic!("a tile at ({}, {}) in a passed stream's batch", tile.x, tile.y),
+            BatchRecord::Region(region) => panic!("region {}'s unit in a passed stream's batch", region.stream),
         })
         .collect()
 }

@@ -90,8 +90,12 @@ export interface DesktopPainter {
   startGraphics(): void;
   /** A Mac's Adaptive picture starts, for the worker to decode. */
   startStandard(): void;
-  /** The gateway's tiles start, for the worker to draw. */
+  /** Tiles start, the gateway's or wlshare's, for the worker to draw. */
   startTiles(): void;
+  /** Moving region `stream` of wlshare's tiles is announced (`regionFormat`). */
+  setRegionFormat(stream: number, format: VideoFormat): void;
+  /** Moving region `stream` has stopped (`regionEnd`). */
+  endRegion(stream: number): void;
   /** The part of the pipeline's picture this page's display is (`graphicsView`). */
   setGraphicsView(part: PicturePart): void;
   /**
@@ -263,6 +267,12 @@ export function desktopPainterFor(
     },
     startTiles() {
       post({ type: "tilesStart" });
+    },
+    setRegionFormat(stream, format) {
+      post({ type: "regionFormat", stream, format });
+    },
+    endRegion(stream) {
+      post({ type: "regionEnd", stream });
     },
     setGraphicsView(part) {
       post({ type: "graphicsView", part });

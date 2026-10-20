@@ -104,8 +104,15 @@ export type PainterCommand =
   | { type: "graphicsStart" }
   /** A Mac's Adaptive picture starts, and this worker decodes it. */
   | { type: "standardStart" }
-  /** The gateway's tiles start, and this worker draws them. */
+  /** Tiles start, the gateway's or wlshare's, and this worker draws them. */
   | { type: "tilesStart" }
+  /**
+   * Moving region `stream` of wlshare's tiles is announced (regionStreams.ts),
+   * or has stopped. Queued like a format: a region's decoder is built and
+   * retired in its place among the records.
+   */
+  | { type: "regionFormat"; stream: number; format: VideoFormat }
+  | { type: "regionEnd"; stream: number }
   /** The part of the pipeline's picture this page's display is, to show. */
   | { type: "graphicsView"; part: PicturePart }
   /**
@@ -363,6 +370,14 @@ export function createPainterWorker(
           break;
         case "tilesStart":
           queued(() => painter?.startTiles());
+          break;
+        case "regionFormat":
+          queued(() =>
+            painter?.setRegionFormat(command.stream, command.format),
+          );
+          break;
+        case "regionEnd":
+          queued(() => painter?.endRegion(command.stream));
           break;
         case "graphicsView":
           queued(() => painter?.setGraphicsView(command.part));

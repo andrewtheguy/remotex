@@ -204,6 +204,12 @@ pub struct RenderPlan {
     /// says the picture is the remote's, it is the tiles coded here. A wlshare server
     /// that ignores the listing is coded here too.
     pub wlshare: bool,
+    /// wlshare's picture is its tiles rather than its VP9
+    /// ([`TargetConfig::render_tiles`]): exact PNG tiles where the desktop is still
+    /// and a VP9 stream of its own, 4:2:0, for each region that moves, asked of the
+    /// server and passed as it comes. Set only with [`Self::wlshare`], and never with
+    /// [`Self::adaptive`]: the regions are held at [`Self::quality`].
+    pub wlshare_tiles: bool,
     /// The Mac's picture passes as it came, its HEVC:
     /// [`Passthrough::AppleMedia`], chosen at the picker. None of the fields
     /// above reach such a picture.
@@ -720,6 +726,9 @@ impl RenderPlan {
         if !self.wlshare {
             return format!("tiles q{}", self.quality);
         }
+        if self.wlshare_tiles {
+            return format!("tiles · VP9 regions q{} · {}", self.quality, self.chroma.name());
+        }
         // The walk as a suffix: the quality named before it is a ceiling the link
         // may fall below.
         let adaptive = if self.adaptive { " · adaptive" } else { "" };
@@ -962,6 +971,17 @@ pub struct TargetConfig {
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub render_adaptive: Option<bool>,
+    /// Have wlshare send its tiles in place of its VP9: the desktop as exact PNG
+    /// tiles where it is still, and a VP9 stream of its own for each region that
+    /// moves, each passed to the browser as it came. A `wlshare` target's key alone,
+    /// and off unless the operator turned it on: it is the picture for a link with
+    /// room to spare, costing wlshare a fraction of its VP9's time and ending exact
+    /// wherever the desktop stops, for several times the bytes. Its regions are held
+    /// at [`Self::video_quality`], so it takes no [`Self::render_adaptive`].
+    ///
+    /// Resolved by the accessor of the same name.
+    #[serde(default)]
+    pub render_tiles: Option<bool>,
 }
 
 /// The quality a target's picture is at when [`TargetConfig::video_quality`] is
@@ -1057,7 +1077,13 @@ impl TargetConfig {
     /// wlshare's adaptive walk, resolved: on unless the operator turned it off, and
     /// off wherever the picture is not wlshare's.
     pub fn render_adaptive(&self) -> bool {
-        self.wlshare() && self.render_adaptive.unwrap_or(true)
+        self.wlshare() && !self.render_tiles() && self.render_adaptive.unwrap_or(true)
+    }
+
+    /// wlshare's tiles in place of its VP9, resolved: off unless the operator
+    /// turned it on, and off wherever the picture is not wlshare's.
+    pub fn render_tiles(&self) -> bool {
+        self.wlshare() && self.render_tiles.unwrap_or(false)
     }
 
     /// The stream keys resolved to the one [`RenderPlan`] the engines see, so
@@ -1083,11 +1109,13 @@ impl TargetConfig {
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
         let apple_combined = self.offers().standard_view && choices.standard_view == StandardView::Combined;
         let rdp_h264 = rdp_graphics && choices.pipeline.h264() && decoders.rdp_h264;
-        let chroma = if self.wlshare() && decoders.vp9_444 { crate::vp9::Chroma::Yuv444 } else { crate::vp9::Chroma::Yuv420 };
+        // A tiles picture's regions are 4:2:0 whatever the browser takes.
+        let chroma = if self.wlshare() && !self.render_tiles() && decoders.vp9_444 { crate::vp9::Chroma::Yuv444 } else { crate::vp9::Chroma::Yuv420 };
         RenderPlan {
             quality,
             adaptive,
             wlshare: self.wlshare(),
+            wlshare_tiles: self.render_tiles(),
             apple_media,
             apple_h264,
             hevc_instead,
@@ -2032,6 +2060,20 @@ impl ConfigFile {
                 target.render_adaptive.is_none() || target.wlshare(),
                 "target {:?} is {kind} and sets render_adaptive — it walks wlshare's VP9, \
                  which only a `wlshare` target is sent. Remove the key.",
+                target.name
+            );
+            // `render_tiles` is wlshare's other picture, which nothing else sends.
+            anyhow::ensure!(
+                target.render_tiles.is_none() || target.wlshare(),
+                "target {:?} is {kind} and sets render_tiles — it asks wlshare for its tiles, \
+                 which only a `wlshare` target is sent. Remove the key.",
+                target.name
+            );
+            // The tiles' regions are held at the quality: there is no walk to turn on or off.
+            anyhow::ensure!(
+                target.render_adaptive.is_none() || !target.render_tiles(),
+                "target {:?} sets both render_tiles and render_adaptive — wlshare's tiles hold \
+                 their regions at video_quality and do not walk. Remove render_adaptive.",
                 target.name
             );
             // Which credentials a VNC target may carry is the subtype's to say:
@@ -3320,7 +3362,7 @@ mod tests {
                 apple_standard: None, apple_combined: false,
                 rdp_graphics: false,
                 rdp_h264: false,
-                wlshare: false,
+                wlshare: false, wlshare_tiles: false,
                 chroma: crate::vp9::Chroma::Yuv420,
             }
         );
@@ -3340,7 +3382,7 @@ mod tests {
                 apple_standard: None, apple_combined: false,
                 rdp_graphics: false,
                 rdp_h264: false,
-                wlshare: false,
+                wlshare: false, wlshare_tiles: false,
                 chroma: crate::vp9::Chroma::Yuv420,
             }
         );
@@ -4600,7 +4642,7 @@ vnc_password = \"x\"")).unwrap();
         for (key, adaptive) in [("render_adaptive = true", true), ("render_adaptive = false", false), ("", true)] {
             let cfg = ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 80\n{key}"))).expect("a wlshare target");
             let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-            assert_eq!(plan, RenderPlan { quality: 80, adaptive, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, chroma: crate::vp9::Chroma::Yuv444 }, "{key}");
+            assert_eq!(plan, RenderPlan { quality: 80, adaptive, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: false, chroma: crate::vp9::Chroma::Yuv444 }, "{key}");
         }
     }
 
@@ -4616,6 +4658,31 @@ vnc_password = \"x\"")).unwrap();
             assert!(format!("{err:#}").contains("render_adaptive — it walks wlshare's VP9"), "{err:#}");
         }
         assert!(parse_target("render_adaptive = true").is_err(), "the bitmap path took the key");
+    }
+
+    /// `render_tiles` asks wlshare for its tiles: off unless turned on, its regions at
+    /// 4:2:0 whatever the browser takes and held at the quality, with no walk.
+    #[test]
+    fn render_tiles_resolves_into_a_wlshare_plan() {
+        let cfg = ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nvideo_quality = 80\nrender_tiles = true")).expect("a wlshare target");
+        let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: true, chroma: crate::vp9::Chroma::Yuv420 });
+        assert_eq!(plan.describe(), "tiles · VP9 regions q80 · 4:2:0");
+        for key in ["", "render_tiles = false"] {
+            let cfg = ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\n{key}"))).expect("a wlshare target");
+            assert!(!cfg.targets[0].render_plan(Choices::default(), Decoders::ALL).wlshare_tiles, "{key}");
+        }
+    }
+
+    /// The tiles are wlshare's alone, and hold their regions at the quality: a target
+    /// that is not wlshare refuses the key, and one that asks for the tiles refuses a walk.
+    #[test]
+    fn render_tiles_is_a_wlshare_key_with_no_walk() {
+        let err = ConfigFile::parse(&vnc_toml("render_tiles = true")).unwrap_err();
+        assert!(format!("{err:#}").contains("render_tiles — it asks wlshare for its tiles"), "{err:#}");
+        let err = ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nrender_tiles = true\nrender_adaptive = false")).unwrap_err();
+        assert!(format!("{err:#}").contains("sets both render_tiles and render_adaptive"), "{err:#}");
+        ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nrender_tiles = false\nrender_adaptive = false")).expect("a walk held, with the VP9");
     }
 
     /// The floor key is gone: a settle sharpens a quiet desktop at the dial, which

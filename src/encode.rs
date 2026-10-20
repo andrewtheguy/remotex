@@ -27,7 +27,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::config::RenderPlan;
 use crate::feedback::LinkFeedback;
-use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, StandardUnit, TileUnit, VideoUnit};
+use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, RegionUnit, ServerMsg, StandardUnit, TileUnit, VideoUnit};
 use crate::shadow::Rect;
 use crate::tiles::{Coded, Format, LEVELS, Round, Tiles};
 use crate::video;
@@ -405,7 +405,7 @@ pub enum Oversize {
     /// which only the remote can do: [`VideoSink::damage`] drops what it is handed
     /// while [`VideoSink::oversized`] says so, and the browser is told
     /// ([`ServerMsg::Oversize`]). A `wlshare` target on a physical output, whose VP9
-    /// comes off the encoding list past the ceiling.
+    /// or tiles come off the encoding list past the ceiling.
     Hold,
     /// The desktop is shown at whatever size the remote has: the tiles coded here
     /// of a plain VNC server's desktop or an RDP host's bitmap path, and a
@@ -469,6 +469,10 @@ struct Shared {
     pass_restart: AtomicBool,
     /// The configuration string last announced for the passed stream.
     pass_announced: Mutex<Option<(String, u8)>>,
+    /// The moving regions of wlshare's tiles the browser was told of
+    /// ([`VideoSink::pass_region`]) since the tiles last started, by stream id, each
+    /// with the rectangle it started at and keeps for its life: `(x, y, w, h)`.
+    regions: Mutex<std::collections::HashMap<u8, (u16, u16, u16, u16)>>,
     /// The browser's notice that the screen is not available is to come down
     /// behind the next unit queued — see [`VideoSink::uncover`].
     uncover_owed: AtomicBool,
@@ -529,6 +533,7 @@ impl Shared {
             passing: AtomicBool::new(false),
             pass_restart: AtomicBool::new(true),
             pass_announced: Mutex::default(),
+            regions: Mutex::default(),
             uncover_owed: AtomicBool::new(false),
             restart_owed: AtomicBool::new(false),
             feedback: Arc::clone(&feedback),
@@ -859,6 +864,106 @@ impl VideoSink {
         self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
         self.uncover_behind().await?;
         Ok(true)
+    }
+
+    /// Queue a PNG of a rectangle of the desktop in wlshare's tiles as the next record,
+    /// untouched: the desktop's pixels there exactly, as wlshare coded them.
+    ///
+    /// wlshare's tiles are a passed picture, as its VP9 is ([`Self::pass`]): wlshare
+    /// decides what is sent, codes it and paces it by the fences the engine echoes once
+    /// [`Self::fence_hold`] says so, and none of the tiles' machinery here runs. What
+    /// is shared is the queue: each record takes its size out of [`QUEUE_BUDGET`] and
+    /// goes out in order with the messages around it. The first record after the
+    /// picture starts over ([`Self::reset_render`]) goes behind a `TilesStart`, which
+    /// tells the browser every region it held is over; the full update the engine asks
+    /// for at the same moment is what brings wlshare's whole picture.
+    pub async fn pass_tile(&self, x: u16, y: u16, w: u16, h: u16, png: Vec<u8>) -> anyhow::Result<()> {
+        self.tiles_begin().await?;
+        let bytes = png.len();
+        let held = self.hold(bytes).await;
+        self.shared.feedback.handed(tokio::time::Instant::now());
+        self.shared.png.fetch_add(1, Ordering::Relaxed);
+        self.shared.png_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        let unit = TileUnit { x, y, w, h, format: Format::Png, data: png, held, painted: Painted::default() };
+        self.push(Pending::Msg(ServerMsg::Tile(unit))).await?;
+        self.uncover_behind().await
+    }
+
+    /// Queue a frame of one moving region's VP9 stream in wlshare's tiles, `w`×`h` at
+    /// `(x, y)`, as the next record, untouched: `start` for the first of a new stream
+    /// on `stream`, a keyframe, which goes behind the `RegionFormat` that builds its
+    /// decoder.
+    ///
+    /// Held to what wlshare promises of a region — 4:2:0, profile 0, a keyframe where
+    /// and only where a stream starts, the rectangle it started at for its life,
+    /// within the ceiling every passed stream is held to ([`crate::vp9::pass`]) — and
+    /// a frame of a stream the browser was not told of
+    /// since the tiles started over is dropped: one coded before a reattach or a
+    /// resize, of a stream the browser no longer has.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn pass_region(&self, stream: u8, x: u16, y: u16, w: u16, h: u16, start: bool, frame: Vec<u8>) -> anyhow::Result<()> {
+        let passed = crate::vp9::pass(w, h, &frame, crate::vp9::Chroma::Yuv420)?;
+        anyhow::ensure!(
+            passed.keyframe == start,
+            "the server sent region {stream}'s {} as {}",
+            if start { "first frame" } else { "next frame" },
+            if passed.keyframe { "a keyframe" } else { "a frame of another" }
+        );
+        self.tiles_begin().await?;
+        {
+            let mut regions = self.shared.regions.lock().unwrap();
+            if start {
+                anyhow::ensure!(
+                    regions.insert(stream, (x, y, w, h)).is_none(),
+                    "the server started region {stream} while it was live"
+                );
+            } else {
+                let Some(&(rx, ry, rw, rh)) = regions.get(&stream) else {
+                    debug!("{}: dropping a frame of region {stream}, which the browser does not hold", self.engine);
+                    return Ok(());
+                };
+                anyhow::ensure!(
+                    (x, y, w, h) == (rx, ry, rw, rh),
+                    "the server sent a frame of region {stream} at {w}x{h}+{x}+{y}, where its stream is {rw}x{rh}+{rx}+{ry}"
+                );
+            }
+        }
+        if start {
+            self.push(Pending::Msg(ServerMsg::RegionFormat { stream, decode: passed.decode, engine: 0 })).await?;
+        }
+        let bytes = frame.len();
+        let held = self.hold(bytes).await;
+        self.shared.feedback.handed(tokio::time::Instant::now());
+        self.shared.units.fetch_add(1, Ordering::Relaxed);
+        self.shared.passed_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        if start {
+            self.shared.keyframes.fetch_add(1, Ordering::Relaxed);
+            self.shared.keyframe_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
+        let unit = RegionUnit { stream, x, y, w, h, keyframe: start, data: frame, held };
+        self.push(Pending::Msg(ServerMsg::Region(unit))).await?;
+        self.uncover_behind().await
+    }
+
+    /// Moving region `stream` of wlshare's tiles is over: the browser is told, where
+    /// it holds the stream.
+    pub async fn pass_region_end(&self, stream: u8) -> anyhow::Result<()> {
+        self.tiles_begin().await?;
+        if self.shared.regions.lock().unwrap().remove(&stream).is_some() {
+            self.push(Pending::Msg(ServerMsg::RegionEnd { stream, engine: 0 })).await?;
+        }
+        Ok(())
+    }
+
+    /// wlshare's tiles are the picture: behind a `TilesStart` where it starts over,
+    /// every region the browser held forgotten with it.
+    async fn tiles_begin(&self) -> anyhow::Result<()> {
+        self.shared.passing.store(true, Ordering::Relaxed);
+        if self.shared.pass_restart.swap(false, Ordering::Relaxed) {
+            self.shared.regions.lock().unwrap().clear();
+            self.push(Pending::Msg(ServerMsg::TilesStart { engine: 0 })).await?;
+        }
+        Ok(())
     }
 
     /// Bring the browser's notice that the screen is not available down behind the
@@ -1429,7 +1534,7 @@ mod tests {
         }
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, chroma: crate::vp9::Chroma::Yuv420 };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, wlshare_tiles: false, chroma: crate::vp9::Chroma::Yuv420 };
 
     /// A `wlshare` target's plan for a browser that decodes 4:4:4, whose stream wlshare
     /// passes at that chroma.
@@ -1761,6 +1866,85 @@ mod tests {
         let mut frame = vec![0u8; len];
         frame[0] = if keyframe { 0xa0 } else { 0xa4 };
         frame
+    }
+
+    /// A frame of a moving region in wlshare's tiles: 4:2:0, profile 0, a keyframe
+    /// or not, `len` bytes.
+    fn region_frame(keyframe: bool, len: usize) -> Vec<u8> {
+        let mut frame = vec![0u8; len];
+        frame[0] = if keyframe { 0x80 } else { 0x84 };
+        frame
+    }
+
+    /// wlshare's tiles go out as they came, the first behind the `TilesStart` that
+    /// begins the picture, a region's first frame behind the format that builds its
+    /// decoder, and its end said once; the picture is passed, so its fences are held.
+    #[tokio::test]
+    async fn wlshares_tiles_and_regions_go_out_as_they_came() {
+        let (sink, mut frame_rx) = video_sink_at(1280, 800, PASSED).await;
+        sink.pass_tile(0, 0, 1280, 64, vec![0x89, 0x50]).await.unwrap();
+        sink.pass_region(0, 64, 64, 320, 192, true, region_frame(true, 900)).await.unwrap();
+        sink.pass_region(0, 64, 64, 320, 192, false, region_frame(false, 40)).await.unwrap();
+        sink.pass_region_end(0).await.unwrap();
+        sink.pass_region_end(0).await.unwrap();
+        sink.pass_tile(64, 64, 320, 64, vec![0x89, 0x51]).await.unwrap();
+        sink.flush().await;
+        assert!(sink.passing(), "wlshare's tiles are a passed picture");
+
+        let out = drain(&mut frame_rx, 6).await;
+        assert!(matches!(out[0], ServerMsg::TilesStart { .. }), "{:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Tile(unit) if unit.format == Format::Png && (unit.x, unit.w, unit.h) == (0, 1280, 64) && unit.data == [0x89, 0x50]));
+        assert!(
+            matches!(&out[2], ServerMsg::RegionFormat { stream: 0, decode, .. } if decode == "vp09.00.20.08.01.06.06.06.00"),
+            "{:?}",
+            out[2]
+        );
+        assert!(matches!(&out[3], ServerMsg::Region(unit) if unit.keyframe && (unit.x, unit.y, unit.w, unit.h) == (64, 64, 320, 192) && unit.data.len() == 900));
+        assert!(matches!(&out[4], ServerMsg::Region(unit) if !unit.keyframe && unit.data.len() == 40));
+        assert!(matches!(out[5], ServerMsg::RegionEnd { stream: 0, .. }), "{:?}", out[5]);
+        let out = drain(&mut frame_rx, 1).await;
+        assert!(matches!(&out[0], ServerMsg::Tile(unit) if unit.data == [0x89, 0x51]), "the end was said twice: {:?}", out[0]);
+        assert!(frame_rx.try_recv().is_err());
+    }
+
+    /// A picture started over begins again behind a `TilesStart`, and a frame of a
+    /// region from before it, which the browser no longer holds, is dropped until a
+    /// stream starts on its id.
+    #[tokio::test]
+    async fn wlshares_tiles_start_over_without_the_regions_before() {
+        let (sink, mut frame_rx) = video_sink_at(1280, 800, PASSED).await;
+        sink.pass_region(1, 0, 0, 320, 320, true, region_frame(true, 500)).await.unwrap();
+        sink.flush().await;
+        assert_eq!(drain(&mut frame_rx, 3).await.len(), 3);
+        sink.reset_render();
+        sink.pass_region(1, 0, 0, 320, 320, false, region_frame(false, 40)).await.unwrap();
+        sink.pass_region_end(1).await.unwrap();
+        sink.pass_tile(0, 0, 1280, 800, vec![0x89]).await.unwrap();
+        sink.pass_region(1, 0, 0, 640, 320, true, region_frame(true, 600)).await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 4).await;
+        assert!(matches!(out[0], ServerMsg::TilesStart { .. }), "{:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Tile(_)), "{:?}", out[1]);
+        assert!(matches!(&out[2], ServerMsg::RegionFormat { stream: 1, .. }), "{:?}", out[2]);
+        assert!(matches!(&out[3], ServerMsg::Region(unit) if unit.keyframe && unit.w == 640));
+        assert!(frame_rx.try_recv().is_err(), "a region from before the start went out");
+    }
+
+    /// A region is held to what wlshare promises of one: profile 0, a keyframe where
+    /// and only where its stream starts, a stream started once, its rectangle fixed,
+    /// and the ceiling.
+    #[tokio::test]
+    async fn a_region_wlshare_did_not_promise_is_refused() {
+        let (sink, _frame_rx) = video_sink_at(1280, 800, PASSED).await;
+        assert!(sink.pass_region(0, 0, 0, 320, 320, true, passed_frame(true, 100)).await.is_err(), "profile 1");
+        assert!(sink.pass_region(0, 0, 0, 320, 320, true, region_frame(false, 100)).await.is_err(), "a start that is no keyframe");
+        assert!(sink.pass_region(0, 0, 0, 320, 320, false, region_frame(true, 100)).await.is_err(), "a keyframe that starts nothing");
+        assert!(sink.pass_region(0, 0, 0, 3841, 64, true, region_frame(true, 100)).await.is_err(), "past the ceiling");
+        sink.pass_region(0, 0, 0, 320, 320, true, region_frame(true, 100)).await.unwrap();
+        assert!(sink.pass_region(0, 0, 0, 320, 320, true, region_frame(true, 100)).await.is_err(), "a stream started twice");
+        assert!(sink.pass_region(0, 64, 0, 320, 320, false, region_frame(false, 40)).await.is_err(), "a stream moved");
+        assert!(sink.pass_region(0, 0, 0, 320, 256, false, region_frame(false, 40)).await.is_err(), "a stream resized");
+        sink.pass_region(0, 0, 0, 320, 320, false, region_frame(false, 40)).await.unwrap();
     }
 
     /// A frame the remote encoded goes out as it came, behind the announcement a

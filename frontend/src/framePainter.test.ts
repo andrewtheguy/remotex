@@ -1802,3 +1802,238 @@ test("a malformed batch of tiles asks for the whole picture", async () => {
   assert.deepEqual(cropped, []);
   assert.match(videoKeyframeAsks[0] ?? "", /malformed/);
 });
+
+// wlshare's tiles with their moving regions (regionStreams.ts): TILE records as
+// above, and REGION records transcribed from `RegionUnit::write_record` in
+// src/protocol.rs: op 0x07, the stream, the flags (0x01 a keyframe), x, y, w and
+// h as u16, a u32 length, the unit, little-endian.
+type TilesRecord =
+  | { tile: [number, number, number, number]; image: number[] }
+  | {
+      region: number;
+      at: [number, number, number, number];
+      keyframe: boolean;
+      payload: number[];
+    };
+
+function regionsFrame(records: TilesRecord[]): ArrayBuffer {
+  const bytes: number[] = [];
+  const u16 = (n: number) => bytes.push(n & 0xff, (n >> 8) & 0xff);
+  const u32 = (n: number) =>
+    bytes.push(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff);
+  bytes.push(0x02, 0x00);
+  u16(records.length);
+  u32(1);
+  for (const record of records) {
+    if ("tile" in record) {
+      bytes.push(0x06, 0x02);
+      record.tile.forEach(u16);
+      u32(record.image.length);
+      bytes.push(...record.image);
+    } else {
+      bytes.push(0x07, record.region, record.keyframe ? 0x01 : 0x00);
+      record.at.forEach(u16);
+      u32(record.payload.length);
+      bytes.push(...record.payload);
+    }
+  }
+  return new Uint8Array(bytes).buffer;
+}
+
+/** A desktop's context that records each draw's source, place and clip. */
+function regionContext() {
+  const draws: string[] = [];
+  let clip = "";
+  const saved: string[] = [];
+  const ctx = {
+    save() {
+      saved.push(clip);
+    },
+    restore() {
+      clip = saved.pop() ?? "";
+    },
+    beginPath() {},
+    rect(x: number, y: number, w: number, h: number) {
+      clip = ` clip ${x},${y} ${w}x${h}`;
+    },
+    clip() {},
+    drawImage(source: { tag?: number }, ...args: number[]) {
+      // Drawn whole at its place: the clip is what cuts it.
+      assert.equal(args.length, 2);
+      const what = source.tag === undefined ? "frame" : `tile${source.tag}`;
+      draws.push(`${what} ${args[0]},${args[1]}${clip}`);
+    },
+  };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, draws };
+}
+
+function regionPainter(ctx: CanvasRenderingContext2D, regionRetireMs = 0) {
+  return createFramePainter({
+    context: () => ctx,
+    onVideoError: (error) => {
+      videoErrors.push(error);
+    },
+    onVideoNeedsKeyframe: (reason) => {
+      videoKeyframeAsks.push(reason);
+    },
+    regionRetireMs,
+  });
+}
+
+const REGION = "vp09.00.21.08.01.06.06.06.00";
+const waited = (ms: number) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+test("wlshare's regions are decoded by their own decoders and drawn cut to their rectangles, in wire order among the tiles", async () => {
+  const { ctx, draws } = regionContext();
+  const p = regionPainter(ctx);
+  p.startTiles();
+  p.setRegionFormat(1, { decode: REGION });
+  p.setRegionFormat(2, { decode: "vp09.00.10.08.01.06.06.06.00" });
+  // The first tile decodes last, and is still drawn first.
+  decodeDelay.set(1, 20);
+  await p.draw(
+    regionsFrame([
+      { tile: [0, 0, 64, 64], image: [1] },
+      { region: 1, at: [10, 20, 33, 17], keyframe: true, payload: KEYFRAME },
+      { tile: [64, 0, 64, 64], image: [2] },
+      { region: 2, at: [100, 100, 16, 16], keyframe: true, payload: KEYFRAME },
+    ]),
+  );
+  assert.deepEqual(draws, [
+    "tile1 0,0",
+    "frame 10,20 clip 10,20 33x17",
+    "tile2 64,0",
+    "frame 100,100 clip 100,100 16x16",
+  ]);
+  assert.deepEqual(configured, [REGION, "vp09.00.10.08.01.06.06.06.00"]);
+  // A stream's units after its keyframe go to its own decoder, in its chain.
+  await p.draw(
+    regionsFrame([
+      { region: 1, at: [10, 20, 33, 17], keyframe: false, payload: [0x01] },
+    ]),
+  );
+  assert.equal(draws.at(-1), "frame 10,20 clip 10,20 33x17");
+  assert.equal(decoders, 2);
+  assert.deepEqual(chunkTypes, ["key", "key", "delta"]);
+  assert.ok(
+    decoded.every((frame) => frame.closed),
+    "a drawn frame is let go",
+  );
+  assert.deepEqual(videoKeyframeAsks, []);
+});
+
+test("a region of no stream this page was told of, or of no picture of tiles, is dropped", async () => {
+  const { ctx, draws } = regionContext();
+  const p = regionPainter(ctx);
+  const region = (stream: number) =>
+    regionsFrame([
+      { region: stream, at: [0, 0, 16, 16], keyframe: true, payload: KEYFRAME },
+    ]);
+  // Before any `tilesStart`: the format and its unit are of a picture this page
+  // is not on.
+  p.setRegionFormat(1, { decode: REGION });
+  await p.draw(region(1));
+  p.startTiles();
+  await p.draw(region(1));
+  // And a stream never announced: from before the `tilesStart` of a reattach.
+  p.setRegionFormat(2, { decode: REGION });
+  await p.draw(region(3));
+  assert.deepEqual(draws, []);
+  assert.equal(decoders, 0);
+  assert.deepEqual(videoKeyframeAsks, []);
+  assert.deepEqual(
+    videoErrors.filter((error) => error !== null),
+    [],
+  );
+});
+
+test("a region that ended draws nothing more, and its decoder serves its id started again or retires", async () => {
+  const { ctx, draws } = regionContext();
+  const p = regionPainter(ctx, 10);
+  const region = (keyframe: boolean) =>
+    regionsFrame([
+      { region: 1, at: [0, 0, 16, 16], keyframe, payload: KEYFRAME },
+    ]);
+  p.startTiles();
+  p.setRegionFormat(1, { decode: REGION });
+  await p.draw(region(true));
+  p.endRegion(1);
+  await p.draw(region(false));
+  assert.equal(draws.length, 1, "a unit after its stream's end");
+  // The id started again at the same size before the decoder retired: the
+  // same decoder, from the new stream's keyframe.
+  p.setRegionFormat(1, { decode: REGION });
+  await p.draw(region(true));
+  assert.equal(draws.length, 2);
+  assert.deepEqual([decoders, closes], [1, 0]);
+  p.endRegion(1);
+  await waited(20);
+  assert.equal(closes, 1, "the decoder retired");
+  // Started again after that, it is built again.
+  p.setRegionFormat(1, { decode: REGION });
+  await p.draw(region(true));
+  assert.deepEqual([decoders, draws.length], [2, 3]);
+});
+
+test("a tiles picture started over ends every region of the one before, and a video format ends them too", async () => {
+  const { ctx, draws } = regionContext();
+  const p = regionPainter(ctx);
+  const region = (stream: number) =>
+    regionsFrame([
+      { region: stream, at: [0, 0, 16, 16], keyframe: true, payload: KEYFRAME },
+    ]);
+  p.startTiles();
+  p.setRegionFormat(1, { decode: REGION });
+  p.setRegionFormat(2, { decode: REGION });
+  await p.draw(region(1));
+  await p.draw(region(2));
+  assert.deepEqual([decoders, closes], [2, 0]);
+  p.startTiles();
+  assert.equal(closes, 2);
+  await p.draw(region(1));
+  assert.equal(draws.length, 2, "a region of the picture before");
+  p.setRegionFormat(3, { decode: REGION });
+  await p.draw(region(3));
+  assert.equal(draws.length, 3);
+  p.setVideoFormat({ decode: "vp09.00.40.08.01.06.06.06.00" });
+  assert.equal(closes, 3);
+  p.setRegionFormat(3, { decode: REGION });
+  await p.draw(region(3));
+  assert.equal(draws.length, 3, "a region under a stream");
+  // And the attachment's end.
+  p.startTiles();
+  p.setRegionFormat(4, { decode: REGION });
+  await p.draw(region(4));
+  p.clear();
+  assert.equal(closes, decoders);
+});
+
+test("a malformed batch cuts every region's chain and asks for the whole picture", async () => {
+  const { ctx, draws } = regionContext();
+  const p = regionPainter(ctx);
+  p.startTiles();
+  p.setRegionFormat(1, { decode: REGION });
+  await p.draw(
+    regionsFrame([
+      { region: 1, at: [0, 0, 16, 16], keyframe: true, payload: KEYFRAME },
+    ]),
+  );
+  // A REGION record with a flag this client does not know.
+  const bad = new Uint8Array(
+    regionsFrame([
+      { region: 1, at: [0, 0, 16, 16], keyframe: true, payload: KEYFRAME },
+    ]),
+  );
+  bad[10] = 0x02;
+  await p.draw(bad.buffer);
+  assert.match(videoKeyframeAsks[0] ?? "", /malformed/);
+  // The delta after it names a picture no decoder has now.
+  await p.draw(
+    regionsFrame([
+      { region: 1, at: [0, 0, 16, 16], keyframe: false, payload: [0x01] },
+    ]),
+  );
+  assert.equal(draws.length, 1);
+  assert.deepEqual(chunkTypes, ["key"]);
+});

@@ -1446,7 +1446,9 @@ export function useRemoteDesktop(
         (msg.type === "videoFormat" ||
           msg.type === "graphicsStart" ||
           msg.type === "standardStart" ||
-          msg.type === "tilesStart") &&
+          msg.type === "tilesStart" ||
+          msg.type === "regionFormat" ||
+          msg.type === "regionEnd") &&
         msg.engine <= endedEngines
       ) {
         return;
@@ -2334,9 +2336,30 @@ export function useRemoteDesktop(
           break;
         case "tilesStart":
           // Queued the same way: the picture's first tile must find no decoder or
-          // compositor standing.
+          // compositor standing, a moving region's of the tiles before included.
           painter()?.startTiles();
-          setVideoStream({ decode: "", tiles: true });
+          // wlshare's tiles started over on a resize or a reattach move their
+          // regions as the last ones did, so what the card says of them stands.
+          setVideoStream((prev) =>
+            prev?.tiles && prev.regions ? prev : { decode: "", tiles: true },
+          );
+          break;
+        case "regionFormat":
+          // Queued the same way, behind the frames already posted: the region's
+          // decoder is built ahead of its first unit, in its place among the
+          // records.
+          painter()?.setRegionFormat(msg.stream, { decode: msg.decode });
+          // The card names the first region's configuration: every region is
+          // the same VP9 at another size.
+          setVideoStream((prev) =>
+            prev?.tiles && !prev.regions
+              ? { ...prev, regions: msg.decode }
+              : prev,
+          );
+          break;
+        case "regionEnd":
+          // And retired in its place, after its last unit is drawn.
+          painter()?.endRegion(msg.stream);
           break;
         case "hostPicture":
           setHostPicture({ exact: msg.exact, codecs: msg.codecs });

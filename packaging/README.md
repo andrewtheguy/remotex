@@ -151,10 +151,10 @@ libopus build in `build-tarball.sh`.
 
 The C libraries built from source are SQLite, for `[meter]`, through `rusqlite`'s
 `bundled` feature, and jemalloc, through `tikv-jemallocator`.
-jemalloc is the global allocator on Unix and is linked with unprefixed `malloc` symbols,
+jemalloc is the global allocator on Linux and is linked with unprefixed `malloc` symbols,
 so allocations in libopus and libFLAC use it as well as Rust allocations. The build
-environment must provide a C compiler and `make`. Windows continues to use its
-system heap.
+environment must provide a C compiler and `make`. macOS and Windows, which have no
+glibc arenas, keep their system allocators.
 
 The choice is based on a 2026-09-12 comparison of six consecutive motion-heavy
 sessions against one RDP target. The observed process footprint reached 289 MB
