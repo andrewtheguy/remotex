@@ -2312,11 +2312,8 @@ mod tests {
             size: Some((1, 1)),
             egfx: None,
             virtual_displays: 1,
-            camera: false,
-            microphone: false,
             video_quality: None,
             render_adaptive: None,
-            render_tiles: None,
             virtual_display: false,
             audio_adaptive: None,
         }

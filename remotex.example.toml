@@ -176,20 +176,20 @@ site_passwd = ""
 # profile is served; the browser picks one from a picker after login (there is
 # no --target selector).
 #
-# Four things about a session are not keys here. Whoever starts it chooses them
+# What a session is started with is not a key here. Whoever starts it chooses it
 # at the picker: picking a target opens it, its options show under it, and Start
 # connects with what is chosen. They hold for the life of the session — a browser
 # that takes it over gets it as it was started — and the browser remembers them
 # per target for the next time. Which a target shows is its type's to say:
 #
-#   target                           window   sound            passthrough   graphics
-#   rdp                              yes      shown            always        shown
-#   rdp with egfx = false            —        shown            —             —
-#   vnc                              —        —                —             —
-#   vnc, wlshare                     yes      shown            —             —
-#   vnc, ard                         —        —                shown         —
-#   vnc, ard with virtual_display    yes      —                shown         —
-#   vnc, ard-high-performance        yes      always carried   shown         —
+#   target                           window   sound            passthrough   graphics   camera, microphone
+#   rdp                              yes      shown            always        shown      shown
+#   rdp with egfx = false            —        shown            —             —          shown
+#   vnc                              —        —                —             —          —
+#   vnc, wlshare                     yes      shown            shown         —          shown
+#   vnc, ard                         —        —                shown         —          —
+#   vnc, ard with virtual_display    yes      —                shown         —          —
+#   vnc, ard-high-performance        yes      always carried   shown         —          —
 #
 # A Standard "ard" target on the Mac's physical screens also shows Displays: one
 # screen at a time (beta), in the picture chosen above, or Combined (alpha), every
@@ -238,11 +238,19 @@ site_passwd = ""
 #
 # Passthrough sends the remote's own stream to the browser as it came: an
 # "ard-high-performance" Mac's HEVC, for a LAN, where it is a choice greyed for a
-# browser that cannot take it, or an "rdp" host's graphics pipeline for the page
-# to compose, which is no choice: with `egfx` on every session passes it, and a
-# browser that cannot compose it cannot start the target. Each is described with
-# its target below. A browser that cannot take a session somebody else started
-# is shown why and offered End session, not a different session.
+# browser that cannot take it, or its H.264; a "wlshare" target's VP9, or its
+# tiles with motion; an "ard" Mac's Adaptive picture; or an "rdp" host's graphics
+# pipeline for the page to compose, which is no choice: with `egfx` on every
+# session passes it, and a browser that cannot compose it cannot start the
+# target. Each is described with its target below. A browser that cannot take a
+# session somebody else started is shown why and offered End session, not a
+# different session.
+#
+# Camera and Microphone, EXPERIMENTAL, offer the remote this browser's devices, on
+# an "rdp" target over MS-RDPECAM and MS-RDPEAI and on a "wlshare" target over
+# wlshare's extensions: the tick is the offer, and the session's floating menu
+# turns the device on, per session. Described under Camera and microphone in
+# docs/guide.md.
 #
 # Graphics is how an "rdp" host draws its pipeline: High quality, the pipeline's
 # codecs without H.264, for a LAN, where a slow link
@@ -330,8 +338,8 @@ password = "change-me"
 # The compositor is the gateway's own and is tested as it is there,
 # and what is passed is checked against a real host, in a headless browser and by
 # hand. That is a physical Windows 11 computer, from a desktop browser and from a
-# mobile browser on iOS, with sound and the clipboard beside it; `camera` and `microphone`
-# beside it have not been tried.
+# mobile browser on iOS, with sound and the clipboard beside it; the camera and the
+# microphone beside it have not been tried.
 #egfx = true
 
 # ALPHA. Ask the host for this many virtual displays, each the session's size.
@@ -400,41 +408,6 @@ password = "change-me"
 # the Mac's own AAC-ELD.
 #audio_adaptive = true
 
-# Camera redirection: offer the remote a virtual webcam whose frames are this
-# browser's, over MS-RDPECAM on "rdp" — or, on a "wlshare" target, over
-# wlshare's camera extension, which makes it a PipeWire camera on the wlroots
-# desktop (see docs/wlshare-camera.md). The rest of this note is about RDP.
-# EXPERIMENTAL. The socket's rules, its messages, and both channel wires are
-# checked, and the wlshare path has container coverage. Only a Windows host that
-# creates the camera enumeration channel has anywhere to test the RDP path: a
-# workstation, or a Windows Server carrying the Remote Desktop Session Host role.
-# `a_real_host_streams_the_camera` carries H.264 frames to such a host, but it is
-# ignored by default and does not check the pixels the host displays. The RDP
-# picture is verified by hand against such a host.
-#
-# Capability only. The device appears when a client turns the camera on from the
-# floating menu — explicitly, per session, never remembered — and is unplugged
-# when that client closes it, the session changes hands, or the engine ends. The
-# browser encodes H.264 and the gateway passes it through untranscoded, so there
-# is no codec key beside this one. Apple's Screen Sharing and a plain "vnc"
-# server have nowhere to put a camera, so those targets refuse the key rather
-# than ignoring it. A Windows Server without the
-# RDSH role never creates the enumeration channel, so an enabled camera against
-# one is simply never asked for a frame.
-#camera = false
-
-# Microphone redirection: offer the remote this browser's microphone over
-# MS-RDPEAI on "rdp" — or, on a "wlshare" target, over wlshare's microphone
-# extension, which makes it a PipeWire audio source on the wlroots desktop (see
-# docs/wlshare-microphone.md). EXPERIMENTAL, like `camera`. Capability only: the recording
-# device is fed when a client turns the microphone on from the floating menu —
-# per session, never remembered. The browser sends mono speech Opus at a fixed
-# low bitrate and the gateway decodes it to the PCM the host records in, so there
-# is no codec or quality key beside this one. The host starts recording only
-# once an application on it does. An Apple target and a plain "vnc" target
-# refuse the key.
-#microphone = false
-
 # A plain VNC target needs host and, usually, one of the two passwords; domain is
 # refused, and it is asked once for `size`, or 1440×900, as above.
 # `vnc_password` is the server's own password and is all a server without user
@@ -450,8 +423,8 @@ password = "change-me"
 # `subtype = "wlshare"`, which makes the gateway list wlshare's extensions: its own
 # VP9 stream, passed to the browser untouched; its pixel density, so a `scale 2`
 # output is shown at 2x and a window it follows is asked for in points × scale; its
-# output list; its sound, in a session started with it; and, with the keys above,
-# the camera and the microphone.
+# output list; its sound, in a session started with it; and, in a session started
+# with them at the picker, the camera and the microphone.
 # Without the subtype the same server is a plain target, read as any VNC server
 # is. With a username and password, wlshare checks the account it runs as through
 # PAM over RSA-AES, encrypting the session; a password_file on the server is its
@@ -594,7 +567,7 @@ password = "change-me"
 # changed tile of few colours sent exactly as PNG and any other as JPEG, sent again
 # exactly as PNG once it has stopped changing. Tiles go as fast as the browser
 # paints them, and a change the link would take too long to carry comes first as a
-# coarse JPEG that sharpens to the exact picture once it is still. A `wlshare` target's picture is wlshare's own VP9, passed through.
+# coarse JPEG that sharpens to the exact picture once it is still. A `wlshare` target's picture is wlshare's own, passed through: its VP9, or its tiles with motion, chosen at the picker.
 # A passed Mac media stream or RDP graphics pipeline keeps the remote's own quality,
 # so the keys are refused on "ard-high-performance", but for `video_quality` on an
 # "ard" target, which is the quality of the gateway's tiles of the Mac's Full
@@ -613,14 +586,8 @@ password = "change-me"
 # `subtype = "wlshare"` only: wlshare's VP9 walks `video_quality` on the browser's
 # queueing — on unless this turns it off, which holds wlshare at `video_quality`.
 # The configured quality remains the ceiling, and a desktop that has gone quiet is
-# sharpened back at it. Refused on every other target: tiles have no walk.
+# sharpened back at it. Refused on every other target: tiles have no walk, and
+# nor have wlshare's tiles with motion, chosen at the picker, which hold their
+# regions at `video_quality` whatever this says.
 #render_adaptive = true
-
-# `subtype = "wlshare"` only: have wlshare send its tiles in place of its VP9 —
-# what is still as exact PNG, and a VP9 stream of its own for each region that
-# moves, made exact again once it stops. For a link with room to spare: a
-# fraction of wlshare's encoding time and a picture that ends exact, for several
-# times the bytes. Its regions are held at `video_quality`, so it is refused
-# beside `render_adaptive`. Off by default.
-#render_tiles = false
 

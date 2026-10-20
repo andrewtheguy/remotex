@@ -5,7 +5,9 @@
 //! private one. Pseudo-encoding [`ENCODING`] (`WLSM`) and message type
 //! [`MSG_MICROPHONE`] are the whole of it, in both directions:
 //!
-//! - A target with `microphone = true` lists the pseudo-encoding in `SetEncodings`.
+//! - A session started with the microphone offered
+//!   ([`crate::config::Choices::microphone`], the picker's Microphone tick) lists the
+//!   pseudo-encoding in `SetEncodings`.
 //!   wlshare answers with an *available* message; any other server ignores the
 //!   encoding and says nothing, and the microphone the browser enables is then never
 //!   plugged.

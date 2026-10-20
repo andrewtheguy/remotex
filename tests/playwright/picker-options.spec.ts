@@ -126,6 +126,8 @@ test.describe("the picker's options", () => {
         placement: "right",
         pipeline: "adaptive-region",
         standardView: "one",
+        camera: false,
+        microphone: false,
       },
     ]);
     const connected = seen.statuses.at(-1);

@@ -5,9 +5,9 @@ wlshare, on the RFB connection the session already has, so a `wlshare` target ca
 take a microphone the way an RDP one does over MS-RDPEAI. The audio extension
 ([`wlshare-audio.md`](wlshare-audio.md)) carries sound from the server only, so
 this private extension is the camera's twin
-([`wlshare-camera.md`](wlshare-camera.md)). A `wlshare` target with
-`microphone = true` lists a pseudo-encoding and wlshare answers that it takes a
-microphone; until it answers, the browser's microphone is never plugged.
+([`wlshare-camera.md`](wlshare-camera.md)). A `wlshare` session started with
+the picker's Microphone tick lists a pseudo-encoding and wlshare answers that it
+takes a microphone; until it answers, the browser's microphone is never plugged.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare), which offers
 the PCM to the desktop as a PipeWire `Audio/Source` node, "wlshare remote
@@ -24,16 +24,16 @@ protocol = "vnc"
 subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
-microphone = true
 ```
 
-`subtype = "wlshare"` says the server is wlshare, and `microphone = true` is what
-makes the gateway list the extension to it. The key is accepted on a `wlshare`
-target and refused on a plain `vnc` target and on both Apple subtypes. As on RDP
-it is capability only: the microphone is plugged when a browser enables it from the
-floating menu, per session and never remembered, and unplugged when that socket
-closes, the session changes hands, or the engine ends. wlshare's own `microphone`
-key (default `false`) is the server's side of the same switch.
+`subtype = "wlshare"` says the server is wlshare, and the picker's Microphone
+tick (experimental), carried by `connect` as `choices.microphone`, is what makes
+the gateway list the extension to it in that session. The tick is offered on a
+`wlshare` target and refused on a plain `vnc` target and on both Apple subtypes.
+As on RDP it is the offer only: the microphone is plugged when a browser enables
+it from the floating menu, per session and never remembered, and unplugged when
+that socket closes, the session changes hands, or the engine ends. wlshare's own
+`microphone` key (default `false`) is the server's side of the same switch.
 
 ## The wire
 

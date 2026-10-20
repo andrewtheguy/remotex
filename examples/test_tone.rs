@@ -77,11 +77,8 @@ async fn main() {
         size: Some((640, 480)),
         egfx: None,
         virtual_displays: 1,
-        camera: false,
-        microphone: false,
         video_quality: None,
         render_adaptive: None,
-        render_tiles: None,
         virtual_display: false,
         audio_adaptive: None,
     };

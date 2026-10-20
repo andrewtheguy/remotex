@@ -97,8 +97,8 @@ pub enum Subtype {
     /// listed. Its picture is its own VP9 stream, passed to the browser untouched
     /// ([`crate::vnc`]), the output's pixel density and the compositor's output
     /// list come over extensions of their own, and a session started with sound,
-    /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] ask for the
-    /// extensions that carry them.
+    /// the camera ([`Choices::camera`]) or the microphone ([`Choices::microphone`])
+    /// asks for the extensions that carry them.
     ///
     /// The subtype is what lists any of it. A plain `vnc` target pointed at the
     /// same server lists none, and wlshare serves it as it serves any VNC client:
@@ -199,17 +199,19 @@ pub struct RenderPlan {
     /// the tiles coded here follow the browser's painting at the one quality, with a
     /// coarse first pass on a slow link.
     pub adaptive: bool,
-    /// The picture is wlshare's own VP9 ([`Self::chroma`]), asked of a `wlshare`
+    /// The picture is wlshare's own, its VP9 ([`Passthrough::WlshareVp9`],
+    /// [`Self::chroma`]) or its tiles ([`Self::wlshare_tiles_motion`]), asked of a `wlshare`
     /// target's server and passed as it comes; otherwise, where no passthrough below
     /// says the picture is the remote's, it is the tiles coded here. A wlshare server
     /// that ignores the listing is coded here too.
     pub wlshare: bool,
     /// wlshare's picture is its tiles rather than its VP9
-    /// ([`TargetConfig::render_tiles`]): exact PNG tiles where the desktop is still
-    /// and a VP9 stream of its own, 4:2:0, for each region that moves, asked of the
-    /// server and passed as it comes. Set only with [`Self::wlshare`], and never with
-    /// [`Self::adaptive`]: the regions are held at [`Self::quality`].
-    pub wlshare_tiles: bool,
+    /// ([`Passthrough::WlshareTilesMotion`], chosen at the picker): exact PNG tiles where the
+    /// desktop is still and a VP9 stream of its own, 4:2:0, for each region that
+    /// moves, asked of the server and passed as it comes. Set only with
+    /// [`Self::wlshare`], and never with [`Self::adaptive`]: the regions are held at
+    /// [`Self::quality`].
+    pub wlshare_tiles_motion: bool,
     /// The Mac's picture passes as it came, its HEVC:
     /// [`Passthrough::AppleMedia`], chosen at the picker. None of the fields
     /// above reach such a picture.
@@ -257,15 +259,16 @@ pub struct RenderPlan {
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
-/// here and encoded as VP9. Which a target has to pass is its type's to say
+/// here and coded as the tiles. Which a target has to pass is its type's to say
 /// ([`TargetConfig::offers`]); which a session passes is chosen at the picker
 /// ([`Choices::passthrough`]) where [`Self::chosen`] says it is, and otherwise
-/// it passes in every session. A target that offers one has no picture encoded
-/// here.
+/// it passes in every session not started with another
+/// ([`TargetConfig::passthrough`]).
 ///
 /// The stream is the remote's own, with no quality walk of this gateway's
 /// behind it, so [`TargetConfig::video_quality`] and the adaptive keys do not
-/// reach a passed picture.
+/// reach a passed picture, but wlshare's: wlshare is told the dial and the walk
+/// its plan resolves to ([`RenderPlan`]), and codes to them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Passthrough {
@@ -284,8 +287,8 @@ pub enum Passthrough {
     /// host, by the probe, by a headless browser and by hand. That is a physical
     /// Windows 11 computer, from a desktop browser and from a mobile browser on iOS, with sound
     /// and the clipboard beside it;
-    /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] beside it have not
-    /// been tried.
+    /// the camera and the microphone ([`Choices::camera`], [`Choices::microphone`])
+    /// beside it have not been tried.
     RdpGraphics,
     /// A High Performance Mac's picture as its HEVC, Range Extensions 4:4:4.
     /// Offered by `ard-high-performance` beside its H.264. The Mac's sound is not
@@ -312,6 +315,20 @@ pub enum Passthrough {
     ///
     /// Tested against a virtual Mac alone.
     AppleAdaptive,
+    /// wlshare's VP9 of the whole desktop, at the dial, walk and chroma the plan
+    /// resolves to ([`RenderPlan::adaptive`], [`RenderPlan::chroma`]), which fits a
+    /// slow link and is never lossless. Offered by a `wlshare` target beside its
+    /// tiles, and passed in every session not started with them: the subtype's
+    /// picture where none is named.
+    WlshareVp9,
+    /// wlshare's tiles: the desktop as exact PNG where it is still and a VP9 stream
+    /// of its own, 4:2:0, for each region that moves, passed as they come for the
+    /// page to decode and sent exact again once it stops. Offered by a `wlshare`
+    /// target beside its VP9, and chosen at the picker: wlshare's picture for a link
+    /// with room to spare, a fraction of the VP9's encoder time and a picture that
+    /// ends exact, for several times the bytes. Its regions are held at the dial,
+    /// with no walk.
+    WlshareTilesMotion,
 }
 
 /// A Standard Mac's picture, in the quality Apple's viewer's menu names, which is
@@ -341,18 +358,21 @@ impl Passthrough {
             Self::AppleMedia => "apple-media",
             Self::AppleH264 => "apple-h264",
             Self::AppleAdaptive => "apple-adaptive",
+            Self::WlshareVp9 => "wlshare-vp9",
+            Self::WlshareTilesMotion => "wlshare-tiles-motion",
         }
     }
 
     /// Whether a session passes it only where it was chosen at the picker. A High
     /// Performance Mac's HEVC and its H.264 are a choice of one from two, either
-    /// passed in every session, and a Standard Mac's Adaptive picture is a choice
-    /// against the tiles coded here; an RDP host's pipeline is the only one, as the
-    /// gateway composes none.
+    /// passed in every session, a Standard Mac's Adaptive picture is a choice
+    /// against the tiles coded here, and wlshare's tiles against its VP9; an RDP
+    /// host's pipeline is the only one, as the gateway composes none, and wlshare's
+    /// VP9 is the picture of every session that chose no other.
     pub fn chosen(self) -> bool {
         match self {
-            Self::RdpGraphics => false,
-            Self::AppleMedia | Self::AppleH264 | Self::AppleAdaptive => true,
+            Self::RdpGraphics | Self::WlshareVp9 => false,
+            Self::AppleMedia | Self::AppleH264 | Self::AppleAdaptive | Self::WlshareTilesMotion => true,
         }
     }
 
@@ -363,7 +383,8 @@ impl Passthrough {
     pub fn resumes(self) -> bool {
         match self {
             Self::RdpGraphics | Self::AppleAdaptive => false,
-            Self::AppleMedia | Self::AppleH264 => true,
+            // wlshare starts over at a keyframe, or sends the whole desktop again.
+            Self::AppleMedia | Self::AppleH264 | Self::WlshareVp9 | Self::WlshareTilesMotion => true,
         }
     }
 
@@ -374,6 +395,8 @@ impl Passthrough {
             Self::AppleMedia => "the Mac's HEVC",
             Self::AppleH264 => "the Mac's H.264",
             Self::AppleAdaptive => "the Mac's Adaptive picture",
+            Self::WlshareVp9 => "wlshare's VP9",
+            Self::WlshareTilesMotion => "wlshare's tiles with motion",
         }
     }
 }
@@ -388,7 +411,8 @@ pub struct Offers {
     /// take and where it is always carried, as on `ard-high-performance`.
     pub audio: bool,
     /// The streams this target can pass untouched, in the picker's order: none,
-    /// the one, or a High Performance Mac's two.
+    /// the one, or two, a High Performance Mac's HEVC and H.264 or wlshare's VP9
+    /// and tiles.
     pub passthrough: &'static [Passthrough],
     /// Whether where the second virtual display sits is a choice
     /// ([`Placement`]): on a target that asks for two of a host that is told
@@ -400,6 +424,15 @@ pub struct Offers {
     /// Whether the session's view of a Standard Mac's screens is a choice
     /// ([`StandardView`]): on `ard` sharing its physical displays.
     pub standard_view: bool,
+    /// Whether offering the remote this browser's camera is a choice
+    /// ([`Choices::camera`]): on `rdp`, over MS-RDPECAM, and on `wlshare`, over
+    /// its camera extension. Neither Apple's Screen Sharing nor a VNC server read
+    /// as a plain one has anywhere to put one.
+    pub camera: bool,
+    /// Whether offering the remote this browser's microphone is a choice
+    /// ([`Choices::microphone`]): on `rdp`, over MS-RDPEAI, and on `wlshare`, over
+    /// its microphone extension, and nowhere else, as the camera.
+    pub microphone: bool,
 }
 
 /// What whoever started a session chose under its target at the picker, carried by
@@ -425,8 +458,9 @@ pub struct Choices {
     pub audio: Sound,
     /// The [`Passthrough`] of the target's to pass, by its name, where which is a
     /// choice ([`Passthrough::chosen`]), as on `ard-high-performance`, which
-    /// refuses a session that names none; one that passes in every session is
-    /// passed whatever this says.
+    /// refuses a session that names none, and on `wlshare`, whose VP9 is the
+    /// picture of a session that names none; one that passes in every session is
+    /// passed whatever this says ([`TargetConfig::passthrough`]).
     #[serde(default)]
     pub passthrough: Option<Passthrough>,
     /// Where the second virtual display sits.
@@ -442,6 +476,38 @@ pub struct Choices {
     /// Standard's alone: no other target has a combined view.
     #[serde(default, rename = "standardView")]
     pub standard_view: StandardView,
+    /// Offer the remote a redirected camera whose frames are this browser's:
+    /// MS-RDPECAM on RDP, and on a `wlshare` target the wlshare camera extension
+    /// ([`crate::vnc_camera`]), listed the way its audio extension is. Refused on a
+    /// plain `vnc` target and on both Apple subtypes ([`Offers::camera`]).
+    ///
+    /// **Experimental.** The socket's session rules and message encodings are
+    /// unit tested, both wires are checked, and the wlshare path has container
+    /// coverage. The RDP redirection itself is exercised only against a real
+    /// Windows host, because only a host that creates the
+    /// `RDCamera_Device_Enumerator` channel — a workstation, or a Windows Server
+    /// carrying the Remote Desktop Session Host role — has anywhere to redirect
+    /// a camera to.
+    ///
+    /// The offer alone. The device itself appears when a client enables the
+    /// camera — explicitly, per session, never remembered — by opening
+    /// `/ws/camera`; a session started with the offer and no such client gives
+    /// the remote nothing. The browser encodes H.264 and the gateway passes it
+    /// through, so there is no codec choice beside this one.
+    #[serde(default)]
+    pub camera: bool,
+    /// Offer the remote this browser's microphone: MS-RDPEAI on RDP, and on a
+    /// `wlshare` target the wlshare microphone extension ([`crate::vnc_mic`]),
+    /// listed the way [`Self::camera`]'s is, and refused where it is
+    /// ([`Offers::microphone`]). Experimental, like the camera.
+    ///
+    /// The offer alone, like [`Self::camera`]: the recording device is fed when a
+    /// client enables its microphone — explicitly, per session — by opening
+    /// `/ws/mic`. The browser sends speech-grade Opus and the gateway decodes it to
+    /// the PCM the host records in, so there is no codec or quality choice beside
+    /// this one.
+    #[serde(default)]
+    pub microphone: bool,
     /// Ask a High Performance Mac whose picture is passed for one tile, each
     /// picture the whole display, and not the four strips a session passing the
     /// HEVC is offered ([`crate::vnc_apple_media::Receive`]); the H.264 is
@@ -673,6 +739,9 @@ impl Decoders {
             Passthrough::AppleH264 => true,
             // The page decodes it in WebAssembly, which every page that starts has.
             Passthrough::AppleAdaptive => true,
+            // The page asks its own decoder about VP9 and cannot start a `wlshare`
+            // target where that refuses it; the gateway is not told.
+            Passthrough::WlshareVp9 | Passthrough::WlshareTilesMotion => true,
             Passthrough::RdpGraphics => self.rdp_graphics,
         }
     }
@@ -701,6 +770,10 @@ impl RenderPlan {
             Some(Passthrough::AppleAdaptive)
         } else if self.rdp_graphics {
             Some(Passthrough::RdpGraphics)
+        } else if self.wlshare_tiles_motion {
+            Some(Passthrough::WlshareTilesMotion)
+        } else if self.wlshare {
+            Some(Passthrough::WlshareVp9)
         } else {
             None
         }
@@ -711,8 +784,19 @@ impl RenderPlan {
     /// The resolved plan rather than the config keys: what a target *does* is the
     /// plan its keys collapse to, defaults included, and a description built from
     /// the keys would restate the file while the picture did something the reader
-    /// has to derive. wlshare's VP9's chroma is the browser's, so the card says it.
+    /// has to derive. wlshare's pictures are passed too, but coded to this plan's
+    /// dial, so the card names the dial and, of its VP9, the browser's chroma and
+    /// whether the walk runs.
     pub fn describe(&self) -> String {
+        if self.wlshare_tiles_motion {
+            return format!("tiles with motion q{} · {}", self.quality, self.chroma.name());
+        }
+        if self.wlshare {
+            // The walk as a suffix: the quality named before it is a ceiling the
+            // link may fall below.
+            let adaptive = if self.adaptive { " · adaptive" } else { "" };
+            return format!("VP9 q{} · {}{adaptive}", self.quality, self.chroma.name());
+        }
         if let Some(passthrough) = self.passthrough() {
             let h264 = if self.rdp_h264 { " with H.264" } else { "" };
             return format!("{}{h264}, passed through", passthrough.stream());
@@ -723,16 +807,7 @@ impl RenderPlan {
         if self.apple_standard.is_some() {
             return format!("the Mac's Full quality, tiles q{}", self.quality);
         }
-        if !self.wlshare {
-            return format!("tiles q{}", self.quality);
-        }
-        if self.wlshare_tiles {
-            return format!("tiles · VP9 regions q{} · {}", self.quality, self.chroma.name());
-        }
-        // The walk as a suffix: the quality named before it is a ceiling the link
-        // may fall below.
-        let adaptive = if self.adaptive { " · adaptive" } else { "" };
-        format!("VP9 q{} · {}{adaptive}", self.quality, self.chroma.name())
+        format!("tiles q{}", self.quality)
     }
 }
 
@@ -888,37 +963,6 @@ pub struct TargetConfig {
     /// measured against Microsoft's or Apple's own client.
     #[serde(default = "one_display")]
     pub virtual_displays: u8,
-    /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a
-    /// `wlshare` target the wlshare camera extension ([`crate::vnc_camera`]),
-    /// listed the way its audio extension is. Rejected on a plain `vnc`
-    /// target and on both Apple subtypes: neither speaks such an extension.
-    ///
-    /// **Experimental.** The socket's session rules and message encodings are
-    /// unit tested, both wires are checked, and the wlshare path has container
-    /// coverage. The RDP redirection itself is exercised only against a real
-    /// Windows host, because only a host that creates the
-    /// `RDCamera_Device_Enumerator` channel — a workstation, or a Windows Server
-    /// carrying the Remote Desktop Session Host role — has anywhere to redirect
-    /// a camera to.
-    ///
-    /// Capability only. The device itself appears when a client enables the
-    /// camera — explicitly, per session, never remembered — by opening
-    /// `/ws/camera`; a target with this key and no such client offers the
-    /// remote nothing. The browser encodes H.264 and the gateway passes it
-    /// through, so there is no codec key beside this one.
-    #[serde(default)]
-    pub camera: bool,
-    /// Offer the remote this browser's microphone: MS-RDPEAI on RDP, and on a `wlshare`
-    /// target the wlshare microphone extension ([`crate::vnc_mic`]), listed the way
-    /// [`Self::camera`]'s is. Rejected on a plain `vnc` target and on both Apple
-    /// subtypes: neither speaks such an extension.
-    ///
-    /// Capability only, like [`Self::camera`]: the recording device is fed when a client
-    /// enables its microphone — explicitly, per session — by opening `/ws/mic`. The
-    /// browser sends speech-grade Opus and the gateway decodes it to the PCM the host
-    /// records in, so there is no codec or quality key beside this one.
-    #[serde(default)]
-    pub microphone: bool,
     /// Let the Opus bitrate, [`AUDIO_BITRATE_KBPS`], track the audio socket's
     /// own backpressure — on unless the operator turned it off, like
     /// [`Self::render_adaptive`].
@@ -945,12 +989,15 @@ pub struct TargetConfig {
     /// Where the picture is the tiles coded here, the JPEG quality a changed tile of
     /// many colours is sent at until it is still and sent exactly. On a `wlshare`
     /// target, the ceiling of wlshare's VP9: a link that cannot hold it coarsens until
-    /// it can, and one with room to spare never earns better.
+    /// it can, and one with room to spare never earns better; and the dial the moving
+    /// regions of its tiles are held at.
     #[serde(default)]
     pub video_quality: Option<u8>,
     /// Let wlshare's VP9 walk [`Self::video_quality`] on the measured link — on
     /// unless the operator turned it off. A `wlshare` target's key alone: the tiles
-    /// coded here follow the browser's painting at the one quality, and have no walk.
+    /// coded here follow the browser's painting at the one quality, and have no walk,
+    /// and nor have wlshare's tiles, which hold their regions at the dial: a session
+    /// started with them ([`Passthrough::WlshareTilesMotion`]) has no walk to turn off.
     ///
     /// The configured quality stays the *ceiling* — a link with room to spare
     /// never earns a better picture than the one asked for — and the walk's floor
@@ -961,17 +1008,6 @@ pub struct TargetConfig {
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub render_adaptive: Option<bool>,
-    /// Have wlshare send its tiles in place of its VP9: the desktop as exact PNG
-    /// tiles where it is still, and a VP9 stream of its own for each region that
-    /// moves, each passed to the browser as it came. A `wlshare` target's key alone,
-    /// and off unless the operator turned it on: it is the picture for a link with
-    /// room to spare, costing wlshare a fraction of its VP9's time and ending exact
-    /// wherever the desktop stops, for several times the bytes. Its regions are held
-    /// at [`Self::video_quality`], so it takes no [`Self::render_adaptive`].
-    ///
-    /// Resolved by the accessor of the same name.
-    #[serde(default)]
-    pub render_tiles: Option<bool>,
 }
 
 /// The quality a target's picture is at when [`TargetConfig::video_quality`] is
@@ -1060,15 +1096,10 @@ impl TargetConfig {
     }
 
     /// wlshare's adaptive walk, resolved: on unless the operator turned it off, and
-    /// off wherever the picture is not wlshare's.
+    /// off wherever the picture is not wlshare's. A session started with wlshare's
+    /// tiles has no walk whatever this says ([`Self::render_plan`]).
     pub fn render_adaptive(&self) -> bool {
-        self.wlshare() && !self.render_tiles() && self.render_adaptive.unwrap_or(true)
-    }
-
-    /// wlshare's tiles in place of its VP9, resolved: off unless the operator
-    /// turned it on, and off wherever the picture is not wlshare's.
-    pub fn render_tiles(&self) -> bool {
-        self.wlshare() && self.render_tiles.unwrap_or(false)
+        self.wlshare() && self.render_adaptive.unwrap_or(true)
     }
 
     /// The stream keys resolved to the one [`RenderPlan`] the engines see, so
@@ -1081,8 +1112,12 @@ impl TargetConfig {
     /// with, whose passthrough is this target's own ([`Self::passthrough`]).
     pub fn render_plan(&self, choices: Choices, decoders: Decoders) -> RenderPlan {
         let quality = self.video_quality();
-        let adaptive = self.render_adaptive();
         let passthrough = self.passthrough(choices);
+        // wlshare's picture is the one the session was started with, its VP9 where
+        // none was named; the tiles hold their regions at the dial, with no walk.
+        let wlshare_tiles_motion = passthrough == Some(Passthrough::WlshareTilesMotion);
+        let wlshare = wlshare_tiles_motion || passthrough == Some(Passthrough::WlshareVp9);
+        let adaptive = wlshare && !wlshare_tiles_motion && self.render_adaptive();
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let apple_h264 = passthrough == Some(Passthrough::AppleH264);
         let hevc_instead = apple_h264 && decoders.takes(Passthrough::AppleMedia);
@@ -1095,12 +1130,12 @@ impl TargetConfig {
         let apple_combined = self.offers().standard_view && choices.standard_view == StandardView::Combined;
         let rdp_h264 = rdp_graphics && choices.pipeline.h264() && decoders.rdp_h264;
         // A tiles picture's regions are 4:2:0 whatever the browser takes.
-        let chroma = if self.wlshare() && !self.render_tiles() && decoders.vp9_444 { crate::vp9::Chroma::Yuv444 } else { crate::vp9::Chroma::Yuv420 };
+        let chroma = if wlshare && !wlshare_tiles_motion && decoders.vp9_444 { crate::vp9::Chroma::Yuv444 } else { crate::vp9::Chroma::Yuv420 };
         RenderPlan {
             quality,
             adaptive,
-            wlshare: self.wlshare(),
-            wlshare_tiles: self.render_tiles(),
+            wlshare,
+            wlshare_tiles_motion,
             apple_media,
             apple_h264,
             hevc_instead,
@@ -1137,16 +1172,34 @@ impl TargetConfig {
                 placement: self.virtual_displays > 1,
                 pipeline: self.egfx(),
                 standard_view: false,
+                camera: true,
+                microphone: true,
             },
             // Read as any VNC server, which carries no sound and is shown at its
-            // own size.
-            (Protocol::Vnc, None) => {
-                Offers { resize: false, audio: false, passthrough: &[], placement: false, pipeline: false, standard_view: false }
-            }
-            // Its VP9 is the subtype's picture and not a choice.
-            (Protocol::Vnc, Some(Subtype::Wlshare)) => {
-                Offers { resize: true, audio: true, passthrough: &[], placement: false, pipeline: false, standard_view: false }
-            }
+            // own size, and has nowhere to put a camera or a microphone.
+            (Protocol::Vnc, None) => Offers {
+                resize: false,
+                audio: false,
+                passthrough: &[],
+                placement: false,
+                pipeline: false,
+                standard_view: false,
+                camera: false,
+                microphone: false,
+            },
+            // Its picture is wlshare's own, passed: its VP9, the picture of a
+            // session that names none, or its tiles with motion, chosen at the
+            // picker. Its camera and microphone extensions take the browser's.
+            (Protocol::Vnc, Some(Subtype::Wlshare)) => Offers {
+                resize: true,
+                audio: true,
+                passthrough: &[Passthrough::WlshareVp9, Passthrough::WlshareTilesMotion],
+                placement: false,
+                pipeline: false,
+                standard_view: false,
+                camera: true,
+                microphone: true,
+            },
             // Standard mode shares the Mac's physical displays, whose resolution
             // this gateway does not change, and never touches its sound. Its
             // picture is the tiles coded here from the Mac's Full quality, one
@@ -1162,6 +1215,8 @@ impl TargetConfig {
                     placement: false,
                     pipeline: false,
                     standard_view: !self.virtual_display,
+                    camera: false,
+                    microphone: false,
                 }
             }
             // The sound comes with the picture, so it is not a choice, and the
@@ -1174,6 +1229,8 @@ impl TargetConfig {
                 placement: false,
                 pipeline: false,
                 standard_view: false,
+                camera: false,
+                microphone: false,
             },
         }
     }
@@ -1211,6 +1268,8 @@ impl TargetConfig {
                 choices.placement != Placement::default() && !offers.placement,
             ),
             ("adaptive H.264", choices.pipeline != Pipeline::HighQuality && !offers.pipeline),
+            ("a camera", choices.camera && !offers.camera),
+            ("a microphone", choices.microphone && !offers.microphone),
         ];
         match refused.into_iter().find(|(_, refused)| *refused) {
             Some((choice, _)) => Err(NotOffered { target: self.name.clone(), choice }),
@@ -1218,17 +1277,19 @@ impl TargetConfig {
         }
     }
 
-    /// The stream a session started with `choices` passes, if any: one that is
-    /// a choice where it was chosen, and one that is not in every session.
+    /// The stream a session started with `choices` passes, if any: the one it
+    /// named, where this target offers it, and otherwise the one this target
+    /// passes in every session not started with another ([`Passthrough::chosen`]),
+    /// where it has one.
     pub fn passthrough(&self, choices: Choices) -> Option<Passthrough> {
         if choices.standard_view == StandardView::Combined {
             return None;
         }
-        self.offers()
+        let offered = self.offers().passthrough;
+        choices
             .passthrough
-            .iter()
-            .copied()
-            .find(|passthrough| !passthrough.chosen() || choices.passthrough == Some(*passthrough))
+            .filter(|named| offered.contains(named))
+            .or_else(|| offered.iter().copied().find(|passthrough| !passthrough.chosen()))
     }
 
     /// The passthrough a session started with `choices` runs on that `decoders`'
@@ -1254,11 +1315,15 @@ impl TargetConfig {
     /// pipeline on passes it in every session, so its card says so; whether with
     /// H.264 is a session's choice, so the card is the lossless one. A Standard
     /// Mac's card names the tiles of its Full quality beside its passed Adaptive
-    /// picture.
+    /// picture, and a `wlshare` target's its tiles beside its VP9.
     pub fn render_summary(&self) -> String {
         let offered = self.offers().passthrough;
         let decoders = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false, vp9_444: true };
         let plan = self.render_plan(Choices::default(), decoders).describe();
+        if self.wlshare() {
+            let tiles = Choices { passthrough: Some(Passthrough::WlshareTilesMotion), ..Choices::default() };
+            return format!("{plan}, or {}", self.render_plan(tiles, decoders).describe());
+        }
         if offered.is_empty() || self.passthrough(Choices::default()).is_some() {
             return plan;
         }
@@ -1986,27 +2051,7 @@ impl ConfigFile {
                 target.name,
                 target.virtual_displays
             );
-            // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
-            // `wlshare` target. Neither Apple's Screen Sharing nor a VNC server read
-            // as a plain one speaks such an extension.
-            let carries_devices = target.protocol == Protocol::Rdp || target.wlshare();
             let kind = target.subtype.map_or("plain vnc", Subtype::name);
-            anyhow::ensure!(
-                !target.camera || carries_devices,
-                "target {:?} is {kind} and sets camera, which has nowhere to go there: the \
-                 camera rides MS-RDPECAM on rdp and wlshare's camera extension on a vnc target \
-                 with subtype = \"wlshare\". Remove the key.",
-                target.name
-            );
-            // The microphone likewise: MS-RDPEAI on RDP, wlshare's microphone extension on
-            // a `wlshare` target, and nothing anywhere else.
-            anyhow::ensure!(
-                !target.microphone || carries_devices,
-                "target {:?} is {kind} and sets microphone, which has nowhere to go there: \
-                 the microphone rides MS-RDPEAI on rdp and wlshare's microphone extension on a \
-                 vnc target with subtype = \"wlshare\". Remove the key.",
-                target.name
-            );
             // The adaptive switch tunes the Opus encoder, for the sessions that take
             // the target's sound: the one here for MS-RDPEA's PCM on RDP, and
             // wlshare's own on a `wlshare` target, which is told the rate over its
@@ -2038,20 +2083,6 @@ impl ConfigFile {
                 target.render_adaptive.is_none() || target.wlshare(),
                 "target {:?} is {kind} and sets render_adaptive — it walks wlshare's VP9, \
                  which only a `wlshare` target is sent. Remove the key.",
-                target.name
-            );
-            // `render_tiles` is wlshare's other picture, which nothing else sends.
-            anyhow::ensure!(
-                target.render_tiles.is_none() || target.wlshare(),
-                "target {:?} is {kind} and sets render_tiles — it asks wlshare for its tiles, \
-                 which only a `wlshare` target is sent. Remove the key.",
-                target.name
-            );
-            // The tiles' regions are held at the quality: there is no walk to turn on or off.
-            anyhow::ensure!(
-                target.render_adaptive.is_none() || !target.render_tiles(),
-                "target {:?} sets both render_tiles and render_adaptive — wlshare's tiles hold \
-                 their regions at video_quality and do not walk. Remove render_adaptive.",
                 target.name
             );
             // Which credentials a VNC target may carry is the subtype's to say:
@@ -3339,7 +3370,7 @@ mod tests {
                 apple_standard: None, apple_combined: false,
                 rdp_graphics: false,
                 rdp_h264: false,
-                wlshare: false, wlshare_tiles: false,
+                wlshare: false, wlshare_tiles_motion: false,
                 chroma: crate::vp9::Chroma::Yuv420,
             }
         );
@@ -3359,7 +3390,7 @@ mod tests {
                 apple_standard: None, apple_combined: false,
                 rdp_graphics: false,
                 rdp_h264: false,
-                wlshare: false, wlshare_tiles: false,
+                wlshare: false, wlshare_tiles_motion: false,
                 chroma: crate::vp9::Chroma::Yuv420,
             }
         );
@@ -3385,8 +3416,8 @@ mod tests {
         let wlshare = |extra: &str| {
             ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 60\n{extra}"))).unwrap().targets.remove(0)
         };
-        assert_eq!(wlshare("").render_summary(), "VP9 q60 · 4:4:4 · adaptive");
-        assert_eq!(wlshare("render_adaptive = false").render_summary(), "VP9 q60 · 4:4:4");
+        assert_eq!(wlshare("").render_summary(), "VP9 q60 · 4:4:4 · adaptive, or tiles with motion q60 · 4:2:0");
+        assert_eq!(wlshare("render_adaptive = false").render_summary(), "VP9 q60 · 4:4:4, or tiles with motion q60 · 4:2:0");
     }
 
     /// wlshare's VP9 follows the browser: 4:4:4 where its own decoder takes it, 4:2:0
@@ -3571,7 +3602,10 @@ mod tests {
                 audio: false,
                 passthrough: &[Passthrough::AppleAdaptive],
                 placement: false,
-                pipeline: false, standard_view: true
+                pipeline: false,
+                standard_view: true,
+                camera: false,
+                microphone: false,
             }
         );
 
@@ -3624,7 +3658,10 @@ mod tests {
                 audio: false,
                 passthrough: &[Passthrough::AppleAdaptive],
                 placement: false,
-                pipeline: false, standard_view: false
+                pipeline: false,
+                standard_view: false,
+                camera: false,
+                microphone: false,
             },
             "a display to resize, and no sound on Standard's virtual display either"
         );
@@ -4191,121 +4228,50 @@ vnc_password = \"x\"")).unwrap();
         assert_eq!(rdp.audio_source_format(), crate::audio::PCM_CD_QUALITY);
     }
 
-    /// The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
-    /// `wlshare` target, so the key is accepted on both — opt-in (default off) on
-    /// each — and refused on both Apple subtypes and on a plain `vnc` target,
-    /// none of which speaks such an extension.
+    /// The camera and the microphone are offered at the picker on `rdp`, over
+    /// MS-RDPECAM and MS-RDPEAI, and on `wlshare`, over its camera and microphone
+    /// extensions, and refused on both Apple subtypes and on a plain `vnc` target,
+    /// none of which speaks such an extension. Either stands on its own: a remote
+    /// records with or without redirected sound.
     #[test]
-    fn camera_rides_rdp_and_wlshare_and_is_refused_elsewhere() {
-        let err = ConfigFile::parse(&format!(
-            "[server]\n{}\n[[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\ncamera = true\n",
-            site_passwd_line()
-        ))
-        .unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("is plain vnc and sets camera"), "{rendered}");
-        assert!(rendered.contains("subtype = \"wlshare\""), "{rendered}");
-
-        for subtype in APPLE_SUBTYPES {
-            let err = ConfigFile::parse(&format!(
-                r#"
-                [server]
-                {}
-
-                [[targets]]
-                name = "mac"
-                protocol = "vnc"
-                subtype = "{subtype}"
-                host = "10.0.0.5"
-                username = "andrew"
-                password = "h"
-                camera = true
-                "#,
-                site_passwd_line()
-            ))
-            .and_then(|file| file.resolve())
-            .unwrap_err();
-            let rendered = format!("{err:#}");
-            assert!(rendered.contains(&format!("is {subtype} and sets camera")), "{rendered}");
-            assert!(
-                rendered.contains("wlshare's camera extension"),
-                "the path a vnc target does have is named: {rendered}"
-            );
-        }
-
-        let config = ConfigFile::parse(&format!(
-            r#"
-            [server]
-            {}
-
-            [[targets]]
-            name = "win"
-            protocol = "rdp"
-            username = "u"
-            password = "p"
-            host = "10.0.0.5"
-            camera = true
-
-            [[targets]]
-            name = "desk"
-            protocol = "vnc"
-            subtype = "wlshare"
-            host = "10.0.0.7"
-            camera = true
-
-            [[targets]]
-            name = "quiet"
-            protocol = "rdp"
-            username = "u"
-            password = "p"
-            host = "10.0.0.6"
-            "#,
-            site_passwd_line()
-        ))
-        .unwrap()
-        .resolve()
-        .unwrap();
-        assert!(config.targets[0].camera);
-        assert!(config.targets[1].camera, "a wlshare target lists the extension");
-        assert!(!config.targets[2].camera, "the camera is opt-in");
-    }
-
-    /// The microphone rides MS-RDPEAI on RDP and wlshare's microphone extension on a
-    /// `wlshare` target, and is refused on both Apple subtypes and on a plain `vnc`
-    /// target. On either it stands on its own: a remote records with or without
-    /// redirected sound.
-    #[test]
-    fn microphone_rides_rdp_and_wlshare_and_is_refused_elsewhere() {
+    fn a_camera_and_a_microphone_are_offered_on_rdp_and_wlshare_alone() {
         let parse = |target: &str| {
             ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
                 .and_then(|file| file.resolve())
+                .unwrap()
+                .targets
+                .remove(0)
         };
-        for subtype in APPLE_SUBTYPES {
-            let mac = parse(&format!(
-                "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\nhost = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\nmicrophone = true"
-            ))
-            .unwrap_err();
-            let rendered = format!("{mac:#}");
-            assert!(rendered.contains(&format!("is {subtype} and sets microphone")), "{rendered}");
-            assert!(rendered.contains("wlshare's microphone extension"), "{rendered}");
+        let camera = Choices { camera: true, ..Choices::default() };
+        let microphone = Choices { microphone: true, ..Choices::default() };
+        let win = parse("name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"");
+        let desk = parse("name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"");
+        for target in [&win, &desk] {
+            let offers = target.offers();
+            assert!(offers.camera && offers.microphone, "{}", target.name);
+            target.accepts(camera).unwrap();
+            target.accepts(microphone).unwrap();
+            assert!(!target.sound(microphone), "the microphone does not need the remote's sound");
         }
-        let plain = parse("name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\nmicrophone = true").unwrap_err();
-        let rendered = format!("{plain:#}");
-        assert!(rendered.contains("is plain vnc and sets microphone"), "{rendered}");
-        let vnc = parse(
-            "name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"\nmicrophone = true",
-        )
-        .unwrap();
-        assert!(vnc.targets[0].microphone, "a wlshare target lists the extension");
-        let config = parse(
-            "name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"\nmicrophone = true",
-        )
-        .unwrap();
-        assert!(config.targets[0].microphone);
-        assert!(
-            !config.targets[0].sound(Choices::default()),
-            "the microphone does not need the remote's sound"
-        );
+        let plain = parse("name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"");
+        let macs: Vec<TargetConfig> = APPLE_SUBTYPES
+            .iter()
+            .map(|subtype| {
+                parse(&format!(
+                    "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\nhost = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\""
+                ))
+            })
+            .collect();
+        for target in std::iter::once(&plain).chain(&macs) {
+            let offers = target.offers();
+            assert!(!offers.camera && !offers.microphone, "{}", target.name);
+            // With a picture a High Performance Mac accepts, so the device is what is refused.
+            let picture = offers.passthrough.first().copied();
+            let camera = Choices { passthrough: picture, ..camera };
+            let microphone = Choices { passthrough: picture, ..microphone };
+            assert_eq!(target.accepts(camera).unwrap_err().choice, "a camera", "{}", target.name);
+            assert_eq!(target.accepts(microphone).unwrap_err().choice, "a microphone", "{}", target.name);
+        }
     }
 
     /// EGFX is RDP's, and refused on VNC by name — either value, since a key
@@ -4388,7 +4354,7 @@ vnc_password = \"x\"")).unwrap();
         let win = rdp("");
         assert_eq!(
             win.offers(),
-            Offers { resize: true, audio: true, passthrough: &[Passthrough::RdpGraphics], placement: false, pipeline: true, standard_view: false }
+            Offers { resize: true, audio: true, passthrough: &[Passthrough::RdpGraphics], placement: false, pipeline: true, standard_view: false, camera: true, microphone: true }
         );
         let composes = Decoders { apple_media: false, rdp_graphics: true, rdp_h264: false, vp9_444: true };
         let plan = win.render_plan(passed, composes);
@@ -4420,7 +4386,7 @@ vnc_password = \"x\"")).unwrap();
         assert!(!win.render_plan(unasked, decodes).rdp_h264, "high quality unless chosen");
 
         let bitmap = rdp("egfx = false");
-        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false, standard_view: false });
+        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: &[], placement: false, pipeline: false, standard_view: false, camera: true, microphone: true });
         assert_eq!(
             bitmap.accepts(passed),
             Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })
@@ -4609,7 +4575,7 @@ vnc_password = \"x\"")).unwrap();
         for (key, adaptive) in [("render_adaptive = true", true), ("render_adaptive = false", false), ("", true)] {
             let cfg = ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 80\n{key}"))).expect("a wlshare target");
             let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-            assert_eq!(plan, RenderPlan { quality: 80, adaptive, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: false, chroma: crate::vp9::Chroma::Yuv444 }, "{key}");
+            assert_eq!(plan, RenderPlan { quality: 80, adaptive, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles_motion: false, chroma: crate::vp9::Chroma::Yuv444 }, "{key}");
         }
     }
 
@@ -4627,29 +4593,45 @@ vnc_password = \"x\"")).unwrap();
         assert!(parse_target("render_adaptive = true").is_err(), "the bitmap path took the key");
     }
 
-    /// `render_tiles` asks wlshare for its tiles: off unless turned on, its regions at
-    /// 4:2:0 whatever the browser takes and held at the quality, with no walk.
+    /// wlshare's tiles are chosen at the picker, against its VP9: a session started
+    /// with them asks wlshare for its tiles, their regions at 4:2:0 whatever the
+    /// browser takes and held at the quality, with no walk whatever the key says;
+    /// one that names its VP9, or nothing, is sent the VP9.
     #[test]
-    fn render_tiles_resolves_into_a_wlshare_plan() {
-        let cfg = ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nvideo_quality = 80\nrender_tiles = true")).expect("a wlshare target");
-        let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles: true, chroma: crate::vp9::Chroma::Yuv420 });
-        assert_eq!(plan.describe(), "tiles · VP9 regions q80 · 4:2:0");
-        for key in ["", "render_tiles = false"] {
-            let cfg = ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\n{key}"))).expect("a wlshare target");
-            assert!(!cfg.targets[0].render_plan(Choices::default(), Decoders::ALL).wlshare_tiles, "{key}");
+    fn wlshares_tiles_with_motion_are_a_choice_at_the_picker() {
+        let tiles = Choices { passthrough: Some(Passthrough::WlshareTilesMotion), ..Choices::default() };
+        let vp9 = Choices { passthrough: Some(Passthrough::WlshareVp9), ..Choices::default() };
+        for key in ["", "render_adaptive = true", "render_adaptive = false"] {
+            let cfg = ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 80\n{key}"))).expect("a wlshare target");
+            let target = &cfg.targets[0];
+            assert_eq!(target.offers().passthrough, &[Passthrough::WlshareVp9, Passthrough::WlshareTilesMotion], "{key}");
+            target.accepts(tiles).expect("the tiles are offered");
+            let plan = target.render_plan(tiles, Decoders::ALL);
+            assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles_motion: true, chroma: crate::vp9::Chroma::Yuv420 }, "{key}");
+            assert_eq!(plan.describe(), "tiles with motion q80 · 4:2:0", "{key}");
+            assert_eq!(plan.passthrough(), Some(Passthrough::WlshareTilesMotion), "{key}");
+            for choices in [vp9, Choices::default()] {
+                let plan = target.render_plan(choices, Decoders::ALL);
+                assert!(plan.wlshare && !plan.wlshare_tiles_motion, "{key}: {choices:?}");
+                assert_eq!(plan.adaptive, key != "render_adaptive = false", "{key}: {choices:?}");
+                assert_eq!(plan.passthrough(), Some(Passthrough::WlshareVp9), "{key}: {choices:?}");
+            }
         }
     }
 
-    /// The tiles are wlshare's alone, and hold their regions at the quality: a target
-    /// that is not wlshare refuses the key, and one that asks for the tiles refuses a walk.
+    /// wlshare's pictures are wlshare's alone: a plain `vnc` target, which reads the
+    /// same server through the RFB baseline, and an RDP target refuse a session that
+    /// names either.
     #[test]
-    fn render_tiles_is_a_wlshare_key_with_no_walk() {
-        let err = ConfigFile::parse(&vnc_toml("render_tiles = true")).unwrap_err();
-        assert!(format!("{err:#}").contains("render_tiles — it asks wlshare for its tiles"), "{err:#}");
-        let err = ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nrender_tiles = true\nrender_adaptive = false")).unwrap_err();
-        assert!(format!("{err:#}").contains("sets both render_tiles and render_adaptive"), "{err:#}");
-        ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nrender_tiles = false\nrender_adaptive = false")).expect("a walk held, with the VP9");
+    fn wlshares_pictures_are_refused_elsewhere() {
+        let plain = ConfigFile::parse(&vnc_toml("")).unwrap().targets.remove(0);
+        let rdp = parse_target("").unwrap().targets.remove(0);
+        for target in [&plain, &rdp] {
+            for passthrough in [Passthrough::WlshareVp9, Passthrough::WlshareTilesMotion] {
+                let err = target.accepts(Choices { passthrough: Some(passthrough), ..Choices::default() }).unwrap_err();
+                assert_eq!(err.choice, "a passthrough", "{:?} {passthrough:?}", target.protocol);
+            }
+        }
     }
 
     /// The floor key is gone: a settle sharpens a quiet desktop at the dial, which

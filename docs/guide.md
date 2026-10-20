@@ -67,7 +67,7 @@ config key.
 | `rdp` | yes | off, Opus or FLAC | the graphics pipeline, always passed | high quality or adaptive H.264 |
 | `rdp` with `egfx = false` | no | off, Opus or FLAC | — | — |
 | `vnc` | no | none | — | — |
-| `vnc`, `wlshare` | yes | off, Opus or FLAC | — (its VP9 is always passed) | — |
+| `vnc`, `wlshare` | yes | off, Opus or FLAC | its VP9, or its tiles with motion, always passed | — |
 | `vnc`, `ard` | no | none | the Mac's Adaptive picture, passed (beta), or none: the gateway's tiles of the Mac's Full quality | — |
 | `vnc`, `ard` with `virtual_display` | yes | none | as `ard` | — |
 | `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — |
@@ -108,7 +108,10 @@ config key.
   sends as its tiles at `video_quality`, as it sends any VNC server's desktop:
   JPEG while a region changes, exact once it has settled, fitted to the link,
   and resumed when the browser comes back. Apple's Adaptive is greyed under
-  Combined Display (below), which is the gateway's tiles too.
+  Combined Display (below), which is the gateway's tiles too. On a `wlshare`
+  target the Picture group is *Video, passed through*, the default, wlshare's
+  VP9 of the whole desktop, or *Tiles with motion, passed through*, wlshare's
+  own tiles, for a LAN: see [wlshare](#wlshare-vnc-subtype--wlshare).
 - **Displays.** On an `ard` target sharing the Mac's physical screens: *One at a
   time* (beta), the default, starts on the main screen and offers the others in the
   display menu, in the picture chosen above; *Combined* (alpha) shows every
@@ -129,6 +132,9 @@ config key.
   which keeps text sharp but adapts less. Adaptive is greyed in a browser whose
   `VideoDecoder` cannot decode the host's H.264. See
   [An exact picture](#an-exact-picture) for having the host draw losslessly.
+- **Camera** and **Microphone** (experimental). On an `rdp` or `wlshare` target,
+  ticks that offer the remote this browser's devices, which the session's menu
+  then turns on: see [Camera and microphone](#camera-and-microphone).
 
 One gateway holds one session. A reload or a dropped connection normally
 resumes it; an RDP session with the graphics pipeline on instead reconnects the engine,
@@ -350,16 +356,18 @@ password = "that-account's-password"
 server for wlroots-based Wayland desktops. The subtype makes the gateway list
 wlshare's private RFB extensions: its VP9 stream, which is passed through
 untouched and adapts to the browser's link, pixel density, the output list,
-sound, and with `camera = true` or `microphone = true` the browser's camera and
+sound, and, in a session started with them, the browser's camera and
 microphone as PipeWire devices on the desktop. Without the subtype the same
 server is read as any VNC server is.
 
-- **`render_tiles = true`** has wlshare send its tiles instead of its VP9: what is
-  still as exact PNG, and a VP9 stream of its own for each region that moves,
-  sent exact again once it stops. It is for a link with room to spare: wlshare
-  spends a fraction of the VP9's time on it and the picture ends exact, for
-  several times the bytes — tens of Mbit/s while something large moves. Its
-  regions are held at `video_quality`, so the target takes no `render_adaptive`.
+- **Picture.** The picker's Picture group is *Video, passed through*, the
+  default: wlshare's VP9 of the whole desktop, which it fits to the browser's
+  link. Or *Tiles with motion, passed through*: what is still as exact PNG, and a
+  VP9 stream of its own for each region that moves, sent exact again once it
+  stops. The tiles are for a link with room to spare: wlshare spends a fraction
+  of the VP9's time on them and the picture ends exact, for several times the
+  bytes — tens of Mbit/s while something large moves. Their regions are held at
+  `video_quality`, which `render_adaptive` does not reach.
 
 - **Alpha:** a desktop with exactly two outputs, monitors or headless ones, is
   listed with *All Displays* and starts on it: the first stays here and the second opens at
@@ -395,13 +403,14 @@ that its pixels are HiDPI; see [HiDPI over standard RFB](standard-rfb-hidpi.md).
 
 ## Camera and microphone
 
-`camera = true` and `microphone = true` offer an `rdp` or `wlshare` target this
-browser's camera and microphone. Both are **experimental**, off by default,
-turned on per session from the floating menu and never remembered. They are for
+**Camera** and **Microphone** are ticks at the picker on an `rdp` or `wlshare`
+target, which offer the remote this browser's camera and microphone. Both are
+**experimental**, off until ticked and remembered per target as every choice is;
+the device itself is turned on per session from the floating menu. They are for
 someone who needs one for a while, a call or a recording, and are sent as
 cheaply as that allows: H.264 from the browser passed untranscoded, and mono
 speech Opus at a low fixed bitrate. An Apple target and a plain `vnc` target
-refuse the keys.
+offer neither.
 
 On RDP the camera needs a Windows host that redirects cameras: a workstation, or
 a Windows Server carrying the Remote Desktop Session Host role. A Windows host

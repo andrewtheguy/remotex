@@ -1291,12 +1291,14 @@ pub enum ServerMsg {
         /// [`crate::config::Passthrough::name`], or `None` for a desktop encoded
         /// here.
         passthrough: Option<&'static str>,
-        /// Whether this target redirects the browser's camera to the remote.
-        /// Capability only — enabling is the client's move, made afresh each
-        /// session by opening `/ws/camera`, and never remembered.
+        /// Whether this session offers the remote the browser's camera, as it was
+        /// started with ([`crate::config::Choices::camera`]). The offer alone:
+        /// enabling is the client's move, made afresh each session by opening
+        /// `/ws/camera`, and never remembered.
         camera: bool,
-        /// Whether this target redirects the browser's microphone to the remote. The
-        /// camera's twin: enabled afresh each session by opening `/ws/mic`.
+        /// Whether this session offers the remote the browser's microphone, as it
+        /// was started with. The camera's twin: enabled afresh each session by
+        /// opening `/ws/mic`.
         microphone: bool,
         /// The render dial this session resolved to, as one line — see
         /// [`crate::config::RenderPlan::describe`].
@@ -1976,14 +1978,14 @@ mod tests {
                     passthrough: Some(crate::config::Passthrough::AppleH264),
                     placement: crate::config::Placement::Right,
                     pipeline: crate::config::Pipeline::HighQuality,
-                    standard_view: crate::config::StandardView::One, whole: false,
+                    standard_view: crate::config::StandardView::One, camera: false, microphone: false, whole: false,
                 }
             ),
             other => panic!("unexpected: {other:?}"),
         }
         assert!(
             serde_json::from_str::<ClientMsg>(
-                r#"{"type":"connect","target":"mac","choices":{"camera":true}}"#
+                r#"{"type":"connect","target":"mac","choices":{"clipboard":true}}"#
             )
             .is_err()
         );

@@ -1,5 +1,5 @@
-// The moving regions of wlshare's tiles (`tilesStart` on a `wlshare` target with
-// `render_tiles`), drawn on the desktop's own canvas.
+// The moving regions of wlshare's tiles with motion (`tilesStart` on a `wlshare`
+// session started with them), drawn on the desktop's own canvas.
 //
 // wlshare sends its desktop in two forms, and the gateway passes both untouched:
 // TILE records, a PNG each of a rectangle that is still, the desktop's pixels

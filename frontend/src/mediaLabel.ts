@@ -202,7 +202,7 @@ export function videoLabel(
   if (stream.tiles) {
     // Every region is VP9, which the browser's own decoder decodes.
     return stream.regions
-      ? `VP9 regions where the desktop moves (${stream.regions}), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder`
+      ? `Tiles with motion: VP9 regions where the desktop moves (${stream.regions}), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder`
       : "Not in use: the tiles are images this page decodes";
   }
   const strips = (stream.strips ?? 1) > 1 ? ` in ${stream.strips} strips` : "";

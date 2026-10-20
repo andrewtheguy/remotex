@@ -1534,7 +1534,7 @@ mod tests {
         }
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, wlshare_tiles: false, chroma: crate::vp9::Chroma::Yuv420 };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: false, wlshare_tiles_motion: false, chroma: crate::vp9::Chroma::Yuv420 };
 
     /// A `wlshare` target's plan for a browser that decodes 4:4:4, whose stream wlshare
     /// passes at that chroma.

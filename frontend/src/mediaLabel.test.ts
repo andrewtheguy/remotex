@@ -193,20 +193,20 @@ test("the video row waits for the format, then names it and its decoder", () => 
   );
 });
 
-test("wlshare's tiles say what is drawn where once a region has moved, and which decoder takes the motion", () => {
+test("wlshare's tiles with motion say what is drawn where once a region has moved, and which decoder takes the motion", () => {
   assert.equal(
     videoLabel(
       { decode: "", tiles: true, regions: "vp09.00.21.08.01.06.06.06.00" },
       null,
     ),
-    "VP9 regions where the desktop moves (vp09.00.21.08.01.06.06.06.00), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder",
+    "Tiles with motion: VP9 regions where the desktop moves (vp09.00.21.08.01.06.06.06.00), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder",
   );
 });
 
 test("the Render row waits for the target, then names its dial", () => {
   assert.equal(renderLabel(""), "Waiting for the target");
   // The gateway's tiles, and wlshare's: the plan is said as it came.
-  for (const plan of ["tiles q90", "tiles · VP9 regions q90 · 4:2:0"]) {
+  for (const plan of ["tiles q90", "tiles with motion q90 · 4:2:0"]) {
     assert.equal(renderLabel(plan), plan);
   }
 });

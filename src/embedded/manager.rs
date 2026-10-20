@@ -751,8 +751,16 @@ fn describe_offers(target: &TargetConfig) -> String {
     if offers.audio {
         choices.push("sound".to_owned());
     }
-    // One passed in every session is no choice, and the render line names it.
-    for passthrough in offers.passthrough.iter().filter(|passthrough| passthrough.chosen()) {
+    if offers.camera {
+        choices.push("camera".to_owned());
+    }
+    if offers.microphone {
+        choices.push("microphone".to_owned());
+    }
+    // One passed in every session is no choice, and the render line names it;
+    // one passed where no other is named, wlshare's VP9, is part of the choice.
+    let chosen = offers.passthrough.len() > 1;
+    for passthrough in offers.passthrough.iter().filter(|passthrough| chosen || passthrough.chosen()) {
         choices.push(format!("{} passed through", passthrough.stream()));
     }
     if offers.placement {
@@ -1727,12 +1735,12 @@ mod tests {
             "the render plan describes itself: {page}"
         );
         assert!(
-            page.contains(&spec("picker", "offers resize, sound, high quality or adaptive H.264")),
+            page.contains(&spec("picker", "offers resize, sound, camera, microphone, high quality or adaptive H.264")),
             "what a session's starter chooses is the type's to offer, and the pipeline is passed unasked: {page}"
         );
         assert!(
-            page.lines().any(|line| line == spec("picker", "offers resize, sound")),
-            "a wlshare target's picture is not a choice: {page}"
+            page.contains(&spec("picker", "offers resize, sound, camera, microphone, wlshare's VP9 passed through, wlshare's tiles with motion passed through")),
+            "a wlshare target's picture is one of its two, the VP9 where none is named: {page}"
         );
 
         // A config the gateway would refuse says so, instead of a page of

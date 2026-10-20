@@ -6,9 +6,9 @@ camera the way an RDP one does over MS-RDPECAM. RFB carries nothing from a clien
 but input and a clipboard, and no registered extension carries video that way, so
 this is one of wlshare's private extensions, in the shape of the density and outputs
 ones ([`wlshare-density.md`](wlshare-density.md),
-[`wlshare-outputs.md`](wlshare-outputs.md)). A `wlshare` target with
-`camera = true` lists a pseudo-encoding and wlshare answers that it takes a
-camera; until it answers, the browser's camera is never plugged.
+[`wlshare-outputs.md`](wlshare-outputs.md)). A `wlshare` session started with
+the picker's Camera tick lists a pseudo-encoding and wlshare answers that it
+takes a camera; until it answers, the browser's camera is never plugged.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare), which
 decodes the H.264 with the system's libavcodec and offers it to the desktop as a
@@ -25,17 +25,17 @@ protocol = "vnc"
 subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
-camera = true
 ```
 
-`subtype = "wlshare"` says the server is wlshare, and `camera = true` is what
-makes the gateway list the extension to it. The key is accepted on a `wlshare`
-target and refused on a plain `vnc` target and on both Apple subtypes, none of
-which has anywhere to put a camera. As on RDP it is capability only: the camera
-is plugged when a browser enables it from the floating menu, per session and never
-remembered, and unplugged when that socket closes, the session changes hands, or
-the engine ends. wlshare's own `camera` key (default `false`) is the server's side
-of the same switch.
+`subtype = "wlshare"` says the server is wlshare, and the picker's Camera tick
+(experimental), carried by `connect` as `choices.camera`, is what makes the
+gateway list the extension to it in that session. The tick is offered on a
+`wlshare` target and refused on a plain `vnc` target and on both Apple subtypes,
+none of which has anywhere to put a camera. As on RDP it is the offer only: the
+camera is plugged when a browser enables it from the floating menu, per session
+and never remembered, and unplugged when that socket closes, the session changes
+hands, or the engine ends. wlshare's own `camera` key (default `false`) is the
+server's side of the same switch.
 
 ## The wire
 
@@ -80,8 +80,8 @@ so two decisions leave in the order they were made:
 
 - A plug the browser makes before wlshare's answer is held, and goes out with the
   answer. A server that never answers is sent nothing at all — no plug, no
-  samples — whatever the browser does, so a target with `camera = true` pointed
-  at wayvnc or TigerVNC loses nothing but the camera.
+  samples — whatever the browser does, so a session started with the camera
+  against wayvnc or TigerVNC loses nothing but the camera.
 - A plug with no area or no rate is never sent, as the RDP path refuses it too:
   wlshare takes one as a client that does not speak the extension and ends the
   session over it.

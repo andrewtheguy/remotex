@@ -32,9 +32,6 @@ const TARGET: &str = "wlshare-dummy";
 /// is listed to it.
 const PLAIN_TARGET: &str = "wlshare-dummy-plain";
 
-/// The same wlshare asked for its tiles in place of its VP9 (`render_tiles`).
-const TILES_TARGET: &str = "wlshare-dummy-tiles";
-
 /// Where the wlshare checkout to build is, when not beside this repository.
 const WLSHARE_DIR_ENV: &str = "REMOTEX_TEST_WLSHARE_DIR";
 
@@ -61,20 +58,17 @@ async fn wait_for_vnc_port(port: u16) {
     .expect("wlshare never sent an RFB greeting");
 }
 
-/// Start the real server pointed at wlshare three times: a `wlshare` target with a
-/// camera and a microphone, a plain `vnc` target with neither, which a plain
-/// target may not carry, and a `wlshare` target that asks for its tiles. The tests
-/// start the first following the window and the others at the size they keep.
+/// Start the real server pointed at wlshare twice: a `wlshare` target, whose
+/// sessions may be started offering the browser's camera and microphone, and a
+/// plain `vnc` target, whose may not. The tests start the first following the
+/// window and the second at the size it keeps.
 async fn spawn_app(vnc_port: u16) -> SocketAddr {
     let wlshare = wlshare_target(vnc_port);
     let plain = TargetConfig {
         name: PLAIN_TARGET.to_owned(),
         subtype: None,
-        camera: false,
-        microphone: false,
         ..wlshare.clone()
     };
-    let tiles = TargetConfig { name: TILES_TARGET.to_owned(), render_tiles: Some(true), ..wlshare.clone() };
     let config = AppConfig {
         listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         auth: common::test_auth(),
@@ -82,7 +76,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
-        targets: vec![wlshare, plain, tiles],
+        targets: vec![wlshare, plain],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -108,11 +102,8 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         size: None,
         egfx: None,
         virtual_displays: 1,
-        camera: true,
-        microphone: true,
         video_quality: None,
         render_adaptive: None,
-        render_tiles: None,
         virtual_display: false,
         audio_adaptive: None,
     }
@@ -525,12 +516,12 @@ async fn a_browser_without_4_4_4_is_sent_wlshares_vp9_at_4_2_0() {
     );
 }
 
-/// A target with `render_tiles` is sent wlshare's own tiles, passed: the picture
-/// starts behind a `tilesStart`, its first update is the whole desktop as exact PNG,
-/// and wlshare was asked for its tiles rather than its VP9.
+/// A session started with wlshare's tiles with motion is sent wlshare's own tiles,
+/// passed: the picture starts behind a `tilesStart`, its first update is the whole
+/// desktop as exact PNG, and wlshare was asked for its tiles rather than its VP9.
 #[tokio::test]
 #[ignore = "requires Docker or Podman"]
-async fn a_tiles_target_is_sent_wlshares_own_tiles() {
+async fn a_session_started_with_tiles_with_motion_is_sent_wlshares_own_tiles() {
     common::init_logging();
     let (container, vnc_port) = start_wlshare().await;
 
@@ -540,13 +531,13 @@ async fn a_tiles_target_is_sent_wlshares_own_tiles() {
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     let mut view = View::new();
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{TILES_TARGET}","display":{{"w":1280,"h":800,"scale":100}},"choices":{{"size":"target"}}}}"#
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1280,"h":800,"scale":100}},"choices":{{"size":"target","passthrough":"wlshare-tiles-motion"}}}}"#
     )))
     .await
     .unwrap();
     view.until(&mut ws, "wlshare's tiles of the whole desktop", |v| v.tiles).await;
 
-    assert!(view.decode.is_none(), "a tiles target was announced a stream: {:?}", view.decode);
+    assert!(view.decode.is_none(), "a session on the tiles was announced a stream: {:?}", view.decode);
     let logs = container.logs();
     assert!(logs.contains("asked for tiles, its moving regions at quality 90"), "wlshare was not asked for its tiles:\n{logs}");
     assert!(!logs.contains("asked for VP9"), "wlshare was asked for its VP9 as well:\n{logs}");
@@ -630,8 +621,8 @@ async fn uplink_signal(ws: &mut common::Socket) -> serde_json::Value {
 
 /// Connect to the target and read the session socket up to `connected`, which is
 /// returned; after it the socket is only drained, so nothing backs up behind it.
-async fn open_session(ws: &mut common::Ws) -> serde_json::Value {
-    common::connect_target_with(ws, TARGET, r#"{"size":"window"}"#).await;
+async fn open_session(ws: &mut common::Ws, choices: &str) -> serde_json::Value {
+    common::connect_target_with(ws, TARGET, choices).await;
     loop {
         if let Message::Text(text) = ws.next().await.expect("session socket open").expect("websocket receive") {
             let msg: serde_json::Value = serde_json::from_str(&text).expect("control message is JSON");
@@ -692,8 +683,8 @@ async fn wlshare_lends_the_desktop_the_browsers_microphone() {
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
-    let connected = open_session(&mut ws).await;
-    assert_eq!(connected["microphone"], true, "the target carries a microphone: {connected}");
+    let connected = open_session(&mut ws, r#"{"size":"window","microphone":true}"#).await;
+    assert_eq!(connected["microphone"], true, "the session offers a microphone: {connected}");
 
     // `connected` is sent as the engine starts, ahead of its RFB handshake, so the
     // microphone is plugged before the engine can have heard wlshare's answer. How far
@@ -837,8 +828,8 @@ async fn wlshare_lends_the_desktop_the_browsers_camera() {
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
-    let connected = open_session(&mut ws).await;
-    assert_eq!(connected["camera"], true, "the target carries a camera: {connected}");
+    let connected = open_session(&mut ws, r#"{"size":"window","camera":true}"#).await;
+    assert_eq!(connected["camera"], true, "the session offers a camera: {connected}");
 
     // As the page does, the format goes the moment the socket opens: ahead of the
     // engine's RFB handshake, as the microphone's plug does.

@@ -12,6 +12,7 @@ import { runnableDecoders } from "./softwareSupport.ts";
 import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 import {
   type Choices,
+  type DeviceRow,
   type PictureOption,
   type Pipeline,
   type PipelineRow,
@@ -258,6 +259,18 @@ export default function TargetPicker({
                         }
                       />
                     )}
+                    {/* This browser's camera and microphone, offered to the
+                        remote where the target has somewhere to put them. */}
+                    <DeviceChoices
+                      camera={options.cameraRow}
+                      microphone={options.microphoneRow}
+                      locked={pendingTarget !== null}
+                      choose={(device, offered) =>
+                        setRemembered((was) =>
+                          rememberChoice(was, t.name, device, offered),
+                        )
+                      }
+                    />
                     {/* Where the second of two virtual displays sits, on a
                         target whose host is told. */}
                     {options.placements && (
@@ -336,8 +349,8 @@ export default function TargetPicker({
                         )
                       }
                     />
-                    {/* How a Mac's picture reaches this browser, where the
-                        target has one to choose. */}
+                    {/* How the target's picture reaches this browser, where
+                        it has one to choose: a Mac's or a wlshare desktop's. */}
                     <PictureChoice
                       target={t.name}
                       pictures={options.pictures}
@@ -439,9 +452,9 @@ function ViewChoice({
   );
 }
 
-// How a Mac's picture reaches this browser: which of its own streams is passed
-// through. One that cannot be had here is greyed, with the reason. Nothing on a
-// target with no such choice.
+// How a Mac's or a wlshare desktop's picture reaches this browser: which of its
+// own streams is passed through. One that cannot be had here is greyed, with the
+// reason. Nothing on a target with no such choice.
 function PictureChoice({
   target,
   pictures,
@@ -539,6 +552,42 @@ function SoundChoice({
         </div>
       )}
     </>
+  );
+}
+
+// This browser's devices, offered to the remote or not: the camera and the
+// microphone, each a tick where the target has somewhere to put it, and nothing
+// where it has not. The tick is the offer; the session's menu turns the device on.
+function DeviceChoices({
+  camera,
+  microphone,
+  locked,
+  choose,
+}: {
+  camera: DeviceRow | null;
+  microphone: DeviceRow | null;
+  locked: boolean;
+  choose: (device: "camera" | "microphone", offered: boolean) => void;
+}) {
+  const rows = [
+    ["camera", camera],
+    ["microphone", microphone],
+  ] as const;
+  return rows.map(([device, row]) =>
+    row ? (
+      <label key={device} className="picker-option">
+        <input
+          type="checkbox"
+          checked={row.checked}
+          disabled={locked}
+          onChange={(e) => choose(device, e.target.checked)}
+        />
+        <span className="picker-option-text">
+          <span>{row.label}</span>
+          <span className="picker-option-note">{row.note}</span>
+        </span>
+      </label>
+    ) : null,
   );
 }
 

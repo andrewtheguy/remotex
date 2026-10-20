@@ -693,6 +693,12 @@ struct TargetInfo {
     /// Display is a choice: Screen Sharing Standard's alone.
     #[serde(rename = "standardView")]
     standard_view: bool,
+    /// Whether offering the remote this browser's camera is a choice: on `rdp`
+    /// and `wlshare`, experimental on both.
+    camera: bool,
+    /// Whether offering the remote this browser's microphone is a choice, as the
+    /// camera.
+    microphone: bool,
 }
 
 /// A desktop size in points, as the picker shows it before Start.
@@ -728,6 +734,8 @@ impl TargetInfo {
             placement: offers.placement,
             pipeline: offers.pipeline,
             standard_view: offers.standard_view,
+            camera: offers.camera,
+            microphone: offers.microphone,
         }
     }
 }
@@ -1084,11 +1092,8 @@ mod tests {
                 size: Some((1280, 800)),
                 egfx: None,
                 virtual_displays: 1,
-                camera: false,
-                microphone: false,
                 video_quality: None,
                 render_adaptive: None,
-                render_tiles: None,
                 virtual_display: false,
                 audio_adaptive: None,
             }],
@@ -1278,13 +1283,13 @@ mod tests {
         // no session sizes, and no sound.
         assert_eq!(
             entry("mac"),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"audioAdaptive":false,"software":false,"passthroughs":["apple-adaptive"],"placement":false,"pipeline":false,"standardView":true}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"audioAdaptive":false,"software":false,"passthroughs":["apple-adaptive"],"placement":false,"pipeline":false,"standardView":true,"camera":false,"microphone":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win"),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"audioAdaptive":true,"software":false,"passthroughs":["rdp-graphics"],"placement":false,"pipeline":true,"standardView":false}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"audioAdaptive":true,"software":false,"passthroughs":["rdp-graphics"],"placement":false,"pipeline":true,"standardView":false,"camera":true,"microphone":true}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // picture is, in either codec, and is always passed, so it has no VP9 to
@@ -1292,14 +1297,14 @@ mod tests {
         let fast = entry("fast");
         assert!(
             fast.ends_with(
-                r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"audioAdaptive":false,"software":false,"passthroughs":["apple-media","apple-h264"],"placement":false,"pipeline":false,"standardView":false}"#
+                r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"audioAdaptive":false,"software":false,"passthroughs":["apple-media","apple-h264"],"placement":false,"pipeline":false,"standardView":false,"camera":false,"microphone":false}"#
             ),
             "{fast}"
         );
         // Where the second display sits is offered by a host asked for two.
-        assert!(entry("two").ends_with(r#""placement":true,"pipeline":true,"standardView":false}"#));
-        // wlshare's picture is no choice.
-        assert!(entry("sway").ends_with(r#""pipeline":false,"standardView":false}"#));
+        assert!(entry("two").ends_with(r#""placement":true,"pipeline":true,"standardView":false,"camera":true,"microphone":true}"#));
+        // wlshare's picture is its VP9, or its tiles with motion, both passed.
+        assert!(entry("sway").ends_with(r#""passthroughs":["wlshare-vp9","wlshare-tiles-motion"],"placement":false,"pipeline":false,"standardView":false,"camera":true,"microphone":true}"#), "{}", entry("sway"));
         // Opus held at its one rate is said so.
         let held = crate::config::ConfigFile::parse(&format!(
             "[server]\nsite_passwd = \"{passwd}\"\n\n{}audio_adaptive = false\n",
