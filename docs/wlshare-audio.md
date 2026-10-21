@@ -34,7 +34,7 @@ subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
 username = "me"
-password = "…"
+password_ref = "workstation"   # its value in [passwords], under the config's [master]
 ```
 
 Its Opus is what an `rdp` target's is, with wlshare's encoder in place of the

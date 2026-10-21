@@ -3475,9 +3475,9 @@ mod tests {
         let passwd = crate::auth::generate("admin", "hunter2", 4).unwrap();
         let text = format!(
             "[server]\nsite_passwd = \"{passwd}\"\n\n[[targets]]\nname = \"win\"\n\
-             protocol = \"rdp\"\nhost = \"10.0.0.5\"\nusername = \"u\"\npassword = \"p\"\n{extra}\n"
+             protocol = \"rdp\"\nhost = \"10.0.0.5\"\nusername = \"u\"\npassword_ref = \"p\"\n{extra}\n"
         );
-        crate::config::ConfigFile::parse(&text).unwrap().targets.remove(0)
+        crate::config::ConfigFile::parse_fixture(&text).unwrap().targets.remove(0)
     }
 
     /// A session opens at the layout it will stay at: a phone's 3x screen is the

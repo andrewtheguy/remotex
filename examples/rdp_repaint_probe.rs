@@ -61,7 +61,16 @@ async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
         .expect("set REMOTEX_PROBE_CONFIG to a config file holding a real RDP target");
     let target = std::env::var("REMOTEX_PROBE_TARGET")
         .expect("set REMOTEX_PROBE_TARGET to the name of the target to measure");
-    let (file, _) = remotex::config::load(Some(Path::new(&path))).expect("read the probe config");
+    let (mut file, path_buf) = remotex::config::load(Some(Path::new(&path))).expect("read the probe config");
+    // Its passwords open as a served gateway's would: [server].master_password_file,
+    // else the keychain.
+    let key = file.needs_master().then(|| {
+        let master = file
+            .served_master(path_buf.parent().unwrap_or(Path::new("")))
+            .unwrap_or_else(|e| panic!("the probe config's master password: {e:#}"));
+        file.key(&master).unwrap_or_else(|e| panic!("{path}: {e:#}"))
+    });
+    file.unlock(key.as_ref()).unwrap_or_else(|e| panic!("{path}: {e:#}"));
     let mut config = file.resolve().expect("resolve the probe config");
     config.targets.retain(|t| t.name == target);
     let profile = config

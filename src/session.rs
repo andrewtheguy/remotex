@@ -2335,6 +2335,8 @@ mod tests {
             username: String::new(),
             password: String::new(),
             vnc_password: String::new(),
+            password_ref: None,
+            vnc_password_ref: None,
             domain: None,
             size: Some((1, 1)),
             egfx: meta.bitmap.then_some(false),

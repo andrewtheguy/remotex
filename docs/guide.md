@@ -146,6 +146,67 @@ again returns to the same windows.
 
 See [What a session is started with](architecture.md#what-a-session-is-started-with).
 
+## Target passwords
+
+A target never writes its password. It names it, and the config keeps it
+encrypted in `[passwords]` under that name:
+
+```toml
+[[targets]]
+name = "workstation"
+protocol = "rdp"
+host = "192.0.2.10"
+username = "Administrator"
+password_ref = "workstation"
+```
+
+The two tables are printed for you to paste, never typed:
+
+```sh
+remotex password master -c remotex.toml     # once per config: prints [master]
+remotex password encrypt -c remotex.toml    # prints one value for [passwords]
+```
+
+```toml
+[master]
+salt = "…"
+check = "…"
+
+[passwords]
+workstation = "$RX;1;AES-256-GCM;…"
+```
+
+`password encrypt` asks for the password twice, or reads one line from a pipe,
+and encrypts it under the `[master]` already in the config, which it only reads.
+The name is yours to give when pasting, and it is what `password_ref` says.
+`vnc_password_ref` names a VNC server's own password the same way. Nothing
+secret is in either output, so it can go wherever the config is assembled: an
+editor, a Helm values file, a templated ConfigMap. A local instance's config is
+the TUI's to write: its `p` asks for the name and the password and writes both
+tables itself.
+
+Every value is AES-256-GCM under a key derived from your **master password**
+and the config's own salt, so one master password opens every config your
+account keeps: the served gateway's and each local instance's. It lives in
+the keychain: the macOS Keychain, Windows Credential Manager, or a Linux
+desktop's Secret Service (GNOME Keyring, KWallet). `password master` asks for it
+when the keychain has none, and keeps it there.
+
+| Started as | Master password from |
+|---|---|
+| `remotex serve` | `[server].master_password_file` when set, else the keychain; refused otherwise, never asked |
+| `remotex tui` | the keychain, else asked once at the TUI's terminal |
+| `remotex password` | `[server].master_password_file`, the keychain, else asked |
+
+A gateway with no keychain, such as a container or a headless Linux service,
+reads it from a file: a container secret or a systemd credential, named by
+`[server].master_password_file`. The file holds the master password alone; a
+trailing newline is ignored. A local instance has no `[server]` block, so the
+TUI always uses the keychain or asks.
+
+A wrong master password is reported as one at start-up. Changing the master
+password means setting each password again under a new `[master]`.
+
 ## Windows (`rdp`)
 
 ```toml
@@ -154,7 +215,7 @@ name = "workstation"
 protocol = "rdp"
 host = "192.0.2.10"
 username = "Administrator"
-password = "change-me"
+password_ref = "workstation"
 ```
 
 The RDP client is the gateway's own, tested against Windows 10 and 11's Remote
@@ -257,7 +318,7 @@ protocol = "vnc"
 subtype = "ard"   # or "ard-high-performance"
 host = "192.0.2.11"
 username = "andrew"
-password = "the-account-password"
+password_ref = "mac"
 ```
 
 A Mac needs no additional software. Give the target the Mac *account's* username
@@ -349,7 +410,7 @@ protocol = "vnc"
 subtype = "wlshare"
 host = "192.0.2.12"
 username = "me"
-password = "that-account's-password"
+password_ref = "wayland"
 ```
 
 [wlshare](https://github.com/andrewtheguy/wlshare) is this project's own VNC
@@ -377,8 +438,8 @@ server is read as any VNC server is.
   target. It needs wlshare 0.0.54 or later.
 
 The example uses the account wlshare runs as, checked through PAM over
-RSA-AES. If wlshare instead has a `password_file`, set that server password as
-`vnc_password` and omit `username` and `password`.
+RSA-AES. If wlshare instead has a `password_file`, keep that server password
+under `vnc_password_ref` and omit `username` and `password_ref`.
 
 See [density](wlshare-density.md), [outputs](wlshare-outputs.md),
 [audio](wlshare-audio.md), [camera](wlshare-camera.md) and
@@ -391,11 +452,11 @@ See [density](wlshare-density.md), [outputs](wlshare-outputs.md),
 name = "workstation-vnc"
 protocol = "vnc"
 host = "192.0.2.13"
-vnc_password = "change-me"
+vnc_password_ref = "workstation-vnc"
 ```
 
-A plain target takes `vnc_password` for classic VNC authentication, or
-`username` and `password` for RSA-AES. The gateway asks for ZRLE, which every
+A plain target takes `vnc_password_ref` for classic VNC authentication, or
+`username` and `password_ref` for RSA-AES. The gateway asks for ZRLE, which every
 current VNC server has, and reads nothing else but Raw; the older standard
 encodings, Tight and the other vendor or lossy ones are not listed. The target is shown at its
 server's own size, at 1x, and carries no sound, camera or microphone. Standard RFB cannot say
@@ -435,6 +496,7 @@ is serving. Open <http://remotex.localhost:52380>; each running instance is at
 | `↑`/`↓`, `k`/`j` | select an instance |
 | `n` | create an instance |
 | `e` | edit its `remotex.toml` in `$VISUAL` or `$EDITOR` (`vi`, or Notepad on Windows); the edit is checked, and applies when the instance is restarted |
+| `p` | encrypt a password into its `[passwords]`, asking for the name and the password; a config without `[master]` gets one first |
 | `s`, `x`, `r` | start, stop, restart it |
 | `a` | start every stopped one |
 | `o` | open a running one in the browser |
@@ -451,6 +513,10 @@ another. The root is private to your account, because the configs hold
 credentials. An instance's config has the same `[branding]` and `[[targets]]`
 as a gateway's and no `[server]` block: the TUI owns the port and proxies each
 subdomain to that instance's private Unix socket or named pipe.
+
+A config that names passwords needs the master password to start (see
+[Target passwords](#target-passwords)). The TUI takes it from the keychain or
+asks once, then hands each worker only the key to its own config.
 
 The private files and worker endpoints protect credentials from other local
 users, but the shared loopback listener does not authenticate the OS user: any

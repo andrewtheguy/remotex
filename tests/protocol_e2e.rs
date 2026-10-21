@@ -1260,6 +1260,8 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         },
         password: "s3cr3t-should-not-leak".to_owned(),
         vnc_password: String::new(),
+        password_ref: None,
+        vnc_password_ref: None,
         domain: None,
         size: Some((1280, 800)),
         egfx: None,
