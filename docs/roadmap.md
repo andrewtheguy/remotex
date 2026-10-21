@@ -33,21 +33,6 @@ to the same rate control:
   MS-RDPEMT text on network detection and multitransport say of it, read from
   the specifications rather than recalled.
 
-### What wlshare coded its pictures at
-
-A `wlshare` session's picture is coded and walked by wlshare: its VP9 stream, and
-the region streams of its tiles with motion, move their quantizer by the browser's
-lag, and the gateway passes each frame as it came
-([wlshare's stream, passed through](architecture.md#wlshares-stream-passed-through)).
-So the gateway knows each frame's size and whether it is a keyframe, and nothing
-about the quality it was coded at. The picture totals logged when a session ends
-count a passed stream's units, keyframes and bytes; their count of coarse rounds is
-of the gateway's own tiles, and says nothing of what wlshare coarsened.
-
-Reporting it wants wlshare to say what it coded each frame at: one addition to
-the wire, made in wlshare and read here. Nothing the gateway decides would change
-on it; it is a line in the session log, for judging wlshare on a slow link.
-
 ### The Mac's H.264 mended by refresh pictures
 
 A passed HEVC stream of one tile acknowledges each picture it hands on and, after

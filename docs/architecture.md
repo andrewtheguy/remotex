@@ -1003,7 +1003,8 @@ from an announcement and a keyframe.
 
 wlshare has a VP9 encoding of its own, `WLSV` (`0x574c5356`), made for its desktop
 clients and for this gateway: every update one rectangle over the whole desktop, a
-`u32` length and one frame of a single stream, coded by wlshare's `wlshare-vp9`
+`u8` quality, the 1–100 dial the frame was coded at, a `u32` length and one frame
+of a single stream, coded by wlshare's `wlshare-vp9`
 crate with libvpx, 8-bit, BT.601 at studio swing declared in its keyframes. On a
 `wlshare` target the gateway lists it for every browser, tells wlshare what the
 plan resolved to, and each frame goes to the browser as it came: no ZRLE on either
@@ -1035,6 +1036,18 @@ listing sends.
   of `QUEUE_BUDGET` and go out in order with the messages around them. The mirror,
   the rounds, the interval and the refresh do not run: wlshare paces, codes, walks
   and settles its stream itself.
+- **Each frame says what it was coded at, and nothing turns on it.** The dial
+  ahead of a frame is the one thing about a passed frame the gateway cannot read
+  for itself, since it decodes none of them: wlshare's walk moved it on the
+  browser's lag, and a settle's frame says the ceiling. The gateway passes the
+  frame whatever it says, counts it against the plan's dial for the picture
+  totals logged when the session ends — how many frames were coded below the
+  dial, the coarsest and the mean — and logs each change at debug, for judging
+  wlshare on a slow link. The `coarse` count on the same line is of the
+  gateway's own tiles. A region of wlshare's tiles with motion says none,
+  since every region is held at the dial the list names. Do not make a
+  decision here on what wlshare says it coded at: the walk is wlshare's, by
+  the fence the gateway holds for the browser's queue.
 - **A restart waits for a keyframe.** A reattach and a resize reset the
   render as always. On a reattach the full update the engine asks for
   is what makes wlshare send a keyframe; after a resize it asks for none, because
