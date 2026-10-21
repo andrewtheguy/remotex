@@ -354,6 +354,7 @@ impl Master {
     /// none. A keychain that would not answer is the error, so the TUI says so.
     fn get(&mut self) -> anyhow::Result<&MasterPassword> {
         if self.0.is_none() {
+            let _one_at_a_time = Self::lock()?;
             let master = match crate::keychain::load().context("cannot read the master password")? {
                 Some(master) => master,
                 None => {
@@ -365,6 +366,35 @@ impl Master {
             self.0 = Some(master);
         }
         Ok(self.0.as_ref().expect("set just above"))
+    }
+
+    /// The account's lock on first-time generation, so two control planes
+    /// started together (each with its own port and instances directory) do not
+    /// both find the keychain empty and each keep a master the other's save
+    /// replaces. The keychain has no create-if-absent, so a file beside the
+    /// account's default instances directory stands in, whichever directory
+    /// either was given. Under test the store is the process's own mock, and the
+    /// tests serialize themselves.
+    fn lock() -> anyhow::Result<Option<std::fs::File>> {
+        #[cfg(test)]
+        {
+            Ok(None)
+        }
+        #[cfg(not(test))]
+        {
+            let instances = default_instances_dir()?;
+            let root = instances.parent().context("the instances directory has no parent")?;
+            std::fs::create_dir_all(root).with_context(|| format!("cannot create {}", root.display()))?;
+            let path = root.join("master.lock");
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .with_context(|| format!("cannot open {}", path.display()))?;
+            file.lock().with_context(|| format!("cannot lock {}", path.display()))?;
+            Ok(Some(file))
+        }
     }
 
     /// The key a start of the instance whose config is at `path` hands its worker:
@@ -2098,6 +2128,7 @@ mod tests {
     /// account's is told as one.
     #[test]
     fn the_master_password_is_generated_once_and_kept_in_the_keychain() {
+        let _store = crate::keychain::empty_test_store();
         let mut first = Master::default();
         let generated = first.get().unwrap().clone();
         assert_eq!(generated.as_str().len(), 44, "32 random bytes, base64");
