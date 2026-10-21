@@ -189,20 +189,21 @@ Every value is AES-256-GCM under a key derived from your **master password**
 and the config's own salt, so one master password opens every config your
 account keeps: the served gateway's and each local instance's. It lives in
 the keychain: the macOS Keychain, Windows Credential Manager, or a Linux
-desktop's Secret Service (GNOME Keyring, KWallet). `password master` asks for it
-when the keychain has none, and keeps it there.
+desktop's Secret Service (GNOME Keyring, KWallet). The TUI generates one and
+keeps it there the first time it needs one, so you never type it; `password
+master` asks for it when the keychain has none, and keeps it there.
 
 | Started as | Master password from |
 |---|---|
 | `remotex serve` | `[server].master_password_file` when set, else the keychain; refused otherwise, never asked |
-| `remotex tui` | the keychain, else asked once at the TUI's terminal |
+| `remotex tui` | the keychain; generated and kept there when it has none; refused when the keychain will not answer, never asked |
 | `remotex password` | `[server].master_password_file`, the keychain, else asked |
 
 A gateway with no keychain, such as a container or a headless Linux service,
 reads it from a file: a container secret or a systemd credential, named by
 `[server].master_password_file`. The file holds the master password alone; a
 trailing newline is ignored. A local instance has no `[server]` block, so the
-TUI always uses the keychain or asks.
+TUI always uses the keychain, and needs one.
 
 A wrong master password is reported as one at start-up. Changing the master
 password means setting each password again under a new `[master]`.
@@ -515,8 +516,11 @@ as a gateway's and no `[server]` block: the TUI owns the port and proxies each
 subdomain to that instance's private Unix socket or named pipe.
 
 A config that names passwords needs the master password to start (see
-[Target passwords](#target-passwords)). The TUI takes it from the keychain or
-asks once, then hands each worker only the key to its own config.
+[Target passwords](#target-passwords)). The TUI takes it from the keychain,
+generating one there the first time, then hands each worker only the key to
+its own config. An instance config copied from another account's keychain
+does not open under this one: remove its `[master]` and `[passwords]` and set
+each password again with `p`.
 
 The private files and worker endpoints protect credentials from other local
 users, but the shared loopback listener does not authenticate the OS user: any

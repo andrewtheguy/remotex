@@ -3732,11 +3732,17 @@ Where the master password comes from is each audience's:
   served gateway's deployment says things, so a container names its secret
   there rather than in the environment, where `docker inspect` and every child
   process would see it.
-- `remotex tui` takes it from the keychain or asks once at its own terminal,
-  then derives each instance's key and writes it as the worker's first stdin
-  line. A worker holds the key that opens its own config and nothing that
-  opens another's, and never reads the keychain itself. An instance config has
-  no `[server]` block, so there is no file to name.
+- `remotex tui` takes it from the keychain, and when the keychain keeps none
+  generates one (32 random bytes) and keeps it there, as Chrome's and Slack's
+  Safe Storage keys are made: nobody types it, and every instance opens under
+  the same one. It never asks at its terminal; a keychain that will not answer
+  is reported as the start's error. It then derives each instance's key and
+  writes it as the worker's first stdin line. A worker holds the key that opens
+  its own config and nothing that opens another's, and never reads the keychain
+  itself. An instance config has no `[server]` block, so there is no file to
+  name, and a config whose `[master]` the keychain's master password does not
+  open was made under another account's: the TUI says so, and its passwords are
+  set again with `p` after the two tables are removed.
 - The keychain is the `keychain` Cargo feature, on by default and off in a
   container build, which has no store to ask and reads the file alone.
 

@@ -95,6 +95,14 @@ impl MasterPassword {
         Ok(Self(password))
     }
 
+    /// A master password nobody will ever type: 32 random bytes, for a keychain
+    /// to keep.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        rand::fill(&mut bytes[..]);
+        Self(BASE64.encode(bytes))
+    }
+
     /// Read a master password kept in a file: a container's secret, a systemd
     /// credential. One trailing line ending is the file's, not the password's.
     pub fn read_file(path: &std::path::Path) -> anyhow::Result<Self> {
