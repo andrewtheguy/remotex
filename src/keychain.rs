@@ -89,7 +89,7 @@ fn init_store() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("no keychain: {error}"))
 }
 
-#[cfg(all(feature = "keychain", not(test)))]
+#[cfg(feature = "keychain")]
 fn native_store() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let store = apple_native_keyring_store::keychain::Store::new();
@@ -109,6 +109,37 @@ fn native_store() -> Result<(), String> {
 #[cfg(all(test, feature = "keychain"))]
 mod tests {
     use super::*;
+
+    /// Round-trips a throwaway entry through the machine's real store, under an
+    /// account of its own so the master password kept there is never touched.
+    ///
+    /// Ignored because it writes the real store, and because only a desktop
+    /// session's store answers: run it there (macsandbox on a Mac, a logged-on
+    /// account on Windows, a Linux desktop with GNOME Keyring or KWallet).
+    #[test]
+    #[ignore = "writes the machine's real keychain; run from a desktop session"]
+    fn the_real_store_round_trips_a_throwaway_entry() {
+        /// Deletes the entry however the test ends.
+        struct Cleanup(keyring_core::Entry);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.0.delete_credential();
+            }
+        }
+
+        // Not `init_store`: under test that is the mock, and this is the real one.
+        native_store().expect("a native store");
+        let vendor = keyring_core::get_default_store().unwrap().vendor();
+        assert!(!vendor.contains("Mock"), "{vendor}");
+        let account = format!("test-{}", std::process::id());
+        let entry = keyring_core::Entry::new(SERVICE, &account).unwrap();
+        entry.set_password("correct horse battery staple").expect("write the real store");
+        let cleanup = Cleanup(entry);
+        assert_eq!(cleanup.0.get_password().unwrap(), "correct horse battery staple");
+        cleanup.0.delete_credential().expect("delete from the real store");
+        assert!(matches!(cleanup.0.get_password(), Err(keyring_core::Error::NoEntry)));
+        eprintln!("round-tripped through {vendor}");
+    }
 
     /// The guard for every test in this binary: the store a test reaches is the
     /// mock, and a round trip through it works.

@@ -175,7 +175,15 @@ name = "workstation"
 protocol = "rdp"
 host = "192.0.2.10"
 username = "Administrator"
-password = "change-me"
+password_ref = "workstation"
+```
+
+Then encrypt the target's password into the config, under a master password
+kept in your keychain (see [Target passwords](docs/guide.md#target-passwords)):
+
+```sh
+remotex password init
+remotex password set workstation
 ```
 
 Start it and open <http://localhost:52380>:

@@ -13,7 +13,8 @@
 # working-directory files. The listen address below is the one setting that can
 # also come from outside this file (--listen, or REMOTEX_LISTEN); everything
 # else, credentials included, is configured here. Keep this file readable only
-# by the service user — it holds credentials.
+# by the service user — it holds the login hash, and the targets' passwords,
+# encrypted, in [passwords] below.
 #
 #   chmod 600 remotex.toml
 #
@@ -113,6 +114,28 @@
 #[hevc_wasm]
 #archive = "/srv/remotex/hevc-wasm-v0.0.17.tar.gz"
 
+# The targets' passwords. A target never writes one: it names it, with
+# password_ref or vnc_password_ref, and [passwords] keeps it under that name,
+# encrypted with a key derived from your master password and the salt in
+# [master]. One master password opens every config your account keeps. Neither
+# table is written by hand:
+#
+#   remotex password init -c remotex.toml          # writes [master]
+#   remotex password set example -c remotex.toml   # writes [passwords].example
+#
+# The master password is the one in the keychain (macOS Keychain, Windows
+# Credential Manager, a Linux desktop's Secret Service); `password init` asks for
+# it and keeps it there when the keychain has none. A gateway without a keychain
+# — a container, a headless service — reads it from the file
+# [server].master_password_file names instead.
+#
+#[master]
+#salt = "…"
+#check = "…"
+#
+#[passwords]
+#example = "$RX;1;AES-256-GCM;…"
+
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,
 # because it is one decision — a host without a port is half an answer.
@@ -141,6 +164,13 @@
 # Web login (required): username:bcrypt_hash guarding the whole surface.
 # Generate with:  remotex gen-passwd <username>
 site_passwd = ""
+
+# A file holding the master password that opens [passwords], for a gateway
+# with no keychain to keep it in: a container's secret, a systemd credential.
+# A relative path is taken from this file's directory. Unset, the master
+# password is the keychain's, and a gateway that finds none refuses to start;
+# it never asks at a terminal.
+#master_password_file = "/run/secrets/remotex_master"
 
 # DEVELOPMENT ONLY, and inert in any deployment. Gives this gateway its own
 # hostname on loopback: a browser opening the home page under *any* loopback name
@@ -281,13 +311,14 @@ host = "192.0.2.10"
 # Default: the protocol's standard port (3389 rdp, 5900 vnc).
 #port = 3389
 
-# Credentials (used server-side only; never sent to the browser).
+# Credentials (used server-side only; never sent to the browser). The password
+# is named here and kept in [passwords]: `remotex password set example`.
 username = "Administrator"
-password = "change-me"
+password_ref = "example"
 # A VNC server's own password (RFB VncAuth) — a separate key because it is a
 # separate credential: it proves knowledge of a machine secret and names nobody.
 # VNC only, rejected elsewhere. See the VNC target below.
-#vnc_password = "change-me"
+#vnc_password_ref = "example-vnc"
 # Optional domain (leave unset for a local account). RDP only, rejected elsewhere.
 #domain = ""
 
@@ -402,14 +433,14 @@ password = "change-me"
 
 # A plain VNC target needs host and, usually, one of the two passwords; domain is
 # refused, and it is asked once for `size`, or 1440×900, as above.
-# `vnc_password` is the server's own password and is all a server without user
+# `vnc_password_ref` names the server's own password, which and is all a server without user
 # accounts takes. It is the RFB baseline: the picture comes as ZRLE and is sent as
 # tiles, shown at 1x, with no sound, camera or microphone.
 # [[targets]]
 # name = "workstation-vnc"
 # protocol = "vnc"
 # host = "10.0.0.2"
-# vnc_password = "change-me"
+# vnc_password_ref = "workstation-vnc"
 
 # A wlroots-based Wayland desktop behind the wlshare VNC server says so with
 # `subtype = "wlshare"`, which makes the gateway list wlshare's extensions: its own
@@ -420,22 +451,22 @@ password = "change-me"
 # Without the subtype the same server is a plain target, read as any VNC server
 # is. With a username and password, wlshare checks the account it runs as through
 # PAM over RSA-AES, encrypting the session; a password_file on the server is its
-# VNC password instead, which goes in vnc_password. See docs/wlshare-density.md.
+# VNC password instead, which vnc_password_ref names. See docs/wlshare-density.md.
 # [[targets]]
 # name = "workstation-wayland"
 # protocol = "vnc"
 # subtype = "wlshare"
 # host = "127.0.0.1"
 # username = "me"
-# password = "that-account's-password"
+# password_ref = "workstation-wayland"
 
 # A Mac uses its built-in Screen Sharing service through this same path, with no
 # additional software — say so with a subtype, and give it an *account* rather than
 # the Screen Sharing password. Apple's DH authentication is the only way to tell a
 # Mac who is connecting, and macOS answers a viewer that names nobody by creating a
 # new login window on a virtual display instead of sharing its screen. So every
-# Apple subtype requires username and password (that account's) and takes no
-# vnc_password. Size is where they part: `ard` has none to set, because it shares
+# Apple subtype requires username and password_ref (that account's) and takes no
+# vnc_password_ref. Size is where they part: `ard` has none to set, because it shares
 # the Mac's physical displays, while "ard-high-performance" sizes the one
 # virtual display it makes, by `size` or by the window; the unofficial `virtual_display = true` gives `ard`
 # that display too. A third-party VNC server that happens to run on a Mac is not
@@ -462,7 +493,7 @@ password = "change-me"
 # subtype = "ard"
 # host = "10.0.0.3"
 # username = "andrew"
-# password = "the-account-password"
+# password_ref = "mac"
 
 # UNOFFICIAL: `virtual_display = true` opens that same Standard session on one
 # virtual display instead of the Mac's physical ones. The display is High
@@ -484,7 +515,7 @@ password = "change-me"
 # virtual_display = true
 # host = "10.0.0.3"
 # username = "andrew"
-# password = "the-account-password"
+# password_ref = "mac"
 
 # `subtype = "ard-high-performance"` is High Performance as Apple's own viewer has
 # it. Its virtual display handling and its media stream were reverse engineered
@@ -552,7 +583,7 @@ password = "change-me"
 # subtype = "ard-high-performance"
 # host = "10.0.0.3"
 # username = "andrew"
-# password = "the-account-password"
+# password_ref = "mac"
 
 # How this target's picture is configured. Where the gateway codes the picture —
 # plain VNC, and RDP's bitmap path — it is tiles: the desktop in 64×64 tiles, a

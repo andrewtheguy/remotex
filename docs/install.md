@@ -134,8 +134,21 @@ notepad "$env:ProgramData\remotex\remotex.toml"
 ```
 
 Paste the generated `admin:$2b$...` value into `[server].site_passwd` and
-replace the example `[[targets]]` entry with the remote desktop to reach. Start
-the gateway in the foreground:
+replace the example `[[targets]]` entry with the remote desktop to reach. Its
+password is not written there: the target names it with `password_ref`, and
+these commands keep it encrypted in the config under your master password,
+which `password init` asks for and keeps in the keychain:
+
+```sh
+remotex password init
+remotex password set example
+```
+
+A gateway run as a service where no keychain answers, such as headless Linux or
+Windows over SSH, reads the master password from the file
+`[server].master_password_file` names instead. See
+[Target passwords](guide.md#target-passwords). Start the gateway in the
+foreground:
 
 ```sh
 remotex serve
@@ -163,6 +176,28 @@ Generate the required web-login credential with:
 ```sh
 docker run --rm -it ghcr.io/andrewtheguy/remotex:latest gen-passwd admin
 ```
+
+The image has no keychain, so the master password comes from a file. Keep it in
+a secret, name that file in the config, and write the config's passwords with
+the same image:
+
+```toml
+[server]
+master_password_file = "/run/secrets/remotex_master"
+```
+
+```sh
+printf '%s' 'the master password' > remotex_master   # mode 600, outside the image
+docker run --rm -it -v ./remotex.toml:/opt/remotex/etc/remotex.toml \
+  -v ./remotex_master:/run/secrets/remotex_master:ro \
+  ghcr.io/andrewtheguy/remotex:latest password init
+docker run --rm -it -v ./remotex.toml:/opt/remotex/etc/remotex.toml \
+  -v ./remotex_master:/run/secrets/remotex_master:ro \
+  ghcr.io/andrewtheguy/remotex:latest password set example
+```
+
+Mount the same file read-only into the running gateway, as above or as a Docker,
+Podman or Kubernetes secret.
 
 ## Upgrade
 

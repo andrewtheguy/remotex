@@ -70,7 +70,9 @@ are experimental — see [Camera frames](#camera-frames) and
 The rules every change keeps, by area. [AGENTS.md](../AGENTS.md) names each
 area and points here; read the area's section before changing what it covers.
 
-- Remote credentials remain in the server-side TOML configuration.
+- Remote credentials remain in the server-side TOML configuration, encrypted
+  in its `[passwords]` under the account's master password, and never reach the
+  browser. See [Target passwords](#target-passwords).
 - Clients speak only the remotex protocol and never implement RDP or RFB.
 - Protocol engines speak each protocol's baseline to every server, and the
   project prioritizes three: Windows' own Remote Desktop, macOS's built-in Screen
@@ -3243,7 +3245,8 @@ with its alpha, so a shadow and antialiased edges survive where Cursor's 1-bit
 mask cuts them away. Only its Raw form is read, which is what TigerVNC, QEMU and
 wlshare send; QEMU's pixels are in its native `B, G, R, A` rather than the
 spec's `R, G, B, A`, which a greyscale guest pointer does not show. Plain VNC carries
-`vnc_password` for classic `VncAuth`, and `username` and `password` for RSA-AES —
+the password `vnc_password_ref` names for classic `VncAuth`, and `username` and the one
+`password_ref` names for RSA-AES —
 the account a server such as wayvnc (`enable_auth`) or RealVNC checks — taking
 whichever the server offers and the encrypted one when it offers both.
 `src/vnc_rsa_aes.rs` is that exchange and the AES-EAX framed transport every byte
@@ -3628,9 +3631,11 @@ directories and worker endpoints protect the configs and the private transport;
 they do not authenticate the public loopback surface. Do not run the TUI on a
 machine shared with users who must not reach its desktops.
 
-Each hidden worker binds its private endpoint, prints one JSON readiness line —
-`{"endpoint","token"}` — after binding, reads only that instance's
-`remotex.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,
+Each hidden worker reads one line from stdin first — the key to its config's
+`[passwords]`, or an empty line for a config that names none (see
+[Target passwords](#target-passwords)) — binds its private endpoint, prints one
+JSON readiness line — `{"endpoint","token"}` — after binding, reads only that
+instance's `remotex.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,
 `Audience::Embedded`). Before any of that it claims the instance: an exclusive
 lock on `<instance>/gateway.lock` through std's `File::try_lock`, the same on
 every platform and released by the operating system however the worker ends. A
@@ -3698,6 +3703,48 @@ private endpoint — `<instance>/gateway.sock`, or a named pipe on Windows — a
 never on TCP, and the thing terminating the proxy is the TUI master, which the
 browser reaches over loopback TCP and which forwards each connection to that
 endpoint.
+
+### Target passwords
+
+A target names its password (`password_ref`, `vnc_password_ref`) and the
+top-level `[passwords]` table holds each one as
+`$RX;1;AES-256-GCM;<base64(nonce ‖ ciphertext ‖ tag)>`, sealed with its own
+name as associated data so a value moved under another name does not open
+(`src/vault.rs`). The key is scrypt (2^16, 8, 1) of the account's master
+password and the file's `[master].salt`; `[master].check`, an HMAC under that
+key, tells a wrong master password apart before any value is tried. One master
+password per OS account opens every config it keeps, while each file's salt
+gives each its own key. Inline `password` and `vnc_password` are unknown keys.
+
+Reading a file checks only shape: every name a target gives is in
+`[passwords]`, every value has the prefix and length of one, and `[master]` is
+there to open them. `check-config` therefore needs no master password. The
+values are decrypted into the targets once, at start-up, and a target's
+`password` and `vnc_password` hold the plaintext from then on, exactly as
+before.
+
+Where the master password comes from is each audience's:
+
+- `remotex serve` reads `[server].master_password_file` when it is set, else
+  the keychain (`src/keychain.rs`: keyring-core over the macOS Keychain,
+  Windows Credential Manager, or the Secret Service over zbus, so no build
+  needs libdbus). It never asks at a terminal: a service manager and a person
+  must start it the same way. The file is a `[server]` key, the one place a
+  served gateway's deployment says things, so a container names its secret
+  there rather than in the environment, where `docker inspect` and every child
+  process would see it.
+- `remotex tui` takes it from the keychain or asks once at its own terminal,
+  then derives each instance's key and writes it as the worker's first stdin
+  line. A worker holds the key that opens its own config and nothing that
+  opens another's, and never reads the keychain itself. An instance config has
+  no `[server]` block, so there is no file to name.
+- The keychain is the `keychain` Cargo feature, on by default and off in a
+  container build, which has no store to ask and reads the file alone.
+
+`remotex password init` writes `[master]`, keeping a master password it had to
+ask for in the keychain; `remotex password set <name>` writes one value. Both
+edit the file through `toml_edit`, keeping its comments, and replace it by a
+rename. The TUI's `p` does the same for the selected instance.
 
 ### Branding
 
