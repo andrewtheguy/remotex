@@ -186,24 +186,22 @@ the TUI's to write: its `p` asks for the name and the password and writes both
 tables itself.
 
 Every value is AES-256-GCM under a key derived from your **master password**
-and the config's own salt, so one master password opens every config your
-account keeps: the served gateway's and each local instance's. It lives in
-the keychain: the macOS Keychain, Windows Credential Manager, or a Linux
-desktop's Secret Service (GNOME Keyring, KWallet). The TUI generates one and
-keeps it there the first time it needs one, so you never type it; `password
-master` asks for it when the keychain has none, and keeps it there.
+and the config's own salt. A served gateway reads it from a file named by
+`[server].master_password_file`: a container secret, a systemd credential, or
+a file only the gateway's account can read. The file holds the master password
+alone; a trailing newline is ignored. The TUI keeps its own in the keychain
+(the macOS Keychain, Windows Credential Manager, or a Linux desktop's Secret
+Service: GNOME Keyring, KWallet), generated the first time it needs one, so
+you never type it. Nothing but the TUI reads the keychain.
 
 | Started as | Master password from |
 |---|---|
-| `remotex serve` | `[server].master_password_file` when set, else the keychain; refused otherwise, never asked |
+| `remotex serve` | `[server].master_password_file`; refused without it, never asked |
 | `remotex tui` | the keychain; generated and kept there when it has none; refused when the keychain will not answer, never asked |
-| `remotex password` | `[server].master_password_file`, the keychain, else asked |
+| `remotex password` | `[server].master_password_file`, else asked |
 
-A gateway with no keychain, such as a container or a headless Linux service,
-reads it from a file: a container secret or a systemd credential, named by
-`[server].master_password_file`. The file holds the master password alone; a
-trailing newline is ignored. A local instance has no `[server]` block, so the
-TUI always uses the keychain, and needs one.
+A local instance has no `[server]` block, so the TUI always uses the keychain,
+and needs one.
 
 A wrong master password is reported as one at start-up. Changing the master
 password means setting each password again under a new `[master]`.

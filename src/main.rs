@@ -19,8 +19,8 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // zbus, under the Secret Service keychain on Linux, narrates its D-Bus handshake
-    // at info; nothing it says there is the gateway's news.
+    // zbus, under the TUI's Secret Service keychain on Linux, narrates its D-Bus
+    // handshake at info; nothing it says there is the control plane's news.
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,zbus=warn,tracing=warn"),
     )
@@ -134,17 +134,17 @@ fn read_secret(label: &str, confirm: bool) -> anyhow::Result<String> {
 fn password(action: PasswordAction) -> anyhow::Result<()> {
     match action {
         PasswordAction::Master { config } => {
-            let (master, kept) = command_master(config.as_deref(), true)?;
+            // The installed config when there is one, as `encrypt` takes, so both
+            // read the master password the gateway will; a first config can come later.
+            let path = config.or_else(|| remotex::config::installed_config_path().filter(|path| path.exists()));
+            let (master, from_file) = command_master(path.as_deref(), true)?;
             let (section, _) = remotex::vault::Key::create(&master)?;
             println!("[master]\nsalt = \"{}\"\ncheck = \"{}\"", section.salt, section.check);
-            if !kept {
-                match remotex::keychain::save(&master) {
-                    Ok(()) => eprintln!("kept the master password in the keychain"),
-                    Err(error) => eprintln!(
-                        "the master password is not kept anywhere ({error:#}): give it to a \
-                         served gateway in a file named by [server].master_password_file"
-                    ),
-                }
+            if !from_file {
+                eprintln!(
+                    "the master password is not kept anywhere: give it to a served gateway \
+                     in a file named by [server].master_password_file"
+                );
             }
         }
         PasswordAction::Encrypt { config } => {
@@ -162,10 +162,10 @@ fn password(action: PasswordAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The master password for a `remotex password` run, and whether it came from
-/// somewhere that keeps it: the `[server].master_password_file` of the config at
-/// `path`, then the keychain, then the terminal, asked twice there when `confirm`
-/// (a new `[master]` block has nothing to check it by).
+/// The master password for a `remotex password` run, and whether it came from a
+/// file: the `[server].master_password_file` of the config at `path`, else the
+/// terminal, asked twice there when `confirm` (a new `[master]` block has nothing
+/// to check it by). Never the keychain, which is the TUI's.
 fn command_master(
     path: Option<&std::path::Path>,
     confirm: bool,
@@ -175,17 +175,10 @@ fn command_master(
     if let Some(file) = path.map(remotex::vault::master_file_of).transpose()?.flatten() {
         return Ok((remotex::vault::MasterPassword::read_file(&file)?, true));
     }
-    match remotex::keychain::load() {
-        Ok(Some(master)) => {
-            eprintln!("using the master password in the keychain");
-            return Ok((master, true));
-        }
-        Ok(None) => {}
-        Err(error) => eprintln!("{error:#}"),
-    }
     anyhow::ensure!(
         std::io::stdin().is_terminal(),
-        "no master password: the keychain keeps none and stdin is not a terminal to ask at"
+        "no master password: the config names no [server].master_password_file and stdin \
+         is not a terminal to ask at"
     );
     let master = read_secret("Master password", confirm)?;
     Ok((remotex::vault::MasterPassword::new(master)?, false))

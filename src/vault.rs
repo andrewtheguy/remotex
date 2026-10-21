@@ -22,9 +22,9 @@
 //! gives it.
 //!
 //! Where the master password comes from is the deployment's to say, and each
-//! audience has its own answer — see [`crate::keychain`] and
-//! `[server].master_password_file`. This module only turns it into a [`Key`] and
-//! uses that key.
+//! audience has its own answer — `[server].master_password_file` for a served
+//! gateway, the keychain for the TUI (`crate::keychain`). This module only turns
+//! it into a [`Key`] and uses that key.
 
 use aes_gcm::aead::{Aead as _, KeyInit as _};
 use aes_gcm::Aes256Gcm;

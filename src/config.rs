@@ -1494,14 +1494,13 @@ pub struct ServerSection {
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
     /// A file holding the master password that opens `[passwords]`: a container's
-    /// secret (`/run/secrets/…`), a systemd credential, anything a deployment
-    /// without a keychain keeps one in. A relative path is taken from the config
-    /// file's directory. Unset, the master password is the keychain's — see
-    /// [`crate::keychain`].
+    /// secret (`/run/secrets/…`), a systemd credential, a file only the service's
+    /// account reads. A relative path is taken from the config file's directory.
+    /// A served gateway has no other source: a config that names passwords and
+    /// not this file refuses to start.
     ///
     /// A `[server]` key because only a served gateway reads it: a local instance has
-    /// no `[server]` block, and its control plane asks the keychain or the person at
-    /// the terminal instead.
+    /// no `[server]` block, and its control plane takes the keychain's instead.
     pub master_password_file: Option<PathBuf>,
     // No `branding` here: it is the top-level `[branding]` table now (see
     // `ConfigFile::branding`), because an embedded config has no `[server]`
@@ -2220,29 +2219,30 @@ impl ConfigFile {
         Ok(())
     }
 
-    /// The master password a served gateway opens this file with:
-    /// `[server].master_password_file` when it names one, the keychain's otherwise.
-    /// Never asked at a terminal — a gateway is started as often by a service
-    /// manager as by hand, and the two must start the same way.
+    /// The master password a served gateway opens this file with: the one in the
+    /// file `[server].master_password_file` names. Never the keychain, which is the
+    /// TUI's, and never asked at a terminal — a gateway is started as often by a
+    /// service manager as by hand, and the two must start the same way.
     ///
     /// `config_dir` is what a relative `master_password_file` is taken from.
     pub fn served_master(&self, config_dir: &Path) -> anyhow::Result<MasterPassword> {
-        if let Some(file) = self.server.as_ref().and_then(|server| server.master_password_file.as_ref()) {
-            return MasterPassword::read_file(&config_dir.join(file))
-                .context("invalid [server].master_password_file");
-        }
-        match crate::keychain::load() {
-            Ok(Some(master)) => Ok(master),
-            Ok(None) => anyhow::bail!(
-                "the keychain has no remotex master password: store one with \
-                 `remotex password master`, or name a file holding it in \
-                 [server].master_password_file"
-            ),
-            Err(error) => Err(error).context(
-                "the config names passwords and the master password could not be read from \
-                 the keychain; name a file holding it in [server].master_password_file",
-            ),
-        }
+        let file = self
+            .served_master_file()?
+            .context("the config names no [server].master_password_file")?;
+        MasterPassword::read_file(&config_dir.join(file)).context("invalid [server].master_password_file")
+    }
+
+    /// `[server].master_password_file`, which a served config that names passwords
+    /// must set. Checked without reading the file, so `check-config` refuses what
+    /// `serve` would.
+    fn served_master_file(&self) -> anyhow::Result<Option<&Path>> {
+        let file = self.server.as_ref().and_then(|server| server.master_password_file.as_deref());
+        anyhow::ensure!(
+            file.is_some() || !self.needs_master(),
+            "the config names passwords: name a file holding the master password in \
+             [server].master_password_file"
+        );
+        Ok(file)
     }
 
     /// Resolve the runtime configuration of a managed local instance: its private
@@ -2509,7 +2509,9 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<(ConfigFile, PathBuf)> {
 /// This lives in the ordinary config module so `check-config` remains useful in
 /// feature-minimal builds without pulling in the managed-instance substrate.
 pub fn check(text: &str) -> anyhow::Result<()> {
-    ConfigFile::parse(text)?.resolve().map(|_| ())
+    let file = ConfigFile::parse(text)?;
+    file.served_master_file()?;
+    file.resolve().map(|_| ())
 }
 
 /// Read config text from a file, or from stdin when no path is given.
@@ -3705,6 +3707,17 @@ mod tests {
         let orphaned = format!("{no_master}[passwords]\npi = \"{}{}\"\n", crate::vault::PREFIX, "A".repeat(40));
         let err = ConfigFile::parse(&orphaned).unwrap_err();
         assert!(format!("{err:#}").contains("no [master]"), "{err:#}");
+    }
+
+    /// A served config that names passwords names the file its master password is
+    /// in, and `check-config` refuses one that does not, as `serve` would.
+    #[test]
+    fn a_served_config_with_passwords_names_its_master_password_file() {
+        let vaulted = vaulted(&vnc_toml(r#"vnc_password_ref = "pi""#));
+        let err = check(&vaulted).unwrap_err();
+        assert!(format!("{err:#}").contains("[server].master_password_file"), "{err:#}");
+        check(&vaulted.replacen("[server]", "[server]\nmaster_password_file = \"mp\"", 1)).unwrap();
+        check(&vnc_toml("")).unwrap();
     }
 
     /// `ard` is a declaration about the far end, so it comes with the credentials

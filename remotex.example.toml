@@ -117,17 +117,14 @@
 # The targets' passwords. A target never writes one: it names it, with
 # password_ref or vnc_password_ref, and [passwords] keeps it under that name,
 # encrypted with a key derived from your master password and the salt in
-# [master]. One master password opens every config your account keeps. Neither
-# table is typed: each is printed for you to paste here.
+# [master]. Neither table is typed: each is printed for you to paste here.
 #
 #   remotex password master -c remotex.toml    # prints the [master] block
 #   remotex password encrypt -c remotex.toml   # prints a value: example = "…"
 #
-# The master password is the one in the keychain (macOS Keychain, Windows
-# Credential Manager, a Linux desktop's Secret Service); `password master` asks
-# for it and keeps it there when the keychain has none. A gateway without a keychain
-# — a container, a headless service — reads it from the file
-# [server].master_password_file names instead.
+# A served gateway reads the master password from the file
+# [server].master_password_file names; `password` reads it there too, or asks
+# when the config names none. The keychain is the TUI's alone.
 #
 #[master]
 #salt = "…"
@@ -165,11 +162,11 @@
 # Generate with:  remotex gen-passwd <username>
 site_passwd = ""
 
-# A file holding the master password that opens [passwords], for a gateway
-# with no keychain to keep it in: a container's secret, a systemd credential.
-# A relative path is taken from this file's directory. Unset, the master
-# password is the keychain's, and a gateway that finds none refuses to start;
-# it never asks at a terminal.
+# A file holding the master password that opens [passwords]: a container's
+# secret, a systemd credential, a file only the gateway's account reads. A
+# relative path is taken from this file's directory. A config that names
+# passwords and not this file refuses to start; the gateway never asks at a
+# terminal, and never reads the keychain.
 #master_password_file = "/run/secrets/remotex_master"
 
 # DEVELOPMENT ONLY, and inert in any deployment. Gives this gateway its own

@@ -13,14 +13,11 @@ use clap::{Parser, Subcommand};
 
 /// The optional cargo features this binary was built with, for `--help` and the log
 /// of a starting gateway: `embedded-gateway` decides whether it accepts `tui`, and
-/// `keychain` whether a master password can come from the OS credential store, and
-/// nothing else about the binary says either. Not in `--version`, which packaging
+/// nothing else about the binary says so. Not in `--version`, which packaging
 /// compares to the release's.
 pub const FEATURES: &[&str] = &[
     #[cfg(feature = "embedded-gateway")]
     "embedded-gateway",
-    #[cfg(feature = "keychain")]
-    "keychain",
 ];
 
 /// [`FEATURES`] as a terminal and the log spell them.
@@ -121,8 +118,8 @@ pub enum Commands {
     /// to paste there. A target names one with password_ref or vnc_password_ref.
     ///
     /// The master password is the config's [server].master_password_file when
-    /// it names one, else the keychain's, else asked for here. The TUI writes its
-    /// instances' configs itself (p).
+    /// it names one, else asked for here. The TUI writes its instances' configs
+    /// itself (p), under the keychain's master password.
     Password {
         #[command(subcommand)]
         action: PasswordAction,
@@ -132,11 +129,12 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum PasswordAction {
     /// Print a new [master] block, to paste into a config before its
-    /// [passwords]. A master password asked for here is kept in the keychain,
-    /// where the gateway and the TUI find it
+    /// [passwords]. A served gateway reads the master password from the file
+    /// its [server].master_password_file names
     Master {
         /// A config whose [server].master_password_file holds the master
-        /// password; nothing in it is changed
+        /// password; nothing in it is changed (default: the installed global
+        /// config, when there is one)
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
@@ -164,7 +162,6 @@ mod tests {
         let help = command.render_help().to_string();
         assert!(help.trim_end().ends_with(&format!("Features: {}", features_line())), "{help}");
         assert_eq!(FEATURES.contains(&"embedded-gateway"), cfg!(feature = "embedded-gateway"));
-        assert_eq!(FEATURES.contains(&"keychain"), cfg!(feature = "keychain"));
         assert_eq!(
             command.render_version(),
             format!("remotex {}\n", env!("CARGO_PKG_VERSION"))

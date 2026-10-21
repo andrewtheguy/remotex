@@ -136,21 +136,21 @@ notepad "$env:ProgramData\remotex\remotex.toml"
 Paste the generated `admin:$2b$...` value into `[server].site_passwd` and
 replace the example `[[targets]]` entry with the remote desktop to reach. Its
 password is not written there: the target names it with `password_ref`, and
-the config keeps it encrypted under your master password. `password master`
-prints the `[master]` block to paste into the config, asking for the master
-password and keeping it in the keychain when the keychain has none; then
-`password encrypt` prints the value to paste as `example = "…"` under
-`[passwords]`:
+the config keeps it encrypted under your master password, which the gateway
+reads from the file `[server].master_password_file` names. Write the master
+password alone to a file beside the config, which only your account can read,
+and name it there (`master_password_file = "master-password"`; a relative path
+is taken from the config's directory). `password master` then prints the
+`[master]` block to paste into the config, and `password encrypt` the value to
+paste as `example = "…"` under `[passwords]`; both read the master password
+from that file:
 
 ```sh
 remotex password master
 remotex password encrypt
 ```
 
-A gateway run as a service where no keychain answers, such as headless Linux or
-Windows over SSH, reads the master password from the file
-`[server].master_password_file` names instead. See
-[Target passwords](guide.md#target-passwords). Start the gateway in the
+See [Target passwords](guide.md#target-passwords). Start the gateway in the
 foreground:
 
 ```sh
@@ -180,7 +180,7 @@ Generate the required web-login credential with:
 docker run --rm -it ghcr.io/andrewtheguy/remotex:latest gen-passwd admin
 ```
 
-The image has no keychain, so the master password comes from a file. Keep it in
+The master password comes from a file, as for any served gateway. Keep it in
 a secret, name that file in the config, and write the config's passwords with
 the same image, pasting what each prints:
 
@@ -191,7 +191,7 @@ master_password_file = "/run/secrets/remotex_master"
 
 ```sh
 # asked without echo, kept out of shell history, written 0600
-(umask 077; IFS= read -rsp 'Master password: ' pw && echo && printf '%s' "$pw" > remotex_master)
+(umask 077; trap 'stty echo' EXIT; trap 'exit 1' INT HUP TERM; stty -echo; printf 'Master password: '; IFS= read -r pw; echo; printf '%s' "$pw" > remotex_master)
 docker run --rm -it -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro \
   -v ./remotex_master:/run/secrets/remotex_master:ro \
   ghcr.io/andrewtheguy/remotex:latest password master -c /opt/remotex/etc/remotex.toml

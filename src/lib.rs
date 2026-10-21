@@ -19,6 +19,7 @@ pub mod error;
 pub mod feedback;
 pub mod h264;
 pub mod hevc_wasm;
+#[cfg(feature = "embedded-gateway")]
 pub mod keychain;
 pub mod keymap;
 pub mod mic;
