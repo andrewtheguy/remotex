@@ -33,7 +33,7 @@ subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
 username = "me"              # the account wlshare runs as; its [pam] table checks the login
-password = "…"
+password_ref = "workstation"   # its value in [passwords], under the config's [master]
 ```
 
 The session is started with resize: its size is the window's, chosen under the
@@ -52,7 +52,7 @@ densities in its display layout.
 The credentials are the account wlshare runs as, carried by RSA-AES and checked
 through PAM on the server, the way an `ard` target is a Mac account; wlshare
 offers RSA-AES or None and nothing else, so a target with `username` and
-`password` takes the encrypted login by the plain target's rule.
+`password_ref` takes the encrypted login by the plain target's rule.
 
 ## The wire
 

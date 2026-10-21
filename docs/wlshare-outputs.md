@@ -32,7 +32,7 @@ subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
 username = "me"
-password = "…"
+password_ref = "workstation"   # its value in [passwords], under the config's [master]
 ```
 
 The gateway lists the pseudo-encoding in a `wlshare` target's `SetEncodings`,

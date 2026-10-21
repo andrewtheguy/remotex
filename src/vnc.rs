@@ -2424,7 +2424,7 @@ async fn connect(
         warn!(
             "vnc: this server is a Mac and the target has no Apple subtype — macOS answers \
              an anonymous viewer with a new login window on a virtual display rather than its \
-             own screen. Set subtype = \"ard\" with a macOS account's username and password \
+             own screen. Set subtype = \"ard\" with a macOS account's username and password_ref \
              to share the screen."
         );
     }
@@ -7931,9 +7931,9 @@ fn choose_security(
             _ => "a password",
         },
         match (offers_rsa_aes, offers_vnc_auth) {
-            (true, true) => "username and password, nor vnc_password,",
-            (true, false) => "username and password",
-            _ => "vnc_password",
+            (true, true) => "username and password_ref, nor vnc_password_ref,",
+            (true, false) => "username and password_ref",
+            _ => "vnc_password_ref",
         }
     );
     anyhow::bail!(

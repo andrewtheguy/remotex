@@ -318,7 +318,8 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             message = match set {
                                 Ok(password) => format!(
                                     "{name}: [passwords].{password} set; name it in a target's \
-                                     password_ref, then restart {name}"
+                                     password_ref (vnc_password_ref for a VNC server's own \
+                                     password), then restart {name}"
                                 ),
                                 Err(error) => format!("{name}: {error:#}"),
                             };
@@ -409,7 +410,7 @@ impl Master {
     /// suspended, and encrypt it into the config at `path` — giving the config its
     /// `[master]` block first when it has none. Returns the name.
     fn set_password(&mut self, instance: &str, path: &Path) -> anyhow::Result<String> {
-        print!("Password name in {instance} (as a target's password_ref names it): ");
+        print!("Password name in {instance} (what a target's password_ref or vnc_password_ref says): ");
         std::io::stdout().flush()?;
         let mut name = String::new();
         std::io::stdin().read_line(&mut name).context("cannot read the name")?;
