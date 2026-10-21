@@ -10,12 +10,18 @@
 // picture again for every run, which on an integrated GPU was more work than
 // everything else presenting it.
 //
+// An H.264 picture the browser converts as the compositor would is not copied out
+// of its decoder: the run names its rectangles (`ComposedRun.gpu`), and each is
+// drawn into the texture from the picture itself, on the GPU a hardware decoder
+// made it on. The texture is then the only place they are, so a later run that
+// reads one reads it back from here first (`read`).
+//
 // The picture is the whole output the host draws, which over two virtual displays
 // is both of them as the host placed them; the canvas shows the part of it the gateway named
 // (`graphicsView`), one display's column. A tab showing the second display holds a
 // picture of its own, patched from the session page's rather than composed
 // (displayRelay.ts), and shows it whole.
-import type { ComposedRun } from "./egfxCompositor.ts";
+import { type ComposedRun, GPU_FIELDS } from "./egfxCompositor.ts";
 import { openPictureCanvas } from "./glPicture.ts";
 
 /** A part of the picture, in its pixels. */
@@ -28,11 +34,17 @@ export interface PicturePart {
 
 export interface GraphicsPicture {
   /**
-   * Take a run's painted rectangles into the picture, and draw it. Throws once
-   * the browser has taken the GPU away (a lost context), after which nothing more
-   * is drawn.
+   * Take a run's painted rectangles into the picture, then its rectangles of the
+   * pictures shown from the GPU, each from its unit's picture in `shown`, and
+   * draw it. Throws once the browser has taken the GPU away (a lost context),
+   * after which nothing more is drawn.
    */
-  upload(run: ComposedRun): void;
+  upload(run: ComposedRun, shown?: ReadonlyMap<number, VideoFrame>): void;
+  /**
+   * The picture's pixels over `w` by `h` from `x`, `y`: RGBA rows, top row first.
+   * What a picture shown from the GPU holds, read back for the compositor.
+   */
+  read(x: number, y: number, w: number, h: number): Uint8Array;
   /**
    * Show this part of the picture, the display this page is out of the span the
    * host draws, or the whole picture for null. Drawn at once from what the
@@ -82,6 +94,29 @@ void main() {
   color = vec4(texture(picture, at).rgb, 1.0);
 }`;
 
+// A picture shown from the GPU, drawn into the texture: each pixel of the rectangle
+// the scissor leaves from the picture's, `offset` from it. Read whole, as the
+// browser converted it.
+const FROM_PICTURE = `#version 300 es
+precision highp float;
+precision highp int;
+uniform highp sampler2D decoded;
+uniform ivec2 offset;
+out vec4 color;
+void main() {
+  color = vec4(texelFetch(decoded, ivec2(gl_FragCoord.xy) - offset, 0).rgb, 1.0);
+}`;
+
+// One triangle over the whole target.
+const OVER_ALL = `#version 300 es
+void main() {
+  vec2 at = vec2((gl_VertexID & 1) * 4 - 1, (gl_VertexID & 2) * 2 - 1);
+  gl_Position = vec4(at, 0.0, 1.0);
+}`;
+
+/** The texture unit a decoded picture is sampled from: the picture is on the first. */
+const DECODED_UNIT = 1;
+
 /** `part` within a picture of `w` by `h`, or null for none of it inside. */
 function clipped(part: PicturePart, w: number, h: number): PicturePart | null {
   const x = Math.max(part.x, 0);
@@ -104,6 +139,178 @@ export function createGraphicsPicture(
   let height = 0;
   // The part shown, or the whole picture.
   let part: PicturePart | null = null;
+  // What draws a picture shown from the GPU into the texture, and reads it back:
+  // made the first time either is needed.
+  interface Pass {
+    program: WebGLProgram;
+    decodedAt: WebGLUniformLocation | null;
+    offsetAt: WebGLUniformLocation | null;
+    // A decoded picture's texture, at the size of the last one taken: none yet.
+    decoded: WebGLTexture | null;
+    decodedWidth: number;
+    decodedHeight: number;
+    target: WebGLFramebuffer;
+  }
+  let pass: Pass | null = null;
+
+  const makePass = (): Pass => {
+    const compile = (kind: number, source: string) => {
+      const made = gl.createShader(kind);
+      if (!made) {
+        throw new Error("WebGL 2 gave no shader");
+      }
+      gl.shaderSource(made, source);
+      gl.compileShader(made);
+      return made;
+    };
+    const program = gl.createProgram();
+    const vertex = compile(gl.VERTEX_SHADER, OVER_ALL);
+    const fragment = compile(gl.FRAGMENT_SHADER, FROM_PICTURE);
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    gl.deleteShader(vertex);
+    gl.deleteShader(fragment);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(
+        `WebGL 2 refused the H.264 picture's shaders: ${gl.getProgramInfoLog(program)}`,
+      );
+    }
+    return {
+      program,
+      decodedAt: gl.getUniformLocation(program, "decoded"),
+      offsetAt: gl.getUniformLocation(program, "offset"),
+      decoded: null,
+      decodedWidth: 0,
+      decodedHeight: 0,
+      target: gl.createFramebuffer(),
+    };
+  };
+
+  const passes = (): Pass => {
+    pass ??= makePass();
+    return pass;
+  };
+
+  // The decoded picture's texture at `w` by `h`, bound on the decoded unit: made
+  // anew when the size changes, and the allocation checked as the picture's own
+  // is (`resize`), since a draw from a texture the GPU did not make is blank.
+  const decodedTexture = (made: Pass, w: number, h: number): WebGLTexture => {
+    if (made.decoded && made.decodedWidth === w && made.decodedHeight === h) {
+      gl.bindTexture(gl.TEXTURE_2D, made.decoded);
+      return made.decoded;
+    }
+    gl.deleteTexture(made.decoded);
+    made.decoded = null;
+    const decoded = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, decoded);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) {
+      gl.deleteTexture(decoded);
+      throw new Error(
+        `the GPU refused a ${w}x${h} H.264 picture (WebGL error 0x${error.toString(16)})`,
+      );
+    }
+    made.decoded = decoded;
+    made.decodedWidth = w;
+    made.decodedHeight = h;
+    return decoded;
+  };
+
+  // The texture as what is drawn into, or read from, for `use`; the canvas's own
+  // after.
+  const onTexture = <T>(use: () => T): T => {
+    const { target } = passes();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+    gl.framebufferTexture2D(
+      gl.FRAMEBUFFER,
+      gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D,
+      texture,
+      0,
+    );
+    try {
+      const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      if (status !== gl.FRAMEBUFFER_COMPLETE) {
+        throw new Error(
+          `the GPU will not draw into the picture (framebuffer status 0x${status.toString(16)})`,
+        );
+      }
+      return use();
+    } finally {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+  };
+
+  // The run's rectangles of the pictures shown from the GPU, each drawn from its
+  // unit's picture, a unit's picture taken into a texture once.
+  const drawShown = (
+    gpu: Uint32Array,
+    shown: ReadonlyMap<number, VideoFrame>,
+  ) => {
+    const made = passes();
+    const { program, decodedAt, offsetAt } = made;
+    onTexture(() => {
+      gl.useProgram(program);
+      gl.uniform1i(decodedAt, DECODED_UNIT);
+      gl.viewport(0, 0, width, height);
+      gl.enable(gl.SCISSOR_TEST);
+      // Nothing the program samples is the texture drawn into.
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.activeTexture(gl.TEXTURE0 + DECODED_UNIT);
+      // The picture as it is: the whole of it, its colour as the browser converts it.
+      gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+      try {
+        let taken = -1;
+        for (let i = 0; i + GPU_FIELDS <= gpu.length; i += GPU_FIELDS) {
+          const [unit, x, y, w, h, sourceX, sourceY] = gpu.subarray(
+            i,
+            i + GPU_FIELDS,
+          );
+          const picture = shown.get(unit);
+          if (!picture) {
+            throw new Error(
+              `no picture for H.264 unit ${unit}, shown from the GPU`,
+            );
+          }
+          if (unit !== taken) {
+            const { displayWidth: pw, displayHeight: ph } = picture;
+            decodedTexture(made, pw, ph);
+            gl.texSubImage2D(
+              gl.TEXTURE_2D,
+              0,
+              0,
+              0,
+              pw,
+              ph,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              picture,
+            );
+            taken = unit;
+          }
+          gl.uniform2i(offsetAt, x - sourceX, y - sourceY);
+          gl.scissor(x, y, w, h);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+      } finally {
+        gl.pixelStorei(
+          gl.UNPACK_COLORSPACE_CONVERSION_WEBGL,
+          gl.BROWSER_DEFAULT_WEBGL,
+        );
+        gl.disable(gl.SCISSOR_TEST);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.useProgram(surface.program);
+      }
+    });
+  };
 
   // A texture of the picture's size, blank: WebGL zero-fills what it makes.
   // WebGL reports a refused allocation as an error flag, not an exception, and a
@@ -166,7 +373,7 @@ export function createGraphicsPicture(
   };
 
   return {
-    upload(run) {
+    upload(run, shown = new Map()) {
       surface.usable();
       if (run.width === 0 || run.height === 0) {
         return;
@@ -193,7 +400,19 @@ export function createGraphicsPicture(
           0,
         );
       }
+      if (run.gpu.length > 0) {
+        drawShown(run.gpu, shown);
+      }
       present();
+    },
+    read(x, y, w, h) {
+      surface.usable();
+      const pixels = new Uint8Array(w * h * 4);
+      // The texture's rows top row first, as the framebuffer's are uploaded.
+      onTexture(() =>
+        gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels),
+      );
+      return pixels;
     },
     window(next) {
       part = next;
@@ -254,6 +473,12 @@ export function createGraphicsPicture(
     close() {
       gl.deleteTexture(texture);
       texture = null;
+      if (pass) {
+        gl.deleteProgram(pass.program);
+        gl.deleteTexture(pass.decoded);
+        gl.deleteFramebuffer(pass.target);
+        pass = null;
+      }
       surface.close();
     },
   };

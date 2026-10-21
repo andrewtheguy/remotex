@@ -10,7 +10,13 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import type { RelayMessage, RelayPort } from "./displayRelay.ts";
-import type { ComposedRun, EgfxCompositor, Scanned } from "./egfxCompositor.ts";
+import type {
+  ComposedRun,
+  EgfxCompositor,
+  GpuArea,
+  RunPlan,
+  Scanned,
+} from "./egfxCompositor.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 import type { EgfxVideo } from "./egfxVideo.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
@@ -221,6 +227,8 @@ async function fakeCreateImageBitmap(blob: Blob): Promise<FakeBitmap> {
 
 beforeEach(() => {
   uploaded = [];
+  uploadedShown = [];
+  reads = [];
   pictures = { made: 0, closed: 0 };
   blanked = [];
   windows = [];
@@ -660,7 +668,13 @@ function h264Runs(commands: Uint8Array): Scanned[] {
 }
 
 function fakeCompositors(
-  options: { refuse?: number; garbled?: number; fail?: boolean } = {},
+  options: {
+    refuse?: number;
+    garbled?: number;
+    fail?: boolean;
+    /** What each run's plan says, by the run's first byte: none shown from the GPU else. */
+    plan?: (commands: Uint8Array) => RunPlan;
+  } = {},
 ) {
   const made: {
     /** The first byte of each message unwrapped, in order. */
@@ -669,6 +683,10 @@ function fakeCompositors(
     closed: boolean;
     /** Each picture supplied: its number in its run, and the unit's byte. */
     supplied: number[][];
+    /** Each unit shown from the GPU instead, by its number in its run. */
+    onGpu: number[];
+    /** What was read back, in order with what was fed: `restore x,y` or `fed n`. */
+    events: string[];
   }[] = [];
   const load = () => {
     if (options.fail) {
@@ -680,7 +698,11 @@ function fakeCompositors(
         fed: [] as number[][],
         closed: false,
         supplied: [] as number[][],
+        onGpu: [] as number[],
+        events: [] as string[],
       };
+      // The units this run shows from the GPU.
+      let showing: number[] = [];
       made.push(record);
       // The picture: 64 by 48, every byte the last run's first byte, and of
       // nothing before the first run, as a compositor's is before its reset.
@@ -712,18 +734,37 @@ function fakeCompositors(
           ]);
           return Promise.resolve();
         },
+        plan(commands) {
+          return options.plan?.(commands) ?? { gpu: [], restore: [] };
+        },
+        showOnGpu(number) {
+          record.onGpu.push(number);
+          showing.push(number);
+        },
+        gpuAreas: () => [],
+        restore(area, read) {
+          assert.equal(read.length, area.w * area.h * 4);
+          record.events.push(`restore ${area.x},${area.y}`);
+        },
         compose(commands): ComposedRun {
           assert.notEqual(commands[0], WRAPPED, "a message composed wrapped");
           if (commands[0] === options.refuse) {
             throw new Error("a command that does not decode");
           }
           record.fed.push([...commands]);
+          record.events.push(`fed ${commands[0]}`);
           pixels.fill(commands[0]);
+          // Each unit shown from the GPU draws one pixel, at its number.
+          const gpu = Uint32Array.from(
+            showing.flatMap((number) => [number, number, 0, 1, 1, 0, 0]),
+          );
+          showing = [];
           return {
             // Each run paints one rectangle named by its first byte; the first
             // run of a pipeline is the reset that lays the picture out.
             painted: new Uint32Array([commands[0], 2, 3, 4]),
             resized: record.fed.length === 1,
+            gpu,
             ...picture(),
           };
         },
@@ -742,13 +783,29 @@ interface FakePicture {
   unit: number;
   closed: boolean;
   close(): void;
+  colorSpace: VideoColorSpaceInit;
+  visibleRect: { width: number; height: number };
+  displayWidth: number;
+  displayHeight: number;
 }
+
+/** The colour a host's H.264 is, as a browser labels a picture it converts so. */
+const AS_CODED: VideoColorSpaceInit = {
+  primaries: "bt709",
+  transfer: "iec61966-2-1",
+  matrix: "bt709",
+  fullRange: true,
+};
 
 /**
  * A pipeline's H.264 decoders, recording what they were asked. `hold` keeps each
- * decode waiting until `release` is called, and `fail` rejects every one.
+ * decode waiting until `release` is called, and `fail` rejects every one. Their
+ * pictures are labelled as a software decoder's are, BT.601, but for the units
+ * whose bytes are in `coded`, labelled with the stream's own colour.
  */
-function fakeVideo(options: { fail?: boolean; hold?: boolean } = {}) {
+function fakeVideo(
+  options: { fail?: boolean; hold?: boolean; coded?: number[] } = {},
+) {
   const log: string[] = [];
   const frames: FakePicture[] = [];
   const held: (() => void)[] = [];
@@ -771,6 +828,12 @@ function fakeVideo(options: { fail?: boolean; hold?: boolean } = {}) {
               close() {
                 this.closed = true;
               },
+              colorSpace: options.coded?.includes(data[0])
+                ? AS_CODED
+                : { ...AS_CODED, matrix: "smpte170m" },
+              visibleRect: { width: 64, height: 48 },
+              displayWidth: 64,
+              displayHeight: 48,
             };
             frames.push(frame);
             resolve(frame as unknown as VideoFrame);
@@ -799,6 +862,13 @@ function fakeVideo(options: { fail?: boolean; hold?: boolean } = {}) {
 
 /** The picture of a pipeline: what each run's upload named, painted or not. */
 let uploaded: number[][] = [];
+/**
+ * The pictures each upload was handed to draw from the GPU: each unit's number
+ * and byte, and whether it was still open.
+ */
+let uploadedShown: [number, number, boolean][][] = [];
+/** What was read back off a picture: `x, y, w, h`. */
+let reads: number[][] = [];
 /** How many pictures were made, and how many closed. */
 let pictures = { made: 0, closed: 0 };
 /** The sizes a picture was blanked at. */
@@ -865,8 +935,18 @@ function graphicsPainter(
       }
       pictures.made += 1;
       return {
-        upload(run) {
+        upload(run, frames = new Map()) {
           uploaded.push([...run.painted]);
+          uploadedShown.push(
+            [...frames].map(([number, frame]) => {
+              const fake = frame as unknown as FakePicture;
+              return [number, fake.unit, !fake.closed];
+            }),
+          );
+        },
+        read(x, y, w, h) {
+          reads.push([x, y, w, h]);
+          return new Uint8Array(w * h * 4);
         },
         window(part) {
           windows.push(part);
@@ -1171,6 +1251,59 @@ test("a run's H.264 is decoded and supplied before the run is composed", async (
   );
   p.clear();
   assert.equal(video.log.at(-1), "close");
+});
+
+test("a picture the browser draws as coded is left on the GPU where the run's plan allows", async () => {
+  const area: GpuArea = {
+    surface: 1,
+    x: 2,
+    y: 3,
+    w: 4,
+    h: 5,
+    outputX: 12,
+    outputY: 13,
+  };
+  const { made, load } = fakeCompositors({
+    // The run reads a rectangle the GPU shows, and may show its first two units
+    // there.
+    plan: (commands) =>
+      commands[0] === H264
+        ? { gpu: [true, true, false], restore: [area] }
+        : { gpu: [], restore: [] },
+  });
+  // The first and third units' pictures are labelled with the stream's colour.
+  const video = fakeVideo({ coded: [31, 33] });
+  const p = graphicsPainter(load, { video: video.make });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[1], [H264, 3, 5, 31, 32, 33]]));
+  assert.deepEqual(made[0].onGpu, [0], "allowed, and drawn as coded");
+  assert.deepEqual(
+    made[0].supplied,
+    [
+      [1, 32],
+      [2, 33],
+    ],
+    "a picture labelled otherwise, or one the plan keeps off the GPU, is supplied",
+  );
+  assert.deepEqual(reads, [[12, 13, 4, 5]], "read where the output has it");
+  assert.deepEqual(
+    made[0].events,
+    ["fed 1", "restore 2,3", `fed ${H264}`],
+    "what the run reads is restored before it is composed",
+  );
+  assert.deepEqual(
+    uploadedShown.at(-1),
+    [[0, 31, true]],
+    "the picture is drawn from while it is open",
+  );
+  assert.ok(
+    video.frames.every((frame) => frame.closed),
+    "and closed once the run is drawn",
+  );
+  assert.deepEqual(
+    videoErrors.filter((error) => error !== null),
+    [],
+  );
 });
 
 test("an H.264 unit that gives no picture ends the pipeline and says so", async () => {

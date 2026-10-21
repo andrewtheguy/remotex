@@ -104,16 +104,6 @@ How many real deployments this reaches is not known, and no host in use has show
 it. What would settle it is one connection to an RDSH configured for per-device
 CALs; the work is only worth taking once a host that needs it turns up.
 
-### An RDP host's H.264 presented on the GPU
-
-Taken up if a large desktop's H.264 proves slow. Every picture the page decodes
-is copied into the compositor's memory and converted there, and from a hardware
-decoder that copy is a readback off the GPU
-([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
-It was measured at a 1280×800 desktop and not above. The step after it is to
-present a decoded picture on the GPU, and read it back only when a later command
-copies from it.
-
 ### The pipeline compressed again for the browser
 
 Taken up if a pipeline's bytes to the browser come to matter, a Lossless host
@@ -181,38 +171,6 @@ server outside the three the project prioritizes, which is reached through the
 RFB baseline and nothing more
 ([Constraints](architecture.md#constraints)). A stream of its own passed
 through is what a `wlshare` target has.
-
-### Motion
-
-Motion (alpha) sent what is still as exact PNG and each region that moves as a
-VP9 stream of its own, first under an RDP target's High quality, from the
-pipeline composed at the gateway, then on a Mac's virtual display under `ard`,
-from its ZRLE. It was removed from both, and the gateway sends a picture it
-decodes one way, as tiles, with no video encoder ([Media paths](architecture.md#media-paths)).
-On an RDP target it encoded twice, decoding what the host had already encoded
-only to encode it again, beside a pipeline that already gives an exact picture
-under the host's Lossless policy
-([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy))
-and the host's own Adaptive H.264 for a slow link. On a Mac, Standard mode's
-Adaptive quality, the Mac's own codecs, covers a slow link with fewer updates
-rather than coarser ones
-([Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)).
-Its rules are wlshare's now, as its tiles with motion beside `WLSV` that a
-`wlshare` session started with them passes
-([wlshare's tiles with motion, passed through](architecture.md#wlshares-tiles-with-motion-passed-through)):
-there the compositor's pixels are coded once and no native protocol stands
-between, so the gateway codes nothing.
-
-### `THINCLIENT` in the graphics capability advertise
-
-`caps_advertise` in the graphics crate's `proto/gfx.rs` sends versions 8 and 10 with the small cache
-and, on version 10, `AVC_DISABLED` — or, for an adaptive session, which takes H.264,
-every set to 10.4, and 10.7, without it — and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
-unset either way. A current Windows host, the only host this client targets, ignores the
-flag; the hosts that acted on it, choosing the classic RemoteFX codec over the
-progressive form, are not supported, so there is nothing for the flag to change.
-The decision is recorded in
-[The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx).
 
 ### More than two virtual displays on a target
 

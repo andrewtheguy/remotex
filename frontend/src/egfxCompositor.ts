@@ -26,7 +26,11 @@
 // H.264 is the one codec the module does not decode (ALPHA, rdpH264.ts): a
 // run's access units are found by `scan`, decoded by the browser (egfxVideo.ts),
 // and each picture's samples copied into the module's memory by `supply`, before
-// the run is composed and paints them.
+// the run is composed and paints them. A picture the browser converts as the
+// compositor would is left on the GPU instead (`showOnGpu`), where a hardware
+// decoder made it, and its rectangles are drawn from there after the run
+// (egfxPicture.ts): what the run's `plan` allows, and what a later run reads of
+// them read back first (`restore`).
 //
 // The framebuffer stays in the module's memory, and a canvas takes no image data
 // out of a shared one; a WebGL texture takes an upload from one. So `pixels` is a
@@ -65,9 +69,38 @@ export interface ComposedRun {
   resized: boolean;
   /**
    * The whole picture, RGBX with the fourth byte unused, top row first: a view on
-   * the module's shared memory, good until the next `compose`.
+   * the module's shared memory, good until the next `compose`. Not what the GPU
+   * shows: `gpu`'s rectangles are stale here.
    */
   pixels: Uint8ClampedArray;
+  /**
+   * What to draw, after the painted rectangles, from the pictures shown from the
+   * GPU: `unit, x, y, width, height, sourceX, sourceY` for each, the rectangle of
+   * the picture taking unit `unit`'s pixels from `sourceX`, `sourceY` on.
+   */
+  gpu: Uint32Array;
+}
+
+/**
+ * A rectangle a picture shown from the GPU holds: `x`, `y`, `w`, `h` in its
+ * surface, and its top left on the output, which is where the picture has it.
+ */
+export interface GpuArea {
+  surface: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  outputX: number;
+  outputY: number;
+}
+
+/** What a run asks of the page before it is composed (`plan`). */
+export interface RunPlan {
+  /** For each access unit, by its number, whether it may be shown from the GPU. */
+  gpu: boolean[];
+  /** What the run reads of what the GPU shows: each to be restored first. */
+  restore: GpuArea[];
 }
 
 /** The part of a picture, in its own pixels, right and bottom exclusive. */
@@ -141,6 +174,25 @@ export interface EgfxCompositor {
     window: H264Unit["window"],
     frame: DecodedFrame,
   ): Promise<void>;
+  /**
+   * What one GRAPHICS record's commands, unwrapped, ask before they are composed:
+   * which units may be shown from the GPU, and what of what it shows they read.
+   * Throws for a command that does not decode, as `compose` would.
+   */
+  plan(commands: Uint8Array): RunPlan;
+  /**
+   * Leave unit `number`'s picture, of the record composed next, on the GPU instead
+   * of supplying it: one `plan` said may be. Its rectangles come back in the run's
+   * `gpu`.
+   */
+  showOnGpu(number: number): void;
+  /** Every rectangle shown from the GPU: what reading it all back takes. */
+  gpuAreas(): GpuArea[];
+  /**
+   * A rectangle shown from the GPU, read back: `pixels` is its RGBA rows, top row
+   * first. The framebuffer holds it again. Throws for one the surface does not.
+   */
+  restore(area: GpuArea, pixels: Uint8Array): void;
   /**
    * Compose one GRAPHICS record's commands, unwrapped. Throws for a command that does not
    * decode, after which this compositor is no longer the host's picture of its
@@ -301,6 +353,30 @@ export function coalesce(painted: Uint32Array): Uint32Array {
 
 /** How many numbers the module says each thing a scan found in. */
 const SCAN_FIELDS = 10;
+/** How many numbers the module says each rectangle of the GPU's in. */
+export const GPU_FIELDS = 7;
+
+/** Rectangles shown from the GPU, read out of the module's numbers. */
+function gpuAreas(fields: Uint32Array): GpuArea[] {
+  const areas: GpuArea[] = [];
+  for (let at = 0; at + GPU_FIELDS <= fields.length; at += GPU_FIELDS) {
+    const [surface, x, y, w, h, outputX, outputY] = fields.subarray(
+      at,
+      at + GPU_FIELDS,
+    );
+    areas.push({ surface, x, y, w, h, outputX, outputY });
+  }
+  return areas;
+}
+
+/** A run's plan, read out of the module's numbers (`Egfx::plan`). */
+function runPlan(fields: Uint32Array): RunPlan {
+  const units = fields[0] ?? 0;
+  return {
+    gpu: Array.from(fields.subarray(1, 1 + units), (may) => may === 1),
+    restore: gpuAreas(fields.subarray(1 + units)),
+  };
+}
 /** The window the module names for the whole of a picture. */
 const WHOLE = 0xffffffff;
 
@@ -440,11 +516,24 @@ export function loadEgfx(
               ),
             );
           },
+          plan(commands: Uint8Array): RunPlan {
+            return runPlan(egfx.plan(commands));
+          },
+          showOnGpu(number: number) {
+            egfx.showOnGpu(number);
+          },
+          gpuAreas(): GpuArea[] {
+            return gpuAreas(egfx.gpuAreas());
+          },
+          restore(area: GpuArea, pixels: Uint8Array) {
+            egfx.restore(area.surface, area.x, area.y, area.w, area.h, pixels);
+          },
           compose(commands: Uint8Array): ComposedRun {
             egfx.compose(commands);
             return {
               painted: coalesce(egfx.painted()),
               resized: egfx.resized(),
+              gpu: egfx.gpuPaints(),
               ...picture(),
             };
           },

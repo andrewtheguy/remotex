@@ -148,7 +148,18 @@ test("a browser whose decoder gives a picture for each unit, copied into shared 
   assert.equal(await chooseRdpH264(), true);
   assert.equal(decodesRdpH264(), true);
   // For one picture a unit, and with no say in which decoder the browser uses.
-  assert.deepEqual(asked, [{ codec: "avc1.4d4020", optimizeForLatency: true }]);
+  assert.deepEqual(asked, [
+    {
+      codec: "avc1.4d4020",
+      optimizeForLatency: true,
+      colorSpace: {
+        primaries: "bt709",
+        transfer: "iec61966-2-1",
+        matrix: "bt709",
+        fullRange: true,
+      },
+    },
+  ]);
   assert.deepEqual(
     chunks.map((chunk) => chunk.type),
     ["key", "delta", "delta"],

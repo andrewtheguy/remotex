@@ -23,11 +23,27 @@
 //! log: that count is what decides which decoder is written next, and a codec this
 //! client cannot read is a hole in the picture rather than the end of the session.
 //!
+//! # What the page's GPU shows
+//!
+//! A page that composes a passed pipeline may leave an H.264 picture on its GPU
+//! and draw the masked rectangles from there ([`crate::avc`]), since copying the
+//! samples out of a hardware decoder costs more than the decode. Those rectangles
+//! are then not in the surface's pixels: the surface records them as shown from
+//! the GPU, present copies everything else, and the page draws them after
+//! ([`GpuPaint`]). A command that writes over one takes it back, its pixels the
+//! surface's again. A command that reads one — a copy, a cache entry, a ClearCodec
+//! rectangle drawn over it — needs its pixels here, so before a run is composed
+//! [`Graphics::plan`] names what the run reads of them, and the page reads those
+//! back off its GPU into the surface ([`Graphics::restore`]). The same plan says
+//! which of the run's pictures may be shown so: one whose frame ends in the run,
+//! on a surface mapped wholly inside the output with no other over it, and that
+//! nothing later in the run reads.
+//!
 //! [`Graphics::receive`] is the whole of it: one channel PDU in, and out come the
 //! things the session has to act on that the framebuffer cannot show — the output
 //! being redefined, the rectangles painted, and each frame's end.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, Result};
 use log::{debug, info, warn};
@@ -43,6 +59,13 @@ use crate::proto::{clear, planar, progressive, zgfx};
 /// Most rectangles a surface holds as changed before two of them are merged to
 /// make room — coarser, never longer. See [`stage`] for which two.
 const DAMAGE_CAP: usize = 64;
+
+/// Most rectangles a surface has shown from the GPU before the next run's plan
+/// has them all read back. A command that writes over part of one leaves up to
+/// four pieces of it, and a unit whose mask overlaps the last one's cuts it up;
+/// pieces that line up are joined again ([`join_shown`]), so a desktop drawn all
+/// in H.264 holds a few, and this is for a pattern that never lines up.
+const GPU_CAP: usize = 512;
 
 /// Most bytes the cache slots hold together. The caps this client advertises promise
 /// the host a 16 MiB cache (`SMALL_CACHE`), so a host that keeps its word never comes
@@ -80,6 +103,53 @@ pub enum Update {
     Drawn(Fidelity),
 }
 
+/// A rectangle of a surface whose pixels are a picture the page shows from its
+/// GPU, and where the output shows it: the rectangle, placed where the surface was
+/// mapped at the EndFrame that showed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuArea {
+    pub surface: u16,
+    /// In the surface's pixels.
+    pub rect: Rect,
+    /// In the output's.
+    pub output: Rect,
+}
+
+/// One rectangle of the output for the page to draw from a picture it shows from
+/// its GPU: `output` takes the pixels of access unit `unit`'s picture from
+/// `source`, its top left, on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuPaint {
+    /// The unit's number in the run, as [`avc::scan`] counts them.
+    pub unit: u32,
+    pub output: Rect,
+    pub source: (u32, u32),
+}
+
+/// What a run of commands asks of the page before it is composed
+/// ([`Graphics::plan`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// For each access unit, by its number in the run, whether its picture may be
+    /// shown from the GPU.
+    pub gpu: Vec<bool>,
+    /// What the run reads of pictures shown from the GPU, each to be read back into
+    /// its surface first ([`Graphics::restore`]).
+    pub restore: Vec<GpuArea>,
+}
+
+/// One rectangle of a surface shown from the GPU.
+#[derive(Clone, Copy, Debug)]
+struct OnGpu {
+    rect: Rect,
+    /// Where the surface's top left sat on the output at the EndFrame that showed
+    /// it; `None` before then.
+    at: Option<(u32, u32)>,
+    /// The unit whose picture it is, by its number in the run being composed;
+    /// `None` once that run is over and its picture drawn.
+    unit: Option<u32>,
+}
+
 /// One surface: its pixels in `RGBX32`, where it shows on the output, and what has
 /// changed in it since the last frame.
 struct Surface {
@@ -93,6 +163,9 @@ struct Surface {
     /// What its H.264 stream leaves between units, made on the first one: every
     /// surface a host draws H.264 into has a stream of its own.
     avc: Option<Box<Avc>>,
+    /// Rectangles shown from the GPU, apart from one another, whose pixels here are
+    /// not the picture.
+    gpu: Vec<OnGpu>,
 }
 
 impl Surface {
@@ -178,9 +251,54 @@ impl Surface {
     }
 
     /// Record a rectangle drawn into — see [`stage`] for how the list is kept to
-    /// [`DAMAGE_CAP`].
+    /// [`DAMAGE_CAP`]. What the GPU showed there is no longer the picture.
     fn invalidate(&mut self, rect: Rect) {
         stage(&mut self.invalid, rect, DAMAGE_CAP);
+        self.release(rect);
+    }
+
+    /// The pixels here are the picture over `rect` again.
+    fn release(&mut self, rect: Rect) {
+        if self.gpu.iter().any(|shown| shown.rect.overlaps(&rect)) {
+            self.gpu = self
+                .gpu
+                .iter()
+                .flat_map(|shown| shown.rect.minus(rect).map(move |piece| OnGpu { rect: piece, ..*shown }))
+                .collect();
+        }
+    }
+
+    /// Unit `unit`'s picture, shown from the GPU over `rect`.
+    fn show_on_gpu(&mut self, rect: Rect, unit: u32) {
+        self.release(rect);
+        self.gpu.push(OnGpu { rect, at: None, unit: Some(unit) });
+    }
+
+    /// The rectangles shown from the GPU, those that line up joined.
+    fn join_gpu(&mut self) {
+        if self.gpu.len() > 1 {
+            join_shown(&mut self.gpu);
+        }
+    }
+
+    /// `rect` with what the GPU shows taken out of it.
+    fn off_gpu(&self, rect: Rect) -> Vec<Rect> {
+        let mut pieces = vec![rect];
+        for shown in &self.gpu {
+            if pieces.iter().any(|piece| piece.overlaps(&shown.rect)) {
+                pieces = pieces.iter().flat_map(|piece| piece.minus(shown.rect)).collect();
+            }
+        }
+        pieces
+    }
+
+    /// What it has shown from the GPU, as the output shows it.
+    fn gpu_areas(&self, surface: u16) -> impl Iterator<Item = GpuArea> + '_ {
+        self.gpu.iter().filter_map(move |shown| {
+            let (x, y) = shown.at?;
+            let output = Rect { x: x + shown.rect.x, y: y + shown.rect.y, ..shown.rect };
+            Some(GpuArea { surface, rect: shown.rect, output })
+        })
     }
 }
 
@@ -284,6 +402,11 @@ pub struct Graphics {
     /// The pictures supplied for the next run's H.264 access units, by the unit's
     /// number in the run ([`Self::supply`]).
     supplied: BTreeMap<u32, Picture>,
+    /// The next run's access units whose pictures the page shows from its GPU
+    /// ([`Self::show_on_gpu`]).
+    on_gpu: BTreeSet<u32>,
+    /// What the last run left the page to draw from those pictures.
+    gpu_paints: Vec<GpuPaint>,
     /// How many access units the run being composed has reached.
     unit: u32,
     /// What a passed pipeline has drawn with.
@@ -314,6 +437,8 @@ impl Graphics {
             progressive: None,
             pass: false,
             supplied: BTreeMap::new(),
+            on_gpu: BTreeSet::new(),
+            gpu_paints: Vec::new(),
             unit: 0,
             fidelity: Fidelity::default(),
         }
@@ -380,7 +505,236 @@ impl Graphics {
         self.unit = 0;
         let outcome = self.compose_run(commands, framebuffer);
         self.supplied.clear();
+        self.on_gpu.clear();
+        self.gpu_paints = self.finish_gpu();
         outcome
+    }
+
+    /// What the run just composed showed from the GPU, still shown at its end, for
+    /// the page to draw. A picture whose frame did not end in the run was never
+    /// placed, and is dropped: [`Self::plan`] shows none such.
+    fn finish_gpu(&mut self) -> Vec<GpuPaint> {
+        let mut paints = Vec::new();
+        let output = self.output.map(|(width, height)| Rect { x: 0, y: 0, width, height });
+        for (id, surface) in &mut self.surfaces {
+            surface.gpu.retain_mut(|shown| {
+                let Some(unit) = shown.unit.take() else { return true };
+                let (Some((x, y)), Some(output)) = (shown.at, output) else {
+                    warn!("rdp: a picture shown from the GPU on graphics surface {id} was never placed on the output");
+                    return false;
+                };
+                let placed = Rect { x: x + shown.rect.x, y: y + shown.rect.y, ..shown.rect };
+                if let Some(inside) = placed.clipped(output) {
+                    paints.push(GpuPaint { unit, output: inside, source: (inside.x - x, inside.y - y) });
+                }
+                true
+            });
+            // Drawn, the units' pieces are one picture's, and join across them.
+            surface.join_gpu();
+        }
+        paints
+    }
+
+    /// What the last run composed left the page to draw from the pictures it shows
+    /// from its GPU.
+    pub(crate) fn take_gpu_paints(&mut self) -> Vec<GpuPaint> {
+        std::mem::take(&mut self.gpu_paints)
+    }
+
+    /// Access unit `unit` of the run composed next is shown from the page's GPU
+    /// rather than supplied: its rectangles are recorded as the GPU's, and drawn by
+    /// the page from what the run's end says ([`GpuPaint`]). Only for a unit
+    /// [`Self::plan`] says may be.
+    pub(crate) fn show_on_gpu(&mut self, unit: u32) {
+        self.on_gpu.insert(unit);
+    }
+
+    /// Every rectangle shown from the GPU, as the output shows it: what the page
+    /// reads back to have the surfaces whole.
+    pub(crate) fn gpu_areas(&self) -> Vec<GpuArea> {
+        self.surfaces.iter().flat_map(|(id, surface)| surface.gpu_areas(*id)).collect()
+    }
+
+    /// The pixels of a rectangle shown from the GPU, read back off it: `rgbx` is
+    /// `rect`'s rows, packed, top row first. The framebuffer takes them where the
+    /// surface is mapped, for whoever reads it whole, and nothing is presented:
+    /// the page's picture holds them already.
+    pub(crate) fn restore(&mut self, surface: u16, rect: Rect, rgbx: &[u8], framebuffer: &Framebuffer) -> Result<()> {
+        let found = self.surfaces.get_mut(&surface).with_context(|| format!("no graphics surface {surface}"))?;
+        anyhow::ensure!(
+            found.contains(rect.x, rect.y, rect.width, rect.height),
+            "a {}x{}+{}+{} rectangle read back for a {}x{} graphics surface",
+            rect.width,
+            rect.height,
+            rect.x,
+            rect.y,
+            found.width,
+            found.height
+        );
+        let bytes = rect.width as usize * 4;
+        anyhow::ensure!(
+            rgbx.len() == bytes * rect.height as usize,
+            "{} bytes read back for a {}x{} rectangle",
+            rgbx.len(),
+            rect.width,
+            rect.height
+        );
+        let stride = found.stride();
+        for (row, src) in rgbx.chunks_exact(bytes).enumerate() {
+            let at = (rect.y as usize + row) * stride + rect.x as usize * 4;
+            for (out, px) in found.pixels[at..at + bytes].as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+                *out = [px[0], px[1], px[2], 0];
+            }
+        }
+        found.release(rect);
+        if let (Some((ox, oy)), Some((width, height))) = (found.mapped, self.output) {
+            let output = Rect { x: 0, y: 0, width, height };
+            let placed = Rect { x: ox.saturating_add(rect.x), y: oy.saturating_add(rect.y), ..rect };
+            if let Some(placed) = placed.clipped(output) {
+                let origin = ((placed.x - ox) as usize, (placed.y - oy) as usize);
+                framebuffer.blit_from(&found.pixels, found.stride(), origin, placed);
+            }
+        }
+        Ok(())
+    }
+
+    /// What a run of commands, unwrapped, asks of the page before it is composed:
+    /// which of its access units may be shown from the GPU, and what it reads of
+    /// what the GPU shows already. Walks the commands as [`Self::compose`] will,
+    /// with nothing decoded and nothing changed.
+    ///
+    /// A unit may be shown from the GPU where its command's luma view paints on its
+    /// own ([`avc::Stream::alone`]), its stream has carried no chroma view, a frame
+    /// ends after it in the run with its surface mapped wholly inside the output
+    /// and no other mapped surface over it, and nothing after it in the run reads
+    /// that surface. What reads a surface is a copy out of it, a cache entry taken
+    /// from it, and a ClearCodec rectangle, which is drawn over what it holds and
+    /// whose bands can land beside it, so all the surface shows is read back. A
+    /// surface mapped elsewhere, and one mapped over another, read back what the
+    /// output shows from the GPU where it was and under the new place: the page
+    /// paints over it from then on.
+    pub(crate) fn plan(&self, commands: &[u8]) -> Result<Plan, Malformed> {
+        let mut surfaces: BTreeMap<u16, Seen> = self
+            .surfaces
+            .iter()
+            .map(|(id, surface)| {
+                let chroma = surface.avc.as_ref().is_some_and(|avc| avc.chroma_seen());
+                (*id, Seen { size: (surface.width, surface.height), mapped: surface.mapped, chroma })
+            })
+            .collect();
+        let mut output = self.output;
+        let mut plan = Plan::default();
+        // A surface that has shown too many pieces from the GPU is read back whole.
+        for (id, surface) in &self.surfaces {
+            if surface.gpu.len() > GPU_CAP {
+                plan.restore.extend(surface.gpu_areas(*id));
+            }
+        }
+        // The units that may be shown from the GPU so far, by number and surface:
+        // those whose frame has not ended yet, and all of them.
+        let mut unplaced: Vec<(usize, u16)> = Vec::new();
+        let mut shown: Vec<(usize, u16)> = Vec::new();
+        // The units shown on a surface so far are supplied instead.
+        let deny = |plan: &mut Plan, shown: &[(usize, u16)], surface: u16| {
+            for (unit, on) in shown {
+                if *on == surface {
+                    plan.gpu[*unit] = false;
+                }
+            }
+        };
+        // What a surface shows from the GPU is read back where `touched` says.
+        let restore = |plan: &mut Plan, surface: u16, touched: &dyn Fn(&GpuArea) -> bool| {
+            if let Some(held) = self.surfaces.get(&surface) {
+                for area in held.gpu_areas(surface) {
+                    if touched(&area) && !plan.restore.contains(&area) {
+                        plan.restore.push(area);
+                    }
+                }
+            }
+        };
+        let read = |plan: &mut Plan, shown: &[(usize, u16)], surface: u16, rect: Rect| {
+            deny(plan, shown, surface);
+            restore(plan, surface, &|area| area.rect.overlaps(&rect));
+        };
+        for message in gfx::messages(commands) {
+            match message? {
+                Message::ResetGraphics { width, height, .. } => output = Some((width, height)),
+                Message::CreateSurface { surface, width, height, .. } => {
+                    let size = (u32::from(width), u32::from(height));
+                    surfaces.insert(surface, Seen { size, mapped: None, chroma: false });
+                }
+                Message::DeleteSurface { surface } => {
+                    surfaces.remove(&surface);
+                }
+                Message::MapSurfaceToOutput { surface, x, y } => {
+                    let Some(seen) = surfaces.get_mut(&surface) else { continue };
+                    let moved = seen.mapped.replace((x, y)).is_some_and(|was| was != (x, y));
+                    let placed = seen.placed();
+                    // Moved, what it showed from the GPU is drawn where it was.
+                    if moved {
+                        deny(&mut plan, &shown, surface);
+                        restore(&mut plan, surface, &|_| true);
+                    }
+                    // What the output showed from the GPU under its new place, this
+                    // surface paints over.
+                    let Some(placed) = placed else { continue };
+                    for (other, under) in &surfaces {
+                        if *other != surface && under.placed().is_some_and(|under| under.overlaps(&placed)) {
+                            deny(&mut plan, &shown, *other);
+                            restore(&mut plan, *other, &|area| area.output.overlaps(&placed));
+                        }
+                    }
+                }
+                Message::EndFrame { .. } => {
+                    for (unit, surface) in unplaced.drain(..) {
+                        if !placeable(&surfaces, output, surface) {
+                            plan.gpu[unit] = false;
+                        }
+                    }
+                }
+                Message::WireToSurface1 { surface, codec, data, .. } if avc::carries(codec) => {
+                    // As `avc::scan` counts them: a payload that does not read has no units.
+                    let Ok(stream) = avc::Stream::read(codec, data) else { continue };
+                    let seen = surfaces.get_mut(&surface);
+                    let chroma_before = seen.as_ref().is_some_and(|seen| seen.chroma);
+                    if stream.has_chroma() {
+                        if let Some(seen) = seen {
+                            seen.chroma = true;
+                        }
+                        // The luma views before it are what it combines with.
+                        for (unit, on) in &shown {
+                            if *on == surface {
+                                plan.gpu[*unit] = false;
+                            }
+                        }
+                    }
+                    let alone = stream.alone().is_some_and(|regions| !regions.is_empty());
+                    for at in 0..stream.units() {
+                        let unit = plan.gpu.len();
+                        let may = at == 0 && alone && !chroma_before;
+                        plan.gpu.push(may);
+                        if may {
+                            unplaced.push((unit, surface));
+                            shown.push((unit, surface));
+                        }
+                    }
+                }
+                Message::WireToSurface1 { surface, codec: gfx::CODEC_CLEARCODEC, .. } => {
+                    // Its bands can land beside its rectangle (see `draw`).
+                    deny(&mut plan, &shown, surface);
+                    restore(&mut plan, surface, &|_| true);
+                }
+                Message::SurfaceToSurface { src, rect, .. } => read(&mut plan, &shown, src, to_rect(rect)),
+                Message::SurfaceToCache { surface, rect, .. } => read(&mut plan, &shown, surface, to_rect(rect)),
+                _ => {}
+            }
+        }
+        // A frame that does not end in the run is shown in a run whose pictures
+        // these are not.
+        for (unit, _) in unplaced {
+            plan.gpu[unit] = false;
+        }
+        Ok(plan)
     }
 
     fn compose_run(&mut self, commands: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
@@ -475,6 +829,7 @@ impl Graphics {
                 for surface in self.surfaces.values_mut() {
                     surface.pixels.fill(0);
                     surface.invalid.clear();
+                    surface.gpu.clear();
                 }
                 updates.push(Update::Reset { width, height, monitors });
             }
@@ -509,6 +864,7 @@ impl Graphics {
                     mapped: None,
                     invalid: Vec::new(),
                     avc: None,
+                    gpu: Vec::new(),
                 };
                 // A server may create a surface under a number still in use; the
                 // new one replaces the old.
@@ -701,6 +1057,10 @@ impl Graphics {
         let first = self.unit;
         self.unit += stream.units();
         let (luma, chroma) = stream.numbers();
+        if let Some(unit) = luma.map(|at| first + at).filter(|unit| self.on_gpu.contains(unit)) {
+            self.show_avc_on_gpu(surface, codec, &stream, unit);
+            return;
+        }
         let luma = luma.and_then(|at| self.supplied.remove(&(first + at)));
         let chroma = chroma.and_then(|at| self.supplied.remove(&(first + at)));
         let Some(found) = self.surfaces.get_mut(&surface) else {
@@ -718,6 +1078,25 @@ impl Graphics {
         if let Err(e) = outcome {
             warn!("rdp: leaving a {} stream's rectangles unpainted: {e:#}", gfx::codec_name(codec));
         }
+    }
+
+    /// A stream's masked rectangles, shown from the GPU from unit `unit`'s picture.
+    fn show_avc_on_gpu(&mut self, surface: u16, codec: u16, stream: &avc::Stream<'_>, unit: u32) {
+        let Some(found) = self.surfaces.get_mut(&surface) else {
+            warn!("rdp: the host drew into graphics surface {surface}, which does not exist");
+            return;
+        };
+        let Some(regions) = stream.alone() else {
+            warn!("rdp: leaving a {} stream unpainted: its views combine, and its luma view's picture was not supplied", gfx::codec_name(codec));
+            return;
+        };
+        let bounds = found.bounds();
+        let rects: Vec<Rect> = regions.iter().filter_map(|region| to_rect(region.rect).clipped(bounds)).collect();
+        for rect in &rects {
+            found.show_on_gpu(*rect, unit);
+        }
+        found.join_gpu();
+        found.avc.get_or_insert_default().shown_on_gpu(stream, &rects);
     }
 
     /// A Progressive PDU for a surface: its blocks carry their own rectangles, in
@@ -862,18 +1241,92 @@ impl Graphics {
             let Some((ox, oy)) = surface.mapped else {
                 continue;
             };
-            for rect in invalid {
-                let Some(rect) = rect.clipped(surface.bounds()) else { continue };
-                let placed = Rect { x: ox.saturating_add(rect.x), y: oy.saturating_add(rect.y), ..rect };
-                let Some(placed) = placed.clipped(output) else { continue };
-                // The source pixel under the placed rectangle's corner.
-                let origin = ((placed.x - ox) as usize, (placed.y - oy) as usize);
-                if framebuffer.blit_from(&surface.pixels, surface.stride(), origin, placed) {
-                    updates.push(Update::Paint(placed));
+            // What the GPU shows is the page's to draw, and not here.
+            for rect in invalid.into_iter().filter_map(|rect| rect.clipped(surface.bounds())) {
+                for rect in surface.off_gpu(rect) {
+                    let placed = Rect { x: ox.saturating_add(rect.x), y: oy.saturating_add(rect.y), ..rect };
+                    let Some(placed) = placed.clipped(output) else { continue };
+                    // The source pixel under the placed rectangle's corner.
+                    let origin = ((placed.x - ox) as usize, (placed.y - oy) as usize);
+                    if framebuffer.blit_from(&surface.pixels, surface.stride(), origin, placed) {
+                        updates.push(Update::Paint(placed));
+                    }
                 }
+            }
+            for shown in surface.gpu.iter_mut().filter(|shown| shown.at.is_none()) {
+                shown.at = Some((ox, oy));
             }
         }
     }
+}
+
+/// Join rectangles shown from the GPU that line up — the same rows and touching
+/// side to side, or the same columns and touching end to end — where they are of
+/// the same picture and the same place on the output, until none do.
+fn join_shown(shown: &mut Vec<OnGpu>) {
+    let key = |s: &OnGpu| (s.at, s.unit);
+    loop {
+        let before = shown.len();
+        // Side by side.
+        shown.sort_by_key(|s| (key(s), s.rect.y, s.rect.height, s.rect.x));
+        let mut joined: Vec<OnGpu> = Vec::with_capacity(shown.len());
+        for next in shown.drain(..) {
+            match joined.last_mut() {
+                Some(last)
+                    if key(last) == key(&next)
+                        && (last.rect.y, last.rect.height) == (next.rect.y, next.rect.height)
+                        && last.rect.x + last.rect.width == next.rect.x =>
+                {
+                    last.rect.width += next.rect.width;
+                }
+                _ => joined.push(next),
+            }
+        }
+        // End to end.
+        joined.sort_by_key(|s| (key(s), s.rect.x, s.rect.width, s.rect.y));
+        for next in joined.drain(..) {
+            match shown.last_mut() {
+                Some(last)
+                    if key(last) == key(&next)
+                        && (last.rect.x, last.rect.width) == (next.rect.x, next.rect.width)
+                        && last.rect.y + last.rect.height == next.rect.y =>
+                {
+                    last.rect.height += next.rect.height;
+                }
+                _ => shown.push(next),
+            }
+        }
+        if shown.len() == before {
+            return;
+        }
+    }
+}
+
+/// A surface as [`Graphics::plan`] walks a run: its size, where it is mapped, and
+/// whether its stream has carried a chroma view.
+struct Seen {
+    size: (u32, u32),
+    mapped: Option<(u32, u32)>,
+    chroma: bool,
+}
+
+impl Seen {
+    /// Where it lies on the output, if it is mapped.
+    fn placed(&self) -> Option<Rect> {
+        let (x, y) = self.mapped?;
+        Some(Rect { x, y, width: self.size.0, height: self.size.1 })
+    }
+}
+
+/// Whether a picture shown from the GPU on `surface` can be placed on the output
+/// and read back from where it lands: the surface is mapped, wholly inside the
+/// output, and no other mapped surface overlaps it.
+fn placeable(surfaces: &BTreeMap<u16, Seen>, output: Option<(u32, u32)>, surface: u16) -> bool {
+    let Some((width, height)) = output else { return false };
+    let output = Rect { x: 0, y: 0, width, height };
+    let Some(placed) = surfaces.get(&surface).and_then(Seen::placed) else { return false };
+    placed.clipped(output) == Some(placed)
+        && surfaces.iter().all(|(id, other)| *id == surface || other.placed().is_none_or(|other| !other.overlaps(&placed)))
 }
 
 impl Drop for Graphics {
@@ -1434,12 +1887,12 @@ mod tests {
         let opening = [reset(4, 4), create(1, 4, 4), map(1, 0, 0)].concat();
         assert_eq!(
             compositor.compose(&opening).unwrap(),
-            Composed { resized: Some((4, 4)), painted: Vec::new(), frames: 0 }
+            Composed { resized: Some((4, 4)), painted: Vec::new(), frames: 0, gpu: Vec::new() }
         );
         let frame = [start(1), solidfill(1, [10, 20, 30, 0], &[(1, 1, 3, 2)]), end(1)].concat();
         assert_eq!(
             compositor.compose(&frame).unwrap(),
-            Composed { resized: None, painted: vec![Rect { x: 1, y: 1, width: 2, height: 1 }], frames: 1 }
+            Composed { resized: None, painted: vec![Rect { x: 1, y: 1, width: 2, height: 1 }], frames: 1, gpu: Vec::new() }
         );
         compositor.framebuffer().with(|picture| {
             let at = (picture.width as usize + 1) * 4;
@@ -1558,5 +2011,234 @@ mod tests {
         graphics.supply(0, flat(32, 32, second));
         let updates = graphics.compose(&next, &framebuffer).unwrap();
         assert_eq!(updates[0], Update::Paint(Rect { x: 0, y: 0, width: 4, height: 4 }));
+    }
+    /// An H.264 unit's rectangles in a stream of its own, for the GPU tests below.
+    fn masked(rect: (u16, u16, u16, u16)) -> Vec<u8> {
+        use crate::proto::avc::tests::metablock;
+        [metablock(&[(rect, 20, 100)]), vec![0, 0, 1, 0x65]].concat()
+    }
+
+    /// The pixels the framebuffer's paints cover, each counted.
+    fn covered(updates: &[Update], width: u32, height: u32) -> Vec<u32> {
+        let mut counts = vec![0; (width * height) as usize];
+        for update in updates {
+            if let Update::Paint(rect) = update {
+                for y in rect.y..rect.y + rect.height {
+                    for x in rect.x..rect.x + rect.width {
+                        counts[(y * width + x) as usize] += 1;
+                    }
+                }
+            }
+        }
+        counts
+    }
+
+    /// A picture shown from the GPU is not copied to the framebuffer: what the run
+    /// painted around it is, once, and the page is told to draw it where the
+    /// surface is mapped. A later copy out of it is planned as a read, and once its
+    /// pixels are read back into the surface the copy carries them.
+    #[test]
+    fn a_picture_shown_from_the_gpu_is_left_to_the_page_and_read_back_before_a_copy() {
+        use crate::proto::gfx::CODEC_AVC420;
+
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(64, 32), create(1, 32, 32), map(1, 16, 0)]);
+        let run = [
+            start(1),
+            solidfill(1, [9, 9, 9, 0], &[(0, 0, 32, 32)]),
+            wire(1, CODEC_AVC420, (0, 0, 32, 32), &masked((4, 4, 20, 20))),
+            end(1),
+        ]
+        .concat();
+        let plan = graphics.plan(&run).unwrap();
+        assert_eq!(plan, Plan { gpu: vec![true], restore: vec![] });
+        graphics.show_on_gpu(0);
+        let updates = graphics.compose(&run, &framebuffer).unwrap();
+        let shown = Rect { x: 20, y: 4, width: 16, height: 16 };
+        let counts = covered(&updates, 64, 32);
+        for y in 0..32 {
+            for x in 16..48 {
+                let pixel = Rect { x, y, width: 1, height: 1 };
+                let want = u32::from(!shown.overlaps(&pixel));
+                assert_eq!(counts[(y * 64 + x) as usize], want, "pixel {x},{y}");
+            }
+        }
+        assert_eq!(graphics.take_gpu_paints(), vec![GpuPaint { unit: 0, output: shown, source: (4, 4) }]);
+        let area = GpuArea { surface: 1, rect: Rect { x: 4, y: 4, width: 16, height: 16 }, output: shown };
+        assert_eq!(graphics.gpu_areas(), vec![area]);
+
+        // A copy out of it: planned as a read of what the GPU shows, read back, and
+        // then carried where it goes like any other pixels.
+        let copy = [start(2), s2s(1, 1, (8, 8, 12, 12), &[(24, 24)]), end(2)].concat();
+        let plan = graphics.plan(&copy).unwrap();
+        assert_eq!(plan, Plan { gpu: vec![], restore: vec![area] });
+        let read_back: Vec<u8> = [40u8, 50, 60, 255].repeat(16 * 16);
+        graphics.restore(1, area.rect, &read_back, &framebuffer).unwrap();
+        assert_eq!(graphics.gpu_areas(), vec![], "read back, the pixels are the surface's again");
+        framebuffer.with(|frame| {
+            for row in frame.rows(shown) {
+                assert_eq!(row, [40u8, 50, 60, 0].repeat(16), "the framebuffer takes what was read back");
+            }
+        });
+        let updates = graphics.compose(&copy, &framebuffer).unwrap();
+        assert_eq!(updates[0], Update::Paint(Rect { x: 40, y: 24, width: 4, height: 4 }));
+        framebuffer.with(|frame| {
+            for row in frame.rows(Rect { x: 40, y: 24, width: 4, height: 4 }) {
+                for px in row.as_chunks::<4>().0 {
+                    assert_eq!(px, &[40, 50, 60, 0]);
+                }
+            }
+        });
+    }
+
+    /// What the run writes over a picture shown from the GPU is the surface's
+    /// again: copied to the framebuffer, and left out of what the page draws.
+    #[test]
+    fn a_write_over_a_picture_shown_from_the_gpu_takes_that_part_back() {
+        use crate::proto::gfx::CODEC_AVC420;
+
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(32, 32), create(1, 32, 32), map(1, 0, 0)]);
+        let run = [
+            start(1),
+            wire(1, CODEC_AVC420, (0, 0, 32, 32), &masked((0, 0, 16, 16))),
+            solidfill(1, [9, 9, 9, 0], &[(0, 0, 16, 8)]),
+            end(1),
+        ]
+        .concat();
+        assert_eq!(graphics.plan(&run).unwrap().gpu, vec![true]);
+        graphics.show_on_gpu(0);
+        let updates = graphics.compose(&run, &framebuffer).unwrap();
+        assert_eq!(updates[0], Update::Paint(Rect { x: 0, y: 0, width: 16, height: 8 }));
+        let rest = Rect { x: 0, y: 8, width: 16, height: 8 };
+        assert_eq!(graphics.take_gpu_paints(), vec![GpuPaint { unit: 0, output: rest, source: (0, 8) }]);
+
+        // And in a later run: the fill is copied, and nothing is left to draw.
+        let later = [start(2), solidfill(1, [9, 9, 9, 0], &[(0, 8, 16, 16)]), end(2)].concat();
+        assert_eq!(graphics.plan(&later).unwrap(), Plan::default());
+        let updates = graphics.compose(&later, &framebuffer).unwrap();
+        assert_eq!(updates[0], Update::Paint(rest));
+        assert_eq!(graphics.take_gpu_paints(), vec![]);
+        assert_eq!(graphics.gpu_areas(), vec![]);
+    }
+
+    /// A desktop drawn all in H.264 stays a few rectangles shown from the GPU: a
+    /// mask of tiles is one, and a mask over part of it, which cuts it into pieces,
+    /// is one again once its run is drawn.
+    #[test]
+    fn pictures_shown_from_the_gpu_over_one_another_stay_a_few_rectangles() {
+        use crate::proto::avc::tests::metablock;
+        use crate::proto::gfx::CODEC_AVC420;
+
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(64, 64), create(1, 64, 64), map(1, 0, 0)]);
+        let tiles: Vec<_> =
+            (0..16u16).map(|i| (((i % 4) * 16, (i / 4) * 16, (i % 4) * 16 + 16, (i / 4) * 16 + 16), 20, 100)).collect();
+        let tiled = [metablock(&tiles), vec![0, 0, 1, 0x65]].concat();
+        let whole = (0, 0, 64, 64);
+        for (frame, mask) in [(1, tiled), (2, masked((8, 8, 40, 40)))] {
+            let run = [start(frame), wire(1, CODEC_AVC420, whole, &mask), end(frame)].concat();
+            assert_eq!(graphics.plan(&run).unwrap().gpu, vec![true]);
+            graphics.show_on_gpu(0);
+            graphics.compose(&run, &framebuffer).unwrap();
+            let all = Rect { x: 0, y: 0, width: 64, height: 64 };
+            assert_eq!(graphics.gpu_areas(), vec![GpuArea { surface: 1, rect: all, output: all }], "frame {frame}");
+        }
+    }
+
+    /// A picture is shown from the GPU only where the page can draw it and read it
+    /// back: not past the run's last EndFrame, not where the run reads it again,
+    /// not on a surface unmapped, partly off the output or under another, and not
+    /// where its luma view combines with a chroma view.
+    #[test]
+    fn the_plan_shows_from_the_gpu_only_what_the_page_can_draw_and_read_back() {
+        use crate::proto::avc::tests::wrap444;
+        use crate::proto::gfx::{CODEC_AVC420, CODEC_AVC444_V2, CODEC_CLEARCODEC};
+
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(
+            &mut graphics,
+            &framebuffer,
+            &[reset(64, 32), create(1, 32, 32), map(1, 0, 0), create(2, 16, 16), create(3, 32, 32), map(3, 48, 0)],
+        );
+        let whole = (0, 0, 32, 32);
+        let unit = |surface: u16| wire(surface, CODEC_AVC420, whole, &masked((0, 0, 8, 8)));
+        let plan = |commands: &[Vec<u8>]| graphics.plan(&commands.concat()).unwrap().gpu;
+
+        assert_eq!(plan(&[start(1), unit(1), end(1)]), vec![true]);
+        assert_eq!(plan(&[start(1), unit(1)]), vec![false], "its frame ends in another run");
+        assert_eq!(plan(&[start(1), unit(1), s2c(1, 0, (0, 0, 4, 4)), end(1)]), vec![false], "the run reads it");
+        assert_eq!(
+            plan(&[start(1), unit(1), wire(1, CODEC_CLEARCODEC, (20, 20, 24, 24), &[0]), end(1)]),
+            vec![false],
+            "a ClearCodec rectangle is drawn over what the surface holds"
+        );
+        assert_eq!(plan(&[start(1), unit(2), end(1)]), vec![false], "an unmapped surface");
+        assert_eq!(plan(&[start(1), map(2, 0, 0), unit(2), end(1)]), vec![false], "under another surface");
+        assert_eq!(plan(&[start(1), unit(2), map(2, 32, 0), end(1)]), vec![true], "mapped by its frame's end");
+        assert_eq!(plan(&[start(1), unit(3), end(1)]), vec![false], "partly off the output");
+        let luma = masked((0, 0, 8, 8));
+        assert_eq!(
+            plan(&[start(1), wire(1, CODEC_AVC444_V2, whole, &wrap444(Some(&luma), None)), end(1)]),
+            vec![true],
+            "a luma view alone"
+        );
+        assert_eq!(
+            plan(&[
+                start(1),
+                wire(1, CODEC_AVC444_V2, whole, &wrap444(Some(&luma), None)),
+                wire(1, CODEC_AVC444_V2, whole, &wrap444(Some(&luma), Some(&luma))),
+                end(1),
+            ]),
+            vec![false, false, false],
+            "luma views that a chroma view combines with"
+        );
+    }
+
+    /// A surface mapped elsewhere, or another mapped over it, has the page paint
+    /// over where the output showed its picture from the GPU: the plan reads that
+    /// back first, and shows nothing more of the surface from the GPU in that run.
+    #[test]
+    fn the_plan_reads_back_what_a_mapping_paints_over() {
+        use crate::proto::gfx::CODEC_AVC420;
+
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(64, 32), create(1, 32, 32), map(1, 0, 0), create(2, 16, 16)]);
+        let unit = |surface: u16| wire(surface, CODEC_AVC420, (0, 0, 32, 32), &masked((0, 0, 8, 8)));
+        let shown = [start(1), unit(1), end(1)].concat();
+        assert_eq!(graphics.plan(&shown).unwrap().gpu, vec![true]);
+        graphics.show_on_gpu(0);
+        graphics.compose(&shown, &framebuffer).unwrap();
+        let area = GpuArea {
+            surface: 1,
+            rect: Rect { x: 0, y: 0, width: 8, height: 8 },
+            output: Rect { x: 0, y: 0, width: 8, height: 8 },
+        };
+        assert_eq!(graphics.gpu_areas(), vec![area]);
+
+        let moved = [start(2), unit(1), end(2), map(1, 32, 0), unit(1), end(3)].concat();
+        assert_eq!(
+            graphics.plan(&moved).unwrap(),
+            Plan { gpu: vec![false, true], restore: vec![area] },
+            "moved, the picture shown before the move is read back and the unit before it supplied"
+        );
+        assert_eq!(graphics.plan(&[start(2), map(1, 0, 0), unit(1), end(2)].concat()).unwrap(), Plan {
+            gpu: vec![true],
+            restore: vec![],
+        }, "mapped where it is, nothing changes");
+
+        let over = [start(2), unit(1), end(2), map(2, 4, 4), unit(1), end(3)].concat();
+        assert_eq!(
+            graphics.plan(&over).unwrap(),
+            Plan { gpu: vec![false, false], restore: vec![area] },
+            "another surface over it: read back, and nothing more shown under it"
+        );
+        let beside = [start(2), map(2, 40, 0), unit(1), end(2)].concat();
+        assert_eq!(graphics.plan(&beside).unwrap(), Plan { gpu: vec![true], restore: vec![] }, "mapped beside it");
     }
 }

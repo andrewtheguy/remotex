@@ -15,7 +15,8 @@ use anyhow::Result;
 
 use crate::avc::Picture;
 use crate::framebuffer::{Framebuffer, Rect};
-use crate::gfx::{Graphics, Update};
+use crate::gfx::{GpuArea, GpuPaint, Graphics, Plan, Update};
+use crate::proto::wire::Malformed;
 
 /// What one run of commands did to the picture.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -29,6 +30,10 @@ pub struct Composed {
     pub painted: Vec<Rect>,
     /// How many frames the run ended.
     pub frames: u32,
+    /// What the page draws from the pictures it shows from its GPU
+    /// ([`Compositor::show_on_gpu`]), after the painted rectangles: the
+    /// framebuffer does not hold them.
+    pub gpu: Vec<GpuPaint>,
 }
 
 /// The pipeline's compositor, and the framebuffer it composes into.
@@ -79,7 +84,36 @@ impl Compositor {
                 Update::Confirmed | Update::Passed { .. } | Update::Drawn(_) => {}
             }
         }
+        composed.gpu = self.graphics.take_gpu_paints();
         Ok(composed)
+    }
+
+    /// What a run of commands, unwrapped, asks of whoever composes it first: which
+    /// of its access units may be shown from the GPU, and what of what the GPU
+    /// shows it reads, to be restored. See [`crate::gfx`]. An error is a command
+    /// that does not decode, which [`Self::compose`] refuses too.
+    pub fn plan(&self, commands: &[u8]) -> Result<Plan, Malformed> {
+        self.graphics.plan(commands)
+    }
+
+    /// Access unit `unit` of the run composed next is shown from the GPU rather
+    /// than supplied: its rectangles are left to whoever composes the pipeline to
+    /// draw, as [`Composed::gpu`] says. Only for a unit [`Self::plan`] says may be.
+    pub fn show_on_gpu(&mut self, unit: u32) {
+        self.graphics.show_on_gpu(unit);
+    }
+
+    /// Every rectangle shown from the GPU, where the output shows it.
+    pub fn gpu_areas(&self) -> Vec<GpuArea> {
+        self.graphics.gpu_areas()
+    }
+
+    /// A rectangle shown from the GPU, read back: `rgbx` is `rect`'s rows of the
+    /// surface's pixels, packed, top row first, read off the output where
+    /// [`GpuArea::output`] says. The framebuffer takes them too, so that it is the
+    /// picture whole for a second display's tab.
+    pub fn restore(&mut self, surface: u16, rect: Rect, rgbx: &[u8]) -> Result<()> {
+        self.graphics.restore(surface, rect, rgbx, &self.framebuffer)
     }
 
     /// The decoded picture of one H.264 access unit in the run composed next:

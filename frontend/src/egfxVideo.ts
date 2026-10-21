@@ -14,6 +14,17 @@
 // compositor's scan reads off the unit (egfxCompositor.ts), and a keyframe that
 // names another configures the decoder again.
 //
+// **Its colour, told.** The host's stream says it is full range and names no
+// colour space; MS-RDPEGFX says full-range BT.709. The decoder is told so. A
+// picture the browser then labels with that colour is one it converts to RGB as
+// the compositor would, and can be drawn as the browser draws it, from the GPU a
+// hardware decoder made it on (`drawnAsCoded`). Measured (tmp/h264-gpu, 2026-10-20):
+// Chrome's hardware decoder on Windows takes the colour space and Safari's labels
+// the stream so untold, both drawing within a step of the compositor; Chrome's
+// hardware decoder on a Mac keeps its limited-range label, and its software
+// decoder a BT.601 matrix, and their pictures are copied and converted here as
+// before.
+//
 // **One picture for each unit, awaited.** The compositor composes a run's commands
 // in order and takes a unit's picture where its command is, so a unit is decoded
 // and its picture in hand before the run is composed. So the decoder has to give
@@ -33,6 +44,41 @@ import type { H264Unit } from "./egfxCompositor.ts";
 const PICTURE_TIMEOUT_MS = 5000;
 
 /**
+ * The colour MS-RDPEGFX gives the host's H.264: full-range BT.709, its pixels the
+ * desktop's own, so no transfer between them.
+ */
+const RDP_COLOUR: VideoColorSpaceInit = {
+  primaries: "bt709",
+  transfer: "iec61966-2-1",
+  matrix: "bt709",
+  fullRange: true,
+};
+
+/**
+ * Whether the browser draws this picture as the compositor would paint it: labelled
+ * with the stream's own colour, and shown at the size it was coded, so a texture
+ * made of it holds the compositor's pixels where the picture's are.
+ */
+export function drawnAsCoded(
+  frame: Pick<
+    VideoFrame,
+    "colorSpace" | "visibleRect" | "displayWidth" | "displayHeight"
+  >,
+): boolean {
+  const { primaries, transfer, matrix, fullRange } = frame.colorSpace;
+  const visible = frame.visibleRect;
+  return (
+    primaries === RDP_COLOUR.primaries &&
+    transfer === RDP_COLOUR.transfer &&
+    matrix === RDP_COLOUR.matrix &&
+    fullRange === true &&
+    visible !== null &&
+    frame.displayWidth === visible.width &&
+    frame.displayHeight === visible.height
+  );
+}
+
+/**
  * How a decoder for the host's stream is configured: for one picture out for each
  * access unit in, which is what composing in command order needs. Which decoder
  * that is, the GPU's or one in software, is left to the browser, as it is for the
@@ -41,7 +87,11 @@ const PICTURE_TIMEOUT_MS = 5000;
 export async function rdpH264Config(
   codec: string,
 ): Promise<VideoDecoderConfig | null> {
-  const config: VideoDecoderConfig = { codec, optimizeForLatency: true };
+  const config: VideoDecoderConfig = {
+    codec,
+    optimizeForLatency: true,
+    colorSpace: RDP_COLOUR,
+  };
   const support = await VideoDecoder.isConfigSupported(config);
   return support.supported === true ? config : null;
 }

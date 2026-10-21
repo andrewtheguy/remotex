@@ -512,9 +512,6 @@ pub enum H264 {
 /// `SCALEDMAP_DISABLE`: from 10.5 a host may map a surface to the output through
 /// the scaled mappings, commands this client ignores, and only 10.7 has a flag to
 /// say so. A host that knows 10.5 or 10.6 but not 10.7 settles on 10.4.
-///
-/// `THINCLIENT` is deliberately not set either way: a current host ignores it, and
-/// an older one would answer it with RemoteFX rather than the progressive form.
 pub fn caps_advertise(h264: H264) -> Vec<u8> {
     let whole = match h264 {
         H264::WholeDesktop => CAPS_AVC_THINCLIENT,

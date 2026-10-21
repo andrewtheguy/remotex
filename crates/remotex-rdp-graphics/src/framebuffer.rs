@@ -50,6 +50,29 @@ impl Rect {
         let bottom = (self.y.saturating_add(self.height)).min(bounds.y.saturating_add(bounds.height));
         (right > x && bottom > y).then(|| Rect { x, y, width: right - x, height: bottom - y })
     }
+
+    /// What is left of this rectangle with `cut` taken out: none of it, all of it,
+    /// or up to four pieces — the bands above and below the cut, then the parts
+    /// beside it.
+    pub fn minus(self, cut: Rect) -> impl Iterator<Item = Rect> {
+        let mut pieces = [None; 4];
+        match self.clipped(cut) {
+            None => pieces[0] = Some(self),
+            Some(inside) => {
+                let (right, bottom) = (self.x + self.width, self.y + self.height);
+                let (inside_right, inside_bottom) = (inside.x + inside.width, inside.y + inside.height);
+                let band = |y: u32, height: u32| (height > 0).then_some(Rect { x: self.x, y, width: self.width, height });
+                let side = |x: u32, width: u32| (width > 0).then_some(Rect { x, y: inside.y, width, height: inside.height });
+                pieces = [
+                    band(self.y, inside.y - self.y),
+                    band(inside_bottom, bottom - inside_bottom),
+                    side(self.x, inside.x - self.x),
+                    side(inside_right, right - inside_right),
+                ];
+            }
+        }
+        pieces.into_iter().flatten()
+    }
 }
 
 /// A desktop size the server named, refused before anything is allocated for it —
@@ -281,6 +304,30 @@ impl Framebuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Taking a rectangle out of another leaves the pixels of the first that are
+    /// not in the second, each once: a hole in the middle, a bite off an edge, all
+    /// of it, and none of it.
+    #[test]
+    fn a_rectangle_minus_another_leaves_exactly_the_rest() {
+        let whole = Rect { x: 2, y: 3, width: 10, height: 8 };
+        for cut in [
+            Rect { x: 5, y: 5, width: 2, height: 2 },
+            Rect { x: 0, y: 0, width: 6, height: 20 },
+            Rect { x: 0, y: 0, width: 30, height: 30 },
+            Rect { x: 20, y: 20, width: 2, height: 2 },
+        ] {
+            let pieces: Vec<Rect> = whole.minus(cut).collect();
+            for y in 0..16 {
+                for x in 0..16 {
+                    let pixel = Rect { x, y, width: 1, height: 1 };
+                    let left = usize::from(whole.overlaps(&pixel) && !cut.overlaps(&pixel));
+                    let covered = pieces.iter().filter(|piece| piece.overlaps(&pixel)).count();
+                    assert_eq!(covered, left, "pixel {x},{y} with {cut:?} cut out, in {pieces:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_blit_lands_where_the_rectangle_says() {
