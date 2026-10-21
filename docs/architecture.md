@@ -3712,8 +3712,8 @@ top-level `[passwords]` table holds each one as
 value is printed before anyone names it (`src/vault.rs`). The key is Argon2id (64 MiB, 3 passes, 1 lane) of the
 account's master password and the file's `[master].salt`; `[master].check`, an HMAC under that
 key, tells a wrong master password apart before any value is tried. One master
-password per OS account opens every config it keeps, while each file's salt
-gives each its own key. Inline `password` and `vnc_password` are unknown keys.
+password opens every config made under it, while each file's salt gives each
+its own key. Inline `password` and `vnc_password` are unknown keys.
 
 Reading a file checks only shape: every name a target gives is in
 `[passwords]`, every value has the prefix and length of one, and `[master]` is
@@ -3724,15 +3724,19 @@ before.
 
 Where the master password comes from is each audience's:
 
-- `remotex serve` reads `[server].master_password_file` when it is set, else
-  the keychain (`src/keychain.rs`: keyring-core over the macOS Keychain,
-  Windows Credential Manager, or the Secret Service over zbus, so no build
-  needs libdbus). It never asks at a terminal: a service manager and a person
-  must start it the same way. The file is a `[server]` key, the one place a
-  served gateway's deployment says things, so a container names its secret
-  there rather than in the environment, where `docker inspect` and every child
-  process would see it.
-- `remotex tui` takes it from the keychain, and when the keychain keeps none
+- `remotex serve` reads `[server].master_password_file`, and a config that
+  names passwords without it refuses to start. It never asks at a terminal: a
+  service manager and a person must start it the same way. Nor does it read
+  the keychain, which is the TUI's alone: a served gateway runs where no
+  keychain answers as often as where one does (a container, a headless Linux
+  service, Windows over SSH), and one source starts it the same way in all of
+  them. The file is a `[server]` key, the one place a served gateway's
+  deployment says things, so a container names its secret there rather than
+  in the environment, where `docker inspect` and every child process would
+  see it.
+- `remotex tui` takes it from the keychain (`src/keychain.rs`: keyring-core
+  over the macOS Keychain, Windows Credential Manager, or the Secret Service
+  over zbus, so no build needs libdbus), and when the keychain keeps none
   generates one (32 random bytes) and keeps it there, as Chrome's and Slack's
   Safe Storage keys are made: nobody types it, and every instance opens under
   the same one. It never asks at its terminal; a keychain that will not answer
@@ -3743,13 +3747,15 @@ Where the master password comes from is each audience's:
   name, and a config whose `[master]` the keychain's master password does not
   open was made under another account's: the TUI says so, and its passwords are
   set again with `p` after the two tables are removed.
-- The keychain is the `keychain` Cargo feature, on by default and off in a
-  container build, which has no store to ask and reads the file alone.
+- The keychain comes with the `embedded-gateway` Cargo feature, since only the
+  TUI reads it; a container build, which has neither, links no credential
+  store.
 
-`remotex password master` prints a `[master]` block, keeping a master password
-it had to ask for in the keychain, and `remotex password encrypt` prints one
-value under a config's `[master]`. Neither writes a file: a served gateway's
-config is assembled by whoever deploys it, by hand or from Helm values, and the
+`remotex password master` prints a `[master]` block and `remotex password
+encrypt` prints one value under a config's `[master]`, each taking the master
+password from the config's `[server].master_password_file`, else asking at the
+terminal, and neither touches the keychain. Neither writes a file: a served
+gateway's config is assembled by whoever deploys it, by hand or from Helm values, and the
 output goes wherever that is. A local instance's config belongs to the TUI,
 whose `p` writes both tables into it through `toml_edit`, keeping its comments,
 and replaces the file by a rename.

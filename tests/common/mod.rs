@@ -41,8 +41,7 @@ pub fn uat_target(name: &str) -> remotex::config::TargetConfig {
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("these tests need the local UAT config at {path}: {e}"));
     let mut config = remotex::config::ConfigFile::parse(&text).expect("tmp/test_uat.toml should parse");
-    // Its passwords open as a served gateway's would: [server].master_password_file,
-    // else the keychain.
+    // Its passwords open as a served gateway's would: [server].master_password_file.
     let key = config.needs_master().then(|| {
         let master = config
             .served_master(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tmp")))

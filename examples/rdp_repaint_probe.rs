@@ -62,8 +62,7 @@ async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
     let target = std::env::var("REMOTEX_PROBE_TARGET")
         .expect("set REMOTEX_PROBE_TARGET to the name of the target to measure");
     let (mut file, path_buf) = remotex::config::load(Some(Path::new(&path))).expect("read the probe config");
-    // Its passwords open as a served gateway's would: [server].master_password_file,
-    // else the keychain.
+    // Its passwords open as a served gateway's would: [server].master_password_file.
     let key = file.needs_master().then(|| {
         let master = file
             .served_master(path_buf.parent().unwrap_or(Path::new("")))

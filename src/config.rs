@@ -1494,14 +1494,13 @@ pub struct ServerSection {
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
     /// A file holding the master password that opens `[passwords]`: a container's
-    /// secret (`/run/secrets/…`), a systemd credential, anything a deployment
-    /// without a keychain keeps one in. A relative path is taken from the config
-    /// file's directory. Unset, the master password is the keychain's — see
-    /// [`crate::keychain`].
+    /// secret (`/run/secrets/…`), a systemd credential, a file only the service's
+    /// account reads. A relative path is taken from the config file's directory.
+    /// A served gateway has no other source: a config that names passwords and
+    /// not this file refuses to start.
     ///
     /// A `[server]` key because only a served gateway reads it: a local instance has
-    /// no `[server]` block, and its control plane asks the keychain or the person at
-    /// the terminal instead.
+    /// no `[server]` block, and its control plane takes the keychain's instead.
     pub master_password_file: Option<PathBuf>,
     // No `branding` here: it is the top-level `[branding]` table now (see
     // `ConfigFile::branding`), because an embedded config has no `[server]`
@@ -2220,29 +2219,22 @@ impl ConfigFile {
         Ok(())
     }
 
-    /// The master password a served gateway opens this file with:
-    /// `[server].master_password_file` when it names one, the keychain's otherwise.
-    /// Never asked at a terminal — a gateway is started as often by a service
-    /// manager as by hand, and the two must start the same way.
+    /// The master password a served gateway opens this file with: the one in the
+    /// file `[server].master_password_file` names. Never the keychain, which is the
+    /// TUI's, and never asked at a terminal — a gateway is started as often by a
+    /// service manager as by hand, and the two must start the same way.
     ///
     /// `config_dir` is what a relative `master_password_file` is taken from.
     pub fn served_master(&self, config_dir: &Path) -> anyhow::Result<MasterPassword> {
-        if let Some(file) = self.server.as_ref().and_then(|server| server.master_password_file.as_ref()) {
-            return MasterPassword::read_file(&config_dir.join(file))
-                .context("invalid [server].master_password_file");
-        }
-        match crate::keychain::load() {
-            Ok(Some(master)) => Ok(master),
-            Ok(None) => anyhow::bail!(
-                "the keychain has no remotex master password: store one with \
-                 `remotex password master`, or name a file holding it in \
-                 [server].master_password_file"
-            ),
-            Err(error) => Err(error).context(
-                "the config names passwords and the master password could not be read from \
-                 the keychain; name a file holding it in [server].master_password_file",
-            ),
-        }
+        let file = self
+            .server
+            .as_ref()
+            .and_then(|server| server.master_password_file.as_ref())
+            .context(
+                "the config names passwords: name a file holding the master password in \
+                 [server].master_password_file",
+            )?;
+        MasterPassword::read_file(&config_dir.join(file)).context("invalid [server].master_password_file")
     }
 
     /// Resolve the runtime configuration of a managed local instance: its private

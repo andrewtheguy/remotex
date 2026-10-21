@@ -165,11 +165,13 @@ sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
 remotex gen-passwd admin
 ```
 
-Put the generated value and a target in `/etc/remotex/remotex.toml`:
+Put the generated value and a target in `/etc/remotex/remotex.toml`, with the
+file the gateway reads its master password from:
 
 ```toml
 [server]
 site_passwd = "admin:$2b$..."
+master_password_file = "master-password"
 
 [[targets]]
 name = "workstation"
@@ -179,13 +181,14 @@ username = "Administrator"
 password_ref = "workstation"
 ```
 
-Then paste in the target's password, encrypted under a master password kept in
-your keychain (see [Target passwords](docs/guide.md#target-passwords)):
-`password master` prints a `[master]` block for the config, and
-`password encrypt` prints the value to add as `workstation = "…"` under
-`[passwords]`.
+Then write the master password to that file and paste in the target's
+password, encrypted under it (see
+[Target passwords](docs/guide.md#target-passwords)): `password master` prints
+a `[master]` block for the config, and `password encrypt` prints the value to
+add as `workstation = "…"` under `[passwords]`.
 
 ```sh
+(umask 077; IFS= read -rsp 'Master password: ' pw && echo && printf '%s' "$pw" > /etc/remotex/master-password)
 remotex password master
 remotex password encrypt
 ```
@@ -200,7 +203,7 @@ The page needs a secure context, so from another machine put the gateway behind
 a TLS-terminating reverse proxy; `localhost` works as it is.
 
 There are also `.rpm`, macOS `.pkg` and Windows `.msi` packages, and a container
-image. The image has no keychain, so its config sets
+image. Its config sets
 `[server].master_password_file = "/run/secrets/remotex_master"` and the master
 password is mounted there; [Container](docs/install.md#container) shows how to
 create that file and print the config's `[master]` and `[passwords]` with the

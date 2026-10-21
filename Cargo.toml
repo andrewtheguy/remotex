@@ -31,12 +31,13 @@ edition = "2024"
 # Native builds include the local TUI control plane. Container artifacts
 # explicitly disable default features: a remotely deployed gateway must not
 # expose process supervision or its private worker surface.
-default = ["embedded-gateway", "keychain"]
-# The TUI's master password is the keychain's, so the TUI needs one.
-embedded-gateway = ["keychain", "dep:crossterm", "dep:libc", "dep:windows-sys"]
-# The master password in the account's credential store. A container has no such
-# store, and reads its master password from [server].master_password_file alone.
-keychain = [
+default = ["embedded-gateway"]
+# The TUI's master password is the keychain's (src/keychain.rs), so the TUI
+# brings the credential stores; nothing else reads them.
+embedded-gateway = [
+    "dep:crossterm",
+    "dep:libc",
+    "dep:windows-sys",
     "dep:keyring-core",
     "dep:apple-native-keyring-store",
     "dep:windows-native-keyring-store",
@@ -228,8 +229,8 @@ argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 # `remotex password` writes those entries into the file somebody edits, keeping its
 # comments and layout, which a round trip through `toml` would not.
 toml_edit = "0.25"
-# The OS credential store the master password is kept in (src/keychain.rs), behind
-# the `keychain` feature: the Keychain on macOS, Credential Manager on Windows,
+# The OS credential store the TUI keeps its master password in (src/keychain.rs),
+# behind `embedded-gateway`: the Keychain on macOS, Credential Manager on Windows,
 # and the Secret Service on Linux, spoken over zbus so no build needs libdbus.
 keyring-core = { version = "1", optional = true }
 
