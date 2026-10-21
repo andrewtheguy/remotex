@@ -599,7 +599,10 @@ impl Graphics {
     /// ends after it in the run with its surface mapped wholly inside the output
     /// and no other mapped surface over it, and nothing after it in the run reads
     /// that surface. What reads a surface is a copy out of it, a cache entry taken
-    /// from it, and a ClearCodec rectangle, which is drawn over what it holds.
+    /// from it, and a ClearCodec rectangle, which is drawn over what it holds. A
+    /// surface mapped elsewhere, and one mapped over another, read back what the
+    /// output shows from the GPU where it was and under the new place: the page
+    /// paints over it from then on.
     pub(crate) fn plan(&self, commands: &[u8]) -> Result<Plan, Malformed> {
         let mut surfaces: BTreeMap<u16, Seen> = self
             .surfaces
@@ -621,19 +624,27 @@ impl Graphics {
         // those whose frame has not ended yet, and all of them.
         let mut unplaced: Vec<(usize, u16)> = Vec::new();
         let mut shown: Vec<(usize, u16)> = Vec::new();
-        let read = |plan: &mut Plan, shown: &[(usize, u16)], surface: u16, rect: Rect| {
+        // The units shown on a surface so far are supplied instead.
+        let deny = |plan: &mut Plan, shown: &[(usize, u16)], surface: u16| {
             for (unit, on) in shown {
                 if *on == surface {
                     plan.gpu[*unit] = false;
                 }
             }
+        };
+        // What a surface shows from the GPU is read back where `touched` says.
+        let restore = |plan: &mut Plan, surface: u16, touched: &dyn Fn(&GpuArea) -> bool| {
             if let Some(held) = self.surfaces.get(&surface) {
                 for area in held.gpu_areas(surface) {
-                    if area.rect.overlaps(&rect) && !plan.restore.contains(&area) {
+                    if touched(&area) && !plan.restore.contains(&area) {
                         plan.restore.push(area);
                     }
                 }
             }
+        };
+        let read = |plan: &mut Plan, shown: &[(usize, u16)], surface: u16, rect: Rect| {
+            deny(plan, shown, surface);
+            restore(plan, surface, &|area| area.rect.overlaps(&rect));
         };
         for message in gfx::messages(commands) {
             match message? {
@@ -646,8 +657,22 @@ impl Graphics {
                     surfaces.remove(&surface);
                 }
                 Message::MapSurfaceToOutput { surface, x, y } => {
-                    if let Some(seen) = surfaces.get_mut(&surface) {
-                        seen.mapped = Some((x, y));
+                    let Some(seen) = surfaces.get_mut(&surface) else { continue };
+                    let moved = seen.mapped.replace((x, y)).is_some_and(|was| was != (x, y));
+                    let placed = seen.placed();
+                    // Moved, what it showed from the GPU is drawn where it was.
+                    if moved {
+                        deny(&mut plan, &shown, surface);
+                        restore(&mut plan, surface, &|_| true);
+                    }
+                    // What the output showed from the GPU under its new place, this
+                    // surface paints over.
+                    let Some(placed) = placed else { continue };
+                    for (other, under) in &surfaces {
+                        if *other != surface && under.placed().is_some_and(|under| under.overlaps(&placed)) {
+                            deny(&mut plan, &shown, *other);
+                            restore(&mut plan, *other, &|area| area.output.overlaps(&placed));
+                        }
                     }
                 }
                 Message::EndFrame { .. } => {
@@ -2155,5 +2180,48 @@ mod tests {
             vec![false, false, false],
             "luma views that a chroma view combines with"
         );
+    }
+
+    /// A surface mapped elsewhere, or another mapped over it, has the page paint
+    /// over where the output showed its picture from the GPU: the plan reads that
+    /// back first, and shows nothing more of the surface from the GPU in that run.
+    #[test]
+    fn the_plan_reads_back_what_a_mapping_paints_over() {
+        use crate::proto::gfx::CODEC_AVC420;
+
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(64, 32), create(1, 32, 32), map(1, 0, 0), create(2, 16, 16)]);
+        let unit = |surface: u16| wire(surface, CODEC_AVC420, (0, 0, 32, 32), &masked((0, 0, 8, 8)));
+        let shown = [start(1), unit(1), end(1)].concat();
+        assert_eq!(graphics.plan(&shown).unwrap().gpu, vec![true]);
+        graphics.show_on_gpu(0);
+        graphics.compose(&shown, &framebuffer).unwrap();
+        let area = GpuArea {
+            surface: 1,
+            rect: Rect { x: 0, y: 0, width: 8, height: 8 },
+            output: Rect { x: 0, y: 0, width: 8, height: 8 },
+        };
+        assert_eq!(graphics.gpu_areas(), vec![area]);
+
+        let moved = [start(2), unit(1), end(2), map(1, 32, 0), unit(1), end(3)].concat();
+        assert_eq!(
+            graphics.plan(&moved).unwrap(),
+            Plan { gpu: vec![false, true], restore: vec![area] },
+            "moved, the picture shown before the move is read back and the unit before it supplied"
+        );
+        assert_eq!(graphics.plan(&[start(2), map(1, 0, 0), unit(1), end(2)].concat()).unwrap(), Plan {
+            gpu: vec![true],
+            restore: vec![],
+        }, "mapped where it is, nothing changes");
+
+        let over = [start(2), unit(1), end(2), map(2, 4, 4), unit(1), end(3)].concat();
+        assert_eq!(
+            graphics.plan(&over).unwrap(),
+            Plan { gpu: vec![false, false], restore: vec![area] },
+            "another surface over it: read back, and nothing more shown under it"
+        );
+        let beside = [start(2), map(2, 40, 0), unit(1), end(2)].concat();
+        assert_eq!(graphics.plan(&beside).unwrap(), Plan { gpu: vec![true], restore: vec![] }, "mapped beside it");
     }
 }
