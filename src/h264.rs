@@ -1,8 +1,7 @@
 //! H.264 as this gateway meets it on a `wlshare` target: the moving regions of
 //! its tiles with motion, coded by the host's hardware encoder and passed to
-//! the browser as wlshare coded them ([`pass`]), for a browser whose own
-//! decoder takes H.264 (`h264` on the session socket). The gateway encodes no
-//! H.264 and decodes none.
+//! the browser as wlshare coded them ([`pass`]), which codec being wlshare's
+//! choice. The gateway encodes no H.264 and decodes none.
 //!
 //! What a passed region's frame needs here is what the browser cannot read out
 //! of it in time: whether a decoder can start at it, and the WebCodecs string
@@ -56,24 +55,36 @@ pub fn nal_units(unit: &[u8]) -> Vec<&[u8]> {
 /// one NAL unit, within the ceiling every passed picture is held to, and
 /// where it carries a sequence parameter set, one of a picture the region's
 /// size — a pixel wider or taller at most, since a 4:2:0 picture is cropped
-/// in pairs and the page clips the picture to the region anyway.
+/// in pairs and the page clips the picture to the region anyway. An IDR
+/// picture is a keyframe only with both parameter sets ahead of it in the
+/// unit, which is what a decoder starting there needs; one without is
+/// refused, since the browser could neither start at it nor be told not to.
 pub fn pass(w: u16, h: u16, unit: &[u8]) -> anyhow::Result<Region> {
     let nals = nal_units(unit);
     anyhow::ensure!(!nals.is_empty(), "the server's H.264 frame is not an Annex B access unit");
     check_picture((w, h))?;
     let mut decode = None;
+    let mut pps = false;
+    let mut keyframe = false;
     for nal in &nals {
-        if nal[0] & 0x1f == 7 {
-            let params = parse_h264_sps(nal).ok_or_else(|| anyhow::anyhow!("the server's H.264 frame carries a sequence parameter set this gateway cannot read"))?;
-            let (sw, sh) = params.size;
-            anyhow::ensure!(
-                (w..=w.saturating_add(1)).contains(&sw) && (h..=h.saturating_add(1)).contains(&sh),
-                "the server's H.264 frame is of a {sw}x{sh} picture, not the {w}x{h} region's"
-            );
-            decode = Some(params.decode);
+        match nal[0] & 0x1f {
+            7 => {
+                let params = parse_h264_sps(nal).ok_or_else(|| anyhow::anyhow!("the server's H.264 frame carries a sequence parameter set this gateway cannot read"))?;
+                let (sw, sh) = params.size;
+                anyhow::ensure!(
+                    (w..=w.saturating_add(1)).contains(&sw) && (h..=h.saturating_add(1)).contains(&sh),
+                    "the server's H.264 frame is of a {sw}x{sh} picture, not the {w}x{h} region's"
+                );
+                decode = Some(params.decode);
+            }
+            8 => pps = true,
+            5 => {
+                anyhow::ensure!(decode.is_some() && pps, "the server's H.264 frame holds an IDR picture without both parameter sets ahead of it");
+                keyframe = true;
+            }
+            _ => {}
         }
     }
-    let keyframe = nals.iter().any(|nal| nal[0] & 0x1f == 5);
     Ok(Region { decode, keyframe })
 }
 
@@ -118,5 +129,20 @@ mod tests {
         assert!(pass(640, 192, KEYFRAME).is_err(), "a picture of another size");
         assert!(pass(318, 192, KEYFRAME).is_err(), "two pixels narrower is another picture");
         assert!(pass(5376, 2288, KEYFRAME).is_err(), "past the ceiling");
+    }
+
+    /// An IDR is a keyframe only with its SPS and PPS ahead of it; without
+    /// either, or with them behind it, the frame is refused rather than passed
+    /// as a keyframe a decoder cannot start at, or as a frame of another.
+    #[test]
+    fn an_idr_without_both_parameter_sets_ahead_of_it_is_refused() {
+        let [sps, pps, idr] = nal_units(KEYFRAME)[..] else { panic!("the sample is SPS, PPS, IDR") };
+        let unit = |nals: &[&[u8]]| nals.iter().flat_map(|nal| [&[0, 0, 0, 1][..], nal]).flatten().copied().collect::<Vec<u8>>();
+        assert_eq!(pass(320, 192, &unit(&[sps, pps, idr])).unwrap(), Region { decode: Some("avc1.64000D".to_owned()), keyframe: true });
+        assert!(pass(320, 192, &unit(&[idr])).is_err(), "an IDR alone");
+        assert!(pass(320, 192, &unit(&[sps, idr])).is_err(), "no PPS");
+        assert!(pass(320, 192, &unit(&[pps, idr])).is_err(), "no SPS");
+        assert!(pass(320, 192, &unit(&[idr, sps, pps])).is_err(), "the parameter sets behind the picture");
+        assert_eq!(pass(320, 192, &unit(&[sps, pps])).unwrap(), Region { decode: Some("avc1.64000D".to_owned()), keyframe: false }, "parameter sets with no picture pass as no keyframe");
     }
 }
