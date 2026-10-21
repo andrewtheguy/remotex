@@ -350,8 +350,7 @@ for when either key is on. The client accepts the channel and at once advertises
 its capability sets (`proto/gfx.rs::caps_advertise`). A session started
 High quality advertises two: version 8 with the small cache, and version 10 with the
 small cache and `AVC_DISABLED`, so the host never sends H.264 and draws with the
-pipeline's other codecs alone. `THINCLIENT` is deliberately not set. The host
-confirms one set and then draws.
+pipeline's other codecs alone. The host confirms one set and then draws.
 
 High quality is not lossless unless the host is told to be
 ([Lossless, by the host's policy](#lossless-by-the-hosts-policy)). Of the codecs

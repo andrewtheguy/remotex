@@ -172,38 +172,6 @@ RFB baseline and nothing more
 ([Constraints](architecture.md#constraints)). A stream of its own passed
 through is what a `wlshare` target has.
 
-### Motion
-
-Motion (alpha) sent what is still as exact PNG and each region that moves as a
-VP9 stream of its own, first under an RDP target's High quality, from the
-pipeline composed at the gateway, then on a Mac's virtual display under `ard`,
-from its ZRLE. It was removed from both, and the gateway sends a picture it
-decodes one way, as tiles, with no video encoder ([Media paths](architecture.md#media-paths)).
-On an RDP target it encoded twice, decoding what the host had already encoded
-only to encode it again, beside a pipeline that already gives an exact picture
-under the host's Lossless policy
-([Lossless, by the host's policy](rdp-client.md#lossless-by-the-hosts-policy))
-and the host's own Adaptive H.264 for a slow link. On a Mac, Standard mode's
-Adaptive quality, the Mac's own codecs, covers a slow link with fewer updates
-rather than coarser ones
-([Apple's own framebuffer encodings](apple-vnc-889.md#apples-own-framebuffer-encodings)).
-Its rules are wlshare's now, as its tiles with motion beside `WLSV` that a
-`wlshare` session started with them passes
-([wlshare's tiles with motion, passed through](architecture.md#wlshares-tiles-with-motion-passed-through)):
-there the compositor's pixels are coded once and no native protocol stands
-between, so the gateway codes nothing.
-
-### `THINCLIENT` in the graphics capability advertise
-
-`caps_advertise` in the graphics crate's `proto/gfx.rs` sends versions 8 and 10 with the small cache
-and, on version 10, `AVC_DISABLED` — or, for an adaptive session, which takes H.264,
-every set to 10.4, and 10.7, without it — and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
-unset either way. A current Windows host, the only host this client targets, ignores the
-flag; the hosts that acted on it, choosing the classic RemoteFX codec over the
-progressive form, are not supported, so there is nothing for the flag to change.
-The decision is recorded in
-[The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx).
-
 ### More than two virtual displays on a target
 
 `virtual_displays` is held to two. A browser tab shows one display, and the
