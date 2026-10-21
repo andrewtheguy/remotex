@@ -106,6 +106,21 @@ fn native_store() -> Result<(), String> {
     }
 }
 
+/// The mock store, emptied, held for one test at a time: every test in this
+/// binary shares the one process-wide store, so two that write the master entry
+/// would see each other's.
+#[cfg(test)]
+pub(crate) fn empty_test_store() -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(feature = "keychain")]
+    match entry().unwrap().delete_credential() {
+        Ok(()) | Err(keyring_core::Error::NoEntry) => {}
+        Err(error) => panic!("cannot empty the mock store: {error}"),
+    }
+    guard
+}
+
 #[cfg(all(test, feature = "keychain"))]
 mod tests {
     use super::*;
@@ -145,6 +160,7 @@ mod tests {
     /// mock, and a round trip through it works.
     #[test]
     fn tests_reach_the_mock_store_and_round_trip() {
+        let _store = empty_test_store();
         init_store().unwrap();
         let vendor = keyring_core::get_default_store().unwrap().vendor();
         assert!(vendor.contains("Mock"), "tests must not reach a real store, got {vendor}");

@@ -23,7 +23,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/apple-adaptive"]
 
 [package]
 name = "remotex"
-version = "0.0.447"
+version = "0.0.448"
 license = "MIT"
 edition = "2024"
 
@@ -32,7 +32,8 @@ edition = "2024"
 # explicitly disable default features: a remotely deployed gateway must not
 # expose process supervision or its private worker surface.
 default = ["embedded-gateway", "keychain"]
-embedded-gateway = ["dep:crossterm", "dep:libc", "dep:windows-sys"]
+# The TUI's master password is the keychain's, so the TUI needs one.
+embedded-gateway = ["keychain", "dep:crossterm", "dep:libc", "dep:windows-sys"]
 # The master password in the account's credential store. A container has no such
 # store, and reads its master password from [server].master_password_file alone.
 keychain = [

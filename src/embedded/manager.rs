@@ -54,8 +54,8 @@ pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
 # text = "remotex"
 # logo = "/path/to/logo.png"
 
-# A target names its password; [passwords] keeps it encrypted under your
-# master password. Press p in the TUI to add one.
+# A target names its password; [passwords] keeps it encrypted under the
+# master password in your keychain. Press p in the TUI to add one.
 
 # [[targets]]
 # name = "work"
@@ -216,10 +216,9 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             .filter(|i| !matches!(i.status, InstanceStatus::Running | InstanceStatus::Starting))
                             .collect();
                         let mut failed = false;
-                        let mut asked = false;
                         for instance in stopped {
                             let name = instance.name.clone();
-                            let started = match master.key_for(&mut terminal, &instance.config_path(), &mut asked) {
+                            let started = match master.key_for(&instance.config_path()) {
                                 Ok(key) => supervisor.start(&name, key.as_ref()).await,
                                 Err(error) => Err(error),
                             };
@@ -227,10 +226,6 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                                 message = format!("{name}: {error:#}");
                                 failed = true;
                             }
-                        }
-                        if asked {
-                            screen.invalidate();
-                            events = EventStream::new();
                         }
                         if !failed {
                             message = "started every stopped instance".to_owned();
@@ -242,15 +237,10 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             message = if instance.status == InstanceStatus::Running {
                                 format!("{name} is already running; x stops it")
                             } else {
-                                let mut asked = false;
-                                let started = match master.key_for(&mut terminal, &instance.config_path(), &mut asked) {
+                                let started = match master.key_for(&instance.config_path()) {
                                     Ok(key) => supervisor.start(&name, key.as_ref()).await,
                                     Err(error) => Err(error),
                                 };
-                                if asked {
-                                    screen.invalidate();
-                                    events = EventStream::new();
-                                }
                                 match started {
                                     Ok(()) => format!("started {name}"),
                                     Err(error) => format!("{name}: {error:#}"),
@@ -279,15 +269,10 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                     KeyCode::Char('r') => {
                         if let Some(instance) = instances.get(selected) {
                             let name = instance.name.clone();
-                            let mut asked = false;
-                            let restarted = match master.key_for(&mut terminal, &instance.config_path(), &mut asked) {
+                            let restarted = match master.key_for(&instance.config_path()) {
                                 Ok(key) => supervisor.restart(&name, key.as_ref()).await,
                                 Err(error) => Err(error),
                             };
-                            if asked {
-                                screen.invalidate();
-                                events = EventStream::new();
-                            }
                             message = match restarted {
                                 Ok(()) => format!("restarted {name}"),
                                 Err(error) => format!("{name}: {error:#}"),
@@ -353,57 +338,78 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The master password this control plane opens its instances' configs with,
-/// kept for the rest of its run once it has opened one.
+/// The master password this control plane opens its instances' configs with:
+/// the account's, kept in the keychain.
 ///
-/// Never `[server].master_password_file`: an instance has no `[server]` block. It
-/// is the keychain's, or else asked for at this terminal, which a served gateway
-/// never does — this process always has a person in front of it.
+/// Generated the first time the account needs one and kept there from then on,
+/// as Chrome's and Slack's Safe Storage keys are, so nobody types or knows it
+/// and every instance opens under the same one. Never asked for at the terminal,
+/// and never `[server].master_password_file`: an instance has no `[server]`
+/// block. Read from the keychain once per run.
 #[derive(Default)]
 struct Master(Option<MasterPassword>);
 
 impl Master {
-    /// The first master password known without asking — the one given already,
-    /// then the keychain's — that `open` accepts, with what `open` made of it.
-    fn known<T>(&self, open: impl Fn(&MasterPassword) -> anyhow::Result<T>) -> Option<(MasterPassword, T)> {
-        self.0
-            .clone()
-            .into_iter()
-            .chain(crate::keychain::load().ok().flatten())
-            .find_map(|master| open(&master).ok().map(|opened| (master, opened)))
+    /// The keychain's master password, generated and kept there when it keeps
+    /// none. A keychain that would not answer is the error, so the TUI says so.
+    fn get(&mut self) -> anyhow::Result<&MasterPassword> {
+        if self.0.is_none() {
+            let _one_at_a_time = Self::lock()?;
+            let master = match crate::keychain::load().context("cannot read the master password")? {
+                Some(master) => master,
+                None => {
+                    let master = MasterPassword::generate();
+                    crate::keychain::save(&master).context("cannot keep a new master password")?;
+                    master
+                }
+            };
+            self.0 = Some(master);
+        }
+        Ok(self.0.as_ref().expect("set just above"))
+    }
+
+    /// The account's lock on first-time generation, so two control planes
+    /// started together (each with its own port and instances directory) do not
+    /// both find the keychain empty and each keep a master the other's save
+    /// replaces. The keychain has no create-if-absent, so a file beside the
+    /// account's default instances directory stands in, whichever directory
+    /// either was given. Under test the store is the process's own mock, and the
+    /// tests serialize themselves.
+    fn lock() -> anyhow::Result<Option<std::fs::File>> {
+        #[cfg(test)]
+        {
+            Ok(None)
+        }
+        #[cfg(not(test))]
+        {
+            let instances = default_instances_dir()?;
+            let root = instances.parent().context("the instances directory has no parent")?;
+            std::fs::create_dir_all(root).with_context(|| format!("cannot create {}", root.display()))?;
+            let path = root.join("master.lock");
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .with_context(|| format!("cannot open {}", path.display()))?;
+            file.lock().with_context(|| format!("cannot lock {}", path.display()))?;
+            Ok(Some(file))
+        }
     }
 
     /// The key a start of the instance whose config is at `path` hands its worker:
-    /// `None` for a config that names no passwords. When neither the master password
-    /// given already nor the keychain's opens the config — none known, or the config
-    /// made under another — it is asked for, the terminal suspended for it, and
-    /// `asked` is set so the caller redraws.
-    fn key_for(
-        &mut self,
-        terminal: &mut TerminalSession,
-        path: &Path,
-        asked: &mut bool,
-    ) -> anyhow::Result<Option<Key>> {
+    /// `None` for a config that names no passwords. A `[master]` block the
+    /// keychain's master password does not open was made under another account's,
+    /// and is told as one.
+    fn key_for(&mut self, path: &Path) -> anyhow::Result<Option<Key>> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
         let file = ConfigFile::parse_with(&text, Audience::Embedded)?;
         if !file.needs_master() {
             return Ok(None);
         }
-        let (master, key) = match self.known(|master| file.key(master)) {
-            Some(known) => known,
-            None => {
-                *asked = true;
-                terminal.suspend()?;
-                let answer = ask_master(path, false);
-                terminal.resume()?;
-                let master = answer?;
-                let key = file.key(&master)?;
-                (master, key)
-            }
-        };
-        self.0 = Some(master);
-        Ok(Some(key))
+        let master = self.get()?;
+        file.key(master).map(Some).with_context(|| foreign_master(path))
     }
 
     /// Ask for a password's name and the password, on a terminal already
@@ -417,51 +423,37 @@ impl Master {
         let name = name.trim().to_owned();
         crate::vault::valid_name(&name)?;
 
+        let master = self.get()?.clone();
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
         let has_master = text
             .parse::<toml::Table>()
             .with_context(|| format!("{} is not valid TOML", path.display()))?
             .contains_key("master");
-        // A config with a [master] block takes the master password that opens it,
-        // asked for when none known does; a new block takes whichever is known.
-        let section = has_master.then(|| crate::vault::master_of(path)).transpose()?;
-        let known = self.known(|master| match &section {
-            Some(section) => Key::derive(master, section).map(|_| ()),
-            None => Ok(()),
-        });
-        let (candidate, asked) = match known {
-            Some((master, ())) => (master, false),
-            None => (ask_master(path, !has_master)?, true),
-        };
-        if !has_master {
-            crate::vault::init_file(path, &candidate)?;
-            if asked && let Err(error) = crate::keychain::save(&candidate) {
-                eprintln!("the master password is not kept in the keychain: {error:#}");
-            }
+        if has_master {
+            Key::derive(&master, &crate::vault::master_of(path)?).with_context(|| foreign_master(path))?;
+        } else {
+            crate::vault::init_file(path, &master)?;
         }
         let password = rpassword::prompt_password(format!("Password for {name}: "))
             .context("cannot read the password")?;
         let confirm = rpassword::prompt_password(format!("Confirm password for {name}: "))
             .context("cannot read the password")?;
         anyhow::ensure!(password == confirm, "the passwords do not match");
-        crate::vault::set_file(path, &name, &password, &candidate)?;
-        self.0 = Some(candidate);
+        crate::vault::set_file(path, &name, &password, &master)?;
         Ok(name)
     }
 }
 
-/// The master password, asked for on a terminal not in raw mode — twice when
-/// `confirm`, for a new `[master]` block, which has nothing to check it by.
-fn ask_master(path: &Path, confirm: bool) -> anyhow::Result<MasterPassword> {
-    let prompt = format!("remotex master password for {}: ", path.display());
-    let password = rpassword::prompt_password(prompt).context("cannot read the master password")?;
-    if confirm {
-        let again = rpassword::prompt_password("Confirm the master password: ")
-            .context("cannot read the master password")?;
-        anyhow::ensure!(password == again, "the master passwords do not match");
-    }
-    MasterPassword::new(password)
+/// What a config whose `[master]` the keychain's master password does not open
+/// is told: it was made under another account's, and nothing here can derive
+/// that key again.
+fn foreign_master(path: &Path) -> String {
+    format!(
+        "{} was encrypted under another account's master password: remove its [master] and \
+         [passwords] and press p to set each password again",
+        path.display()
+    )
 }
 
 /// Opens the instance config in the operator's editor and waits for it.
@@ -2129,6 +2121,44 @@ mod tests {
             .local_addr()
             .unwrap()
             .port()
+    }
+
+    /// The master password is the keychain's, made once: a second control plane
+    /// finds the one the first generated, and a config made under another
+    /// account's is told as one.
+    #[test]
+    fn the_master_password_is_generated_once_and_kept_in_the_keychain() {
+        let _store = crate::keychain::empty_test_store();
+        let mut first = Master::default();
+        let generated = first.get().unwrap().clone();
+        assert_eq!(generated.as_str().len(), 44, "32 random bytes, base64");
+        assert_eq!(first.get().unwrap().as_str(), generated.as_str());
+        let mut second = Master::default();
+        assert_eq!(second.get().unwrap().as_str(), generated.as_str());
+        assert_eq!(crate::keychain::load().unwrap().unwrap().as_str(), generated.as_str());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remotex.toml");
+        let target = "[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword_ref = \"w\"\n";
+        let foreign = MasterPassword::new("another account's".to_owned()).unwrap();
+        let (_, orphan) = Key::create(&foreign).unwrap();
+        let value = orphan.encrypt("hunter2").unwrap();
+        std::fs::write(&path, format!("{target}[passwords]\nw = \"{value}\"\n")).unwrap();
+        let err = second.key_for(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("no [master]"), "{err:#}");
+
+        crate::vault::init_file(&path, &foreign).unwrap();
+        crate::vault::set_file(&path, "w", "hunter2", &foreign).unwrap();
+        let err = second.key_for(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("another account's master password"), "{err:#}");
+
+        std::fs::write(&path, target).unwrap();
+        crate::vault::init_file(&path, &generated).unwrap();
+        crate::vault::set_file(&path, "w", "hunter2", &generated).unwrap();
+        let key = second.key_for(&path).unwrap().expect("a config naming passwords has a key");
+        let mut file = ConfigFile::parse_with(&std::fs::read_to_string(&path).unwrap(), Audience::Embedded).unwrap();
+        file.unlock(Some(&key)).unwrap();
+        assert_eq!(file.targets[0].password, "hunter2");
     }
 
     /// A master left holding one family of the shared port is not something to
