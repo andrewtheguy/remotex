@@ -219,11 +219,11 @@ sha2 = "0.11"
 # (src/vnc_apple_media.rs), over the `sha1` above.
 hmac = "0.13"
 # The `[passwords]` a config keeps its targets' passwords in (src/vault.rs): each
-# one AES-256-GCM under a key scrypt derives from the account's master password and
-# the file's own salt. The lines on `cipher` 0.5 and `digest` 0.11, as `aes`, `eax`
-# and `sha2` above are.
+# one AES-256-GCM under a key Argon2id derives from the account's master password
+# and the file's own salt. The lines on `cipher` 0.5 and `digest` 0.11, as `aes`,
+# `eax` and `sha2` above are; no `password-hash`, since nothing here is a PHC string.
 aes-gcm = "0.11"
-scrypt = "0.12"
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 # `remotex password` writes those entries into the file somebody edits, keeping its
 # comments and layout, which a round trip through `toml` would not.
 toml_edit = "0.25"
@@ -351,10 +351,10 @@ opt-level = 3
 [profile.dev.package.fdeflate]
 opt-level = 3
 
-# The master password's key derivation (src/vault.rs): 64 MiB of scrypt takes a
+# The master password's key derivation (src/vault.rs): 64 MiB of Argon2id takes a
 # debug gateway seconds to start without these.
-[profile.dev.package.scrypt]
+[profile.dev.package.argon2]
 opt-level = 3
 
-[profile.dev.package.salsa20]
+[profile.dev.package.blake2]
 opt-level = 3

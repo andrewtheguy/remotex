@@ -12,7 +12,7 @@
 //! win11 = "$RX;1;AES-256-GCM;…"
 //! ```
 //!
-//! The key is never in the file. scrypt derives it from the account's **master
+//! The key is never in the file. Argon2id derives it from the account's **master
 //! password** and the file's own `[master].salt`, so one master password opens
 //! every config an account keeps — the served gateway's and each local instance's —
 //! while no two of them share a key. `[master].check` is an HMAC under that key, so
@@ -40,11 +40,12 @@ use std::path::{Path, PathBuf};
 /// and the cipher, so a value says what it is to anyone reading the file.
 pub const PREFIX: &str = "$RX;1;AES-256-GCM;";
 
-/// scrypt's cost: 2^16 rounds of 8 × 128 bytes, 64 MiB, a tenth of a second or so
-/// on a laptop, paid once per start and once per `remotex password` run.
-const SCRYPT_LOG_N: u8 = 16;
-const SCRYPT_R: u32 = 8;
-const SCRYPT_P: u32 = 1;
+/// Argon2id's cost: 64 MiB, three passes, one lane — RFC 9106's second
+/// recommendation, a fraction of a second on a laptop, paid once per start and once
+/// per `remotex password` run.
+const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
+const ARGON2_PASSES: u32 = 3;
+const ARGON2_LANES: u32 = 1;
 
 /// What `[master].check` authenticates. A constant, because the check proves the
 /// key and nothing else.
@@ -149,11 +150,12 @@ impl Key {
     }
 
     fn stretch(master: &MasterPassword, salt: &[u8]) -> anyhow::Result<Self> {
-        let params = scrypt::Params::new(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P)
-            .context("invalid scrypt parameters")?;
+        let params = argon2::Params::new(ARGON2_MEMORY_KIB, ARGON2_PASSES, ARGON2_LANES, Some(32))
+            .map_err(|error| anyhow::anyhow!("invalid Argon2 parameters: {error}"))?;
         let mut key = [0u8; 32];
-        scrypt::scrypt(master.as_str().as_bytes(), salt, &params, &mut key)
-            .context("scrypt failed")?;
+        argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+            .hash_password_into(master.as_str().as_bytes(), salt, &mut key)
+            .map_err(|error| anyhow::anyhow!("Argon2id failed: {error}"))?;
         Ok(Self(key))
     }
 

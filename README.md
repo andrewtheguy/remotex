@@ -199,12 +199,17 @@ The page needs a secure context, so from another machine put the gateway behind
 a TLS-terminating reverse proxy; `localhost` works as it is.
 
 There are also `.rpm`, macOS `.pkg` and Windows `.msi` packages, and a container
+image. The image has no keychain, so its config sets
+`[server].master_password_file = "/run/secrets/remotex_master"` and the master
+password is mounted there; [Container](docs/install.md#container) shows how to
+create that file and print the config's `[master]` and `[passwords]` with the
 image:
 
 ```sh
 docker run -d --name remotex -p 52380:52380 \
   -e REMOTEX_LISTEN=0.0.0.0:52380 \
   -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro \
+  -v ./remotex_master:/run/secrets/remotex_master:ro \
   ghcr.io/andrewtheguy/remotex:latest
 ```
 

@@ -362,16 +362,21 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
 struct Master(Option<MasterPassword>);
 
 impl Master {
-    /// The master password known without asking: the one given already, else the
-    /// keychain's.
-    fn known(&self) -> Option<MasterPassword> {
-        self.0.clone().or_else(|| crate::keychain::load().ok().flatten())
+    /// The first master password known without asking — the one given already,
+    /// then the keychain's — that `open` accepts, with what `open` made of it.
+    fn known<T>(&self, open: impl Fn(&MasterPassword) -> anyhow::Result<T>) -> Option<(MasterPassword, T)> {
+        self.0
+            .clone()
+            .into_iter()
+            .chain(crate::keychain::load().ok().flatten())
+            .find_map(|master| open(&master).ok().map(|opened| (master, opened)))
     }
 
     /// The key a start of the instance whose config is at `path` hands its worker:
-    /// `None` for a config that names no passwords. When the master password is
-    /// neither given nor in the keychain it is asked for, the terminal suspended
-    /// for it, and `asked` is set so the caller redraws.
+    /// `None` for a config that names no passwords. When neither the master password
+    /// given already nor the keychain's opens the config — none known, or the config
+    /// made under another — it is asked for, the terminal suspended for it, and
+    /// `asked` is set so the caller redraws.
     fn key_for(
         &mut self,
         terminal: &mut TerminalSession,
@@ -384,18 +389,19 @@ impl Master {
         if !file.needs_master() {
             return Ok(None);
         }
-        let candidate = match self.known() {
-            Some(master) => master,
+        let (master, key) = match self.known(|master| file.key(master)) {
+            Some(known) => known,
             None => {
                 *asked = true;
                 terminal.suspend()?;
                 let answer = ask_master(path, false);
                 terminal.resume()?;
-                answer?
+                let master = answer?;
+                let key = file.key(&master)?;
+                (master, key)
             }
         };
-        let key = file.key(&candidate)?;
-        self.0 = Some(candidate);
+        self.0 = Some(master);
         Ok(Some(key))
     }
 
@@ -416,8 +422,15 @@ impl Master {
             .parse::<toml::Table>()
             .with_context(|| format!("{} is not valid TOML", path.display()))?
             .contains_key("master");
-        let (candidate, asked) = match self.known() {
-            Some(master) => (master, false),
+        // A config with a [master] block takes the master password that opens it,
+        // asked for when none known does; a new block takes whichever is known.
+        let section = has_master.then(|| crate::vault::master_of(path)).transpose()?;
+        let known = self.known(|master| match &section {
+            Some(section) => Key::derive(master, section).map(|_| ()),
+            None => Ok(()),
+        });
+        let (candidate, asked) = match known {
+            Some((master, ())) => (master, false),
             None => (ask_master(path, !has_master)?, true),
         };
         if !has_master {

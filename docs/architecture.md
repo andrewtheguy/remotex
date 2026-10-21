@@ -3709,8 +3709,8 @@ endpoint.
 A target names its password (`password_ref`, `vnc_password_ref`) and the
 top-level `[passwords]` table holds each one as
 `$RX;1;AES-256-GCM;<base64(nonce ‖ ciphertext ‖ tag)>`, the password alone, so a
-value is printed before anyone names it (`src/vault.rs`). The key is scrypt (2^16, 8, 1) of the account's master
-password and the file's `[master].salt`; `[master].check`, an HMAC under that
+value is printed before anyone names it (`src/vault.rs`). The key is Argon2id (64 MiB, 3 passes, 1 lane) of the
+account's master password and the file's `[master].salt`; `[master].check`, an HMAC under that
 key, tells a wrong master password apart before any value is tried. One master
 password per OS account opens every config it keeps, while each file's salt
 gives each its own key. Inline `password` and `vnc_password` are unknown keys.
