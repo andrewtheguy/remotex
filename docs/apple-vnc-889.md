@@ -1415,6 +1415,15 @@ the strip's number, a frame's strips sharing its timestamp.
   its behavior in strips was not read and a viewer cannot select it. Remotex
   consequently cannot acknowledge or request an acknowledged-reference
   refresh of H.264, so a loss costs a keyframe.
+- **A refresh request brings no cheaper H.264 keyframe.** In one tile, at
+  2880×1800 on macvm under a detailed still page with a small counter ticking,
+  a PT 206 format 2 request, naming the size or 0×0, and a PT 192 request
+  naming the size each brought an IDR of 1195 KB and about 89 KB in the next
+  3 s. A PLI brought a coarser IDR of 839 KB and about 457 KB of refinement in
+  the next 3 s. The totals matched, about 1.29 MB, in each of six rounds, and
+  no picture carried the refresh bit. The HEVC's IDR after the same request is
+  the smaller one ([The stream](#the-stream)); the H.264's is the larger
+  burst, so remotex asks for an H.264 keyframe with a PLI.
 - **On a detailed still picture the strips never settle.** At 1440×900, a
   full-screen photograph in Chrome on macvm, with the rate target at 58.4
   Mbit/s throughout, the Mac sent about 17 frames a second in four strips, each
