@@ -37,3 +37,4 @@ pub mod proto;
 
 pub use compositor::{Composed, Compositor};
 pub use framebuffer::{Frame, Framebuffer, Rect};
+pub use gfx::{GpuArea, GpuPaint, Plan};

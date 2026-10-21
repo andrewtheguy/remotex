@@ -1594,17 +1594,46 @@ the pipeline.
   for one unit. The part of the picture the
   unit's mask shows is copied into the compositor's memory, and the run is then
   composed, painting those rectangles from the samples
-  (`crates/remotex-rdp-graphics/src/avc.rs`). The conversion to RGB is the
-  compositor's, full-range BT.709 as MS-RDPEGFX has it, and never the browser's:
-  measured, Chrome labels this stream BT.601 from its software decoder and
-  limited-range BT.709 from a hardware one. Which decoder is the browser's
+  (`crates/remotex-rdp-graphics/src/avc.rs`), converted to RGB as MS-RDPEGFX has
+  it, full-range BT.709. Which decoder is the browser's
   choice, as it is for the desktop's own stream ([The codec](#the-codec)): the
-  configuration states no `hardwareAcceleration`. A hardware decoder's picture
-  is read back from the GPU to be composed: measured on an Intel GPU at
-  1280×800, that copy took 6 to 9 ms where the decode itself took half a
-  millisecond. A decoder
+  configuration states no `hardwareAcceleration`, and it does state the stream's
+  colour, which the host's stream does not name. A decoder
   that fails or gives no picture ends the pipeline, as a command that does not
   decode does: the host sends no keyframe on request.
+
+  **A picture left on the GPU.** A hardware decoder's picture is on the GPU, and
+  copying its samples out took 6 to 9 ms on an Intel GPU at 1280×800, where the
+  decode took half a millisecond. So a picture the browser labels with the
+  stream's own colour, at the size it was coded (`drawnAsCoded` in
+  `frontend/src/egfxVideo.ts`), is not copied: the browser converts it as the
+  compositor would, and the page draws the unit's rectangles from it into the
+  pipeline's picture after the run's painted rectangles, a copy on the GPU
+  (`frontend/src/egfxPicture.ts`). Measured against a Windows 11 host's stream,
+  by region and over the whole desktop, on flat colours: Chrome's hardware
+  decoder on Windows, told the colour, and Safari's on a Mac, untold, both draw
+  within a step of the compositor; Chrome's hardware decoder on a Mac keeps its
+  limited-range label, which clips black and white, and its software decoder a
+  BT.601 matrix, and their pictures are copied as before. Chrome's conversion on
+  a Mac is to eight bits and clamped before anything sees it, so a float texture
+  does not undo it. The browser fills in chroma between samples where the
+  compositor repeats each, a difference only at a colour's edge.
+
+  The compositor still has to hold what a later command reads. So a rectangle
+  shown from the GPU is recorded as the GPU's on its surface: the EndFrame copies
+  everything else to the framebuffer, a command that writes over it makes it the
+  surface's again, and before each run is composed the compositor's plan of it
+  (`Compositor::plan`) names what the run reads of the GPU's — a copy out of it,
+  a cache entry taken from it, a ClearCodec rectangle drawn over it — and the
+  page reads those back off the picture into the surface first. The plan also
+  says which of the run's units may be shown so: one whose frame ends in the run,
+  on a surface mapped wholly inside the output with no other over it, that
+  nothing later in the run reads, and whose command's luma view paints on its
+  own, which is AVC420 and an AVC444 luma view without a chroma view. A stream
+  that carries a chroma view shows none of its luma views from the GPU after it,
+  since the chroma views combine with the last luma view's samples. A second
+  display's tab is sent the picture out of the compositor's memory, so on *All
+  Displays* what the GPU shows is read back before each update to it.
 
   Checked against one Windows 11 host without a GPU, whose stream is Main
   profile: AVC420 by region, and over the whole desktop, asked for with

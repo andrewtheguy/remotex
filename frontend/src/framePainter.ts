@@ -7,12 +7,17 @@ import {
   type RelaySource,
 } from "./displayRelay.ts";
 import {
+  type ComposedRun,
   type EgfxCompositor,
   type EgfxFactory,
+  GPU_FIELDS,
+  type GpuArea,
+  type H264Unit,
   loadEgfx,
+  type RunPlan,
 } from "./egfxCompositor.ts";
 import type { GraphicsPicture, PicturePart } from "./egfxPicture.ts";
-import { createEgfxVideo, type EgfxVideo } from "./egfxVideo.ts";
+import { createEgfxVideo, drawnAsCoded, type EgfxVideo } from "./egfxVideo.ts";
 import type { PlanesPicture } from "./planesPicture.ts";
 import {
   type BatchRecord,
@@ -121,6 +126,21 @@ export interface FramePainter {
    * longer shown, until the stream's next picture.
    */
   blank(w: number, h: number): void;
+}
+
+/**
+ * The rectangles a run changed in the picture, `x, y, width, height` each: those
+ * it painted, then those the GPU drew from the pictures shown there.
+ */
+function withGpu(run: ComposedRun): Uint32Array {
+  if (run.gpu.length === 0) {
+    return run.painted;
+  }
+  const rects = Array.from(run.painted);
+  for (let i = 0; i + GPU_FIELDS <= run.gpu.length; i += GPU_FIELDS) {
+    rects.push(run.gpu[i + 1], run.gpu[i + 2], run.gpu[i + 3], run.gpu[i + 4]);
+  }
+  return Uint32Array.from(rects);
 }
 
 export function createFramePainter(options: {
@@ -505,39 +525,77 @@ export function createFramePainter(options: {
     options.onVideoNeedsKeyframe("a malformed batch was dropped");
   };
 
+  // One unit's picture, handed to the compositor: left on the GPU, in `shown` until
+  // the run is drawn, where the run's plan allows and the browser draws it as the
+  // compositor would; supplied otherwise. False for a pipeline that has ended,
+  // whose compositor is not to be touched.
+  const handOver = async (
+    current: Pipeline,
+    compositor: EgfxCompositor,
+    found: { unit: H264Unit; number: number },
+    frame: VideoFrame,
+    plan: RunPlan,
+    shown: Map<number, VideoFrame>,
+  ): Promise<boolean> => {
+    if (current.broken) {
+      frame.close();
+      return false;
+    }
+    if (plan.gpu[found.number] && drawnAsCoded(frame)) {
+      compositor.showOnGpu(found.number);
+      shown.set(found.number, frame);
+      return true;
+    }
+    try {
+      await compositor.supply(found.number, found.unit.window, frame);
+    } finally {
+      frame.close();
+    }
+    return !current.broken;
+  };
+
   // A run's H.264, where it has any, ahead of composing it: each access unit
   // through its surface's decoder in command order, and the picture handed to the
-  // compositor, which paints it where the run's commands say. Every wait is one
-  // the pipeline may end during, and an ended one's compositor is not to be
-  // touched: false then, and the run is dropped.
+  // compositor, which paints it where the run's commands say or leaves it to the
+  // GPU. Every wait is one the pipeline may end during, and an ended one's
+  // compositor is not to be touched: false then, and the run is dropped.
   const decodeUnits = async (
     current: Pipeline,
     compositor: EgfxCompositor,
     commands: Uint8Array,
+    plan: RunPlan,
+    shown: Map<number, VideoFrame>,
   ): Promise<boolean> => {
     for (const found of compositor.scan(commands)) {
       if ("gone" in found) {
         current.video?.drop(found.gone);
         continue;
       }
-      const { unit, number } = found;
       current.video ??= makeGraphicsVideo();
       const frame = await current.video.decode(
-        unit,
-        commands.subarray(unit.start, unit.end),
+        found.unit,
+        commands.subarray(found.unit.start, found.unit.end),
       );
-      try {
-        if (!current.broken) {
-          await compositor.supply(number, unit.window, frame);
-        }
-      } finally {
-        frame.close();
-      }
-      if (current.broken) {
+      if (!(await handOver(current, compositor, found, frame, plan, shown))) {
         return false;
       }
     }
     return true;
+  };
+
+  // What the GPU shows of `areas`, read back into the compositor's framebuffer:
+  // what a run reads of it, or all of it for a copy of the whole picture.
+  const restoreFromGpu = (
+    compositor: EgfxCompositor,
+    picture: GraphicsPicture,
+    areas: GpuArea[],
+  ) => {
+    for (const area of areas) {
+      compositor.restore(
+        area,
+        picture.read(area.outputX, area.outputY, area.w, area.h),
+      );
+    }
   };
 
   // One run of the pipeline, composed and painted when its turn comes. Everything a
@@ -560,21 +618,28 @@ export function createFramePainter(options: {
       return;
     }
     let run: ReturnType<EgfxCompositor["compose"]>;
+    const shown = new Map<number, VideoFrame>();
     try {
       // Unwrapped first and in its turn, whatever becomes of it after: the
       // messages after it are compressed against it.
       const commands = compositor.unwrap(record.data);
-      if (!(await decodeUnits(current, compositor, commands))) {
+      const plan = compositor.plan(commands);
+      restoreFromGpu(compositor, picture, plan.restore);
+      if (!(await decodeUnits(current, compositor, commands, plan, shown))) {
         return;
       }
       run = compositor.compose(commands);
-      picture.upload(run);
+      picture.upload(run, shown);
     } catch (error) {
       endPipeline(current, describe(error));
       return;
+    } finally {
+      for (const frame of shown.values()) {
+        frame.close();
+      }
     }
-    // And the tab's share of it, out of the same picture.
-    source?.painted(run);
+    // And the tab's share of it, out of the same picture: what the GPU drew too.
+    source?.painted({ ...run, painted: withGpu(run) });
     // Shown from its first drawn run, and not before: until then the picture's
     // canvas holds nothing of this pipeline's.
     if (!current.shown && run.width > 0 && run.height > 0) {
@@ -931,11 +996,21 @@ export function createFramePainter(options: {
       // the tab unpainted, and this page's picture as it is.
       if (!source) {
         try {
-          source = createRelaySource(makeRelay(), () =>
-            pipeline?.compositor && !pipeline.broken
-              ? pipeline.compositor.picture()
-              : null,
-          );
+          // The framebuffer whole, what the GPU shows read back into it.
+          source = createRelaySource(makeRelay(), () => {
+            const current = pipeline;
+            if (!current?.compositor || !current.picture || current.broken) {
+              return null;
+            }
+            const { compositor, picture } = current;
+            try {
+              restoreFromGpu(compositor, picture, compositor.gpuAreas());
+            } catch (error) {
+              endPipeline(current, describe(error));
+              return null;
+            }
+            return compositor.picture();
+          });
         } catch (error) {
           console.warn("the second display's channel did not open:", error);
         }

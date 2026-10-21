@@ -3,7 +3,15 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import type { H264Unit } from "./egfxCompositor.ts";
-import { createEgfxVideo, rdpH264Config } from "./egfxVideo.ts";
+import { createEgfxVideo, drawnAsCoded, rdpH264Config } from "./egfxVideo.ts";
+
+/** The colour a host's H.264 is: what each decoder is told it is. */
+const RDP_COLOUR = {
+  primaries: "bt709",
+  transfer: "iec61966-2-1",
+  matrix: "bt709",
+  fullRange: true,
+} as const;
 
 interface Chunk {
   type: string;
@@ -112,7 +120,7 @@ test("each surface's stream goes through a decoder of its own, a picture a unit"
   const first = video.decode(key(1), Uint8Array.of(11));
   await submitted(() => decoders[0], 1);
   assert.deepEqual(decoders[0].configured, [
-    { codec: "avc1.4d4020", optimizeForLatency: true },
+    { codec: "avc1.4d4020", optimizeForLatency: true, colorSpace: RDP_COLOUR },
   ]);
   const picture = decoders[0].output();
   assert.equal(await first, picture as unknown as VideoFrame);
@@ -149,8 +157,31 @@ test("a decoder is configured for the stream's own profile, the browser's choice
   assert.deepEqual(await rdpH264Config("avc1.640028"), {
     codec: "avc1.640028",
     optimizeForLatency: true,
+    colorSpace: RDP_COLOUR,
   });
   assert.equal(await rdpH264Config("avc1.4d40ff"), null);
+});
+
+test("a picture is drawn as coded only labelled with the stream's colour, at the size coded", () => {
+  const picture = (colorSpace: VideoColorSpaceInit, displayWidth = 64) => ({
+    colorSpace: colorSpace as VideoColorSpace,
+    visibleRect: { x: 0, y: 0, width: 64, height: 48 } as DOMRectReadOnly,
+    displayWidth,
+    displayHeight: 48,
+  });
+  assert.equal(drawnAsCoded(picture(RDP_COLOUR)), true);
+  // As Chrome's hardware decoder on a Mac labels it, and its software decoder.
+  assert.equal(
+    drawnAsCoded(
+      picture({ ...RDP_COLOUR, transfer: "bt709", fullRange: false }),
+    ),
+    false,
+  );
+  assert.equal(
+    drawnAsCoded(picture({ ...RDP_COLOUR, matrix: "smpte170m" })),
+    false,
+  );
+  assert.equal(drawnAsCoded(picture(RDP_COLOUR, 128)), false, "scaled");
 });
 
 test("a keyframe that names another profile configures the decoder again", async () => {

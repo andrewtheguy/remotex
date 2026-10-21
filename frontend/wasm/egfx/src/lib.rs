@@ -12,7 +12,9 @@
 //! H.264 is the one codec not decoded here: the page decodes a run's access units
 //! with the browser's own decoder before it composes the run, and hands each
 //! picture's samples into this memory ([`Egfx::units`], [`Egfx::reserve`],
-//! [`Egfx::supply`]).
+//! [`Egfx::supply`]), or leaves a picture on its GPU and draws its rectangles from
+//! there ([`Egfx::plan`], [`Egfx::show_on_gpu`], [`Egfx::gpu_paints`]), reading
+//! back what a later command reads ([`Egfx::restore`]).
 //!
 //! Progressive's tiles are decoded side by side, on rayon's pool, and a page has no
 //! threads to spawn: a thread is a worker the page starts, running an instance of
@@ -32,8 +34,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 
 use rayon::{ThreadBuilder, ThreadPoolBuilder};
-use remotex_rdp_graphics::Compositor;
 use remotex_rdp_graphics::avc::{self, Picture, Plane, Samples, Scanned, Window};
+use remotex_rdp_graphics::{Compositor, GpuArea, Rect};
 use wasm_bindgen::prelude::*;
 
 /// The pool's threads on their way from the pool that makes them to the workers
@@ -103,16 +105,30 @@ pub struct Egfx {
     /// Where a decoded picture's samples land on their way to the compositor:
     /// reserved, written by the page, then supplied.
     landing: Vec<u8>,
+    /// What the last run left the page to draw from the pictures it shows from its
+    /// GPU: [`GPU_FIELDS`] numbers each.
+    gpu: Vec<u32>,
 }
 
 /// How many numbers [`Egfx::units`] says each thing it found in.
 const UNIT_FIELDS: usize = 10;
 
+/// How many numbers each rectangle of the GPU's is said in, by [`Egfx::plan`],
+/// [`Egfx::gpu_areas`] and [`Egfx::gpu_paints`].
+const GPU_FIELDS: usize = 7;
+
+/// A rectangle shown from the GPU, as [`GPU_FIELDS`] numbers: its surface, its
+/// `x, y, width, height` in the surface, and where its top left is on the output.
+fn area_fields(area: &GpuArea) -> [u32; GPU_FIELDS] {
+    let GpuArea { surface, rect, output } = area;
+    [u32::from(*surface), rect.x, rect.y, rect.width, rect.height, output.x, output.y]
+}
+
 #[wasm_bindgen]
 impl Egfx {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Egfx {
-        Egfx { compositor: Compositor::new(), painted: Vec::new(), resized: false, landing: Vec::new() }
+        Egfx { compositor: Compositor::new(), painted: Vec::new(), resized: false, landing: Vec::new(), gpu: Vec::new() }
     }
 
     /// One `GRAPHICS` record's message, as the host sent it, out of its bulk
@@ -138,7 +154,69 @@ impl Egfx {
         for rect in composed.painted {
             self.painted.extend([rect.x, rect.y, rect.width, rect.height]);
         }
+        self.gpu.clear();
+        for paint in composed.gpu {
+            let output = paint.output;
+            self.gpu.extend([paint.unit, output.x, output.y, output.width, output.height, paint.source.0, paint.source.1]);
+        }
         Ok(composed.frames)
+    }
+
+    /// What a `GRAPHICS` record's commands ask of the page before they are
+    /// composed: how many access units they carry, then for each, by its number,
+    /// `1` where its picture may be shown from the GPU and `0` where it is to be
+    /// supplied, then what of what the GPU shows they read, to be restored first
+    /// ([`Self::restore`]), [`GPU_FIELDS`] numbers each.
+    ///
+    /// Throws for a command that does not decode, which [`Self::compose`] would
+    /// throw for too.
+    pub fn plan(&self, commands: &[u8]) -> Result<Vec<u32>, JsError> {
+        let plan = self.compositor.plan(commands).map_err(|e| JsError::new(&e.to_string()))?;
+        let mut out = Vec::with_capacity(1 + plan.gpu.len() + plan.restore.len() * GPU_FIELDS);
+        out.push(plan.gpu.len() as u32);
+        out.extend(plan.gpu.iter().map(|&gpu| u32::from(gpu)));
+        out.extend(plan.restore.iter().flat_map(area_fields));
+        Ok(out)
+    }
+
+    /// Show access unit `unit`'s picture, of the record composed next, from the
+    /// GPU rather than supplying it: only one [`Self::plan`] said may be.
+    #[wasm_bindgen(js_name = showOnGpu)]
+    pub fn show_on_gpu(&mut self, unit: u32) {
+        self.compositor.show_on_gpu(unit);
+    }
+
+    /// What the last run left the page to draw from the pictures it shows from its
+    /// GPU, after its painted rectangles: [`GPU_FIELDS`] numbers each — the unit's
+    /// number, the output's `x, y, width, height`, and the pixel of the picture at
+    /// its top left.
+    #[wasm_bindgen(js_name = gpuPaints)]
+    pub fn gpu_paints(&self) -> Vec<u32> {
+        self.gpu.clone()
+    }
+
+    /// Every rectangle shown from the GPU, [`GPU_FIELDS`] numbers each: what the
+    /// page reads back to have the framebuffer whole.
+    #[wasm_bindgen(js_name = gpuAreas)]
+    pub fn gpu_areas(&self) -> Vec<u32> {
+        self.compositor.gpu_areas().iter().flat_map(area_fields).collect()
+    }
+
+    /// A rectangle shown from the GPU, read back off it: `pixels` is the rows of
+    /// `width` by `height` from `x`, `y` of the surface, four bytes a pixel, red
+    /// first, top row first. Its pixels are the surface's again.
+    pub fn restore(
+        &mut self,
+        surface: u16,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<(), JsError> {
+        self.compositor
+            .restore(surface, Rect { x, y, width, height }, pixels)
+            .map_err(|e| JsError::new(&format!("{e:#}")))
     }
 
     /// What a `GRAPHICS` record's commands hold for the page to act on before it

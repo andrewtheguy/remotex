@@ -104,16 +104,6 @@ How many real deployments this reaches is not known, and no host in use has show
 it. What would settle it is one connection to an RDSH configured for per-device
 CALs; the work is only worth taking once a host that needs it turns up.
 
-### An RDP host's H.264 presented on the GPU
-
-Taken up if a large desktop's H.264 proves slow. Every picture the page decodes
-is copied into the compositor's memory and converted there, and from a hardware
-decoder that copy is a readback off the GPU
-([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
-It was measured at a 1280×800 desktop and not above. The step after it is to
-present a decoded picture on the GPU, and read it back only when a later command
-copies from it.
-
 ### The pipeline compressed again for the browser
 
 Taken up if a pipeline's bytes to the browser come to matter, a Lossless host

@@ -40,11 +40,24 @@
 //! together is [MS-RDPEGFX] 3.3.8.3.2 and 3.3.8.3.3, including the filter that
 //! recovers the averaged samples from their three neighbours.
 //!
+//! # A picture left on the GPU
+//!
+//! A browser's hardware decoder hands its picture back on the GPU, and copying
+//! the samples out of it costs more than the decode. Where the browser labels the
+//! picture with this stream's own colour, full-range BT.709, the page draws the
+//! masked rectangles itself, from the GPU, and the unit is shown there rather than
+//! supplied ([`crate::Compositor::show_on_gpu`]). A view can be shown so only on its
+//! own: AVC420, or a luma view whose command carries no chroma view
+//! ([`Stream::alone`]). A YUV444 stream's luma view shown from the GPU is missing
+//! from the luma view kept for the chroma views, so a chroma view that falls on
+//! one of its rectangles leaves that rectangle at half chroma.
+//!
 //! [MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/da5c75f9-cd99-450c-98c4-014a496942b0
 
 use anyhow::{Context as _, Result, bail, ensure};
 use rayon::prelude::*;
 
+use crate::framebuffer::Rect;
 use crate::proto::avc::{Avc420, Region, access_unit, avc420, avc444};
 use crate::proto::gfx::{self, Message, Rect16};
 use crate::proto::wire::Malformed;
@@ -119,6 +132,21 @@ impl<'a> Stream<'a> {
         let luma = self.luma.as_ref().map(|_| 0);
         let chroma = self.chroma.as_ref().map(|_| self.units() - 1);
         (luma, chroma)
+    }
+
+    /// The luma view's mask, for a command whose luma view paints its rectangles on
+    /// its own: AVC420, or a YUV444 command that carries no chroma view. `None`
+    /// for one whose views are combined, which only samples can be.
+    pub(crate) fn alone(&self) -> Option<&[Region]> {
+        match (&self.luma, &self.chroma) {
+            (Some(luma), None) => Some(&luma.regions),
+            _ => None,
+        }
+    }
+
+    /// Whether it carries a chroma view.
+    pub(crate) fn has_chroma(&self) -> bool {
+        self.chroma.is_some()
     }
 }
 
@@ -290,6 +318,11 @@ impl Area {
             right: self.right.div_ceil(unit).saturating_mul(unit).min(picture.0),
             bottom: self.bottom.div_ceil(unit).saturating_mul(unit).min(picture.1),
         }
+    }
+
+    fn rect(&self) -> Rect {
+        let (x, y) = (self.left as u32, self.top as u32);
+        Rect { x, y, width: self.right as u32 - x, height: self.bottom as u32 - y }
     }
 
     fn rect16(&self) -> Rect16 {
@@ -471,6 +504,13 @@ impl Planes {
 #[derive(Default)]
 pub(crate) struct Avc {
     luma: Option<Planes>,
+    /// Rectangles of a YUV444 stream whose last luma view was shown from the GPU,
+    /// and so is not in `luma`.
+    on_gpu: Vec<Rect>,
+    /// Whether the stream has carried a chroma view, after which none of its luma
+    /// views is shown from the GPU: they would be missing from what the next one
+    /// combines with.
+    chroma_seen: bool,
     /// The full-resolution chroma of one block of macroblocks, put together from
     /// the two views.
     u444: Vec<u8>,
@@ -480,6 +520,23 @@ pub(crate) struct Avc {
 }
 
 impl Avc {
+    /// A luma view shown from the GPU over `rects` rather than supplied: for a
+    /// YUV444 stream, those rectangles are not in the luma view kept for the chroma
+    /// views.
+    pub(crate) fn shown_on_gpu(&mut self, stream: &Stream<'_>, rects: &[Rect]) {
+        if stream.layout.is_some() {
+            for rect in rects {
+                cut(&mut self.on_gpu, *rect);
+                self.on_gpu.push(*rect);
+            }
+        }
+    }
+
+    /// Whether the stream has carried a chroma view.
+    pub(crate) fn chroma_seen(&self) -> bool {
+        self.chroma_seen
+    }
+
     /// Paint a stream's rectangles from its units' pictures, the luma view's and
     /// the chroma view's.
     ///
@@ -537,10 +594,14 @@ impl Avc {
             for region in &avc.regions {
                 let Some(area) = Area::clip(region.rect, surface, view.held) else { continue };
                 kept.keep(&view, area);
+                cut(&mut self.on_gpu, area.rect());
                 if !painted_whole {
                     convert_420(&view, area, &mut self.rows, paint);
                 }
             }
+        }
+        if stream.chroma.is_some() {
+            self.chroma_seen = true;
         }
         if let Some((avc, aux)) = shown(stream.chroma.as_ref(), chroma)? {
             let Some(kept) = &self.luma else {
@@ -556,16 +617,33 @@ impl Avc {
                 kept.height
             );
             let main = View::of_planes(kept);
+            let mut missing = 0;
             for region in &avc.regions {
                 let Some(area) = Area::clip(region.rect, surface, main.held) else { continue };
+                if self.on_gpu.iter().any(|shown| shown.overlaps(&area.rect())) {
+                    missing += 1;
+                    continue;
+                }
                 // Whole macroblocks, then the mask: the chroma view is laid out by
                 // macroblock, and the filter reads across every 2x2.
                 let block = area.aligned(16, picture);
                 combine(&main, &aux, layout, block, &mut self.u444, &mut self.v444);
                 convert_444(&main, block, &self.u444, &self.v444, area, &mut self.rows, paint);
             }
+            ensure!(
+                missing == 0,
+                "{missing} of a chroma view's rectangles fall on a luma view shown from the GPU, \
+                 and are left at half chroma"
+            );
         }
         Ok(())
+    }
+}
+
+/// Take `rect` out of every rectangle of `list`.
+fn cut(list: &mut Vec<Rect>, rect: Rect) {
+    if list.iter().any(|held| held.overlaps(&rect)) {
+        *list = list.iter().flat_map(|held| held.minus(rect)).collect();
     }
 }
 
@@ -1199,6 +1277,37 @@ mod tests {
                 .unwrap_err();
             assert!(format!("{err}").contains("the whole of it"), "{err}");
         }
+    }
+
+    /// A luma view shown from the GPU is not kept, so a chroma view that falls on it
+    /// has nothing to combine with and leaves it at half chroma, while one beside it
+    /// combines as before; a luma view supplied over it is kept again.
+    #[test]
+    fn a_chroma_view_over_a_luma_view_shown_from_the_gpu_is_not_combined() {
+        let picture = Original { width: 32, height: 32, y: vec![120; 32 * 32], u: vec![60; 32 * 32], v: vec![200; 32 * 32] };
+        let view = |rect| Some(Avc420 { regions: vec![region(rect)], bitstream: &[][..] });
+        let layout = Layout::V2;
+        let (luma, chroma) = (decoded(&picture.luma_view()), decoded(&picture.chroma_view(layout)));
+        let stream = |luma, chroma| Stream { layout: Some(layout), luma, chroma };
+        let (left, right) = ((0, 0, 16, 32), (16, 0, 32, 32));
+
+        let mut avc = Avc::default();
+        let mut calls = Vec::new();
+        avc.draw(&stream(view((0, 0, 32, 32)), None), Some(&luma), None, (32, 32), &mut painted(&mut calls)).unwrap();
+        avc.shown_on_gpu(&stream(view(left), None), &[Rect { x: 0, y: 0, width: 16, height: 32 }]);
+        assert!(!avc.chroma_seen());
+
+        let err = avc
+            .draw(&stream(None, Some(Avc420 { regions: vec![region(left), region(right)], bitstream: &[][..] })), None, Some(&chroma), (32, 32), &mut painted(&mut calls))
+            .unwrap_err();
+        assert!(format!("{err}").contains("shown from the GPU"), "{err}");
+        assert_eq!(calls.len(), 2, "the right half alone is combined");
+        assert_eq!(calls[1].0, region(right).rect);
+        assert!(avc.chroma_seen());
+
+        avc.draw(&stream(view(left), None), Some(&luma), None, (32, 32), &mut painted(&mut calls)).unwrap();
+        avc.draw(&stream(None, view(left)), None, Some(&chroma), (32, 32), &mut painted(&mut calls)).unwrap();
+        assert_eq!(calls.last().unwrap().0, region(left).rect, "kept again, it combines");
     }
 
     /// A picture that is not whole macroblocks: the first layout's chroma view would
