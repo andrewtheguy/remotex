@@ -21,10 +21,13 @@
 //!   learns the endpoint is ready and receives the token, and it is the only thing
 //!   this process writes to stdout — logging goes to stderr for the parent to
 //!   retain.
-//! - **stdin, never**: nothing is written to it in either direction. It exists so
-//!   this process can notice that its parent is gone; see [`parent_closed`].
+//! - **stdin, once**: the [`Key`] line the parent writes as soon as this process
+//!   starts — the key that opens the config's `[passwords]`, or an empty line for a
+//!   config that names none; see [`read_key`]. Nothing follows it. The pipe then
+//!   exists so this process can notice that its parent is gone; see
+//!   [`parent_closed`].
 //!
-//! The token is handed over that way rather than through `argv` (which `ps` shows
+//! The key and the token are handed over that way rather than through `argv` (which `ps` shows
 //! to every process on the machine), the environment (inherited by anything either
 //! side spawns), or a file (which outlives the process that made it). A pipe's read
 //! end belongs to this process and its write end to the parent, and both disappear
@@ -40,6 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::EmbeddedToken;
 use crate::config::{Audience, ConfigFile};
+use crate::vault::Key;
 
 #[doc(hidden)]
 pub mod manager;
@@ -179,8 +183,10 @@ pub struct Claim {
 /// is bound is a promise this process might not keep, and the parent would race a
 /// connection against a listener that does not exist yet. It serves the instance
 /// `claim` holds, and holds it until it returns.
-pub async fn serve(instance: &Instance, claim: Claim) -> anyhow::Result<()> {
-    let file = instance.load()?;
+pub async fn serve(instance: &Instance, claim: Claim, key: Option<Key>) -> anyhow::Result<()> {
+    let mut file = instance.load()?;
+    file.unlock(key.as_ref())
+        .with_context(|| format!("in config file {}", instance.config_path().display()))?;
     let token = EmbeddedToken::generate();
     let endpoint = transport::endpoint(&instance.dir);
     let config = file.resolve_embedded(
@@ -238,9 +244,34 @@ pub async fn serve(instance: &Instance, claim: Claim) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read the line the parent writes first on stdin: the key to this instance's
+/// `[passwords]`, derived by the control plane from the master password, or an
+/// empty line when the config names no passwords. A stdin already closed gives no
+/// key either: the parent is gone, and [`parent_closed`] stops this process once
+/// the config has been read and any refusal of it reported.
+///
+/// The key and not the master password, so a worker holds what opens its own
+/// config and nothing that opens another's. Read before [`parent_closed`] starts
+/// reading, which never sees the line.
+pub fn read_key() -> anyhow::Result<Option<Key>> {
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .read_line(&mut line)
+        .context("cannot read the key line from stdin")?;
+    if read == 0 {
+        return Ok(None);
+    }
+    let line = line.trim_end_matches(['\r', '\n']);
+    if line.is_empty() {
+        Ok(None)
+    } else {
+        Key::from_line(line).map(Some).context("the key line on stdin is malformed")
+    }
+}
+
 /// Resolve when the process that started us is gone.
 ///
-/// Nothing is ever sent on stdin, and that is what makes this work: the read cannot
+/// Nothing is sent on stdin after the key line, and that is what makes this work: the read cannot
 /// return data, so the only thing it can return is end-of-file — which happens when
 /// the last write end of the pipe closes. The parent holds that write end for
 /// exactly as long as it is alive, so this fires however the parent exits, without
@@ -266,7 +297,7 @@ pub async fn parent_closed() {
             match std::io::stdin().read(&mut byte) {
                 // EOF: the write end is gone, so the parent is gone.
                 Ok(0) => break,
-                // Nothing sends anything on this pipe, so a byte can only be
+                // Nothing follows the key line on this pipe, so a byte can only be
                 // somebody driving this by hand — ignored rather than treated as a
                 // signal, since a stray keystroke in a terminal must not stop a
                 // gateway.
@@ -413,8 +444,8 @@ mod tests {
     /// passed as the Mac made it, and no dial here reaches it.
     #[test]
     fn checking_goes_as_far_as_starting_would() {
-        let text = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\nhost = \"::1\"\nusername = \"a\"\npassword = \"b\"\nvideo_quality = 50\n";
-        let error = check(text).expect_err("a dial is refused on a High Performance Mac");
+        let text = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\nhost = \"::1\"\nusername = \"a\"\npassword_ref = \"b\"\nvideo_quality = 50\n";
+        let error = check(&crate::config::vaulted(text)).expect_err("a dial is refused on a High Performance Mac");
         assert!(format!("{error:#}").contains("video_quality"), "{error:#}");
     }
 }

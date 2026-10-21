@@ -73,6 +73,8 @@ async fn main() {
         username: String::new(),
         password: String::new(),
         vnc_password: String::new(),
+        password_ref: None,
+        vnc_password_ref: None,
         domain: None,
         size: Some((640, 480)),
         egfx: None,

@@ -3,7 +3,7 @@ use clap::Parser;
 use log::info;
 #[cfg(unix)]
 use log::warn;
-use remotex::cli::{Cli, Commands};
+use remotex::cli::{Cli, Commands, PasswordAction};
 use remotex::config::{AppConfig, ListenAddr};
 use remotex::server;
 
@@ -31,8 +31,16 @@ async fn main() -> anyhow::Result<()> {
             // TOML file, credentials included (see src/config.rs for why). Every
             // target is served; the browser picks one after login.
             info!("remotex {}, features: {}", env!("CARGO_PKG_VERSION"), remotex::cli::features_line());
-            let (file, path) = remotex::config::load(config.as_deref())?;
+            let (mut file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
+            let key = if file.needs_master() {
+                let master = file.served_master(path.parent().unwrap_or(std::path::Path::new("")))?;
+                Some(file.key(&master).with_context(|| format!("in config file {}", path.display()))?)
+            } else {
+                None
+            };
+            file.unlock(key.as_ref())
+                .with_context(|| format!("in config file {}", path.display()))?;
             let config = file.resolve_with(
                 listen.as_deref(),
                 &remotex::config::state_dir(&path),
@@ -79,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::GenPasswd { username } => gen_passwd(&username)?,
+        Commands::Password { action } => password(action)?,
     }
 
     Ok(())
@@ -88,21 +97,91 @@ async fn main() -> anyhow::Result<()> {
 /// asked twice on a TTY; read as one line when piped) and print the encoded
 /// credential to stdout, pipeable straight into the config.
 fn gen_passwd(username: &str) -> anyhow::Result<()> {
-    use std::io::IsTerminal as _;
-
-    let password = if std::io::stdin().is_terminal() {
-        let password = rpassword::prompt_password("Password: ")?;
-        let confirm = rpassword::prompt_password("Confirm password: ")?;
-        anyhow::ensure!(password == confirm, "passwords do not match");
-        password
-    } else {
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        line.trim_end_matches(['\r', '\n']).to_owned()
-    };
+    let password = read_secret("Password", true)?;
     let encoded = remotex::auth::generate(username, &password, remotex::auth::DEFAULT_COST)?;
     println!("{encoded}");
     Ok(())
+}
+
+/// A secret from whoever runs the command: hidden on a TTY, and asked twice there
+/// when `confirm` says a typing mistake would go unnoticed; read as one line when
+/// piped.
+fn read_secret(label: &str, confirm: bool) -> anyhow::Result<String> {
+    use std::io::IsTerminal as _;
+
+    if std::io::stdin().is_terminal() {
+        let secret = rpassword::prompt_password(format!("{label}: "))?;
+        if !confirm {
+            return Ok(secret);
+        }
+        let confirm = rpassword::prompt_password(format!("Confirm {}: ", label.to_lowercase()))?;
+        anyhow::ensure!(secret == confirm, "they do not match");
+        Ok(secret)
+    } else {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        Ok(line.trim_end_matches(['\r', '\n']).to_owned())
+    }
+}
+
+/// `remotex password`: write a config's `[master]` block or one of its `[passwords]`.
+fn password(action: PasswordAction) -> anyhow::Result<()> {
+    match action {
+        PasswordAction::Init { config } => {
+            let path = remotex::config::config_path(config.as_deref())?;
+            let (master, kept) = command_master(&path, true)?;
+            remotex::vault::init_file(&path, &master)?;
+            eprintln!("wrote [master] to {}", path.display());
+            if !kept {
+                match remotex::keychain::save(&master) {
+                    Ok(()) => eprintln!("kept the master password in the keychain"),
+                    Err(error) => eprintln!(
+                        "the master password is not kept anywhere ({error:#}): give it to a \
+                         served gateway in a file named by [server].master_password_file"
+                    ),
+                }
+            }
+        }
+        PasswordAction::Set { name, config } => {
+            let path = remotex::config::config_path(config.as_deref())?;
+            remotex::vault::valid_name(&name)?;
+            // Asked once: a mistyped master is told as one by the file's check.
+            let (master, _) = command_master(&path, false)?;
+            let password = read_secret(&format!("Password for {name}"), true)?;
+            remotex::vault::set_file(&path, &name, &password, &master)?;
+            eprintln!("wrote [passwords].{name} to {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// The master password for a `remotex password` run on the config at `path`, and
+/// whether it came from somewhere that keeps it: the file's
+/// `[server].master_password_file`, then the keychain, then the terminal, asked
+/// twice there when `confirm` (a new `[master]` block has nothing to check it by).
+fn command_master(
+    path: &std::path::Path,
+    confirm: bool,
+) -> anyhow::Result<(remotex::vault::MasterPassword, bool)> {
+    use std::io::IsTerminal as _;
+
+    if let Some(file) = remotex::vault::master_file_of(path)? {
+        return Ok((remotex::vault::MasterPassword::read_file(&file)?, true));
+    }
+    match remotex::keychain::load() {
+        Ok(Some(master)) => {
+            eprintln!("using the master password in the keychain");
+            return Ok((master, true));
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("{error:#}"),
+    }
+    anyhow::ensure!(
+        std::io::stdin().is_terminal(),
+        "no master password: the keychain keeps none and stdin is not a terminal to ask at"
+    );
+    let master = read_secret("Master password", confirm)?;
+    Ok((remotex::vault::MasterPassword::new(master)?, false))
 }
 
 /// Run a managed embedded gateway, and stop when its parent does.
@@ -113,6 +192,11 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 /// hand, and the server arm only completes by failing.
 #[cfg(feature = "embedded-gateway")]
 async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Result<()> {
+    // The parent writes the key line the moment this process starts, so this wait
+    // is short; it is read before anything else reads stdin.
+    let key = tokio::task::spawn_blocking(remotex::embedded::read_key)
+        .await
+        .context("the key reader panicked")??;
     // Ahead of the race below, because asking for the claim can wait, and waiting
     // is what `serve` must not do before it has refused.
     let claim = instance.claim().await?;
@@ -125,7 +209,7 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
         // that wins decides whether a refused config is reported at all: `[server]`
         // in the file, and one run in five exits 0 with nothing on stderr.
         biased;
-        result = remotex::embedded::serve(instance, claim) => result?,
+        result = remotex::embedded::serve(instance, claim, key) => result?,
         _ = remotex::embedded::parent_closed() => {
             info!("stdin closed: whatever started this gateway is gone; stopping");
         }

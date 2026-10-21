@@ -80,6 +80,8 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             // Must match tests/vnc-dummy/Containerfile — exercises VncAuth.
             password: String::new(),
             vnc_password: "secret42".to_owned(),
+            password_ref: None,
+            vnc_password_ref: None,
             domain: None,
             // A plain target states no size: it is shown at the server's own.
             size: None,

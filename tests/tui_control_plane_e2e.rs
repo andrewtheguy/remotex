@@ -28,8 +28,8 @@ async fn instances_start_stop_and_share_the_master_port() {
             .await
             .unwrap();
     let router = SharedPort::bind(free_port(), supervisor.routes()).await.unwrap();
-    supervisor.start("one").await.unwrap();
-    supervisor.start("two").await.unwrap();
+    supervisor.start("one", None).await.unwrap();
+    supervisor.start("two", None).await.unwrap();
 
     let one_cookie = seed_cookie(router.port(), "one").await;
     let two_cookie = seed_cookie(router.port(), "two").await;

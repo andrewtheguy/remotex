@@ -113,6 +113,37 @@ pub enum Commands {
         /// Username for the web login (must not contain ':')
         username: String,
     },
+
+    /// Keep the targets' passwords encrypted in a config's [passwords], under the
+    /// account's master password. A target names one with password_ref or
+    /// vnc_password_ref.
+    ///
+    /// The master password is the file's [server].master_password_file when it
+    /// names one, else the keychain's, else asked for here.
+    Password {
+        #[command(subcommand)]
+        action: PasswordAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PasswordAction {
+    /// Give a config its [master] block. A master password asked for here is
+    /// kept in the keychain, where the gateway and the TUI find it
+    Init {
+        /// The config to change (default: the installed global config)
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Encrypt a password into [passwords].NAME, replacing one already there:
+    /// prompts for it (twice on a terminal; one line when piped)
+    Set {
+        /// The name a target's password_ref or vnc_password_ref gives it
+        name: String,
+        /// The config to change (default: the installed global config)
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[cfg(test)]

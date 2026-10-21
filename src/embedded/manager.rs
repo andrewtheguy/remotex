@@ -29,8 +29,9 @@ use tokio::sync::RwLock;
 
 use super::{Handshake, transport};
 use crate::config::{
-    DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, TargetConfig,
+    Audience, ConfigFile, DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, TargetConfig,
 };
+use crate::vault::{Key, MasterPassword};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_GRACE: Duration = Duration::from_millis(1500);
@@ -53,19 +54,23 @@ pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
 # text = "remotex"
 # logo = "/path/to/logo.png"
 
+# A target names its password; [passwords] keeps it encrypted under your
+# master password. Press p in the TUI, or run
+# `remotex password set <name> -c <this file>`, to add one.
+
 # [[targets]]
 # name = "work"
 # protocol = "rdp"
 # host = "192.168.1.20"
 # username = "andrew"
-# password = "…"
+# password_ref = "work"
 # domain = "CORP"
 
 # [[targets]]
 # name = "pi"
 # protocol = "vnc"
 # host = "192.168.1.30"
-# vnc_password = "…"
+# vnc_password_ref = "pi"
 "#;
 
 /// Inputs resolved by the CLI before terminal state is changed.
@@ -115,6 +120,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     let mut interrupt = Box::pin(tokio::signal::ctrl_c());
     let mut selected = 0usize;
     let mut view = View::List;
+    let mut master = Master::default();
     let mut message = format!(
         "control plane listening on http://{MASTER_HOST}:{}",
         router.port()
@@ -205,13 +211,27 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                         message = "rescanned the instances directory".to_owned();
                     }
                     KeyCode::Char('a') => {
-                        let names: Vec<_> = supervisor.instances().into_iter().map(|i| i.name).collect();
+                        let stopped: Vec<_> = supervisor
+                            .instances()
+                            .into_iter()
+                            .filter(|i| !matches!(i.status, InstanceStatus::Running | InstanceStatus::Starting))
+                            .collect();
                         let mut failed = false;
-                        for name in names {
-                            if let Err(error) = supervisor.start(&name).await {
+                        let mut asked = false;
+                        for instance in stopped {
+                            let name = instance.name.clone();
+                            let started = match master.key_for(&mut terminal, &instance.config_path(), &mut asked) {
+                                Ok(key) => supervisor.start(&name, key.as_ref()).await,
+                                Err(error) => Err(error),
+                            };
+                            if let Err(error) = started {
                                 message = format!("{name}: {error:#}");
                                 failed = true;
                             }
+                        }
+                        if asked {
+                            screen.invalidate();
+                            events = EventStream::new();
                         }
                         if !failed {
                             message = "started every stopped instance".to_owned();
@@ -223,7 +243,16 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             message = if instance.status == InstanceStatus::Running {
                                 format!("{name} is already running; x stops it")
                             } else {
-                                match supervisor.start(&name).await {
+                                let mut asked = false;
+                                let started = match master.key_for(&mut terminal, &instance.config_path(), &mut asked) {
+                                    Ok(key) => supervisor.start(&name, key.as_ref()).await,
+                                    Err(error) => Err(error),
+                                };
+                                if asked {
+                                    screen.invalidate();
+                                    events = EventStream::new();
+                                }
+                                match started {
                                     Ok(()) => format!("started {name}"),
                                     Err(error) => format!("{name}: {error:#}"),
                                 }
@@ -251,7 +280,16 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                     KeyCode::Char('r') => {
                         if let Some(instance) = instances.get(selected) {
                             let name = instance.name.clone();
-                            message = match supervisor.restart(&name).await {
+                            let mut asked = false;
+                            let restarted = match master.key_for(&mut terminal, &instance.config_path(), &mut asked) {
+                                Ok(key) => supervisor.restart(&name, key.as_ref()).await,
+                                Err(error) => Err(error),
+                            };
+                            if asked {
+                                screen.invalidate();
+                                events = EventStream::new();
+                            }
+                            message = match restarted {
                                 Ok(()) => format!("restarted {name}"),
                                 Err(error) => format!("{name}: {error:#}"),
                             };
@@ -267,6 +305,23 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                                     Ok(()) => format!("opening {url}"),
                                     Err(error) => format!("cannot open {url}: {error:#}"),
                                 }
+                            };
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(instance) = instances.get(selected) {
+                            let name = instance.name.clone();
+                            terminal.suspend()?;
+                            let set = master.set_password(&name, &instance.config_path());
+                            terminal.resume()?;
+                            screen.invalidate();
+                            events = EventStream::new();
+                            message = match set {
+                                Ok(password) => format!(
+                                    "{name}: [passwords].{password} set; name it in a target's \
+                                     password_ref, then restart {name}"
+                                ),
+                                Err(error) => format!("{name}: {error:#}"),
                             };
                         }
                     }
@@ -296,6 +351,104 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     drop(router);
     println!("remotex: every instance stopped");
     Ok(())
+}
+
+/// The master password this control plane opens its instances' configs with,
+/// kept for the rest of its run once it has opened one.
+///
+/// Never `[server].master_password_file`: an instance has no `[server]` block. It
+/// is the keychain's, or else asked for at this terminal, which a served gateway
+/// never does — this process always has a person in front of it.
+#[derive(Default)]
+struct Master(Option<MasterPassword>);
+
+impl Master {
+    /// The master password known without asking: the one given already, else the
+    /// keychain's.
+    fn known(&self) -> Option<MasterPassword> {
+        self.0.clone().or_else(|| crate::keychain::load().ok().flatten())
+    }
+
+    /// The key a start of the instance whose config is at `path` hands its worker:
+    /// `None` for a config that names no passwords. When the master password is
+    /// neither given nor in the keychain it is asked for, the terminal suspended
+    /// for it, and `asked` is set so the caller redraws.
+    fn key_for(
+        &mut self,
+        terminal: &mut TerminalSession,
+        path: &Path,
+        asked: &mut bool,
+    ) -> anyhow::Result<Option<Key>> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let file = ConfigFile::parse_with(&text, Audience::Embedded)?;
+        if !file.needs_master() {
+            return Ok(None);
+        }
+        let candidate = match self.known() {
+            Some(master) => master,
+            None => {
+                *asked = true;
+                terminal.suspend()?;
+                let answer = ask_master(path, false);
+                terminal.resume()?;
+                answer?
+            }
+        };
+        let key = file.key(&candidate)?;
+        self.0 = Some(candidate);
+        Ok(Some(key))
+    }
+
+    /// Ask for a password's name and the password, on a terminal already
+    /// suspended, and encrypt it into the config at `path` — giving the config its
+    /// `[master]` block first when it has none. Returns the name.
+    fn set_password(&mut self, instance: &str, path: &Path) -> anyhow::Result<String> {
+        print!("Password name in {instance} (as a target's password_ref names it): ");
+        std::io::stdout().flush()?;
+        let mut name = String::new();
+        std::io::stdin().read_line(&mut name).context("cannot read the name")?;
+        let name = name.trim().to_owned();
+        crate::vault::valid_name(&name)?;
+
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let has_master = text
+            .parse::<toml::Table>()
+            .with_context(|| format!("{} is not valid TOML", path.display()))?
+            .contains_key("master");
+        let (candidate, asked) = match self.known() {
+            Some(master) => (master, false),
+            None => (ask_master(path, !has_master)?, true),
+        };
+        if !has_master {
+            crate::vault::init_file(path, &candidate)?;
+            if asked && let Err(error) = crate::keychain::save(&candidate) {
+                eprintln!("the master password is not kept in the keychain: {error:#}");
+            }
+        }
+        let password = rpassword::prompt_password(format!("Password for {name}: "))
+            .context("cannot read the password")?;
+        let confirm = rpassword::prompt_password(format!("Confirm password for {name}: "))
+            .context("cannot read the password")?;
+        anyhow::ensure!(password == confirm, "the passwords do not match");
+        crate::vault::set_file(path, &name, &password, &candidate)?;
+        self.0 = Some(candidate);
+        Ok(name)
+    }
+}
+
+/// The master password, asked for on a terminal not in raw mode — twice when
+/// `confirm`, for a new `[master]` block, which has nothing to check it by.
+fn ask_master(path: &Path, confirm: bool) -> anyhow::Result<MasterPassword> {
+    let prompt = format!("remotex master password for {}: ", path.display());
+    let password = rpassword::prompt_password(prompt).context("cannot read the master password")?;
+    if confirm {
+        let again = rpassword::prompt_password("Confirm the master password: ")
+            .context("cannot read the master password")?;
+        anyhow::ensure!(password == again, "the master passwords do not match");
+    }
+    MasterPassword::new(password)
 }
 
 /// Opens the instance config in the operator's editor and waits for it.
@@ -585,7 +738,7 @@ fn render(
             &mut frame,
             footer,
             width,
-            "↑↓ select · Enter specs · s start · x stop · r restart · a start all · o open · n new · e edit · R rescan · q quit",
+            "↑↓ select · Enter specs · s start · x stop · r restart · a start all · o open · n new · e edit · p password · R rescan · q quit",
             Some(Color::DarkGrey),
             false,
         )?;
@@ -692,11 +845,11 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
     if let Some(domain) = target.domain.as_deref().filter(|domain| !domain.is_empty()) {
         credentials.push(format!("domain {domain}"));
     }
-    if !target.password.is_empty() {
-        credentials.push("account password set".to_owned());
+    if let Some(name) = &target.password_ref {
+        credentials.push(format!("account password [passwords].{name}"));
     }
-    if !target.vnc_password.is_empty() {
-        credentials.push("vnc password set".to_owned());
+    if let Some(name) = &target.vnc_password_ref {
+        credentials.push(format!("vnc password [passwords].{name}"));
     }
     if credentials.is_empty() {
         credentials.push("none configured".to_owned());
@@ -998,7 +1151,9 @@ impl Supervisor {
             .context("the new instance did not appear after rescan")
     }
 
-    pub async fn start(&mut self, name: &str) -> anyhow::Result<()> {
+    /// Start an instance, handing its worker `key` — the one that opens its
+    /// config's `[passwords]`, or `None` for a config that names none.
+    pub async fn start(&mut self, name: &str, key: Option<&Key>) -> anyhow::Result<()> {
         let index = self.index(name)?;
         if matches!(
             self.instances[index].state,
@@ -1018,7 +1173,7 @@ impl Supervisor {
         self.instances[index].state = InstanceState::Starting;
         self.publish().await;
 
-        match spawn_gateway(&self.binary, &dir).await {
+        match spawn_gateway(&self.binary, &dir, key).await {
             Ok(gateway) => {
                 self.instances[index].state = InstanceState::Running(Box::new(gateway));
                 self.publish().await;
@@ -1044,9 +1199,9 @@ impl Supervisor {
         Ok(())
     }
 
-    pub async fn restart(&mut self, name: &str) -> anyhow::Result<()> {
+    pub async fn restart(&mut self, name: &str, key: Option<&Key>) -> anyhow::Result<()> {
         self.stop(name).await?;
-        self.start(name).await
+        self.start(name, key).await
     }
 
     /// Notice gateways that ended without being asked. Returns a one-line
@@ -1260,7 +1415,7 @@ impl std::fmt::Display for ExitKind {
     }
 }
 
-async fn spawn_gateway(binary: &Path, dir: &Path) -> anyhow::Result<RunningGateway> {
+async fn spawn_gateway(binary: &Path, dir: &Path, key: Option<&Key>) -> anyhow::Result<RunningGateway> {
     let log_path = dir.join("gateway.log");
     let mut log = std::fs::OpenOptions::new()
         .create(true)
@@ -1287,6 +1442,12 @@ async fn spawn_gateway(binary: &Path, dir: &Path) -> anyhow::Result<RunningGatew
     let mut child = command
         .spawn()
         .with_context(|| format!("cannot start gateway for {}", dir.display()))?;
+    // The key line, first and only: see `super::read_key`. The pipe then stays open
+    // for as long as this process wants the worker to live.
+    let line = format!("{}\n", key.map(Key::to_line).unwrap_or_default());
+    let stdin = child.stdin.as_mut().context("gateway stdin was not piped")?;
+    stdin.write_all(line.as_bytes()).await.context("cannot hand the gateway its key")?;
+    stdin.flush().await.context("cannot hand the gateway its key")?;
     let stdout = child.stdout.take().context("gateway stdout was not piped")?;
     let mut stdout = tokio::io::BufReader::new(stdout);
     let mut line = String::new();
@@ -1704,12 +1865,12 @@ mod tests {
         };
         std::fs::write(
             instance.config_path(),
-            "[branding]\ntext = \"work laptop\"\n\n\
+            crate::config::vaulted("[branding]\ntext = \"work laptop\"\n\n\
              [[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"192.168.1.20\"\n\
-             username = \"andrew\"\npassword = \"hunter2\"\n\
+             username = \"andrew\"\npassword_ref = \"win11\"\n\
              video_quality = 70\n\n\
              [[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\n\
-             host = \"192.168.1.21\"\n",
+             host = \"192.168.1.21\"\n"),
         )
         .unwrap();
 
@@ -1719,8 +1880,7 @@ mod tests {
         assert!(page.contains(&spec("shown as", "work laptop")), "{page}");
         assert!(page.contains("target win"), "{page}");
         assert!(page.contains("192.168.1.20:3389"), "the standard port is filled in: {page}");
-        assert!(page.contains("account password set"), "{page}");
-        assert!(!page.contains("hunter2"), "a password does not reach the screen: {page}");
+        assert!(page.contains("account password [passwords].win11"), "{page}");
         assert!(
             page.contains("opus ≤320 kbit/s, adaptive down to 32 kbit/s"),
             "an unset switch is named with the one rate, walk included: {page}"
@@ -1874,7 +2034,7 @@ mod tests {
         supervisor.create("alpha").await.unwrap();
         let _held = super::super::Instance::new(root.path().join("alpha")).claim().await.unwrap();
 
-        let error = supervisor.start("alpha").await.unwrap_err();
+        let error = supervisor.start("alpha", None).await.unwrap_err();
         assert!(format!("{error:#}").contains("already served by another gateway"), "{error:#}");
         assert_eq!(supervisor.instances()[0].status, InstanceStatus::Stopped);
     }

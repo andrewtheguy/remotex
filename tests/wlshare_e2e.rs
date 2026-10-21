@@ -98,6 +98,8 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         username: String::new(),
         password: String::new(),
         vnc_password: String::new(),
+        password_ref: None,
+        vnc_password_ref: None,
         domain: None,
         size: None,
         egfx: None,

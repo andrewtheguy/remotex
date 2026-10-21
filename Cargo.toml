@@ -31,8 +31,16 @@ edition = "2024"
 # Native builds include the local TUI control plane. Container artifacts
 # explicitly disable default features: a remotely deployed gateway must not
 # expose process supervision or its private worker surface.
-default = ["embedded-gateway"]
+default = ["embedded-gateway", "keychain"]
 embedded-gateway = ["dep:crossterm", "dep:libc", "dep:windows-sys"]
+# The master password in the account's credential store. A container has no such
+# store, and reads its master password from [server].master_password_file alone.
+keychain = [
+    "dep:keyring-core",
+    "dep:apple-native-keyring-store",
+    "dep:windows-native-keyring-store",
+    "dep:zbus-secret-service-keyring-store",
+]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -210,6 +218,19 @@ sha2 = "0.11"
 # SRTP's and SRTCP's HMAC-SHA1-80 tags on the High Performance media stream
 # (src/vnc_apple_media.rs), over the `sha1` above.
 hmac = "0.13"
+# The `[passwords]` a config keeps its targets' passwords in (src/vault.rs): each
+# one AES-256-GCM under a key scrypt derives from the account's master password and
+# the file's own salt. The lines on `cipher` 0.5 and `digest` 0.11, as `aes`, `eax`
+# and `sha2` above are.
+aes-gcm = "0.11"
+scrypt = "0.12"
+# `remotex password` writes those entries into the file somebody edits, keeping its
+# comments and layout, which a round trip through `toml` would not.
+toml_edit = "0.25"
+# The OS credential store the master password is kept in (src/keychain.rs), behind
+# the `keychain` feature: the Keychain on macOS, Credential Manager on Windows,
+# and the Secret Service on Linux, spoken over zbus so no build needs libdbus.
+keyring-core = { version = "1", optional = true }
 
 [build-dependencies]
 anyhow = "1"
@@ -227,6 +248,17 @@ tikv-jemalloc-sys = { version = "0.7", features = ["unprefixed_malloc_on_support
 
 # The control plane's names for how a worker ended (src/embedded/manager.rs): a
 # Unix worker that did not exit was ended by a signal.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", optional = true, features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = { version = "1", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies.zbus-secret-service-keyring-store]
+version = "1"
+optional = true
+features = ["rt-async-io-crypto-rust"]
+
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", optional = true }
 
@@ -317,4 +349,12 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.fdeflate]
+opt-level = 3
+
+# The master password's key derivation (src/vault.rs): 64 MiB of scrypt takes a
+# debug gateway seconds to start without these.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
 opt-level = 3

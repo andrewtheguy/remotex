@@ -1083,6 +1083,8 @@ mod tests {
                 username: String::new(),
                 password: String::new(),
                 vnc_password: String::new(),
+                password_ref: None,
+                vnc_password_ref: None,
                 domain: None,
                 size: Some((1280, 800)),
                 egfx: None,
@@ -1256,7 +1258,7 @@ mod tests {
         let target = |name: &str, kind: &str, host: &str| {
             format!(
                 "[[targets]]\nname = \"{name}\"\n{kind}\nhost = \"{host}\"\n\
-                 username = \"u\"\npassword = \"p\"\n\n"
+                 username = \"u\"\npassword_ref = \"p\"\n\n"
             )
         };
         let text = format!(
@@ -1266,7 +1268,7 @@ mod tests {
             target("fast", "protocol = \"vnc\"\nsubtype = \"ard-high-performance\"", "192.0.2.10"),
         ) + &target("two", "protocol = \"rdp\"\nvirtual_displays = 2", "192.0.2.11")
             + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12");
-        let targets = crate::config::ConfigFile::parse(&text).expect("the targets parse").targets;
+        let targets = crate::config::ConfigFile::parse_fixture(&text).expect("the targets parse").targets;
         let entry = |name: &str| {
             let target = targets.iter().find(|t| t.name == name).unwrap();
             serde_json::to_string(&TargetInfo::of(target, false)).unwrap()

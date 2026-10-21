@@ -22,21 +22,36 @@ mod common;
 /// a bound on a machine being slow, not a measurement of anything.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// A gateway config with a login and one target it never dials.
-fn config_text() -> String {
+/// A gateway config with a login and one target it never dials, whose password
+/// opens under the master password in `dir`'s `master-password` — so the start
+/// goes through `[server].master_password_file`, as a service's would.
+fn config_text(dir: &common::ScratchDir) -> String {
     let site_passwd = remotex::auth::generate("admin", "hunter2", 4).unwrap();
+    dir.write("master-password", "correct horse\n");
+    let master = remotex::vault::MasterPassword::new("correct horse".to_owned()).unwrap();
+    let (section, key) = remotex::vault::Key::create(&master).unwrap();
+    let value = key.encrypt("win", "p").unwrap();
     format!(
         r#"
 [server]
 site_passwd = "{site_passwd}"
+master_password_file = "master-password"
+
+[master]
+salt = "{}"
+check = "{}"
+
+[passwords]
+win = "{value}"
 
 [[targets]]
 name = "unreachable"
 protocol = "rdp"
 host = "192.0.2.10"
 username = "u"
-password = "p"
-"#
+password_ref = "win"
+"#,
+        section.salt, section.check
     )
 }
 
@@ -109,7 +124,7 @@ fn a_gateway_on_a_unix_socket_answers_and_cleans_up_after_itself() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = common::ScratchDir::new("unix-listen");
-    let config = dir.write("remotex.toml", &config_text());
+    let config = dir.write("remotex.toml", &config_text(&dir));
     let socket = dir.path().join("gateway.sock");
 
     let mut gateway = start(&config, &socket);
@@ -159,7 +174,7 @@ fn a_gateway_on_a_unix_socket_answers_and_cleans_up_after_itself() {
 #[test]
 fn a_leftover_socket_does_not_stop_the_next_start() {
     let dir = common::ScratchDir::new("unix-leftover");
-    let config = dir.write("remotex.toml", &config_text());
+    let config = dir.write("remotex.toml", &config_text(&dir));
     let socket = dir.path().join("gateway.sock");
 
     // What a killed process leaves: the file, with nothing serving it.

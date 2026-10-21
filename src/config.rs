@@ -5,6 +5,7 @@
 //! half is identical for both, because a target is a target; `[server]` belongs to
 //! the one a browser reaches.
 
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,7 @@ use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::HostDisplay;
 use crate::throughput::MeterConfig;
+use crate::vault::{Key, MasterPassword, MasterSection};
 
 /// Remote-desktop protocol of a target. Each has a server-side engine feeding
 /// the same browser protocol (docs/architecture.md): `rdp` via the built-in RDP
@@ -856,8 +858,15 @@ pub struct TargetConfig {
     /// Password for [`Self::username`] (never leaves the server). On a plain
     /// `vnc` target it may stand alone, for an RSA-AES server that asks for a
     /// password and no name.
-    #[serde(default)]
+    ///
+    /// Never written in the file: it is `[passwords].<`[`Self::password_ref`]`>`,
+    /// decrypted by [`ConfigFile::unlock`], and empty until then.
+    #[serde(skip)]
     pub password: String,
+    /// The name [`Self::password`] is kept under in `[passwords]` — see
+    /// [`crate::vault`].
+    #[serde(default)]
+    pub password_ref: Option<String>,
     /// A VNC server's own password — RFB `VncAuth`, which proves knowledge of a
     /// secret belonging to the *machine* and says nothing about who is
     /// connecting. Named apart from [`Self::password`] because on a Mac the two
@@ -869,8 +878,14 @@ pub struct TargetConfig {
     /// may sit beside [`Self::password`], and the server's offer decides which
     /// is answered. Rejected on other protocols and on either Apple
     /// [`Subtype`] — see [`ConfigFile::parse`].
-    #[serde(default)]
+    ///
+    /// Kept in `[passwords]` like [`Self::password`], under
+    /// [`Self::vnc_password_ref`].
+    #[serde(skip)]
     pub vnc_password: String,
+    /// The name [`Self::vnc_password`] is kept under in `[passwords]`.
+    #[serde(default)]
+    pub vnc_password_ref: Option<String>,
     /// Optional domain of an RDP account. Refused on any other protocol, which has
     /// nowhere to send it.
     #[serde(default)]
@@ -1478,6 +1493,16 @@ pub struct ServerSection {
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
+    /// A file holding the master password that opens `[passwords]`: a container's
+    /// secret (`/run/secrets/…`), a systemd credential, anything a deployment
+    /// without a keychain keeps one in. A relative path is taken from the config
+    /// file's directory. Unset, the master password is the keychain's — see
+    /// [`crate::keychain`].
+    ///
+    /// A `[server]` key because only a served gateway reads it: a local instance has
+    /// no `[server]` block, and its control plane asks the keychain or the person at
+    /// the terminal instead.
+    pub master_password_file: Option<PathBuf>,
     // No `branding` here: it is the top-level `[branding]` table now (see
     // `ConfigFile::branding`), because an embedded config has no `[server]`
     // block to hold it and one value with two spellings is one of them going
@@ -1718,6 +1743,15 @@ pub struct ConfigFile {
     /// [`Self::branding`]'s reason.
     #[serde(default)]
     pub hevc_wasm: Option<HevcWasmSection>,
+    /// The `[master]` table: what opens [`Self::passwords`]. See [`crate::vault`].
+    /// Top-level for [`Self::branding`]'s reason.
+    #[serde(default)]
+    pub master: Option<MasterSection>,
+    /// The `[passwords]` table: each target password, encrypted, by the name a
+    /// target's `password_ref` or `vnc_password_ref` gives it. Written by
+    /// `remotex password set`.
+    #[serde(default)]
+    pub passwords: BTreeMap<String, String>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
 }
@@ -2046,14 +2080,14 @@ impl ConfigFile {
                 (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance))) => {
                     let name = subtype.name();
                     anyhow::ensure!(
-                        !target.username.is_empty() && !target.password.is_empty(),
-                        "target {:?} is subtype {name:?} but has no username and password — \
+                        !target.username.is_empty() && target.password_ref.is_some(),
+                        "target {:?} is subtype {name:?} but has no username and password_ref — \
                          both are needed, and on a Mac they are an account's there",
                         target.name
                     );
                     anyhow::ensure!(
-                        target.vnc_password.is_empty(),
-                        "target {:?} is subtype {name:?} but sets vnc_password, which only a \
+                        target.vnc_password_ref.is_none(),
+                        "target {:?} is subtype {name:?} but sets vnc_password_ref, which only a \
                          plain \"vnc\" target uses — Apple's authentication carries the \
                          account credentials above instead",
                         target.name
@@ -2061,10 +2095,10 @@ impl ConfigFile {
                 }
                 (Protocol::Vnc, None | Some(Subtype::Wlshare)) => {
                     anyhow::ensure!(
-                        target.username.is_empty() || !target.password.is_empty(),
-                        "target {:?} is protocol \"vnc\" and sets username without password — \
+                        target.username.is_empty() || target.password_ref.is_some(),
+                        "target {:?} is protocol \"vnc\" and sets username without password_ref — \
                          RSA-AES carries the two together; a VNC server's own password goes \
-                         in vnc_password, and a Mac account under subtype = \"ard\"",
+                         in vnc_password_ref, and a Mac account under subtype = \"ard\"",
                         target.name
                     );
                 }
@@ -2082,8 +2116,8 @@ impl ConfigFile {
                 // with unless both are set.
                 (Protocol::Rdp, None) => {
                     anyhow::ensure!(
-                        !target.username.is_empty() && !target.password.is_empty(),
-                        "target {:?} is protocol \"rdp\" and needs both username and password — \
+                        !target.username.is_empty() && target.password_ref.is_some(),
+                        "target {:?} is protocol \"rdp\" and needs both username and password_ref — \
                          this client logs on only through NLA, which carries the two together",
                         target.name
                     );
@@ -2091,8 +2125,8 @@ impl ConfigFile {
             }
             if target.protocol != Protocol::Vnc {
                 anyhow::ensure!(
-                    target.vnc_password.is_empty(),
-                    "target {:?} is protocol {:?} but sets vnc_password, which only \"vnc\" \
+                    target.vnc_password_ref.is_none(),
+                    "target {:?} is protocol {:?} but sets vnc_password_ref, which only \"vnc\" \
                      targets use",
                     target.name,
                     target.protocol.name()
@@ -2115,7 +2149,100 @@ impl ConfigFile {
                 );
             }
         }
+        config.check_passwords()?;
         Ok(config)
+    }
+
+    /// Every password a target names is in `[passwords]`, every value there has the
+    /// shape of one `remotex password set` wrote, and a `[master]` block is there to
+    /// open them — all of it checked without the key, which reading a file never has.
+    fn check_passwords(&self) -> anyhow::Result<()> {
+        if let Some(master) = &self.master {
+            master.validate().context("invalid [master]")?;
+        }
+        for (name, value) in &self.passwords {
+            crate::vault::valid_name(name).context("in [passwords]")?;
+            crate::vault::check_value(name, value)?;
+        }
+        anyhow::ensure!(
+            self.passwords.is_empty() || self.master.is_some(),
+            "[passwords] has no [master] block to open it — `remotex password init` writes one"
+        );
+        for target in &self.targets {
+            for (key, name) in [
+                ("password_ref", &target.password_ref),
+                ("vnc_password_ref", &target.vnc_password_ref),
+            ] {
+                let Some(name) = name else { continue };
+                anyhow::ensure!(
+                    self.passwords.contains_key(name),
+                    "target {:?} sets {key} = {name:?}, which [passwords] does not have — \
+                     `remotex password set {name}` adds it",
+                    target.name
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any target names a password, and so whether this file needs its
+    /// master password before it can serve.
+    pub fn needs_master(&self) -> bool {
+        self.targets
+            .iter()
+            .any(|target| target.password_ref.is_some() || target.vnc_password_ref.is_some())
+    }
+
+    /// The key that opens this file's `[passwords]`, from `master`.
+    pub fn key(&self, master: &MasterPassword) -> anyhow::Result<Key> {
+        let section = self
+            .master
+            .as_ref()
+            .context("the config has no [master] block — `remotex password init` writes one")?;
+        Key::derive(master, section)
+    }
+
+    /// Decrypt every password a target names into the target, with the key from
+    /// [`Self::key`]. A file that names none needs no key, and is given `None`.
+    pub fn unlock(&mut self, key: Option<&Key>) -> anyhow::Result<()> {
+        if !self.needs_master() {
+            return Ok(());
+        }
+        let key = key.context("the config names passwords, and nothing gave its master password")?;
+        for target in &mut self.targets {
+            if let Some(name) = &target.password_ref {
+                target.password = key.decrypt(name, &self.passwords[name])?;
+            }
+            if let Some(name) = &target.vnc_password_ref {
+                target.vnc_password = key.decrypt(name, &self.passwords[name])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The master password a served gateway opens this file with:
+    /// `[server].master_password_file` when it names one, the keychain's otherwise.
+    /// Never asked at a terminal — a gateway is started as often by a service
+    /// manager as by hand, and the two must start the same way.
+    ///
+    /// `config_dir` is what a relative `master_password_file` is taken from.
+    pub fn served_master(&self, config_dir: &Path) -> anyhow::Result<MasterPassword> {
+        if let Some(file) = self.server.as_ref().and_then(|server| server.master_password_file.as_ref()) {
+            return MasterPassword::read_file(&config_dir.join(file))
+                .context("invalid [server].master_password_file");
+        }
+        match crate::keychain::load() {
+            Ok(Some(master)) => Ok(master),
+            Ok(None) => anyhow::bail!(
+                "the keychain has no remotex master password: store one with \
+                 `remotex password init`, or name a file holding it in \
+                 [server].master_password_file"
+            ),
+            Err(error) => Err(error).context(
+                "the config names passwords and the master password could not be read from \
+                 the keychain; name a file holding it in [server].master_password_file",
+            ),
+        }
     }
 
     /// Resolve the runtime configuration of a managed local instance: its private
@@ -2405,7 +2532,7 @@ pub fn read_candidate(path: Option<&Path>) -> anyhow::Result<String> {
 
 
 /// Which config file to read: the one named, or the installed one.
-fn config_path(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
+pub fn config_path(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
     match explicit {
         Some(path) => Ok(path.to_path_buf()),
         None => installed_config_path().context(
@@ -2532,6 +2659,40 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     })
 }
 
+/// A test's config text with the `[master]` and `[passwords]` blocks its targets'
+/// `password_ref`s and `vnc_password_ref`s need, so a fixture names its passwords
+/// the way a real config does without spelling out tables only their shape is
+/// checked in. The values open under no key: [`ConfigFile::unlock`] is the vault's
+/// tests' to drive.
+#[cfg(test)]
+pub(crate) fn vaulted(text: &str) -> String {
+    const SALT: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let value = format!("{}{}", crate::vault::PREFIX, "A".repeat(40));
+    let mut names = std::collections::BTreeSet::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("password_ref = \"") {
+        rest = &rest[at + "password_ref = \"".len()..];
+        let end = rest.find('"').unwrap_or(rest.len());
+        names.insert(rest[..end].to_owned());
+    }
+    if names.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = format!("{text}\n\n[master]\nsalt = \"{SALT}\"\ncheck = \"{SALT}\"\n\n[passwords]\n");
+    for name in names {
+        out.push_str(&format!("{name} = \"{value}\"\n"));
+    }
+    out
+}
+
+#[cfg(test)]
+impl ConfigFile {
+    /// [`Self::parse`] of [`vaulted`] text.
+    pub(crate) fn parse_fixture(text: &str) -> anyhow::Result<Self> {
+        Self::parse(&vaulted(text))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2619,7 +2780,7 @@ mod tests {
             name = "one"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -2635,7 +2796,7 @@ mod tests {
 
     #[test]
     fn minimal_config_gets_defaults() {
-        let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
+        let config = ConfigFile::parse_fixture(&minimal()).unwrap().resolve().unwrap();
         assert_eq!(config.listen.to_string(), DEFAULT_LISTEN);
         let site_passwd = config.auth.login().expect("a served gateway logs in");
         assert_eq!(site_passwd.username(), "admin");
@@ -2646,7 +2807,8 @@ mod tests {
         assert_eq!((t.host.as_str(), t.port), ("192.0.2.10", 3389));
         assert_eq!(t.size, None, "no size is configured");
         assert_eq!(t.kept_size(), DEFAULT_SIZE);
-        assert_eq!((t.username.as_str(), t.password.as_str(), t.domain.as_deref()), ("u", "p", None));
+        assert_eq!((t.username.as_str(), t.password_ref.as_deref(), t.domain.as_deref()), ("u", Some("p"), None));
+        assert!(t.password.is_empty(), "a password is the vault's to open, not the parser's");
         assert!(t.egfx(), "the graphics pipeline is on unless turned off");
         assert!(!t.sound(Choices::default()), "the remote's sound is taken only where it is chosen");
     }
@@ -2663,7 +2825,7 @@ mod tests {
             name = "one"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
@@ -2671,7 +2833,7 @@ mod tests {
     }
 
     fn resolved(line: &str) -> AppConfig {
-        ConfigFile::parse(&with_server(line))
+        ConfigFile::parse_fixture(&with_server(line))
             .unwrap()
             .resolve()
             .unwrap()
@@ -2694,7 +2856,7 @@ mod tests {
         // The pair this replaced is gone, not accepted alongside it.
         for gone in [r#"host = "0.0.0.0""#, "port = 8080"] {
             assert!(
-                ConfigFile::parse(&with_server(gone)).is_err(),
+                ConfigFile::parse_fixture(&with_server(gone)).is_err(),
                 "{gone} is not half of [server].listen"
             );
         }
@@ -2727,7 +2889,7 @@ mod tests {
             "unix:/run/gw.sock"
         );
         // A prefix and nothing else names no socket.
-        let err = ConfigFile::parse(&with_server(r#"listen = "unix:""#))
+        let err = ConfigFile::parse_fixture(&with_server(r#"listen = "unix:""#))
             .and_then(ConfigFile::resolve)
             .expect_err("a prefix is not a path");
         assert!(format!("{err:#}").contains("[server].listen"), "{err:#}");
@@ -2738,7 +2900,7 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn a_unix_socket_is_refused_where_there_are_none() {
-        let err = ConfigFile::parse(&with_server(r#"listen = "unix:/run/gw.sock""#))
+        let err = ConfigFile::parse_fixture(&with_server(r#"listen = "unix:/run/gw.sock""#))
             .and_then(ConfigFile::resolve)
             .expect_err("no Unix sockets on this platform");
         let text = format!("{err:#}");
@@ -2771,7 +2933,7 @@ mod tests {
             "127.0.0.1:65536",
             "127.0.0.1:-1",
         ] {
-            let err = ConfigFile::parse(&with_server(&format!("listen = {bad:?}")))
+            let err = ConfigFile::parse_fixture(&with_server(&format!("listen = {bad:?}")))
                 .and_then(ConfigFile::resolve)
                 .expect_err("should be refused: {bad:?}");
             assert!(
@@ -2786,7 +2948,7 @@ mod tests {
     /// typo into a gateway on an address nothing reaches.
     #[test]
     fn the_command_line_listen_address_wins_and_is_checked() {
-        let file = ConfigFile::parse(&with_server(r#"listen = "127.0.0.1:1""#)).unwrap();
+        let file = ConfigFile::parse_fixture(&with_server(r#"listen = "127.0.0.1:1""#)).unwrap();
         assert_eq!(
             file.clone().resolve_with(Some("0.0.0.0:8080"), Path::new(""), Path::new("")).unwrap().listen.to_string(),
             "0.0.0.0:8080"
@@ -2798,7 +2960,7 @@ mod tests {
         );
         // And a config with no address at all falls back to the default.
         assert_eq!(
-            ConfigFile::parse(&minimal())
+            ConfigFile::parse_fixture(&minimal())
                 .unwrap()
                 .resolve_with(None, Path::new(""), Path::new(""))
                 .unwrap()
@@ -2857,7 +3019,7 @@ mod tests {
             // which would be a redirect loop rather than a working gateway.
             &"a".repeat(64),
         ] {
-            let err = ConfigFile::parse(&with_server(&format!("dev_subdomain = {bad:?}")))
+            let err = ConfigFile::parse_fixture(&with_server(&format!("dev_subdomain = {bad:?}")))
                 .and_then(ConfigFile::resolve)
                 .expect_err("should be refused: {bad:?}");
             assert!(
@@ -2876,7 +3038,7 @@ mod tests {
     #[test]
     fn branding_defaults_and_overrides() {
         // Unset → the default name, no logo.
-        let config = ConfigFile::parse(&minimal()).unwrap().resolve().unwrap();
+        let config = ConfigFile::parse_fixture(&minimal()).unwrap().resolve().unwrap();
         assert_eq!(config.branding.text, DEFAULT_BRANDING);
         assert!(config.branding.logo.is_none());
 
@@ -2895,12 +3057,12 @@ mod tests {
             name = "one"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "192.0.2.10"
             "#,
             site_passwd_line()
         );
-        let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
+        let config = ConfigFile::parse_fixture(&toml).unwrap().resolve().unwrap();
         assert_eq!(config.branding.text, "Acme Remote");
         let logo = config.branding.logo.expect("the logo was configured");
         let LogoSource::File(path) = &logo.source else {
@@ -2911,7 +3073,7 @@ mod tests {
 
         // Whitespace-only → falls back to the default.
         let toml = toml.replace("  Acme Remote  ", "   ");
-        let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
+        let config = ConfigFile::parse_fixture(&toml).unwrap().resolve().unwrap();
         assert_eq!(config.branding.text, DEFAULT_BRANDING);
     }
 
@@ -2920,7 +3082,7 @@ mod tests {
     #[test]
     fn the_old_branding_string_is_refused() {
         let toml = format!("branding = \"remotex\"\n{}", minimal());
-        let err = ConfigFile::parse(&toml).expect_err("a string is not a [branding] table");
+        let err = ConfigFile::parse_fixture(&toml).expect_err("a string is not a [branding] table");
         assert!(format!("{err:#}").contains("branding"), "{err:#}");
     }
 
@@ -2931,7 +3093,7 @@ mod tests {
         let state = Path::new("/var/lib/remotex");
         let meter = |table: &str| {
             let toml = format!("{table}\n{}", minimal());
-            ConfigFile::parse(&toml).unwrap().resolve_with(None, state, Path::new("")).unwrap().meter
+            ConfigFile::parse_fixture(&toml).unwrap().resolve_with(None, state, Path::new("")).unwrap().meter
         };
         assert_eq!(meter(""), None, "no [meter] records nothing");
         assert_eq!(
@@ -2960,7 +3122,7 @@ mod tests {
 
         assert_eq!(meter("[meter]\nenabled = true\nmax_records = 12").unwrap().max_records, 12);
         assert!(
-            ConfigFile::parse(&format!(
+            ConfigFile::parse_fixture(&format!(
                 "[meter]\nenabled = true\ninterval_secs = 60\n{}",
                 minimal()
             ))
@@ -2979,7 +3141,7 @@ mod tests {
         let data = dir.path();
         let archive = |table: &str| {
             let toml = format!("{table}\n{}", minimal());
-            ConfigFile::parse(&toml)
+            ConfigFile::parse_fixture(&toml)
                 .unwrap()
                 .resolve_with(None, Path::new("/var/lib/remotex"), data)
                 .unwrap()
@@ -3004,7 +3166,7 @@ mod tests {
             ("enabled = true\narchive = \"h.tar.gz\"", "enabled"),
             ("archive = \"h.tar.gz\"\ndir = \"/opt/hevc\"", "dir"),
         ] {
-            let err = ConfigFile::parse(&format!("[hevc_wasm]\n{bad}\n{}", minimal()))
+            let err = ConfigFile::parse_fixture(&format!("[hevc_wasm]\n{bad}\n{}", minimal()))
                 .expect_err(bad);
             assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
         }
@@ -3017,8 +3179,8 @@ mod tests {
     fn a_page_takes_a_macs_picture_in_its_own_decoder_where_the_gateway_serves_it() {
         let target = |keys: &str| parse_target(keys).unwrap().targets.remove(0);
         let auto = target("");
-        let mac = ConfigFile::parse(&vnc_toml(
-            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n",
+        let mac = ConfigFile::parse_fixture(&vnc_toml(
+            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword_ref = \"h\"\n",
         ))
         .unwrap()
         .targets
@@ -3042,9 +3204,9 @@ mod tests {
     #[test]
     fn neither_a_chroma_nor_a_vp9_decoder_switch_is_configured() {
         assert!(parse_target("render_chroma = \"444\"").is_err());
-        assert!(ConfigFile::parse(&format!("[vp9_wasm]\nenabled = true\n{}", minimal())).is_err());
+        assert!(ConfigFile::parse_fixture(&format!("[vp9_wasm]\nenabled = true\n{}", minimal())).is_err());
         // Nor where a High Performance Mac's decoder is: the gateway has none.
-        assert!(ConfigFile::parse(&format!("[hp_decoders]\nffmpeg_dir = \"/opt/ffmpeg\"\n{}", minimal())).is_err());
+        assert!(ConfigFile::parse_fixture(&format!("[hp_decoders]\nffmpeg_dir = \"/opt/ffmpeg\"\n{}", minimal())).is_err());
     }
 
     /// The keys are checked as written, enabled or not: a disabled table is still a
@@ -3061,7 +3223,7 @@ mod tests {
             ("enabled = true\ndatabase = \"u.sqlite3\"\nmax_count = 3", "max_count"),
         ] {
             let toml = format!("[meter]\n{bad}\n{}", minimal());
-            let err = ConfigFile::parse(&toml).expect_err(bad);
+            let err = ConfigFile::parse_fixture(&toml).expect_err(bad);
             assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
         }
     }
@@ -3073,14 +3235,14 @@ mod tests {
     fn a_logo_that_is_not_an_image_is_refused() {
         for bad in ["logo = \"/etc/remotex/logo.pdf\"", "logo = \"/etc/remotex/logo\""] {
             let toml = format!("[branding]\n{bad}\n{}", minimal());
-            let err = ConfigFile::parse(&toml)
+            let err = ConfigFile::parse_fixture(&toml)
                 .and_then(ConfigFile::resolve)
                 .expect_err("not a favicon format");
             assert!(format!("{err:#}").contains("[branding].logo"), "{err:#}");
         }
         // Case does not decide it: .PNG is the same file format.
         let toml = format!("[branding]\nlogo = \"C:/logo.PNG\"\n{}", minimal());
-        let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
+        let config = ConfigFile::parse_fixture(&toml).unwrap().resolve().unwrap();
         assert_eq!(config.branding.logo.unwrap().mime, "image/png");
     }
 
@@ -3103,7 +3265,7 @@ mod tests {
         // a multi-line string's newlines, so the payload arrives with them in it.
         let wrapped = PNG_DATA_URL.replace("base64,", "base64,\n").replace("AAAA", "AAAA\n  ");
         let toml = format!("[branding]\nlogo = \"\"\"\n{wrapped}\n\"\"\"\n{}", minimal());
-        let config = ConfigFile::parse(&toml).unwrap().resolve().unwrap();
+        let config = ConfigFile::parse_fixture(&toml).unwrap().resolve().unwrap();
         let Some(Logo { source: LogoSource::Inline(from_file), mime }) = config.branding.logo
         else {
             panic!("the wrapped data: URL is the same image");
@@ -3148,7 +3310,7 @@ mod tests {
 
     #[test]
     fn full_config_parses() {
-        let config = ConfigFile::parse(&format!(
+        let config = ConfigFile::parse_fixture(&format!(
             r#"
             [server]
             listen = "0.0.0.0:8080"
@@ -3160,7 +3322,7 @@ mod tests {
             host = "10.0.0.2"
             port = 3390
             username = "Administrator"
-            password = "hunter2"
+            password_ref = "hunter2"
             domain = "CORP"
             size = "1920x1080"
 
@@ -3194,16 +3356,16 @@ mod tests {
             name = "one"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "192.0.2.10"
         "#;
-        let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
+        let err = ConfigFile::parse_fixture(toml).unwrap().resolve().unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("site_passwd") && msg.contains("gen-passwd"), "{msg}");
 
         // Whitespace-only is as good as absent.
         let toml = format!("[server]\nsite_passwd = \"  \"\n{toml}");
-        let err = ConfigFile::parse(&toml).unwrap().resolve().unwrap_err();
+        let err = ConfigFile::parse_fixture(&toml).unwrap().resolve().unwrap_err();
         assert!(format!("{err:#}").contains("site_passwd"), "{err:#}");
     }
 
@@ -3217,33 +3379,33 @@ mod tests {
             name = "one"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "192.0.2.10"
         "#;
-        let err = ConfigFile::parse(toml).unwrap().resolve().unwrap_err();
+        let err = ConfigFile::parse_fixture(toml).unwrap().resolve().unwrap_err();
         assert!(format!("{err:#}").contains("username:bcrypt_hash"), "{err:#}");
     }
 
     #[test]
     fn no_targets_is_rejected() {
-        assert!(ConfigFile::parse("[server]\nport = 1").is_err());
+        assert!(ConfigFile::parse_fixture("[server]\nport = 1").is_err());
     }
 
     #[test]
     fn duplicate_target_names_are_rejected() {
-        let err = ConfigFile::parse(
+        let err = ConfigFile::parse_fixture(
             r#"
             [[targets]]
             name = "a"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "h1"
             [[targets]]
             name = "a"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "h2"
             "#,
         )
@@ -3254,13 +3416,13 @@ mod tests {
     #[test]
     fn typos_are_rejected() {
         // deny_unknown_fields: a misspelled key is an error, not silence.
-        let err = ConfigFile::parse(
+        let err = ConfigFile::parse_fixture(
             r#"
             [[targets]]
             name = "a"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "h"
             passwd = "oops"
             "#,
@@ -3269,16 +3431,16 @@ mod tests {
         assert!(format!("{err:#}").contains("passwd"), "{err:#}");
 
         // Same for the [server] block and the top level.
-        let err = ConfigFile::parse("[server]\nprot = 1").unwrap_err();
+        let err = ConfigFile::parse_fixture("[server]\nprot = 1").unwrap_err();
         assert!(format!("{err:#}").contains("prot"), "{err:#}");
-        let err = ConfigFile::parse("[srv]\nport = 1").unwrap_err();
+        let err = ConfigFile::parse_fixture("[srv]\nport = 1").unwrap_err();
         assert!(format!("{err:#}").contains("srv"), "{err:#}");
     }
 
     #[test]
     fn missing_protocol_is_rejected() {
         // No default protocol: every target must say what it speaks.
-        let err = ConfigFile::parse(
+        let err = ConfigFile::parse_fixture(
             r#"
             [[targets]]
             name = "a"
@@ -3291,7 +3453,7 @@ mod tests {
 
     #[test]
     fn unknown_protocol_is_rejected() {
-        let err = ConfigFile::parse(
+        let err = ConfigFile::parse_fixture(
             r#"
             [[targets]]
             name = "a"
@@ -3361,11 +3523,11 @@ mod tests {
     #[test]
     fn a_card_describes_the_picture() {
         assert_eq!(parse_target("video_quality = 60").unwrap().targets[0].render_summary(), "tiles q60");
-        let plain = &ConfigFile::parse(&vnc_toml("video_quality = 60")).unwrap().targets[0];
+        let plain = &ConfigFile::parse_fixture(&vnc_toml("video_quality = 60")).unwrap().targets[0];
         assert_eq!(plain.render_summary(), "tiles q60");
         assert_eq!(plain.render_plan(Choices::default(), Decoders::ALL).describe(), "tiles q60");
         let wlshare = |extra: &str| {
-            ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 60\n{extra}"))).unwrap().targets.remove(0)
+            ConfigFile::parse_fixture(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 60\n{extra}"))).unwrap().targets.remove(0)
         };
         assert_eq!(wlshare("").render_summary(), "VP9 q60 · 4:4:4 · adaptive, or tiles with motion q60 · 4:2:0");
         assert_eq!(wlshare("render_adaptive = false").render_summary(), "VP9 q60 · 4:4:4, or tiles with motion q60 · 4:2:0");
@@ -3378,14 +3540,14 @@ mod tests {
     fn the_chroma_follows_the_target_and_the_browser() {
         use crate::vp9::Chroma;
         let no_444 = Decoders { vp9_444: false, ..Decoders::ALL };
-        let plain = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        let plain = &ConfigFile::parse_fixture(&vnc_toml("")).unwrap().targets[0];
         let rdp = &parse_target("").unwrap().targets[0];
         for target in [plain, rdp] {
             for decoders in [Decoders::ALL, no_444] {
                 assert_eq!(target.render_plan(Choices::default(), decoders).chroma, Chroma::Yuv420, "{:?} {decoders:?}", target.protocol);
             }
         }
-        let wlshare = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"")).unwrap().targets[0];
+        let wlshare = &ConfigFile::parse_fixture(&vnc_toml("subtype = \"wlshare\"")).unwrap().targets[0];
         assert_eq!(wlshare.render_plan(Choices::default(), Decoders::ALL).chroma, Chroma::Yuv444);
         assert_eq!(wlshare.render_plan(Choices::default(), no_444).chroma, Chroma::Yuv420);
         assert!(wlshare.render_plan(Choices::default(), Decoders::ALL).describe().contains(" · 4:4:4 · "));
@@ -3397,7 +3559,7 @@ mod tests {
     // is a typo, not a supported knob.
     #[test]
     fn a_target_cannot_declare_the_remote_os() {
-        let err = ConfigFile::parse(
+        let err = ConfigFile::parse_fixture(
             r#"
             [[targets]]
             name = "a"
@@ -3412,7 +3574,7 @@ mod tests {
 
     #[test]
     fn vnc_target_gets_the_vnc_default_port() {
-        let config = ConfigFile::parse(&format!(
+        let config = ConfigFile::parse_fixture(&format!(
             r#"
             [server]
             {}
@@ -3421,7 +3583,7 @@ mod tests {
             name = "mac"
             protocol = "vnc"
             host = "10.0.0.4"
-            vnc_password = "hunter2"
+            vnc_password_ref = "hunter2"
             "#,
             site_passwd_line()
         ))
@@ -3432,7 +3594,7 @@ mod tests {
         assert_eq!(config.targets[0].port, 5900);
 
         // An explicit port wins over the protocol default.
-        let config = ConfigFile::parse(&format!(
+        let config = ConfigFile::parse_fixture(&format!(
             r#"
             [server]
             {}
@@ -3462,7 +3624,7 @@ mod tests {
             name = "win"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "192.0.2.10"
             {extra}
             "#,
@@ -3495,39 +3657,63 @@ mod tests {
     /// because no security type takes a name without a password.
     #[test]
     fn a_plain_vnc_target_takes_an_account_or_the_servers_own_password() {
-        let err = ConfigFile::parse(&vnc_toml(r#"username = "andrew""#)).unwrap_err();
+        let err = ConfigFile::parse_fixture(&vnc_toml(r#"username = "andrew""#)).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("username without password") && msg.contains("RSA-AES"), "{msg}");
+        assert!(msg.contains("username without password_ref") && msg.contains("RSA-AES"), "{msg}");
 
-        let account = ConfigFile::parse(&vnc_toml("username = \"andrew\"\npassword = \"hunter2\""))
+        let account = ConfigFile::parse_fixture(&vnc_toml("username = \"andrew\"\npassword_ref = \"hunter2\""))
             .unwrap();
         assert_eq!(account.targets[0].username, "andrew");
-        assert_eq!(account.targets[0].password, "hunter2");
+        assert_eq!(account.targets[0].password_ref.as_deref(), Some("hunter2"));
         assert!(account.targets[0].subtype.is_none());
         // A password alone is an RSA-AES server that asks for no name.
-        assert!(ConfigFile::parse(&vnc_toml(r#"password = "hunter2""#)).is_ok());
+        assert!(ConfigFile::parse_fixture(&vnc_toml(r#"password_ref = "hunter2""#)).is_ok());
         // Both credentials at once leave the choice to the server's offer.
-        let both = ConfigFile::parse(&vnc_toml(
-            "username = \"andrew\"\npassword = \"hunter2\"\nvnc_password = \"secret\"",
+        let both = ConfigFile::parse_fixture(&vnc_toml(
+            "username = \"andrew\"\npassword_ref = \"hunter2\"\nvnc_password_ref = \"secret\"",
         ))
         .unwrap();
-        assert_eq!(both.targets[0].vnc_password, "secret");
+        assert_eq!(both.targets[0].vnc_password_ref.as_deref(), Some("secret"));
 
         // A plain target takes the server's own password, and nothing at all is
         // still a target: a VNC server may need no credential whatsoever.
-        let plain = ConfigFile::parse(&vnc_toml(r#"vnc_password = "hunter2""#)).unwrap();
-        assert_eq!(plain.targets[0].vnc_password, "hunter2");
+        let plain = ConfigFile::parse_fixture(&vnc_toml(r#"vnc_password_ref = "hunter2""#)).unwrap();
+        assert_eq!(plain.targets[0].vnc_password_ref.as_deref(), Some("hunter2"));
         assert!(plain.targets[0].subtype.is_none());
-        assert!(ConfigFile::parse(&vnc_toml("")).is_ok());
+        assert!(ConfigFile::parse_fixture(&vnc_toml("")).is_ok());
+    }
+
+    /// A password is named, never written: the old inline keys are unknown, a name
+    /// `[passwords]` lacks is refused with the command that adds it, a value that
+    /// was typed in rather than encrypted is refused by its shape, and `[passwords]`
+    /// without `[master]` has nothing to open it.
+    #[test]
+    fn a_target_names_its_password_in_the_vault() {
+        for inline in [r#"password = "hunter2""#, r#"vnc_password = "hunter2""#] {
+            let err = ConfigFile::parse(&vnc_toml(inline)).unwrap_err();
+            assert!(format!("{err:#}").contains("unknown field"), "{inline}: {err:#}");
+        }
+        let err = ConfigFile::parse(&vnc_toml(r#"vnc_password_ref = "pi""#)).unwrap_err();
+        assert!(format!("{err:#}").contains("remotex password set pi"), "{err:#}");
+
+        let vaulted = vaulted(&vnc_toml(r#"vnc_password_ref = "pi""#));
+        let typed = vaulted.replace(&format!("pi = \"{}", crate::vault::PREFIX), "pi = \"");
+        let err = ConfigFile::parse(&typed).unwrap_err();
+        assert!(format!("{err:#}").contains("not an encrypted value"), "{err:#}");
+
+        let (no_master, _) = vaulted.split_once("[master]").unwrap();
+        let orphaned = format!("{no_master}[passwords]\npi = \"{}{}\"\n", crate::vault::PREFIX, "A".repeat(40));
+        let err = ConfigFile::parse(&orphaned).unwrap_err();
+        assert!(format!("{err:#}").contains("no [master]"), "{err:#}");
     }
 
     /// `ard` is a declaration about the far end, so it comes with the credentials
     /// that declaration implies and refuses the ones it does not use.
     #[test]
     fn the_ard_subtype_wants_an_account_and_nothing_else() {
-        let ard = |extra: &str| ConfigFile::parse(&vnc_toml(&format!("subtype = \"ard\"\n{extra}")));
+        let ard = |extra: &str| ConfigFile::parse_fixture(&vnc_toml(&format!("subtype = \"ard\"\n{extra}")));
 
-        let target = &ard("username = \"andrew\"\npassword = \"hunter2\"")
+        let target = &ard("username = \"andrew\"\npassword_ref = \"hunter2\"")
             .unwrap()
             .targets[0];
         assert_eq!(target.subtype, Some(Subtype::Ard));
@@ -3538,14 +3724,14 @@ mod tests {
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
 
         // The machine's own password has no part in it.
-        let err = ard("username = \"andrew\"\npassword = \"h\"\nvnc_password = \"other\"")
+        let err = ard("username = \"andrew\"\npassword_ref = \"h\"\nvnc_password_ref = \"other\"")
             .unwrap_err();
         assert!(format!("{err:#}").contains("sets vnc_password"), "{err:#}");
 
         // Standard mode exposes physical displays, which this gateway never resizes,
         // and never touches the Mac's sound: the picker offers its picture alone,
         // the tiles of the Mac's Full quality or its Adaptive picture passed.
-        let standard = &ard("username = \"andrew\"\npassword = \"h\"").unwrap().targets[0];
+        let standard = &ard("username = \"andrew\"\npassword_ref = \"h\"").unwrap().targets[0];
         assert_eq!(
             standard.offers(),
             Offers {
@@ -3561,7 +3747,7 @@ mod tests {
         );
 
         // And it is a VNC subtype only.
-        let err = ConfigFile::parse(&format!(
+        let err = ConfigFile::parse_fixture(&format!(
             r#"
             [server]
             {}
@@ -3572,7 +3758,7 @@ mod tests {
             host = "10.0.0.5"
             subtype = "ard"
             username = "Administrator"
-            password = "hunter2"
+            password_ref = "hunter2"
             "#,
             site_passwd_line()
         ))
@@ -3587,8 +3773,8 @@ mod tests {
     #[test]
     fn ard_opens_a_virtual_display_only_when_asked() {
         let ard = |extra: &str| {
-            ConfigFile::parse(&vnc_toml(&format!(
-                "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
+            ConfigFile::parse_fixture(&vnc_toml(&format!(
+                "subtype = \"ard\"\nusername = \"andrew\"\npassword_ref = \"h\"\n{extra}"
             )))
         };
 
@@ -3626,17 +3812,17 @@ mod tests {
         // The key says nothing on High Performance, and nothing else has a virtual
         // display to open.
         let refused = [
-            ("subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n", "always opens a virtual display"),
+            ("subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword_ref = \"h\"\n", "always opens a virtual display"),
             ("", "only subtype \"ard\" takes"),
         ];
         for (subtype, reason) in refused {
-            let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}virtual_display = true")))
+            let err = ConfigFile::parse_fixture(&vnc_toml(&format!("{subtype}virtual_display = true")))
                 .unwrap_err();
             assert!(format!("{err:#}").contains(reason), "{err:#}");
         }
-        let err = ConfigFile::parse(&format!(
+        let err = ConfigFile::parse_fixture(&format!(
             "[server]\n{}\n\n[[targets]]\nname = \"pc\"\nprotocol = \"rdp\"\nhost = \"10.0.0.5\"\n\
-             username = \"Administrator\"\npassword = \"h\"\nvirtual_display = true\n",
+             username = \"Administrator\"\npassword_ref = \"h\"\nvirtual_display = true\n",
             site_passwd_line()
         ))
         .unwrap_err();
@@ -3648,8 +3834,8 @@ mod tests {
     #[test]
     fn the_high_performance_subtype_offers_resize() {
         let hp = |extra: &str| {
-            ConfigFile::parse(&vnc_toml(&format!(
-                "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
+            ConfigFile::parse_fixture(&vnc_toml(&format!(
+                "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword_ref = \"h\"\n{extra}"
             )))
         };
 
@@ -3662,8 +3848,8 @@ mod tests {
         assert_eq!(target.subtype.unwrap().name(), "ard-high-performance");
 
         // The credential rules are the ones `ard` has, shared rather than restated.
-        let err = ConfigFile::parse(&vnc_toml(
-            "subtype = \"ard-high-performance\"\nvnc_password = \"other\"",
+        let err = ConfigFile::parse_fixture(&vnc_toml(
+            "subtype = \"ard-high-performance\"\nvnc_password_ref = \"other\"",
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
@@ -3675,7 +3861,7 @@ mod tests {
     /// the tiles, on one screen at a time and on Combined Display alike.
     #[test]
     fn a_standard_session_is_the_tiles_unless_the_macs_adaptive_picture_is_chosen() {
-        let standard = ConfigFile::parse(&vnc_toml("subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\n"))
+        let standard = ConfigFile::parse_fixture(&vnc_toml("subtype = \"ard\"\nusername = \"andrew\"\npassword_ref = \"h\"\n"))
             .unwrap()
             .targets
             .remove(0);
@@ -3721,7 +3907,7 @@ mod tests {
         );
 
         // No other target has a Standard quality.
-        let plain = ConfigFile::parse(&vnc_toml("")).unwrap().targets.remove(0);
+        let plain = ConfigFile::parse_fixture(&vnc_toml("")).unwrap().targets.remove(0);
         assert!(!plain.standard_mode());
         assert_eq!(plain.render_plan(Choices::default(), none).apple_standard, None);
     }
@@ -3734,8 +3920,8 @@ mod tests {
     #[test]
     fn a_high_performance_session_passes_the_macs_stream_where_it_was_chosen() {
         let mac = |subtype: &str| {
-            ConfigFile::parse(&vnc_toml(&format!(
-                "subtype = \"{subtype}\"\nusername = \"andrew\"\npassword = \"h\"\n"
+            ConfigFile::parse_fixture(&vnc_toml(&format!(
+                "subtype = \"{subtype}\"\nusername = \"andrew\"\npassword_ref = \"h\"\n"
             )))
             .unwrap()
             .targets
@@ -3821,7 +4007,7 @@ mod tests {
 
         // The four keys these choices replaced are no longer keys.
         for key in ["resize = true", "audio = true", "media_passthrough = true", "egfx_passthrough = true"] {
-            let err = ConfigFile::parse(&vnc_toml(key)).unwrap_err();
+            let err = ConfigFile::parse_fixture(&vnc_toml(key)).unwrap_err();
             assert!(format!("{err:#}").contains("unknown field"), "{key}: {err:#}");
         }
     }
@@ -3834,9 +4020,9 @@ mod tests {
         let screen = HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
         let phone = HostDisplay { w: 430, h: 932, scale: 300, fit: true };
 
-        let sized = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nsize = \"1600x1000\"")).unwrap().targets[0];
+        let sized = &ConfigFile::parse_fixture(&vnc_toml("subtype = \"wlshare\"\nsize = \"1600x1000\"")).unwrap().targets[0];
         assert_eq!(sized.kept_size(), (1600, 1000));
-        let unsized_ = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"")).unwrap().targets[0];
+        let unsized_ = &ConfigFile::parse_fixture(&vnc_toml("subtype = \"wlshare\"")).unwrap().targets[0];
         assert_eq!(unsized_.kept_size(), DEFAULT_SIZE);
 
         for display in [Some(screen), Some(phone), None] {
@@ -3861,11 +4047,11 @@ mod tests {
     #[test]
     fn a_size_is_written_as_a_width_by_a_height() {
         for wrong in ["1600", "1600x", "x1000", "1600 x 1000", "1600X1000", "1600x1000x2", "70000x1000"] {
-            let err = ConfigFile::parse(&vnc_toml(&format!("size = \"{wrong}\""))).unwrap_err();
+            let err = ConfigFile::parse_fixture(&vnc_toml(&format!("size = \"{wrong}\""))).unwrap_err();
             assert!(format!("{err:#}").contains("is not a width by a height"), "{wrong}: {err:#}");
         }
         for key in ["width = 1600", "height = 1000", "size = 1600"] {
-            ConfigFile::parse(&vnc_toml(key)).expect_err(key);
+            ConfigFile::parse_fixture(&vnc_toml(key)).expect_err(key);
         }
     }
 
@@ -3873,16 +4059,16 @@ mod tests {
     /// one a 2x client's display can hold.
     #[test]
     fn a_size_a_retina_client_would_shrink_is_refused_on_a_virtual_display() {
-        let hp = "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n";
-        let virt = "subtype = \"ard\"\nvirtual_display = true\nusername = \"andrew\"\npassword = \"h\"\n";
+        let hp = "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword_ref = \"h\"\n";
+        let virt = "subtype = \"ard\"\nvirtual_display = true\nusername = \"andrew\"\npassword_ref = \"h\"\n";
         for mac in [hp, virt] {
-            ConfigFile::parse(&vnc_toml(&format!("{mac}size = \"1920x1080\""))).expect("the most it holds at 2x");
+            ConfigFile::parse_fixture(&vnc_toml(&format!("{mac}size = \"1920x1080\""))).expect("the most it holds at 2x");
             for over in ["2560x1440", "1921x1080", "1920x1200"] {
-                let err = ConfigFile::parse(&vnc_toml(&format!("{mac}size = \"{over}\""))).unwrap_err();
+                let err = ConfigFile::parse_fixture(&vnc_toml(&format!("{mac}size = \"{over}\""))).unwrap_err();
                 assert!(format!("{err:#}").contains("at most 1920x1080"), "{err:#}");
             }
         }
-        ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nsize = \"2560x1440\""))
+        ConfigFile::parse_fixture(&vnc_toml("subtype = \"wlshare\"\nsize = \"2560x1440\""))
             .expect("no ceiling of points elsewhere");
     }
 
@@ -3890,13 +4076,13 @@ mod tests {
     /// would never be stated.
     #[test]
     fn a_size_is_refused_on_a_mac_sharing_its_physical_displays() {
-        let ard = "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\n";
-        let standard = &ConfigFile::parse(&vnc_toml(ard)).unwrap().targets[0];
+        let ard = "subtype = \"ard\"\nusername = \"andrew\"\npassword_ref = \"h\"\n";
+        let standard = &ConfigFile::parse_fixture(&vnc_toml(ard)).unwrap().targets[0];
         assert!(!standard.sized());
-        let err = ConfigFile::parse(&vnc_toml(&format!("{ard}size = \"1600x1000\""))).unwrap_err();
+        let err = ConfigFile::parse_fixture(&vnc_toml(&format!("{ard}size = \"1600x1000\""))).unwrap_err();
         assert!(format!("{err:#}").contains("never sizes them"), "{err:#}");
         let virtual_display =
-            &ConfigFile::parse(&vnc_toml(&format!("{ard}virtual_display = true\nsize = \"1600x1000\"")))
+            &ConfigFile::parse_fixture(&vnc_toml(&format!("{ard}virtual_display = true\nsize = \"1600x1000\"")))
                 .unwrap()
                 .targets[0];
         assert!(virtual_display.sized());
@@ -3906,11 +4092,11 @@ mod tests {
     /// never be stated either.
     #[test]
     fn a_size_is_refused_on_a_plain_vnc_target() {
-        let plain = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        let plain = &ConfigFile::parse_fixture(&vnc_toml("")).unwrap().targets[0];
         assert!(!plain.sized());
-        let err = ConfigFile::parse(&vnc_toml("size = \"1600x1000\"")).unwrap_err();
+        let err = ConfigFile::parse_fixture(&vnc_toml("size = \"1600x1000\"")).unwrap_err();
         assert!(format!("{err:#}").contains("own size and never sizes it"), "{err:#}");
-        let wlshare = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"\nsize = \"1600x1000\"")).unwrap().targets[0];
+        let wlshare = &ConfigFile::parse_fixture(&vnc_toml("subtype = \"wlshare\"\nsize = \"1600x1000\"")).unwrap().targets[0];
         assert!(wlshare.sized());
     }
 
@@ -3920,14 +4106,14 @@ mod tests {
     /// the browser composes the span once and shows a display of it.
     #[test]
     fn virtual_displays_are_one_unless_asked_and_only_where_they_are_created() {
-        let one = ConfigFile::parse(&rdp_toml("")).unwrap().targets.remove(0);
+        let one = ConfigFile::parse_fixture(&rdp_toml("")).unwrap().targets.remove(0);
         assert_eq!(one.virtual_displays, 1);
         assert_eq!(one.offers().passthrough, [Passthrough::RdpGraphics]);
 
-        let two = ConfigFile::parse(&rdp_toml("virtual_displays = 2")).unwrap().targets.remove(0);
+        let two = ConfigFile::parse_fixture(&rdp_toml("virtual_displays = 2")).unwrap().targets.remove(0);
         assert_eq!(two.virtual_displays, 2);
         // Two displays are passed, never encoded: the bitmap path is one.
-        let err = ConfigFile::parse(&rdp_toml("virtual_displays = 2\negfx = false")).unwrap_err();
+        let err = ConfigFile::parse_fixture(&rdp_toml("virtual_displays = 2\negfx = false")).unwrap_err();
         assert!(format!("{err:#}").contains("never encoded here"), "{err:#}");
         assert_eq!(two.offers().passthrough, [Passthrough::RdpGraphics], "the passthrough shows one display of the span");
         assert!(two.offers().resize, "the window still drives each display's size");
@@ -3939,20 +4125,20 @@ mod tests {
         assert_eq!(one.accepts(below).unwrap_err().choice, "a place for the second display");
 
         for bad in ["virtual_displays = 0", "virtual_displays = 3"] {
-            let err = ConfigFile::parse(&rdp_toml(bad)).unwrap_err();
+            let err = ConfigFile::parse_fixture(&rdp_toml(bad)).unwrap_err();
             assert!(format!("{err:#}").contains("must be 1 to 2"), "{bad}: {err:#}");
         }
-        let err = ConfigFile::parse(&vnc_toml("virtual_displays = 2
-vnc_password = \"x\"")).unwrap_err();
+        let err = ConfigFile::parse_fixture(&vnc_toml("virtual_displays = 2
+vnc_password_ref = \"x\"")).unwrap_err();
         assert!(format!("{err:#}").contains("lays out more than one virtual display"), "{err:#}");
         // Standard mode's unofficial virtual display is one.
-        let err = ConfigFile::parse(&vnc_toml(
-            "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\nvirtual_display = true\nvirtual_displays = 2",
+        let err = ConfigFile::parse_fixture(&vnc_toml(
+            "subtype = \"ard\"\nusername = \"andrew\"\npassword_ref = \"h\"\nvirtual_display = true\nvirtual_displays = 2",
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("lays out more than one virtual display"), "{err:#}");
-        let mac = ConfigFile::parse(&vnc_toml(
-            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\nvirtual_displays = 2",
+        let mac = ConfigFile::parse_fixture(&vnc_toml(
+            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword_ref = \"h\"\nvirtual_displays = 2",
         ))
         .unwrap()
         .targets
@@ -3961,8 +4147,8 @@ vnc_password = \"x\"")).unwrap_err();
         assert!(mac.accepts(below).is_err());
         assert!(mac.offers().passthrough.contains(&Passthrough::AppleMedia), "each display is a stream of its own");
         // One is every target's default and so is accepted anywhere.
-        ConfigFile::parse(&vnc_toml("virtual_displays = 1
-vnc_password = \"x\"")).unwrap();
+        ConfigFile::parse_fixture(&vnc_toml("virtual_displays = 1
+vnc_password_ref = \"x\"")).unwrap();
     }
 
     /// Which sizings a target takes: following a window where the window can drive
@@ -3974,14 +4160,14 @@ vnc_password = \"x\"")).unwrap();
         let refused = |choice| Err(NotOffered { target: "mac".to_owned(), choice });
 
         // A plain target is shown at its server's own size and never follows a window.
-        let plain = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        let plain = &ConfigFile::parse_fixture(&vnc_toml("")).unwrap().targets[0];
         assert!(!plain.offers().resize);
         assert_eq!(plain.accepts(Choices::default()), Ok(()));
         assert_eq!(plain.accepts(window), refused("resize"));
         assert_eq!(plain.accepts(built_in), refused("the default size"));
 
         let wlshare = |extra: &str| {
-            ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\n{extra}"))).unwrap().targets.remove(0)
+            ConfigFile::parse_fixture(&vnc_toml(&format!("subtype = \"wlshare\"\n{extra}"))).unwrap().targets.remove(0)
         };
         let sized = wlshare("size = \"1600x1000\"");
         for choices in [Choices::default(), window, built_in] {
@@ -3997,19 +4183,19 @@ vnc_password = \"x\"")).unwrap();
     /// at 1x. The ceiling is the stream's, so the bitmap path takes the size.
     #[test]
     fn a_size_over_the_video_ceiling_is_refused_where_the_picture_is_a_stream() {
-        let err = ConfigFile::parse(&rdp_toml("size = \"5120x2880\""))
+        let err = ConfigFile::parse_fixture(&rdp_toml("size = \"5120x2880\""))
             .expect_err("a 5K size parsed");
         assert!(format!("{err:#}").contains("3840"), "{err:#}");
         for size in ["size = \"3840x2400\"", "size = \"2400x3840\""] {
-            ConfigFile::parse(&rdp_toml(size))
+            ConfigFile::parse_fixture(&rdp_toml(size))
                 .expect("a 4K size, either way up, is a picture the stream takes");
         }
-        ConfigFile::parse(&rdp_toml("size = \"5120x2880\"\negfx = false"))
+        ConfigFile::parse_fixture(&rdp_toml("size = \"5120x2880\"\negfx = false"))
             .expect("the bitmap path's tiles have no ceiling");
         // Up to what a Windows host opens, 8192 a side, which it would clamp a
         // larger size to: a desktop the operator did not configure.
-        ConfigFile::parse(&rdp_toml("size = \"8192x8192\"\negfx = false")).expect("the host's own most");
-        let err = ConfigFile::parse(&rdp_toml("size = \"8194x4000\"\negfx = false"))
+        ConfigFile::parse_fixture(&rdp_toml("size = \"8192x8192\"\negfx = false")).expect("the host's own most");
+        let err = ConfigFile::parse_fixture(&rdp_toml("size = \"8194x4000\"\negfx = false"))
             .expect_err("a side past the host's most parsed");
         assert!(format!("{err:#}").contains("8192"), "{err:#}");
     }
@@ -4019,16 +4205,16 @@ vnc_password = \"x\"")).unwrap();
     /// display at it; any other target takes either as it is.
     #[test]
     fn a_mac_is_not_sized_under_its_own_clients_smallest_window() {
-        let hp = "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n";
+        let hp = "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword_ref = \"h\"\n";
         for size in ["640x480", "800x599", "799x600"] {
-            let err = ConfigFile::parse(&vnc_toml(&format!("{hp}size = \"{size}\""))).unwrap_err();
+            let err = ConfigFile::parse_fixture(&vnc_toml(&format!("{hp}size = \"{size}\""))).unwrap_err();
             assert!(format!("{err:#}").contains("800x600"), "{err:#}");
-            ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nsize = \"{size}\"")))
+            ConfigFile::parse_fixture(&vnc_toml(&format!("subtype = \"wlshare\"\nsize = \"{size}\"")))
                 .expect("a wlshare target takes it");
         }
-        let mac = &ConfigFile::parse(&vnc_toml(&format!("{hp}size = \"800x600\""))).unwrap().targets[0];
+        let mac = &ConfigFile::parse_fixture(&vnc_toml(&format!("{hp}size = \"800x600\""))).unwrap().targets[0];
         assert_eq!(mac.kept_size(), (800, 600));
-        let wlshare = &ConfigFile::parse(&vnc_toml("subtype = \"wlshare\"")).unwrap().targets[0];
+        let wlshare = &ConfigFile::parse_fixture(&vnc_toml("subtype = \"wlshare\"")).unwrap().targets[0];
         for (small, raised) in [((640, 480), (800, 600)), ((800, 599), (800, 600)), ((799, 900), (800, 900))] {
             let small = HostDisplay { w: small.0, h: small.1, scale: 100, fit: false };
             assert_eq!(mac.opening_size(Sizing::Window, Some(small)), raised, "raised side by side");
@@ -4045,10 +4231,10 @@ vnc_password = \"x\"")).unwrap();
     fn a_size_requires_nonzero_dimensions() {
         for size in ["size = \"0x1000\"", "size = \"1600x0\""] {
             let apple = APPLE_SUBTYPES.iter().map(|subtype| {
-                format!("subtype = \"{subtype}\"\nusername = \"andrew\"\npassword = \"h\"\n")
+                format!("subtype = \"{subtype}\"\nusername = \"andrew\"\npassword_ref = \"h\"\n")
             });
             for subtype in std::iter::once(String::new()).chain(apple) {
-                let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}{size}")))
+                let err = ConfigFile::parse_fixture(&vnc_toml(&format!("{subtype}{size}")))
                     .unwrap_err();
                 assert!(
                     format!("{err:#}").contains("width and height must both be greater than zero"),
@@ -4060,7 +4246,7 @@ vnc_password = \"x\"")).unwrap();
 
     #[test]
     fn a_vnc_password_on_a_non_vnc_target_is_rejected() {
-        let err = ConfigFile::parse(&format!(
+        let err = ConfigFile::parse_fixture(&format!(
             r#"
             [server]
             {}
@@ -4069,9 +4255,9 @@ vnc_password = \"x\"")).unwrap();
             name = "pc"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "10.0.0.5"
-            vnc_password = "hunter2"
+            vnc_password_ref = "hunter2"
             "#,
             site_passwd_line()
         ))
@@ -4084,8 +4270,8 @@ vnc_password = \"x\"")).unwrap();
     fn a_domain_on_a_vnc_target_is_rejected() {
         let apple = APPLE_SUBTYPES.iter().map(|subtype| format!("subtype = \"{subtype}\"\n"));
         for subtype in std::iter::once(String::new()).chain(apple) {
-            let err = ConfigFile::parse(&vnc_toml(&format!(
-                "{subtype}username = \"u\"\npassword = \"p\"\ndomain = \"CORP\""
+            let err = ConfigFile::parse_fixture(&vnc_toml(&format!(
+                "{subtype}username = \"u\"\npassword_ref = \"p\"\ndomain = \"CORP\""
             )))
             .unwrap_err();
             let msg = format!("{err:#}");
@@ -4097,8 +4283,8 @@ vnc_password = \"x\"")).unwrap();
     /// its credential could never connect and is refused up front.
     #[test]
     fn an_rdp_target_needs_username_and_password() {
-        for keys in ["", "username = \"u\"", "password = \"p\""] {
-            let err = ConfigFile::parse(&format!(
+        for keys in ["", "username = \"u\"", "password_ref = \"p\""] {
+            let err = ConfigFile::parse_fixture(&format!(
                 "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\n{keys}\n",
                 site_passwd_line()
             ))
@@ -4113,7 +4299,7 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn clipboard_is_not_a_target_key() {
         for (protocol, host) in [("vnc", "10.0.0.4"), ("rdp", "10.0.0.5")] {
-            let err = ConfigFile::parse(&format!(
+            let err = ConfigFile::parse_fixture(&format!(
                 r#"
                 [server]
                 {}
@@ -4123,7 +4309,7 @@ vnc_password = \"x\"")).unwrap();
                 protocol = "{protocol}"
                 host = "{host}"
                 username = "u"
-                password = "p"
+                password_ref = "p"
                 clipboard = true
                 "#,
                 site_passwd_line()
@@ -4140,7 +4326,7 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn sound_is_offered_by_rdp_and_wlshare() {
         let target = |body: &str| {
-            ConfigFile::parse(&format!(
+            ConfigFile::parse_fixture(&format!(
                 "[server]\n{}\n[[targets]]\nname = \"desk\"\nhost = \"10.0.0.5\"\n{body}\n",
                 site_passwd_line()
             ))
@@ -4172,7 +4358,7 @@ vnc_password = \"x\"")).unwrap();
         // An rdp target negotiates MS-RDPEA when it connects, and what the host
         // redirects is CD-quality PCM, which is the source format the encoder is
         // built from.
-        let rdp = target("protocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"");
+        let rdp = target("protocol = \"rdp\"\nusername = \"u\"\npassword_ref = \"p\"");
         assert!(rdp.offers().audio);
         assert!(rdp.sound(sound));
         assert!(!rdp.sound(Choices::default()));
@@ -4187,7 +4373,7 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn a_camera_and_a_microphone_are_offered_on_rdp_and_wlshare_alone() {
         let parse = |target: &str| {
-            ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
+            ConfigFile::parse_fixture(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
                 .and_then(|file| file.resolve())
                 .unwrap()
                 .targets
@@ -4195,7 +4381,7 @@ vnc_password = \"x\"")).unwrap();
         };
         let camera = Choices { camera: true, ..Choices::default() };
         let microphone = Choices { microphone: true, ..Choices::default() };
-        let win = parse("name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"");
+        let win = parse("name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword_ref = \"p\"\nhost = \"10.0.0.5\"");
         let desk = parse("name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"");
         for target in [&win, &desk] {
             let offers = target.offers();
@@ -4209,7 +4395,7 @@ vnc_password = \"x\"")).unwrap();
             .iter()
             .map(|subtype| {
                 parse(&format!(
-                    "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\nhost = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\""
+                    "name = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"{subtype}\"\nhost = \"10.0.0.5\"\nusername = \"andrew\"\npassword_ref = \"h\""
                 ))
             })
             .collect();
@@ -4231,7 +4417,7 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn egfx_belongs_to_rdp_and_is_refused_on_vnc() {
         for value in ["true", "false"] {
-            let err = ConfigFile::parse(&format!(
+            let err = ConfigFile::parse_fixture(&format!(
                 r#"
                 [server]
                 {}
@@ -4251,7 +4437,7 @@ vnc_password = \"x\"")).unwrap();
         }
 
         let parse = |value: &str| {
-            ConfigFile::parse(&format!(
+            ConfigFile::parse_fixture(&format!(
                 r#"
                 [server]
                 {}
@@ -4260,7 +4446,7 @@ vnc_password = \"x\"")).unwrap();
                 name = "win"
                 protocol = "rdp"
                 username = "u"
-                password = "p"
+                password_ref = "p"
                 host = "10.0.0.5"
                 egfx = {value}
                 "#,
@@ -4281,7 +4467,7 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn an_rdp_target_offers_its_pipeline_and_resize_while_the_pipeline_is_on() {
         let rdp = |extra: &str| {
-            ConfigFile::parse(&format!(
+            ConfigFile::parse_fixture(&format!(
                 r#"
                 [server]
                 {}
@@ -4290,7 +4476,7 @@ vnc_password = \"x\"")).unwrap();
                 name = "win"
                 protocol = "rdp"
                 username = "u"
-                password = "p"
+                password_ref = "p"
                 host = "10.0.0.5"
                 {extra}
                 "#,
@@ -4358,21 +4544,21 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn a_standard_mac_carries_no_sound() {
         let target = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\n\
-                      host = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\n";
-        let config = ConfigFile::parse(&format!("[server]\n{}\n{target}", site_passwd_line()))
+                      host = \"10.0.0.5\"\nusername = \"andrew\"\npassword_ref = \"h\"\n";
+        let config = ConfigFile::parse_fixture(&format!("[server]\n{}\n{target}", site_passwd_line()))
             .unwrap()
             .resolve()
             .unwrap();
         assert!(!config.targets[0].offers().audio);
         assert!(!config.targets[0].sound(Choices { audio: Sound::Opus, ..Choices::default() }));
 
-        let err = ConfigFile::parse(&format!("[server]\n{}\n{target}render_adaptive = false\n", site_passwd_line()))
+        let err = ConfigFile::parse_fixture(&format!("[server]\n{}\n{target}render_adaptive = false\n", site_passwd_line()))
             .unwrap_err();
         assert!(format!("{err:#}").contains("render_adaptive"), "{err:#}");
         // The quality of the tiles coded from the Mac's Full quality, on the
         // physical screens and on the unofficial virtual display alike.
         for extra in ["", "virtual_display = true\n"] {
-            let config = ConfigFile::parse(&format!("[server]\n{}\n{target}{extra}video_quality = 60\n", site_passwd_line()))
+            let config = ConfigFile::parse_fixture(&format!("[server]\n{}\n{target}{extra}video_quality = 60\n", site_passwd_line()))
                 .unwrap()
                 .resolve()
                 .unwrap();
@@ -4385,8 +4571,8 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn high_performance_carries_its_media_streams_sound() {
         let target = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\n\
-                      host = \"10.0.0.5\"\nusername = \"andrew\"\npassword = \"h\"\n";
-        let config = ConfigFile::parse(&format!("[server]\n{}\n{target}", site_passwd_line()))
+                      host = \"10.0.0.5\"\nusername = \"andrew\"\npassword_ref = \"h\"\n";
+        let config = ConfigFile::parse_fixture(&format!("[server]\n{}\n{target}", site_passwd_line()))
             .unwrap()
             .resolve()
             .unwrap();
@@ -4399,7 +4585,7 @@ vnc_password = \"x\"")).unwrap();
         // The picture is the Mac's HEVC or H.264, so the picture's keys have
         // nothing to tune.
         for key in ["video_quality = 60", "render_adaptive = false"] {
-            let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
+            let err = ConfigFile::parse_fixture(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");
             assert!(rendered.contains(key.split(' ').next().unwrap()), "{rendered}");
@@ -4411,8 +4597,8 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn the_audio_source_format_is_the_engines() {
         // The format is the protocol's, and is what the RDP client asks a host for.
-        let rdp = ConfigFile::parse(&format!(
-            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\n",
+        let rdp = ConfigFile::parse_fixture(&format!(
+            "[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword_ref = \"p\"\n",
             site_passwd_line()
         ))
         .unwrap()
@@ -4422,7 +4608,7 @@ vnc_password = \"x\"")).unwrap();
 
         // A wlshare target's is the format this client asks the extension
         // for, which is the same 48 kHz stereo and needs no resampling either.
-        let vnc = ConfigFile::parse(&format!(
+        let vnc = ConfigFile::parse_fixture(&format!(
             "[server]\n{}\n[[targets]]\nname = \"v\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"h\"\n",
             site_passwd_line()
         ))
@@ -4439,7 +4625,7 @@ vnc_password = \"x\"")).unwrap();
     /// One valid target body per test below, parameterized by the keys under test,
     /// on a target whose sessions can carry sound.
     fn parse_audio_target(body: &str) -> anyhow::Result<AppConfig> {
-        ConfigFile::parse(&format!(
+        ConfigFile::parse_fixture(&format!(
             r#"
             [server]
             {}
@@ -4459,7 +4645,7 @@ vnc_password = \"x\"")).unwrap();
     /// An RDP target on bitmap updates, whose picture is encoded here: the stream
     /// keys reach no other RDP target, whose pipeline is passed.
     fn parse_target(body: &str) -> anyhow::Result<AppConfig> {
-        ConfigFile::parse(&format!(
+        ConfigFile::parse_fixture(&format!(
             r#"
             [server]
             {}
@@ -4468,7 +4654,7 @@ vnc_password = \"x\"")).unwrap();
             name = "t"
             protocol = "rdp"
             username = "u"
-            password = "p"
+            password_ref = "p"
             host = "10.0.0.5"
             egfx = false
             {body}
@@ -4498,8 +4684,8 @@ vnc_password = \"x\"")).unwrap();
         assert!(serde_json::from_str::<Sound>("\"pcm\"").is_err(), "no third format");
         // No sound to choose a format for: a plain vnc target, and both Macs.
         for kind in ["", "subtype = \"ard\"\nusername = \"u\"", "subtype = \"ard-high-performance\"\nusername = \"u\""] {
-            let target = ConfigFile::parse(&format!(
-                "[server]\n{}\n[[targets]]\nname = \"v\"\nprotocol = \"vnc\"\n{kind}\nhost = \"h\"\npassword = \"p\"\n",
+            let target = ConfigFile::parse_fixture(&format!(
+                "[server]\n{}\n[[targets]]\nname = \"v\"\nprotocol = \"vnc\"\n{kind}\nhost = \"h\"\npassword_ref = \"p\"\n",
                 site_passwd_line()
             ))
             .and_then(ConfigFile::resolve)
@@ -4520,7 +4706,7 @@ vnc_password = \"x\"")).unwrap();
     #[test]
     fn render_adaptive_resolves_into_a_wlshare_plan() {
         for (key, adaptive) in [("render_adaptive = true", true), ("render_adaptive = false", false), ("", true)] {
-            let cfg = ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 80\n{key}"))).expect("a wlshare target");
+            let cfg = ConfigFile::parse_fixture(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 80\n{key}"))).expect("a wlshare target");
             let plan = cfg.targets[0].render_plan(Choices::default(), Decoders::ALL);
             assert_eq!(plan, RenderPlan { quality: 80, adaptive, apple_media: false, apple_h264: false, hevc_instead: false, apple_standard: None, apple_combined: false, rdp_graphics: false, rdp_h264: false, wlshare: true, wlshare_tiles_motion: false, chroma: crate::vp9::Chroma::Yuv444 }, "{key}");
         }
@@ -4532,9 +4718,9 @@ vnc_password = \"x\"")).unwrap();
     fn render_adaptive_is_a_wlshare_key() {
         for toml in [
             vnc_toml("render_adaptive = false"),
-            format!("[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword = \"p\"\nrender_adaptive = true\n", site_passwd_line()),
+            format!("[server]\n{}\n[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword_ref = \"p\"\nrender_adaptive = true\n", site_passwd_line()),
         ] {
-            let err = ConfigFile::parse(&toml).unwrap_err();
+            let err = ConfigFile::parse_fixture(&toml).unwrap_err();
             assert!(format!("{err:#}").contains("render_adaptive — it walks wlshare's VP9"), "{err:#}");
         }
         assert!(parse_target("render_adaptive = true").is_err(), "the bitmap path took the key");
@@ -4550,7 +4736,7 @@ vnc_password = \"x\"")).unwrap();
         let tiles = Choices { passthrough: Some(Passthrough::WlshareTilesMotion), ..Choices::default() };
         let vp9 = Choices { passthrough: Some(Passthrough::WlshareVp9), ..Choices::default() };
         for key in ["", "render_adaptive = true", "render_adaptive = false"] {
-            let cfg = ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 80\n{key}"))).expect("a wlshare target");
+            let cfg = ConfigFile::parse_fixture(&vnc_toml(&format!("subtype = \"wlshare\"\nvideo_quality = 80\n{key}"))).expect("a wlshare target");
             let target = &cfg.targets[0];
             assert_eq!(target.offers().passthrough, &[Passthrough::WlshareVp9, Passthrough::WlshareTilesMotion], "{key}");
             target.accepts(tiles).expect("the tiles are offered");
@@ -4572,7 +4758,7 @@ vnc_password = \"x\"")).unwrap();
     /// names either.
     #[test]
     fn wlshares_pictures_are_refused_elsewhere() {
-        let plain = ConfigFile::parse(&vnc_toml("")).unwrap().targets.remove(0);
+        let plain = ConfigFile::parse_fixture(&vnc_toml("")).unwrap().targets.remove(0);
         let rdp = parse_target("").unwrap().targets.remove(0);
         for target in [&plain, &rdp] {
             for passthrough in [Passthrough::WlshareVp9, Passthrough::WlshareTilesMotion] {

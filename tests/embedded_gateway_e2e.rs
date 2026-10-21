@@ -108,6 +108,12 @@ impl Embedded {
 /// Start a gateway in `dir` and read its handshake: the child, its endpoint
 /// and its token.
 fn launch(dir: &std::path::Path) -> (Child, String, String) {
+    launch_keyed(dir, "")
+}
+
+/// [`launch`], handing the gateway `key` as its key line, as the control plane
+/// does for a config that names passwords.
+fn launch_keyed(dir: &std::path::Path, key: &str) -> (Child, String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_remotex"))
         .arg("serve-embedded")
         .arg("--instance-dir")
@@ -119,6 +125,10 @@ fn launch(dir: &std::path::Path) -> (Child, String, String) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("the gateway binary must be built");
+    // The key line comes first on that pipe, empty for a config that names no
+    // passwords.
+    std::io::Write::write_all(child.stdin.as_mut().expect("a piped stdin"), format!("{key}\n").as_bytes())
+        .expect("the gateway reads its key line");
 
     // Taken rather than borrowed, so the reader below owns what is left of stdout
     // after the handshake line.
@@ -382,6 +392,51 @@ async fn closing_the_liveness_pipe_stops_the_gateway() {
         transport::connect(&embedded.endpoint).await.is_err(),
         "nothing answers at a stopped gateway's endpoint"
     );
+}
+
+/// A config that names passwords, with the key that opens them.
+fn vaulted_target() -> (String, remotex::vault::Key) {
+    let master = remotex::vault::MasterPassword::new("correct horse".to_owned()).unwrap();
+    let (section, key) = remotex::vault::Key::create(&master).unwrap();
+    let text = format!(
+        "{}vnc_password_ref = \"pi\"\n\n[master]\nsalt = \"{}\"\ncheck = \"{}\"\n\n\
+         [passwords]\npi = \"{}\"\n",
+        one_target(),
+        section.salt,
+        section.check,
+        key.encrypt("pi", "hunter2").unwrap()
+    );
+    (text, key)
+}
+
+/// The control plane hands a worker the key to its config's `[passwords]` on
+/// stdin, and the worker opens them with it before it binds: started with it, it
+/// serves; started without, it refuses, saying what was missing.
+#[tokio::test]
+async fn a_config_naming_passwords_starts_on_the_key_it_is_handed() {
+    let (text, key) = vaulted_target();
+    let dir = common::ScratchDir::new("embedded-vaulted");
+    dir.write("remotex.toml", &text);
+    let (mut child, endpoint, token) = launch_keyed(dir.path(), &key.to_line());
+    let request = format!(
+        "GET /api/health HTTP/1.1\r\nHost: x\r\nCookie: remotex_session={token}\r\nConnection: close\r\n\r\n"
+    );
+    let (status, _, _) = endpoint_http_request(&endpoint, &request).await;
+    assert_eq!(status, 200);
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_remotex"))
+        .arg("serve-embedded")
+        .arg("--instance-dir")
+        .arg(dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(output.stdout.is_empty(), "no handshake without the key");
+    assert!(stderr.contains("nothing gave its master password"), "{stderr}");
 }
 
 /// One gateway per instance, on every platform: a second is refused before it
