@@ -172,6 +172,15 @@ RFB baseline and nothing more
 ([Constraints](architecture.md#constraints)). A stream of its own passed
 through is what a `wlshare` target has.
 
+The gateway does decode zlib, since a Standard Mac's Full quality is RFB's zlib
+asked for ahead of ZRLE as Apple's viewer asks
+([Full quality's zlib](apple-vnc-889.md#full-qualitys-zlib)); the decoder sits
+beside ZRLE's and Raw's (`vnc_encodings`, `Payload::Zlib`). Listing it on a plain
+target would cost only the entry and a test, and is still not planned: every
+VNC server in use has ZRLE and prefers it when a client lists it first, so the
+listing would be read by no server this project meets, and would be a path the
+end-to-end tests against a real server never exercise.
+
 ### More than two virtual displays on a target
 
 `virtual_displays` is held to two. A browser tab shows one display, and the
