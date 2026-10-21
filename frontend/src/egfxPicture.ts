@@ -39,7 +39,7 @@ export interface GraphicsPicture {
    * draw it. Throws once the browser has taken the GPU away (a lost context),
    * after which nothing more is drawn.
    */
-  upload(run: ComposedRun, shown?: ReadonlyMap<number, TexImageSource>): void;
+  upload(run: ComposedRun, shown?: ReadonlyMap<number, VideoFrame>): void;
   /**
    * The picture's pixels over `w` by `h` from `x`, `y`: RGBA rows, top row first.
    * What a picture shown from the GPU holds, read back for the compositor.
@@ -145,7 +145,10 @@ export function createGraphicsPicture(
     program: WebGLProgram;
     decodedAt: WebGLUniformLocation | null;
     offsetAt: WebGLUniformLocation | null;
-    decoded: WebGLTexture;
+    // A decoded picture's texture, at the size of the last one taken: none yet.
+    decoded: WebGLTexture | null;
+    decodedWidth: number;
+    decodedHeight: number;
     target: WebGLFramebuffer;
   }
   let pass: Pass | null = null;
@@ -173,17 +176,13 @@ export function createGraphicsPicture(
         `WebGL 2 refused the H.264 picture's shaders: ${gl.getProgramInfoLog(program)}`,
       );
     }
-    const decoded = gl.createTexture();
-    gl.activeTexture(gl.TEXTURE0 + DECODED_UNIT);
-    gl.bindTexture(gl.TEXTURE_2D, decoded);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.activeTexture(gl.TEXTURE0);
     return {
       program,
       decodedAt: gl.getUniformLocation(program, "decoded"),
       offsetAt: gl.getUniformLocation(program, "offset"),
-      decoded,
+      decoded: null,
+      decodedWidth: 0,
+      decodedHeight: 0,
       target: gl.createFramebuffer(),
     };
   };
@@ -191,6 +190,34 @@ export function createGraphicsPicture(
   const passes = (): Pass => {
     pass ??= makePass();
     return pass;
+  };
+
+  // The decoded picture's texture at `w` by `h`, bound on the decoded unit: made
+  // anew when the size changes, and the allocation checked as the picture's own
+  // is (`resize`), since a draw from a texture the GPU did not make is blank.
+  const decodedTexture = (made: Pass, w: number, h: number): WebGLTexture => {
+    if (made.decoded && made.decodedWidth === w && made.decodedHeight === h) {
+      gl.bindTexture(gl.TEXTURE_2D, made.decoded);
+      return made.decoded;
+    }
+    gl.deleteTexture(made.decoded);
+    made.decoded = null;
+    const decoded = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, decoded);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) {
+      gl.deleteTexture(decoded);
+      throw new Error(
+        `the GPU refused a ${w}x${h} H.264 picture (WebGL error 0x${error.toString(16)})`,
+      );
+    }
+    made.decoded = decoded;
+    made.decodedWidth = w;
+    made.decodedHeight = h;
+    return decoded;
   };
 
   // The texture as what is drawn into, or read from, for `use`; the canvas's own
@@ -222,9 +249,10 @@ export function createGraphicsPicture(
   // unit's picture, a unit's picture taken into a texture once.
   const drawShown = (
     gpu: Uint32Array,
-    shown: ReadonlyMap<number, TexImageSource>,
+    shown: ReadonlyMap<number, VideoFrame>,
   ) => {
-    const { program, decodedAt, offsetAt, decoded } = passes();
+    const made = passes();
+    const { program, decodedAt, offsetAt } = made;
     onTexture(() => {
       gl.useProgram(program);
       gl.uniform1i(decodedAt, DECODED_UNIT);
@@ -233,7 +261,6 @@ export function createGraphicsPicture(
       // Nothing the program samples is the texture drawn into.
       gl.bindTexture(gl.TEXTURE_2D, null);
       gl.activeTexture(gl.TEXTURE0 + DECODED_UNIT);
-      gl.bindTexture(gl.TEXTURE_2D, decoded);
       // The picture as it is: the whole of it, its colour as the browser converts it.
       gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
       gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
@@ -253,10 +280,15 @@ export function createGraphicsPicture(
             );
           }
           if (unit !== taken) {
-            gl.texImage2D(
+            const { displayWidth: pw, displayHeight: ph } = picture;
+            decodedTexture(made, pw, ph);
+            gl.texSubImage2D(
               gl.TEXTURE_2D,
               0,
-              gl.RGBA8,
+              0,
+              0,
+              pw,
+              ph,
               gl.RGBA,
               gl.UNSIGNED_BYTE,
               picture,

@@ -556,9 +556,10 @@ impl Graphics {
     }
 
     /// The pixels of a rectangle shown from the GPU, read back off it: `rgbx` is
-    /// `rect`'s rows, packed, top row first. They are the picture already, so
-    /// nothing is presented.
-    pub(crate) fn restore(&mut self, surface: u16, rect: Rect, rgbx: &[u8]) -> Result<()> {
+    /// `rect`'s rows, packed, top row first. The framebuffer takes them where the
+    /// surface is mapped, for whoever reads it whole, and nothing is presented:
+    /// the page's picture holds them already.
+    pub(crate) fn restore(&mut self, surface: u16, rect: Rect, rgbx: &[u8], framebuffer: &Framebuffer) -> Result<()> {
         let found = self.surfaces.get_mut(&surface).with_context(|| format!("no graphics surface {surface}"))?;
         anyhow::ensure!(
             found.contains(rect.x, rect.y, rect.width, rect.height),
@@ -586,6 +587,14 @@ impl Graphics {
             }
         }
         found.release(rect);
+        if let (Some((ox, oy)), Some((width, height))) = (found.mapped, self.output) {
+            let output = Rect { x: 0, y: 0, width, height };
+            let placed = Rect { x: ox.saturating_add(rect.x), y: oy.saturating_add(rect.y), ..rect };
+            if let Some(placed) = placed.clipped(output) {
+                let origin = ((placed.x - ox) as usize, (placed.y - oy) as usize);
+                framebuffer.blit_from(&found.pixels, found.stride(), origin, placed);
+            }
+        }
         Ok(())
     }
 
@@ -599,7 +608,8 @@ impl Graphics {
     /// ends after it in the run with its surface mapped wholly inside the output
     /// and no other mapped surface over it, and nothing after it in the run reads
     /// that surface. What reads a surface is a copy out of it, a cache entry taken
-    /// from it, and a ClearCodec rectangle, which is drawn over what it holds. A
+    /// from it, and a ClearCodec rectangle, which is drawn over what it holds and
+    /// whose bands can land beside it, so all the surface shows is read back. A
     /// surface mapped elsewhere, and one mapped over another, read back what the
     /// output shows from the GPU where it was and under the new place: the page
     /// paints over it from then on.
@@ -709,8 +719,10 @@ impl Graphics {
                         }
                     }
                 }
-                Message::WireToSurface1 { surface, codec: gfx::CODEC_CLEARCODEC, rect, .. } => {
-                    read(&mut plan, &shown, surface, to_rect(rect));
+                Message::WireToSurface1 { surface, codec: gfx::CODEC_CLEARCODEC, .. } => {
+                    // Its bands can land beside its rectangle (see `draw`).
+                    deny(&mut plan, &shown, surface);
+                    restore(&mut plan, surface, &|_| true);
                 }
                 Message::SurfaceToSurface { src, rect, .. } => read(&mut plan, &shown, src, to_rect(rect)),
                 Message::SurfaceToCache { surface, rect, .. } => read(&mut plan, &shown, surface, to_rect(rect)),
@@ -2062,8 +2074,13 @@ mod tests {
         let plan = graphics.plan(&copy).unwrap();
         assert_eq!(plan, Plan { gpu: vec![], restore: vec![area] });
         let read_back: Vec<u8> = [40u8, 50, 60, 255].repeat(16 * 16);
-        graphics.restore(1, area.rect, &read_back).unwrap();
+        graphics.restore(1, area.rect, &read_back, &framebuffer).unwrap();
         assert_eq!(graphics.gpu_areas(), vec![], "read back, the pixels are the surface's again");
+        framebuffer.with(|frame| {
+            for row in frame.rows(shown) {
+                assert_eq!(row, [40u8, 50, 60, 0].repeat(16), "the framebuffer takes what was read back");
+            }
+        });
         let updates = graphics.compose(&copy, &framebuffer).unwrap();
         assert_eq!(updates[0], Update::Paint(Rect { x: 40, y: 24, width: 4, height: 4 }));
         framebuffer.with(|frame| {

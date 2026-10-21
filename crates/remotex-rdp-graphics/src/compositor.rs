@@ -110,9 +110,10 @@ impl Compositor {
 
     /// A rectangle shown from the GPU, read back: `rgbx` is `rect`'s rows of the
     /// surface's pixels, packed, top row first, read off the output where
-    /// [`GpuArea::output`] says.
+    /// [`GpuArea::output`] says. The framebuffer takes them too, so that it is the
+    /// picture whole for a second display's tab.
     pub fn restore(&mut self, surface: u16, rect: Rect, rgbx: &[u8]) -> Result<()> {
-        self.graphics.restore(surface, rect, rgbx)
+        self.graphics.restore(surface, rect, rgbx, &self.framebuffer)
     }
 
     /// The decoded picture of one H.264 access unit in the run composed next:
