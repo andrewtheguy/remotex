@@ -40,9 +40,8 @@ export function gatewayFetch(
 /// `screen` (the same numbers `connect` carries), whether its own decoder takes a High Performance
 /// Mac's picture, whether its page runs the software HEVC decoder that decodes that picture
 /// where the browser's own does not, whether it composes an RDP host's graphics pipeline,
-/// whether it decodes the H.264 such a pipeline may carry, whether its own decoder takes
-/// VP9 at 4:4:4, which a wlshare target is then sent, and whether it takes H.264 in Annex B,
-/// which a wlshare target's tiles with motion are then asked for their moving regions in.
+/// whether it decodes the H.264 such a pipeline may carry, and whether its own decoder takes
+/// VP9 at 4:4:4, which a wlshare target is then sent.
 /// All are here for one reason — a
 /// gateway holding a target whose engine a claim change ended reconnects it at
 /// attach time, before any message this client could send, and it must build that
