@@ -30,7 +30,7 @@ fn config_text(dir: &common::ScratchDir) -> String {
     dir.write("master-password", "correct horse\n");
     let master = remotex::vault::MasterPassword::new("correct horse".to_owned()).unwrap();
     let (section, key) = remotex::vault::Key::create(&master).unwrap();
-    let value = key.encrypt("win", "p").unwrap();
+    let value = key.encrypt("p").unwrap();
     format!(
         r#"
 [server]

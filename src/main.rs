@@ -19,7 +19,12 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // zbus, under the Secret Service keychain on Linux, narrates its D-Bus handshake
+    // at info; nothing it says there is the gateway's news.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,zbus=warn,tracing=warn"),
+    )
+    .init();
 
     let cli = Cli::parse();
 
@@ -124,14 +129,14 @@ fn read_secret(label: &str, confirm: bool) -> anyhow::Result<String> {
     }
 }
 
-/// `remotex password`: write a config's `[master]` block or one of its `[passwords]`.
+/// `remotex password`: print a config's `[master]` block or one of its `[passwords]`
+/// values, for whoever deploys the config to paste. Nothing is written to a file.
 fn password(action: PasswordAction) -> anyhow::Result<()> {
     match action {
-        PasswordAction::Init { config } => {
-            let path = remotex::config::config_path(config.as_deref())?;
-            let (master, kept) = command_master(&path, true)?;
-            remotex::vault::init_file(&path, &master)?;
-            eprintln!("wrote [master] to {}", path.display());
+        PasswordAction::Master { config } => {
+            let (master, kept) = command_master(config.as_deref(), true)?;
+            let (section, _) = remotex::vault::Key::create(&master)?;
+            println!("[master]\nsalt = \"{}\"\ncheck = \"{}\"", section.salt, section.check);
             if !kept {
                 match remotex::keychain::save(&master) {
                     Ok(()) => eprintln!("kept the master password in the keychain"),
@@ -142,30 +147,32 @@ fn password(action: PasswordAction) -> anyhow::Result<()> {
                 }
             }
         }
-        PasswordAction::Set { name, config } => {
+        PasswordAction::Encrypt { config } => {
             let path = remotex::config::config_path(config.as_deref())?;
-            remotex::vault::valid_name(&name)?;
-            // Asked once: a mistyped master is told as one by the file's check.
-            let (master, _) = command_master(&path, false)?;
-            let password = read_secret(&format!("Password for {name}"), true)?;
-            remotex::vault::set_file(&path, &name, &password, &master)?;
-            eprintln!("wrote [passwords].{name} to {}", path.display());
+            let section = remotex::vault::master_of(&path)?;
+            // Asked once: a mistyped master is told as one by the block's check.
+            let (master, _) = command_master(Some(&path), false)?;
+            let key = remotex::vault::Key::derive(&master, &section)
+                .with_context(|| format!("in {}", path.display()))?;
+            let password = read_secret("Password", true)?;
+            anyhow::ensure!(!password.is_empty(), "the password is empty");
+            println!("{}", key.encrypt(&password)?);
         }
     }
     Ok(())
 }
 
-/// The master password for a `remotex password` run on the config at `path`, and
-/// whether it came from somewhere that keeps it: the file's
-/// `[server].master_password_file`, then the keychain, then the terminal, asked
-/// twice there when `confirm` (a new `[master]` block has nothing to check it by).
+/// The master password for a `remotex password` run, and whether it came from
+/// somewhere that keeps it: the `[server].master_password_file` of the config at
+/// `path`, then the keychain, then the terminal, asked twice there when `confirm`
+/// (a new `[master]` block has nothing to check it by).
 fn command_master(
-    path: &std::path::Path,
+    path: Option<&std::path::Path>,
     confirm: bool,
 ) -> anyhow::Result<(remotex::vault::MasterPassword, bool)> {
     use std::io::IsTerminal as _;
 
-    if let Some(file) = remotex::vault::master_file_of(path)? {
+    if let Some(file) = path.map(remotex::vault::master_file_of).transpose()?.flatten() {
         return Ok((remotex::vault::MasterPassword::read_file(&file)?, true));
     }
     match remotex::keychain::load() {

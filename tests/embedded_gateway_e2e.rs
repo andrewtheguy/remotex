@@ -404,7 +404,7 @@ fn vaulted_target() -> (String, remotex::vault::Key) {
         one_target(),
         section.salt,
         section.check,
-        key.encrypt("pi", "hunter2").unwrap()
+        key.encrypt("hunter2").unwrap()
     );
     (text, key)
 }

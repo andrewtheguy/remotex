@@ -160,21 +160,36 @@ username = "Administrator"
 password_ref = "workstation"
 ```
 
+The two tables are printed for you to paste, never typed:
+
 ```sh
-remotex password init -c remotex.toml               # once per config: writes [master]
-remotex password set workstation -c remotex.toml    # writes [passwords].workstation
+remotex password master -c remotex.toml     # once per config: prints [master]
+remotex password encrypt -c remotex.toml    # prints one value for [passwords]
 ```
 
-`password set` asks for the password twice, or reads one line from a pipe, and
-replaces one of the same name. `vnc_password_ref` names a VNC server's own
-password the same way. Both commands edit the file in place and keep its
-comments.
+```toml
+[master]
+salt = "…"
+check = "…"
+
+[passwords]
+workstation = "$RX;1;AES-256-GCM;…"
+```
+
+`password encrypt` asks for the password twice, or reads one line from a pipe,
+and encrypts it under the `[master]` already in the config, which it only reads.
+The name is yours to give when pasting, and it is what `password_ref` says.
+`vnc_password_ref` names a VNC server's own password the same way. Nothing
+secret is in either output, so it can go wherever the config is assembled: an
+editor, a Helm values file, a templated ConfigMap. A local instance's config is
+the TUI's to write: its `p` asks for the name and the password and writes both
+tables itself.
 
 Every value is AES-256-GCM under a key derived from your **master password**
 and the config's own salt, so one master password opens every config your
 account keeps: the served gateway's and each local instance's. It lives in
 the keychain: the macOS Keychain, Windows Credential Manager, or a Linux
-desktop's Secret Service (GNOME Keyring, KWallet). `password init` asks for it
+desktop's Secret Service (GNOME Keyring, KWallet). `password master` asks for it
 when the keychain has none, and keeps it there.
 
 | Started as | Master password from |

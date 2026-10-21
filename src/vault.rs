@@ -17,15 +17,16 @@
 //! every config an account keeps — the served gateway's and each local instance's —
 //! while no two of them share a key. `[master].check` is an HMAC under that key, so
 //! a wrong master password is told as one at start-up, before any value is tried.
-//! Each value is sealed with its own name as associated data: moved under another
-//! name, it no longer opens.
+//! A value is the password alone: what it is called is the config's to say, so
+//! `remotex password encrypt` prints one to paste under whatever name a target
+//! gives it.
 //!
 //! Where the master password comes from is the deployment's to say, and each
 //! audience has its own answer — see [`crate::keychain`] and
 //! `[server].master_password_file`. This module only turns it into a [`Key`] and
 //! uses that key.
 
-use aes_gcm::aead::{Aead as _, KeyInit as _, Payload};
+use aes_gcm::aead::{Aead as _, KeyInit as _};
 use aes_gcm::Aes256Gcm;
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -58,7 +59,7 @@ const TAG_LEN: usize = 16;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MasterSection {
-    /// 32 random bytes, base64, made by `remotex password init`.
+    /// 32 random bytes, base64, printed by `remotex password master`.
     pub salt: String,
     /// HMAC-SHA256 of a fixed message under the derived key, base64.
     pub check: String,
@@ -170,32 +171,32 @@ impl Key {
         Aes256Gcm::new_from_slice(&self.0).expect("a 32-byte key")
     }
 
-    /// The `[passwords]` value for `password` kept under `name`.
-    pub fn encrypt(&self, name: &str, password: &str) -> anyhow::Result<String> {
+    /// A `[passwords]` value for `password`.
+    pub fn encrypt(&self, password: &str) -> anyhow::Result<String> {
         let mut nonce = [0u8; NONCE_LEN];
         rand::fill(&mut nonce[..]);
         let sealed = self
             .cipher()
-            .encrypt(&nonce.into(), Payload { msg: password.as_bytes(), aad: name.as_bytes() })
-            .map_err(|_| anyhow::anyhow!("cannot encrypt [passwords].{name}"))?;
+            .encrypt(&nonce.into(), password.as_bytes())
+            .map_err(|_| anyhow::anyhow!("cannot encrypt the password"))?;
         let mut blob = nonce.to_vec();
         blob.extend_from_slice(&sealed);
         Ok(format!("{PREFIX}{}", BASE64.encode(blob)))
     }
 
-    /// The password `[passwords].<name>` holds.
+    /// The password `[passwords].<name>` holds; `name` is for the error.
     pub fn decrypt(&self, name: &str, value: &str) -> anyhow::Result<String> {
         let blob = decode_value(name, value)?;
         let (nonce, sealed) = blob.split_at(NONCE_LEN);
         let nonce: [u8; NONCE_LEN] = nonce.try_into().expect("split at the nonce's length");
         let plain = self
             .cipher()
-            .decrypt(&nonce.into(), Payload { msg: sealed, aad: name.as_bytes() })
+            .decrypt(&nonce.into(), sealed)
             .map_err(|_| {
                 anyhow::anyhow!(
                     "[passwords].{name} does not open under this config's master password; \
-                     it was set under another master or another name — set it again with \
-                     `remotex password set {name}`"
+                     it was encrypted under another [master] — encrypt it again with \
+                     `remotex password encrypt`"
                 )
             })?;
         String::from_utf8(plain).with_context(|| format!("[passwords].{name} is not UTF-8"))
@@ -220,8 +221,8 @@ impl Key {
 fn decode_value(name: &str, value: &str) -> anyhow::Result<Vec<u8>> {
     let encoded = value.strip_prefix(PREFIX).with_context(|| {
         format!(
-            "[passwords].{name} is not an encrypted value (it starts with {PREFIX:?}): set it \
-             with `remotex password set {name}` rather than writing it in"
+            "[passwords].{name} is not an encrypted value (it starts with {PREFIX:?}): paste \
+             what `remotex password encrypt` prints rather than the password"
         )
     })?;
     let blob = BASE64
@@ -275,18 +276,9 @@ pub fn init_file(path: &Path, master: &MasterPassword) -> anyhow::Result<()> {
 pub fn set_file(path: &Path, name: &str, password: &str, master: &MasterPassword) -> anyhow::Result<()> {
     valid_name(name)?;
     anyhow::ensure!(!password.is_empty(), "the password is empty");
+    let key = Key::derive(master, &master_of(path)?).with_context(|| format!("in {}", path.display()))?;
     let mut doc = read_document(path)?;
-    let section: MasterSection = doc
-        .get("master")
-        .with_context(|| {
-            format!("{} has no [master] block — `remotex password init` writes one", path.display())
-        })?
-        .to_string()
-        .parse::<toml::Table>()
-        .context("[master] is not a table")
-        .and_then(|table| MasterSection::deserialize(table).context("invalid [master]"))?;
-    let key = Key::derive(master, &section).with_context(|| format!("in {}", path.display()))?;
-    let value = key.encrypt(name, password)?;
+    let value = key.encrypt(password)?;
     let passwords = doc
         .entry("passwords")
         .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
@@ -294,6 +286,27 @@ pub fn set_file(path: &Path, name: &str, password: &str, master: &MasterPassword
         .context("[passwords] is not a table")?;
     passwords.insert(name, toml_edit::value(value));
     write_document(path, &doc)
+}
+
+/// The `[master]` block of the config at `path`, read and left as it is.
+pub fn master_of(path: &Path) -> anyhow::Result<MasterSection> {
+    /// The one table wanted, whatever else the file holds.
+    #[derive(Deserialize)]
+    struct Only {
+        master: Option<MasterSection>,
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let only: Only = toml::from_str(&text)
+        .with_context(|| format!("{} is not valid TOML", path.display()))?;
+    let section = only.master.with_context(|| {
+        format!(
+            "{} has no [master] block — paste the one `remotex password master` prints",
+            path.display()
+        )
+    })?;
+    section.validate().with_context(|| format!("invalid [master] in {}", path.display()))?;
+    Ok(section)
 }
 
 /// `[server].master_password_file` of the config at `path`, taken from the file's
@@ -351,16 +364,15 @@ mod tests {
     }
 
     #[test]
-    fn a_value_opens_under_its_own_master_and_name_only() {
+    fn a_value_opens_under_its_own_master_only() {
         let (section, key) = Key::create(&master("correct horse")).unwrap();
-        let value = key.encrypt("win11", "hunter2").unwrap();
+        let value = key.encrypt("hunter2").unwrap();
         assert!(value.starts_with(PREFIX), "{value}");
         check_value("win11", &value).unwrap();
+        assert_ne!(key.encrypt("hunter2").unwrap(), value, "every value has its own nonce");
 
         let again = Key::derive(&master("correct horse"), &section).unwrap();
         assert_eq!(again.decrypt("win11", &value).unwrap(), "hunter2");
-        // Moved under another name, it no longer opens.
-        assert!(again.decrypt("mac", &value).is_err());
 
         let err = Key::derive(&master("battery staple"), &section).unwrap_err();
         assert!(format!("{err:#}").contains("does not open"), "{err:#}");
@@ -370,14 +382,14 @@ mod tests {
     fn two_configs_under_one_master_share_no_key() {
         let (_, first) = Key::create(&master("one master")).unwrap();
         let (_, second) = Key::create(&master("one master")).unwrap();
-        let value = first.encrypt("win11", "hunter2").unwrap();
+        let value = first.encrypt("hunter2").unwrap();
         assert!(second.decrypt("win11", &value).is_err());
     }
 
     #[test]
     fn the_key_survives_the_handover_line() {
         let (_, key) = Key::create(&master("m")).unwrap();
-        let value = key.encrypt("a", "b").unwrap();
+        let value = key.encrypt("b").unwrap();
         let line = key.to_line();
         assert!(!line.contains('\n'));
         assert_eq!(Key::from_line(&format!("{line}\n")).unwrap().decrypt("a", &value).unwrap(), "b");
@@ -386,7 +398,7 @@ mod tests {
     #[test]
     fn a_plaintext_value_is_refused_by_shape() {
         let err = check_value("win11", "hunter2").unwrap_err();
-        assert!(format!("{err:#}").contains("remotex password set win11"), "{err:#}");
+        assert!(format!("{err:#}").contains("remotex password encrypt"), "{err:#}");
     }
 
     #[test]

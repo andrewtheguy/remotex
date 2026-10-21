@@ -1749,7 +1749,7 @@ pub struct ConfigFile {
     pub master: Option<MasterSection>,
     /// The `[passwords]` table: each target password, encrypted, by the name a
     /// target's `password_ref` or `vnc_password_ref` gives it. Written by
-    /// `remotex password set`.
+    /// what `remotex password encrypt` prints, or by the TUI's `p`.
     #[serde(default)]
     pub passwords: BTreeMap<String, String>,
     #[serde(default)]
@@ -2154,7 +2154,7 @@ impl ConfigFile {
     }
 
     /// Every password a target names is in `[passwords]`, every value there has the
-    /// shape of one `remotex password set` wrote, and a `[master]` block is there to
+    /// shape of one `remotex password encrypt` prints, and a `[master]` block is there to
     /// open them — all of it checked without the key, which reading a file never has.
     fn check_passwords(&self) -> anyhow::Result<()> {
         if let Some(master) = &self.master {
@@ -2166,7 +2166,7 @@ impl ConfigFile {
         }
         anyhow::ensure!(
             self.passwords.is_empty() || self.master.is_some(),
-            "[passwords] has no [master] block to open it — `remotex password init` writes one"
+            "[passwords] has no [master] block to open it — `remotex password master` prints one"
         );
         for target in &self.targets {
             for (key, name) in [
@@ -2177,7 +2177,7 @@ impl ConfigFile {
                 anyhow::ensure!(
                     self.passwords.contains_key(name),
                     "target {:?} sets {key} = {name:?}, which [passwords] does not have — \
-                     `remotex password set {name}` adds it",
+                     add it as {name} = \"…\", pasting what `remotex password encrypt` prints",
                     target.name
                 );
             }
@@ -2198,7 +2198,7 @@ impl ConfigFile {
         let section = self
             .master
             .as_ref()
-            .context("the config has no [master] block — `remotex password init` writes one")?;
+            .context("the config has no [master] block — `remotex password master` prints one")?;
         Key::derive(master, section)
     }
 
@@ -2235,7 +2235,7 @@ impl ConfigFile {
             Ok(Some(master)) => Ok(master),
             Ok(None) => anyhow::bail!(
                 "the keychain has no remotex master password: store one with \
-                 `remotex password init`, or name a file holding it in \
+                 `remotex password master`, or name a file holding it in \
                  [server].master_password_file"
             ),
             Err(error) => Err(error).context(
@@ -3694,7 +3694,7 @@ mod tests {
             assert!(format!("{err:#}").contains("unknown field"), "{inline}: {err:#}");
         }
         let err = ConfigFile::parse(&vnc_toml(r#"vnc_password_ref = "pi""#)).unwrap_err();
-        assert!(format!("{err:#}").contains("remotex password set pi"), "{err:#}");
+        assert!(format!("{err:#}").contains("remotex password encrypt"), "{err:#}");
 
         let vaulted = vaulted(&vnc_toml(r#"vnc_password_ref = "pi""#));
         let typed = vaulted.replace(&format!("pi = \"{}", crate::vault::PREFIX), "pi = \"");

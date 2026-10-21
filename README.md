@@ -178,12 +178,15 @@ username = "Administrator"
 password_ref = "workstation"
 ```
 
-Then encrypt the target's password into the config, under a master password
-kept in your keychain (see [Target passwords](docs/guide.md#target-passwords)):
+Then paste in the target's password, encrypted under a master password kept in
+your keychain (see [Target passwords](docs/guide.md#target-passwords)):
+`password master` prints a `[master]` block for the config, and
+`password encrypt` prints the value to add as `workstation = "…"` under
+`[passwords]`.
 
 ```sh
-remotex password init
-remotex password set workstation
+remotex password master
+remotex password encrypt
 ```
 
 Start it and open <http://localhost:52380>:

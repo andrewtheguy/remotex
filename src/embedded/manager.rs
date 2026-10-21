@@ -55,8 +55,7 @@ pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
 # logo = "/path/to/logo.png"
 
 # A target names its password; [passwords] keeps it encrypted under your
-# master password. Press p in the TUI, or run
-# `remotex password set <name> -c <this file>`, to add one.
+# master password. Press p in the TUI to add one.
 
 # [[targets]]
 # name = "work"

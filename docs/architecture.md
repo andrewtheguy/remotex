@@ -3708,9 +3708,8 @@ endpoint.
 
 A target names its password (`password_ref`, `vnc_password_ref`) and the
 top-level `[passwords]` table holds each one as
-`$RX;1;AES-256-GCM;<base64(nonce ‖ ciphertext ‖ tag)>`, sealed with its own
-name as associated data so a value moved under another name does not open
-(`src/vault.rs`). The key is scrypt (2^16, 8, 1) of the account's master
+`$RX;1;AES-256-GCM;<base64(nonce ‖ ciphertext ‖ tag)>`, the password alone, so a
+value is printed before anyone names it (`src/vault.rs`). The key is scrypt (2^16, 8, 1) of the account's master
 password and the file's `[master].salt`; `[master].check`, an HMAC under that
 key, tells a wrong master password apart before any value is tried. One master
 password per OS account opens every config it keeps, while each file's salt
@@ -3741,10 +3740,13 @@ Where the master password comes from is each audience's:
 - The keychain is the `keychain` Cargo feature, on by default and off in a
   container build, which has no store to ask and reads the file alone.
 
-`remotex password init` writes `[master]`, keeping a master password it had to
-ask for in the keychain; `remotex password set <name>` writes one value. Both
-edit the file through `toml_edit`, keeping its comments, and replace it by a
-rename. The TUI's `p` does the same for the selected instance.
+`remotex password master` prints a `[master]` block, keeping a master password
+it had to ask for in the keychain, and `remotex password encrypt` prints one
+value under a config's `[master]`. Neither writes a file: a served gateway's
+config is assembled by whoever deploys it, by hand or from Helm values, and the
+output goes wherever that is. A local instance's config belongs to the TUI,
+whose `p` writes both tables into it through `toml_edit`, keeping its comments,
+and replaces the file by a rename.
 
 ### Branding
 

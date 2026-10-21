@@ -118,14 +118,14 @@
 # password_ref or vnc_password_ref, and [passwords] keeps it under that name,
 # encrypted with a key derived from your master password and the salt in
 # [master]. One master password opens every config your account keeps. Neither
-# table is written by hand:
+# table is typed: each is printed for you to paste here.
 #
-#   remotex password init -c remotex.toml          # writes [master]
-#   remotex password set example -c remotex.toml   # writes [passwords].example
+#   remotex password master -c remotex.toml    # prints the [master] block
+#   remotex password encrypt -c remotex.toml   # prints a value: example = "…"
 #
 # The master password is the one in the keychain (macOS Keychain, Windows
-# Credential Manager, a Linux desktop's Secret Service); `password init` asks for
-# it and keeps it there when the keychain has none. A gateway without a keychain
+# Credential Manager, a Linux desktop's Secret Service); `password master` asks
+# for it and keeps it there when the keychain has none. A gateway without a keychain
 # — a container, a headless service — reads it from the file
 # [server].master_password_file names instead.
 #
@@ -312,7 +312,8 @@ host = "192.0.2.10"
 #port = 3389
 
 # Credentials (used server-side only; never sent to the browser). The password
-# is named here and kept in [passwords]: `remotex password set example`.
+# is named here and kept in [passwords] as example = "…", the value
+# `remotex password encrypt` prints.
 username = "Administrator"
 password_ref = "example"
 # A VNC server's own password (RFB VncAuth) — a separate key because it is a
