@@ -187,13 +187,19 @@ const MAX_WLSHARE_VP9_FRAME: u32 = 64 << 20;
 /// wlshare's tiles encoding, `WLST`, its other picture, tiles with motion, which a
 /// session started with it ([`crate::config::Passthrough::WlshareTilesMotion`]) lists
 /// in place of [`ENCODING_WLSHARE_VP9`]: the desktop as exact PNG
-/// tiles where it is still and a VP9 stream of its own, 4:2:0, for each region that
-/// moves, each rectangle of an update one of them, passed through untouched
+/// tiles where it is still and a video stream of its own, 4:2:0, for each region that
+/// moves — VP9, or H.264 where the host has a hardware encoder, as wlshare
+/// chooses — each rectangle of an update one of them, passed through untouched
 /// ([`VideoSink::pass_tile`], [`VideoSink::pass_region`]). The dial beside it,
 /// [`ENCODING_WLSHARE_VP9_QUALITY_BASE`]'s, is what the regions are held at.
 const ENCODING_WLSHARE_TILES: i32 = 0x574c_5354;
+/// The codec byte a region stream's START carries: wlshare's choice, H.264 by its
+/// host's hardware encoder where it has one and VP9 otherwise, which the browser
+/// decodes either way.
+const WLSHARE_REGION_VP9: u8 = 0;
+const WLSHARE_REGION_H264: u8 = 1;
 /// A `WLST` rectangle's body begins with its kind: a PNG of the rectangle, a region
-/// stream's first frame, its next, and its end.
+/// stream's first frame, which names the stream's codec, its next, and its end.
 const WLSHARE_TILE_PNG: u8 = 0;
 const WLSHARE_TILE_START: u8 = 1;
 const WLSHARE_TILE_FRAME: u8 = 2;
@@ -5996,6 +6002,19 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 WLSHARE_TILE_START | WLSHARE_TILE_FRAME | WLSHARE_TILE_END => Some(reader.read_u8().await?),
                 other => anyhow::bail!("server sent a tiles rectangle of kind {other}, which is none of wlshare's"),
             };
+            // A START says its stream's codec: VP9, or the H.264 this session asked
+            // for beside the tiles. One it did not ask for is a server that lost its
+            // framing, or is not wlshare.
+            let start = if kind == WLSHARE_TILE_START {
+                let codec = reader.read_u8().await?;
+                anyhow::ensure!(
+                    codec == WLSHARE_REGION_VP9 || codec == WLSHARE_REGION_H264,
+                    "server started a region stream in codec {codec}, which is neither VP9 nor H.264"
+                );
+                Some(codec)
+            } else {
+                None
+            };
             let body = if kind == WLSHARE_TILE_END {
                 Vec::new()
             } else {
@@ -6019,7 +6038,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
             }
             match stream {
                 None => sink.pass_tile(x, y, w, h, body).await?,
-                Some(stream) => sink.pass_region(stream, x, y, w, h, kind == WLSHARE_TILE_START, body).await?,
+                Some(stream) => sink.pass_region(stream, x, y, w, h, start, body).await?,
             }
             return Ok(Rect::from_size(x, y, w, h).map_or(RectEffect::NOTHING, RectEffect::pixels));
         }
@@ -12874,6 +12893,9 @@ mod tests {
         for (kind, first) in [(WLSHARE_TILE_START, 0x80), (WLSHARE_TILE_FRAME, 0x84)] {
             rect(&mut msg, (0, 16, 32, 16), kind);
             msg.push(2);
+            if kind == WLSHARE_TILE_START {
+                msg.push(WLSHARE_REGION_VP9);
+            }
             let mut frame = vec![0u8; 50];
             frame[0] = first;
             msg.extend_from_slice(&(frame.len() as u32).to_be_bytes());

@@ -135,7 +135,7 @@ seamlessly of the three, since what RFB lacks is added to it.
   at its density, carries Opus or FLAC sound and the browser's camera and
   microphone, and codes its own VP9 for the gateway to pass through, adapting
   to the browser's link — or, for a link with room to spare, its own exact
-  tiles with a VP9 stream for each region that moves. Two outputs can be shown at once, the second in a
+  tiles with a video stream for each region that moves, VP9 or the host's hardware H.264. Two outputs can be shown at once, the second in a
   browser tab of its own (alpha).
 
 Every other VNC server is a plain `vnc` target reached through the RFB

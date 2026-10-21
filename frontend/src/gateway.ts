@@ -41,7 +41,8 @@ export function gatewayFetch(
 /// Mac's picture, whether its page runs the software HEVC decoder that decodes that picture
 /// where the browser's own does not, whether it composes an RDP host's graphics pipeline,
 /// whether it decodes the H.264 such a pipeline may carry, and whether its own decoder takes
-/// VP9 at 4:4:4, which a wlshare target is then sent. All are here for one reason — a
+/// VP9 at 4:4:4, which a wlshare target is then sent.
+/// All are here for one reason — a
 /// gateway holding a target whose engine a claim change ended reconnects it at
 /// attach time, before any message this client could send, and it must build that
 /// session for this browser rather than the previous one, or cover it where the

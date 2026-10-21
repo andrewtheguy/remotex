@@ -33,7 +33,7 @@
 //   the Adaptive picture is greyed under it.
 // - A `wlshare` target's picture is one of two, both wlshare's own, passed
 //   through: its VP9 of the whole desktop, which fits the link, or its tiles with
-//   motion, exact PNG where the desktop is still and VP9 only where it moves, for
+//   motion, exact PNG where the desktop is still and video only where it moves, for
 //   a LAN: see `pictureOptions`. The VP9 until the other is chosen, and neither
 //   greyed: both need the VP9 decoder the target cannot start without.
 // - Sound is ticked or not where the target offers it, and a ticked one is Opus
@@ -414,7 +414,7 @@ function pictureOptions(
     "wlshare-tiles-motion": {
       value: "wlshare-tiles-motion",
       label: "Tiles with motion, passed through",
-      note: "wlshare's own tiles: exact PNG where the desktop is still, VP9 only where it moves, exact again once it stops. Several times the bytes. For a LAN.",
+      note: "wlshare's own tiles: exact PNG where the desktop is still, video only where it moves (H.264 by the host's GPU where it has one, VP9 otherwise), exact again once it stops. Several times the bytes. For a LAN.",
       disabled: false,
     },
   };

@@ -4,8 +4,10 @@
 // wlshare sends its desktop in two forms, and the gateway passes both untouched:
 // TILE records, a PNG each of a rectangle that is still, the desktop's pixels
 // exactly, which framePainter.ts draws as it draws the gateway's own tiles; and a
-// VP9 stream of its own for each region that moves, up to four at once, as REGION
-// records. This module decodes and draws the second, where the records say and in
+// video stream of its own for each region that moves, up to four at once, as REGION
+// records — VP9, or H.264 from the host's hardware encoder where it has one, as
+// wlshare chooses, each stream's `regionFormat` saying which. This
+// module decodes and draws the second, where the records say and in
 // the order the painter hands them over, which is the wire's: framePainter.ts
 // starts every record's decode at once and draws each in its turn among the
 // tiles. A tile over a region's rectangle comes only after the region's end, so
@@ -13,7 +15,8 @@
 //
 // A region's stream is decoded as the desktop's stream is (videoDecoder.ts), with
 // the same keyframe gate and stall backstop, and by the browser's own decoder, as
-// every VP9 stream on this page is. One decoder for each stream id, built by its
+// every VP9 stream on this page is; an H.264 region's keyframes are where the
+// stream says, its first and one after wlshare's dial moved. One decoder for each stream id, built by its
 // `regionFormat` and kept past its `regionEnd` for `RETIRE_MS`, because the next
 // region to move very often reuses the id at the same size, and a decoder rebuilt
 // is a hardware decode session torn down and set up again — slow on iOS, and the
