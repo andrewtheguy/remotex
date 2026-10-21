@@ -33,24 +33,6 @@ to the same rate control:
   MS-RDPEMT text on network detection and multitransport say of it, read from
   the specifications rather than recalled.
 
-### The Mac's H.264 mended by refresh pictures
-
-A passed HEVC stream of one tile acknowledges each picture it hands on and, after
-a loss, asks the Mac for a refresh picture predicted from an acknowledged one in
-place of an IDR ([The stream](apple-vnc-889.md#the-stream)). A passed H.264 stream
-does neither, so every loss costs a PLI and a keyframe. Read from AVConference,
-nothing on the Mac's side is the HEVC's alone: the answer enables long-term
-references for H.264 as for HEVC, acknowledgements and refresh requests reach the
-encoder with no test of the codec, and the size a refresh request names is
-replaced by the Mac's own, so the H.264's parameter sets need not be read for it.
-
-The plan is to treat a one-tile H.264 stream as the HEVC is: acknowledge every
-picture handed on, ask for a refresh after lost packets, and go on from the
-picture that carries the header extension's refresh bit. What the code does not
-settle is whether the Mac's H.264 encoder marks its pictures for acknowledgement
-and answers with a refresh picture, which is to be checked on the virtual Mac
-first. A refresh, like a keyframe, comes at most once a second.
-
 ### Two virtual displays past alpha
 
 `virtual_displays = 2` on an `rdp` target is alpha
