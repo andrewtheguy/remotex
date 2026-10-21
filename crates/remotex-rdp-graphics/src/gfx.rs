@@ -61,9 +61,11 @@ use crate::proto::{clear, planar, progressive, zgfx};
 const DAMAGE_CAP: usize = 64;
 
 /// Most rectangles a surface has shown from the GPU before the next run's plan
-/// has them all read back: a command that writes over part of one leaves up to
-/// four pieces of it.
-const GPU_CAP: usize = 128;
+/// has them all read back. A command that writes over part of one leaves up to
+/// four pieces of it, and a unit whose mask overlaps the last one's cuts it up;
+/// pieces that line up are joined again ([`join_shown`]), so a desktop drawn all
+/// in H.264 holds a few, and this is for a pattern that never lines up.
+const GPU_CAP: usize = 512;
 
 /// Most bytes the cache slots hold together. The caps this client advertises promise
 /// the host a 16 MiB cache (`SMALL_CACHE`), so a host that keeps its word never comes
@@ -270,6 +272,13 @@ impl Surface {
     fn show_on_gpu(&mut self, rect: Rect, unit: u32) {
         self.release(rect);
         self.gpu.push(OnGpu { rect, at: None, unit: Some(unit) });
+    }
+
+    /// The rectangles shown from the GPU, those that line up joined.
+    fn join_gpu(&mut self) {
+        if self.gpu.len() > 1 {
+            join_shown(&mut self.gpu);
+        }
     }
 
     /// `rect` with what the GPU shows taken out of it.
@@ -520,6 +529,8 @@ impl Graphics {
                 }
                 true
             });
+            // Drawn, the units' pieces are one picture's, and join across them.
+            surface.join_gpu();
         }
         paints
     }
@@ -1047,6 +1058,7 @@ impl Graphics {
         for rect in &rects {
             found.show_on_gpu(*rect, unit);
         }
+        found.join_gpu();
         found.avc.get_or_insert_default().shown_on_gpu(stream, &rects);
     }
 
@@ -1207,6 +1219,48 @@ impl Graphics {
             for shown in surface.gpu.iter_mut().filter(|shown| shown.at.is_none()) {
                 shown.at = Some((ox, oy));
             }
+        }
+    }
+}
+
+/// Join rectangles shown from the GPU that line up — the same rows and touching
+/// side to side, or the same columns and touching end to end — where they are of
+/// the same picture and the same place on the output, until none do.
+fn join_shown(shown: &mut Vec<OnGpu>) {
+    let key = |s: &OnGpu| (s.at, s.unit);
+    loop {
+        let before = shown.len();
+        // Side by side.
+        shown.sort_by_key(|s| (key(s), s.rect.y, s.rect.height, s.rect.x));
+        let mut joined: Vec<OnGpu> = Vec::with_capacity(shown.len());
+        for next in shown.drain(..) {
+            match joined.last_mut() {
+                Some(last)
+                    if key(last) == key(&next)
+                        && (last.rect.y, last.rect.height) == (next.rect.y, next.rect.height)
+                        && last.rect.x + last.rect.width == next.rect.x =>
+                {
+                    last.rect.width += next.rect.width;
+                }
+                _ => joined.push(next),
+            }
+        }
+        // End to end.
+        joined.sort_by_key(|s| (key(s), s.rect.x, s.rect.width, s.rect.y));
+        for next in joined.drain(..) {
+            match shown.last_mut() {
+                Some(last)
+                    if key(last) == key(&next)
+                        && (last.rect.x, last.rect.width) == (next.rect.x, next.rect.width)
+                        && last.rect.y + last.rect.height == next.rect.y =>
+                {
+                    last.rect.height += next.rect.height;
+                }
+                _ => shown.push(next),
+            }
+        }
+        if shown.len() == before {
+            return;
         }
     }
 }
@@ -2026,6 +2080,31 @@ mod tests {
         assert_eq!(updates[0], Update::Paint(rest));
         assert_eq!(graphics.take_gpu_paints(), vec![]);
         assert_eq!(graphics.gpu_areas(), vec![]);
+    }
+
+    /// A desktop drawn all in H.264 stays a few rectangles shown from the GPU: a
+    /// mask of tiles is one, and a mask over part of it, which cuts it into pieces,
+    /// is one again once its run is drawn.
+    #[test]
+    fn pictures_shown_from_the_gpu_over_one_another_stay_a_few_rectangles() {
+        use crate::proto::avc::tests::metablock;
+        use crate::proto::gfx::CODEC_AVC420;
+
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(64, 64), create(1, 64, 64), map(1, 0, 0)]);
+        let tiles: Vec<_> =
+            (0..16u16).map(|i| (((i % 4) * 16, (i / 4) * 16, (i % 4) * 16 + 16, (i / 4) * 16 + 16), 20, 100)).collect();
+        let tiled = [metablock(&tiles), vec![0, 0, 1, 0x65]].concat();
+        let whole = (0, 0, 64, 64);
+        for (frame, mask) in [(1, tiled), (2, masked((8, 8, 40, 40)))] {
+            let run = [start(frame), wire(1, CODEC_AVC420, whole, &mask), end(frame)].concat();
+            assert_eq!(graphics.plan(&run).unwrap().gpu, vec![true]);
+            graphics.show_on_gpu(0);
+            graphics.compose(&run, &framebuffer).unwrap();
+            let all = Rect { x: 0, y: 0, width: 64, height: 64 };
+            assert_eq!(graphics.gpu_areas(), vec![GpuArea { surface: 1, rect: all, output: all }], "frame {frame}");
+        }
     }
 
     /// A picture is shown from the GPU only where the page can draw it and read it

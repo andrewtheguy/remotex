@@ -1617,7 +1617,11 @@ the pipeline.
   BT.601 matrix, and their pictures are copied as before. Chrome's conversion on
   a Mac is to eight bits and clamped before anything sees it, so a float texture
   does not undo it. The browser fills in chroma between samples where the
-  compositor repeats each, a difference only at a colour's edge.
+  compositor repeats each, a difference only at a colour's edge, and at a mask
+  rectangle's edge it fills from the sample past the mask, which holds whatever
+  the host's encoder left there. A still picture is the same either way; in
+  motion a flat colour can show a faint line along a mask edge, one pixel wide,
+  that the copy never shows, since the compositor reads nothing past a mask.
 
   The compositor still has to hold what a later command reads. So a rectangle
   shown from the GPU is recorded as the GPU's on its surface: the EndFrame copies
