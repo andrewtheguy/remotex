@@ -318,16 +318,19 @@ export type ControlMsg =
   //
   // The tiles are the gateway's own, or a wlshare session's started with its
   // tiles with motion, wlshare's own passed through: exact PNG tiles where the desktop is still,
-  // and a VP9 stream of its own for each region that moves, as REGION records.
+  // and a video stream of its own for each region that moves, as REGION records.
   // Every region stream of the tiles picture before it ends here, and its
   // decoder goes: it comes ahead of the first record, and again wherever the
   // picture starts over, a reattach or a resize.
   | { type: "tilesStart"; engine: number }
   // Build the decoder for moving region `stream` of wlshare's tiles with this
-  // WebCodecs string (`vp09.00.LL.08.01.06.06.06.00`, always profile 0 at
-  // 4:2:0): in order on the display socket, as a `videoFormat` is, ahead of
-  // the stream's first REGION record, which is a keyframe. The stream's
-  // rectangle is fixed for its life. `engine` as a format's.
+  // WebCodecs string: `vp09.00.LL.08.01.06.06.06.00`, VP9 profile 0 at 4:2:0, or
+  // `avc1.PPCCLL` from the stream's own parameter sets where wlshare's host coded
+  // the region with its hardware H.264 encoder, which is wlshare's choice, Annex
+  // B with the parameter sets in the stream. In order
+  // on the display socket, as a `videoFormat` is, ahead of the stream's first
+  // REGION record, which is a keyframe. The stream's rectangle is fixed for its
+  // life. `engine` as a format's.
   | { type: "regionFormat"; stream: number; decode: string; engine: number }
   // Moving region `stream` has stopped: what it last drew stays on the canvas,
   // and no REGION record follows on its id until a `regionFormat` starts

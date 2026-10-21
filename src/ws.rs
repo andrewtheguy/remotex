@@ -4,7 +4,7 @@
 //! Five endpoints. Four present the claim token from `POST /api/session`; the
 //! display socket presents none.
 //!
-//! `/ws?session=<token>&apple_media=true|false&page_hevc=true|false&rdp_graphics=true|false&rdp_h264=true|false&vp9_444=true|false`
+//! `/ws?session=<token>&apple_media=true|false&page_hevc=true|false&rdp_graphics=true|false&rdp_h264=true|false&vp9_444=true|false|false`
 //! is the session: it attaches to the single slot
 //! ([`crate::session::SessionManager`]). The URL also names what only this browser
 //! knows about itself — its screen (`w`/`h`/`scale`/`fit`, the same values `connect`
@@ -1780,7 +1780,7 @@ mod tests {
             Query::<SessionParams>::try_from_uri(&format!("/ws?{query}").parse::<Uri>().unwrap())
                 .map(|Query(p)| p)
         };
-        let full = parse("session=t&apple_media=true&page_hevc=false&rdp_graphics=false&rdp_h264=false&vp9_444=false")
+        let full = parse("session=t&apple_media=true&page_hevc=false&rdp_graphics=false&rdp_h264=false&vp9_444=false&h264=false")
             .expect("a browser that takes the Mac's stream");
         assert!(full.apple_media);
         assert!(!full.page_hevc);

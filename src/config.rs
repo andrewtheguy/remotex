@@ -207,8 +207,9 @@ pub struct RenderPlan {
     pub wlshare: bool,
     /// wlshare's picture is its tiles rather than its VP9
     /// ([`Passthrough::WlshareTilesMotion`], chosen at the picker): exact PNG tiles where the
-    /// desktop is still and a VP9 stream of its own, 4:2:0, for each region that
-    /// moves, asked of the server and passed as it comes. Set only with
+    /// desktop is still and a video stream of its own, 4:2:0, for each region that
+    /// moves — VP9, or the host's hardware H.264, as wlshare chooses, each region's
+    /// stream saying which — asked of the server and passed as it comes. Set only with
     /// [`Self::wlshare`], and never with [`Self::adaptive`]: the regions are held at
     /// [`Self::quality`].
     pub wlshare_tiles_motion: bool,
@@ -4541,8 +4542,9 @@ vnc_password = \"x\"")).unwrap();
 
     /// wlshare's tiles are chosen at the picker, against its VP9: a session started
     /// with them asks wlshare for its tiles, their regions at 4:2:0 whatever the
-    /// browser takes and held at the quality, with no walk whatever the key says;
-    /// one that names its VP9, or nothing, is sent the VP9.
+    /// browser takes and held at the quality, with no walk whatever the key says,
+    /// their codec wlshare's choice; one that names its VP9, or nothing, is sent
+    /// the VP9.
     #[test]
     fn wlshares_tiles_with_motion_are_a_choice_at_the_picker() {
         let tiles = Choices { passthrough: Some(Passthrough::WlshareTilesMotion), ..Choices::default() };

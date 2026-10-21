@@ -17,6 +17,7 @@ pub mod encode;
 pub mod engine;
 pub mod error;
 pub mod feedback;
+pub mod h264;
 pub mod hevc_wasm;
 pub mod keymap;
 pub mod mic;
