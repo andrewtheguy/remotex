@@ -16,7 +16,7 @@
 //! pixels.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -487,12 +487,25 @@ struct Shared {
     feedback: Arc<LinkFeedback>,
     /// The plan's chroma, which a passed wlshare frame is held to ([`crate::vp9::pass`]).
     chroma: crate::vp9::Chroma,
+    /// The plan's dial, the ceiling a passed wlshare stream's walk is told
+    /// ([`crate::vnc`]'s `WLQ`), which what it coded each frame at is read against.
+    dial: u8,
     /// Units of a remote's stream passed, and a Mac's own rectangles, and their bytes.
     units: AtomicU64,
     passed_bytes: AtomicU64,
     /// Of the passed units, those a decoder could start from, and what they cost.
     keyframes: AtomicU64,
     keyframe_bytes: AtomicU64,
+    /// Of the passed units, those that said the dial they were coded at — wlshare's
+    /// VP9 frames — the sum of what they said, the coarsest of it, and how many said
+    /// a dial below the plan's: what wlshare's walk gave up to the browser's link,
+    /// which a frame passed undecoded shows nowhere else.
+    rated: AtomicU64,
+    quality_sum: AtomicU64,
+    coarsest: AtomicU8,
+    below_dial: AtomicU64,
+    /// What the last rated unit said, so a change is logged once.
+    last_quality: AtomicU8,
     /// Runs of a graphics pipeline passed ([`VideoSink::pass_graphics`]), and their
     /// bytes.
     graphics: AtomicU64,
@@ -538,10 +551,16 @@ impl Shared {
             restart_owed: AtomicBool::new(false),
             feedback: Arc::clone(&feedback),
             chroma,
+            dial: quality,
             units: AtomicU64::new(0),
             passed_bytes: AtomicU64::new(0),
             keyframes: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
+            rated: AtomicU64::new(0),
+            quality_sum: AtomicU64::new(0),
+            coarsest: AtomicU8::new(u8::MAX),
+            below_dial: AtomicU64::new(0),
+            last_quality: AtomicU8::new(0),
             graphics: AtomicU64::new(0),
             graphics_bytes: AtomicU64::new(0),
             rounds: AtomicU64::new(0),
@@ -780,8 +799,8 @@ impl VideoSink {
         self.shared.pass_restart.store(true, Ordering::Relaxed);
     }
 
-    /// Queue a `w`×`h` frame wlshare encoded itself as the next access unit, untouched
-    /// ([`crate::vp9::pass`]).
+    /// Queue a `w`×`h` frame wlshare encoded itself, at the 1–100 dial `quality` it
+    /// says, as the next access unit, untouched ([`crate::vp9::pass`]).
     ///
     /// None of the tiles' machinery applies. There is no mirror, round, interval or
     /// refresh: the remote paces, codes and sharpens its stream itself, and learns how
@@ -793,9 +812,14 @@ impl VideoSink {
     /// A browser that must start over ([`Self::reset_render`]) is sent nothing until a
     /// keyframe, which the full update the engine asks for at the same moment brings,
     /// and the keyframe goes out behind a fresh announcement.
-    pub async fn pass(&self, w: u16, h: u16, frame: Vec<u8>) -> anyhow::Result<()> {
+    ///
+    /// `quality` decides nothing: wlshare walks it by the browser's lag and the
+    /// gateway passes the frame whatever it is. It is counted for the picture totals
+    /// ([`Totals`]), where a session on a slow link is judged by it, and logged when
+    /// it changes.
+    pub async fn pass(&self, w: u16, h: u16, quality: u8, frame: Vec<u8>) -> anyhow::Result<()> {
         let passed = crate::vp9::pass(w, h, &frame, self.shared.chroma)?;
-        self.forward(w, h, frame, passed).await.map(drop)
+        self.forward(w, h, frame, passed, Some(quality)).await.map(drop)
     }
 
     /// Queue one access unit of a High Performance Mac's HEVC, `w`×`h`, as the next
@@ -821,12 +845,13 @@ impl VideoSink {
         passed: crate::vp9::Passed,
     ) -> anyhow::Result<bool> {
         video::check_picture((w, h))?;
-        self.forward(w, h, frame, passed).await
+        self.forward(w, h, frame, passed, None).await
     }
 
     /// Queue a checked, passed unit: see [`Self::pass`]. `false` when it was dropped
-    /// while the browser waits for a keyframe.
-    async fn forward(&self, w: u16, h: u16, frame: Vec<u8>, passed: crate::vp9::Passed) -> anyhow::Result<bool> {
+    /// while the browser waits for a keyframe. `quality` is the dial the remote said
+    /// it coded the unit at, where it says one.
+    async fn forward(&self, w: u16, h: u16, frame: Vec<u8>, passed: crate::vp9::Passed, quality: Option<u8>) -> anyhow::Result<bool> {
         self.shared.passing.store(true, Ordering::Relaxed);
         let restart = if passed.keyframe {
             self.shared.pass_restart.swap(false, Ordering::Relaxed)
@@ -857,6 +882,9 @@ impl VideoSink {
             self.shared.keyframes.fetch_add(1, Ordering::Relaxed);
             self.shared.keyframe_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
+        if let Some(quality) = quality {
+            self.rated(quality);
+        }
         if let Some(decode) = announce {
             self.push(Pending::Msg(ServerMsg::VideoFormat { decode, strips, engine: 0 })).await?;
         }
@@ -864,6 +892,23 @@ impl VideoSink {
         self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
         self.uncover_behind().await?;
         Ok(true)
+    }
+
+    /// Count a passed unit the remote said it coded at `quality`, and log the dial
+    /// when it moved: the walk's steps as the browser's link took them, which is what
+    /// a wlshare session on a slow link is judged by.
+    fn rated(&self, quality: u8) {
+        let shared = &self.shared;
+        shared.rated.fetch_add(1, Ordering::Relaxed);
+        shared.quality_sum.fetch_add(u64::from(quality), Ordering::Relaxed);
+        shared.coarsest.fetch_min(quality, Ordering::Relaxed);
+        if quality < shared.dial {
+            shared.below_dial.fetch_add(1, Ordering::Relaxed);
+        }
+        let last = shared.last_quality.swap(quality, Ordering::Relaxed);
+        if last != quality {
+            debug!("{}: the remote coded at q{quality} (dial q{})", self.engine, shared.dial);
+        }
     }
 
     /// Queue a PNG of a rectangle of the desktop in wlshare's tiles as the next record,
@@ -1394,6 +1439,10 @@ fn micros(since: Instant) -> u64 {
 ///
 /// - `passed` and `keyframe` are read together for a passed stream: keyframe bytes
 ///   against all of them say how much of the stream the remote spent starting over.
+/// - the dial, where the passed units said one (wlshare's VP9): how many were coded
+///   below the plan's, the coarsest, and the mean, which is what the remote's walk
+///   gave up to the browser's link. A unit passed undecoded says it nowhere else,
+///   and `coarse` below is of this gateway's own tiles, not of it.
 /// - `rounds`, `refreshes`, `coarse`, `jpeg` and `png` are the tiles: how many rounds
 ///   went, how many of them sent still tiles exactly and how many changed tiles
 ///   coarse, and what the rectangles came to in each format.
@@ -1406,6 +1455,11 @@ struct Totals {
     passed_bytes: u64,
     keyframes: u64,
     keyframe_bytes: u64,
+    dial: u8,
+    rated: u64,
+    quality_sum: u64,
+    coarsest: u8,
+    below_dial: u64,
     graphics: u64,
     graphics_bytes: u64,
     rounds: u64,
@@ -1421,6 +1475,21 @@ struct Totals {
 }
 
 impl Totals {
+    /// What the passed units said they were coded at, against the plan's dial, or
+    /// nothing where none said: a Mac's or an RDP host's stream says nothing of it.
+    fn quality(&self) -> String {
+        if self.rated == 0 {
+            return String::new();
+        }
+        format!(
+            ", {} of them coded below the q{} dial, coarsest q{}, mean q{}",
+            self.below_dial,
+            self.dial,
+            self.coarsest,
+            self.quality_sum / self.rated
+        )
+    }
+
     fn of(shared: &Shared) -> Self {
         // Relaxed throughout, and read while the order task may still be running:
         // this is a log line, not a decision, and the counters only ever grow.
@@ -1430,6 +1499,11 @@ impl Totals {
             passed_bytes: load(&shared.passed_bytes),
             keyframes: load(&shared.keyframes),
             keyframe_bytes: load(&shared.keyframe_bytes),
+            dial: shared.dial,
+            rated: load(&shared.rated),
+            quality_sum: load(&shared.quality_sum),
+            coarsest: shared.coarsest.load(Ordering::Relaxed),
+            below_dial: load(&shared.below_dial),
             graphics: load(&shared.graphics),
             graphics_bytes: load(&shared.graphics_bytes),
             rounds: load(&shared.rounds),
@@ -1450,7 +1524,7 @@ impl fmt::Display for Totals {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} passed unit(s) / {} bytes, {} keyframe(s) / {} bytes, \
+            "{} passed unit(s) / {} bytes, {} keyframe(s) / {} bytes{}, \
              {} graphics run(s) / {} bytes passed, \
              {} round(s) of tiles, {} of them refreshes and {} coarse: {} JPEG / {} bytes and {} PNG / {} bytes, \
              {}µs coding in {}µs of waiting, engine stalled {}µs",
@@ -1458,6 +1532,7 @@ impl fmt::Display for Totals {
             self.passed_bytes,
             self.keyframes,
             self.keyframe_bytes,
+            self.quality(),
             self.graphics,
             self.graphics_bytes,
             self.rounds,
@@ -1953,9 +2028,9 @@ mod tests {
     async fn a_passed_stream_starts_at_a_keyframe_behind_its_announcement() {
         let (sink, mut frame_rx) = video_sink_at(1280, 800, PASSED).await;
         assert!(!sink.passing());
-        sink.pass(1280, 800, passed_frame(false, 40)).await.unwrap();
-        sink.pass(1280, 800, passed_frame(true, 900)).await.unwrap();
-        sink.pass(1280, 800, passed_frame(false, 50)).await.unwrap();
+        sink.pass(1280, 800, 60, passed_frame(false, 40)).await.unwrap();
+        sink.pass(1280, 800, 60, passed_frame(true, 900)).await.unwrap();
+        sink.pass(1280, 800, 60, passed_frame(false, 50)).await.unwrap();
         sink.flush().await;
         assert!(sink.passing());
 
@@ -1970,19 +2045,44 @@ mod tests {
         assert!(frame_rx.try_recv().is_err(), "a frame before the first keyframe went out");
     }
 
+    /// What wlshare says it coded each frame at is totalled against the plan's dial:
+    /// the frames it coarsened for the link, the coarsest and the mean. A frame
+    /// dropped before the first keyframe said nothing the browser saw, and a stream
+    /// that says no quality — a Mac's — totals none.
+    #[tokio::test]
+    async fn a_passed_streams_quality_is_totalled_against_the_dial() {
+        let (sink, mut frame_rx) = video_sink_at(1280, 800, PASSED).await;
+        let dial = PASSED.quality;
+        sink.pass(1280, 800, dial - 30, passed_frame(false, 40)).await.unwrap();
+        sink.pass(1280, 800, dial, passed_frame(true, 900)).await.unwrap();
+        sink.pass(1280, 800, dial - 20, passed_frame(false, 50)).await.unwrap();
+        sink.pass(1280, 800, dial - 10, passed_frame(false, 50)).await.unwrap();
+        sink.pass(1280, 800, dial, passed_frame(false, 50)).await.unwrap();
+        sink.flush().await;
+        drain(&mut frame_rx, 5).await;
+
+        let totals = Totals::of(&sink.shared);
+        assert_eq!((totals.rated, totals.below_dial, totals.coarsest), (4, 2, dial - 20));
+        let line = totals.to_string();
+        assert!(line.contains(&format!("2 of them coded below the q{dial} dial, coarsest q{}, mean q{}", dial - 20, dial - 8)), "{line}");
+
+        let (sink, _frame_rx) = video_sink_at(1280, 800, PASSED).await;
+        assert!(!Totals::of(&sink.shared).to_string().contains("dial"), "a stream that said no quality was rated");
+    }
+
     /// A reset — a reattach, a resize — restarts the passed stream: nothing until a
     /// keyframe, which is announced again for the browser that has never seen the
     /// announcement.
     #[tokio::test]
     async fn a_reset_passed_stream_waits_for_a_keyframe_and_announces_it_again() {
         let (sink, mut frame_rx) = video_sink_at(1280, 800, PASSED).await;
-        sink.pass(1280, 800, passed_frame(true, 10)).await.unwrap();
+        sink.pass(1280, 800, 60, passed_frame(true, 10)).await.unwrap();
         sink.flush().await;
         drain(&mut frame_rx, 2).await;
 
         sink.reset_render();
-        sink.pass(1280, 800, passed_frame(false, 10)).await.unwrap();
-        sink.pass(1280, 800, passed_frame(true, 20)).await.unwrap();
+        sink.pass(1280, 800, 60, passed_frame(false, 10)).await.unwrap();
+        sink.pass(1280, 800, 60, passed_frame(true, 20)).await.unwrap();
         sink.flush().await;
         let out = drain(&mut frame_rx, 2).await;
         assert!(matches!(&out[0], ServerMsg::VideoFormat { .. }), "{:?}", out[0]);
@@ -2110,10 +2210,10 @@ mod tests {
         let (sink, _frame_rx) = video_sink_at(1280, 800, PASSED).await;
         let mut frame = passed_frame(true, 10);
         frame[0] = 0x80; // profile 0
-        let error = sink.pass(1280, 800, frame).await.unwrap_err();
+        let error = sink.pass(1280, 800, 60, frame).await.unwrap_err();
         assert!(format!("{error:#}").contains("profile 0, not the profile 1 of the 4:4:4"), "{error:#}");
         let (sink, _frame_rx) = video_sink(1280, 800).await;
-        let error = sink.pass(1280, 800, passed_frame(true, 10)).await.unwrap_err();
+        let error = sink.pass(1280, 800, 60, passed_frame(true, 10)).await.unwrap_err();
         assert!(format!("{error:#}").contains("profile 1, not the profile 0 of the 4:2:0"), "{error:#}");
     }
 

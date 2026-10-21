@@ -153,12 +153,15 @@ const MSG_WLSHARE_SCROLL: u8 = 0xE5;
 /// to send. See docs/wlshare-outputs.md.
 const ENCODING_WLSHARE_OUTPUTS: i32 = 0x574c_534f;
 /// wlshare's VP9 encoding, `WLSV`: every update one rectangle over the whole
-/// desktop, a `u32` length and one frame of a single VP9 stream — the stream this
-/// gateway would encode from the same pixels, coded by the same crate at the
-/// chroma, dial and walk the plan resolves to, which it then passes through untouched
-/// ([`VideoSink::pass`]). Listed for every browser on a `wlshare` target and on
-/// no other. wlshare sends it in place of ZRLE wherever it is listed and announces
-/// nothing; unlisted, as on a plain target, it sends ZRLE as to any VNC client.
+/// desktop, a `u8` quality, a `u32` length and one frame of a single VP9 stream —
+/// the stream this gateway would encode from the same pixels, coded by the same
+/// crate at the chroma, dial and walk the plan resolves to, which it then passes
+/// through untouched ([`VideoSink::pass`]). The quality is the 1–100 dial wlshare
+/// coded the frame at, which a frame passed undecoded says nowhere else: nothing
+/// here turns on it, and it is counted for the session's picture totals. Listed
+/// for every browser on a `wlshare` target and on no other. wlshare sends it in
+/// place of ZRLE wherever it is listed and announces nothing; unlisted, as on a
+/// plain target, it sends ZRLE as to any VNC client.
 const ENCODING_WLSHARE_VP9: i32 = 0x574c_5356;
 /// Listed beside [`ENCODING_WLSHARE_VP9`] with the dial added, names the ceiling
 /// wlshare's walk never goes above, which wlshare has no quality of its own for: `WLQ` and the
@@ -5947,6 +5950,11 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // untouched, or dropped while the desktop is past the ceiling, until the list
         // the read loop sends without the encoding brings the desktop again as ZRLE.
         ENCODING_WLSHARE_VP9 if shared.passthrough.as_ref().is_some_and(|l| l.picture(ENCODING_WLSHARE_VP9)) => {
+            let quality = reader.read_u8().await?;
+            anyhow::ensure!(
+                (crate::video::QUALITY_MIN..=crate::video::QUALITY_MAX).contains(&quality),
+                "server sent a VP9 frame coded at q{quality}, which is not on the 1 to 100 dial"
+            );
             let len = reader.read_u32().await?;
             anyhow::ensure!(
                 len <= MAX_WLSHARE_VP9_FRAME,
@@ -5965,7 +5973,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 debug!("vnc: dropping a {w}x{h} VP9 frame past the video ceiling");
                 return Ok(RectEffect::NOTHING);
             }
-            sink.pass(w, h, frame).await?;
+            sink.pass(w, h, quality, frame).await?;
             return Ok(Rect::from_size(x, y, w, h).map_or(RectEffect::NOTHING, RectEffect::pixels));
         }
         // A rectangle of wlshare's tiles: a PNG of it, a frame of a moving region's
@@ -12825,14 +12833,20 @@ mod tests {
     }
 
     /// One FramebufferUpdate of a `w`×`h` wlshare VP9 frame whose opening byte is
-    /// `first`, then a fence asking for `marker` back.
+    /// `first`, coded at the dial, then a fence asking for `marker` back.
     fn wlshare_vp9_update(w: u16, h: u16, first: u8, marker: &[u8]) -> Vec<u8> {
+        wlshare_vp9_update_at(w, h, 60, first, marker)
+    }
+
+    /// [`wlshare_vp9_update`] with the frame said to be coded at `quality`.
+    fn wlshare_vp9_update_at(w: u16, h: u16, quality: u8, first: u8, marker: &[u8]) -> Vec<u8> {
         let mut msg = vec![0u8, 0];
         msg.extend_from_slice(&1u16.to_be_bytes());
         for field in [0, 0, w, h] {
             msg.extend_from_slice(&field.to_be_bytes());
         }
         msg.extend_from_slice(&ENCODING_WLSHARE_VP9.to_be_bytes());
+        msg.push(quality);
         let mut frame = vec![0u8; 100];
         frame[0] = first;
         msg.extend_from_slice(&(frame.len() as u32).to_be_bytes());
@@ -12960,6 +12974,20 @@ mod tests {
             let _ = read_loop(client, shared, false, None, sink).await;
             drop(server);
         })
+    }
+
+    /// A VP9 frame that says it was coded off the 1–100 dial is a server that has
+    /// lost its framing, and is refused before its frame is read.
+    #[tokio::test]
+    async fn a_wlshare_frame_coded_off_the_dial_is_refused() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, _rx) = sized_sink((64, 32)).await;
+        let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
+        shared.passthrough = Some(test_listing());
+        let err = read_loop(std::io::Cursor::new(wlshare_vp9_update_at(64, 32, 0, 0xa0, b"f1")), shared, false, None, sink)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("coded at q0, which is not on the 1 to 100 dial"), "{err:#}");
     }
 
     /// wlshare's VP9 goes to the browser as it came, and the fence behind a frame is
