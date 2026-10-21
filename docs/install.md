@@ -191,7 +191,7 @@ master_password_file = "/run/secrets/remotex_master"
 
 ```sh
 # asked without echo, kept out of shell history, written 0600
-(umask 077; IFS= read -rsp 'Master password: ' pw && echo && printf '%s' "$pw" > remotex_master)
+(umask 077; trap 'stty echo' EXIT; stty -echo; printf 'Master password: '; IFS= read -r pw; echo; printf '%s' "$pw" > remotex_master)
 docker run --rm -it -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro \
   -v ./remotex_master:/run/secrets/remotex_master:ro \
   ghcr.io/andrewtheguy/remotex:latest password master -c /opt/remotex/etc/remotex.toml

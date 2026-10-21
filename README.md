@@ -188,7 +188,7 @@ a `[master]` block for the config, and `password encrypt` prints the value to
 add as `workstation = "…"` under `[passwords]`.
 
 ```sh
-(umask 077; IFS= read -rsp 'Master password: ' pw && echo && printf '%s' "$pw" > /etc/remotex/master-password)
+(umask 077; trap 'stty echo' EXIT; stty -echo; printf 'Master password: '; IFS= read -r pw; echo; printf '%s' "$pw" > /etc/remotex/master-password)
 remotex password master
 remotex password encrypt
 ```
