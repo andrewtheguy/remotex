@@ -2227,14 +2227,22 @@ impl ConfigFile {
     /// `config_dir` is what a relative `master_password_file` is taken from.
     pub fn served_master(&self, config_dir: &Path) -> anyhow::Result<MasterPassword> {
         let file = self
-            .server
-            .as_ref()
-            .and_then(|server| server.master_password_file.as_ref())
-            .context(
-                "the config names passwords: name a file holding the master password in \
-                 [server].master_password_file",
-            )?;
+            .served_master_file()?
+            .context("the config names no [server].master_password_file")?;
         MasterPassword::read_file(&config_dir.join(file)).context("invalid [server].master_password_file")
+    }
+
+    /// `[server].master_password_file`, which a served config that names passwords
+    /// must set. Checked without reading the file, so `check-config` refuses what
+    /// `serve` would.
+    fn served_master_file(&self) -> anyhow::Result<Option<&Path>> {
+        let file = self.server.as_ref().and_then(|server| server.master_password_file.as_deref());
+        anyhow::ensure!(
+            file.is_some() || !self.needs_master(),
+            "the config names passwords: name a file holding the master password in \
+             [server].master_password_file"
+        );
+        Ok(file)
     }
 
     /// Resolve the runtime configuration of a managed local instance: its private
@@ -2501,7 +2509,9 @@ pub fn load(explicit: Option<&Path>) -> anyhow::Result<(ConfigFile, PathBuf)> {
 /// This lives in the ordinary config module so `check-config` remains useful in
 /// feature-minimal builds without pulling in the managed-instance substrate.
 pub fn check(text: &str) -> anyhow::Result<()> {
-    ConfigFile::parse(text)?.resolve().map(|_| ())
+    let file = ConfigFile::parse(text)?;
+    file.served_master_file()?;
+    file.resolve().map(|_| ())
 }
 
 /// Read config text from a file, or from stdin when no path is given.
@@ -3697,6 +3707,17 @@ mod tests {
         let orphaned = format!("{no_master}[passwords]\npi = \"{}{}\"\n", crate::vault::PREFIX, "A".repeat(40));
         let err = ConfigFile::parse(&orphaned).unwrap_err();
         assert!(format!("{err:#}").contains("no [master]"), "{err:#}");
+    }
+
+    /// A served config that names passwords names the file its master password is
+    /// in, and `check-config` refuses one that does not, as `serve` would.
+    #[test]
+    fn a_served_config_with_passwords_names_its_master_password_file() {
+        let vaulted = vaulted(&vnc_toml(r#"vnc_password_ref = "pi""#));
+        let err = check(&vaulted).unwrap_err();
+        assert!(format!("{err:#}").contains("[server].master_password_file"), "{err:#}");
+        check(&vaulted.replacen("[server]", "[server]\nmaster_password_file = \"mp\"", 1)).unwrap();
+        check(&vnc_toml("")).unwrap();
     }
 
     /// `ard` is a declaration about the far end, so it comes with the credentials
