@@ -26,6 +26,7 @@ active session. Native installs also include [`remotex tui`](docs/guide.md#local
 a local control plane that runs several independent gateway instances side by
 side.
 
+> [!WARNING]
 > **No backward compatibility.** A release may change or remove a configuration
 > key, the WebSocket protocol or a feature, with nothing that reads the old
 > form. Check [`remotex.example.toml`](remotex.example.toml) against your config
