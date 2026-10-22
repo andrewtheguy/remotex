@@ -1,6 +1,6 @@
 //! H.264 as this gateway meets it on a `wlshare` target: the moving regions of
-//! its tiles with motion, coded by the host's hardware encoder, or by libx264
-//! on a host with none, and passed to the browser as wlshare coded them ([`pass`]), which codec being wlshare's
+//! its tiles with motion, the host's hardware encoder's where it has one, and
+//! passed to the browser as wlshare coded them ([`pass`]), which codec being wlshare's
 //! choice. The gateway encodes no H.264 and decodes none.
 //!
 //! What a passed region's frame needs here is what the browser cannot read out
@@ -101,8 +101,7 @@ pub mod sample {
     pub const FRAME: &[u8] = &[0, 0, 0, 1, 0x41, 0x9a, 0x26, 0x3f, 0x00, 0x01, 0xc7];
 
     /// The same picture as libx264 codes it at `ultrafast` with
-    /// `zerolatency`, as wlshare does on a host with no hardware encoder:
-    /// Constrained Baseline, level 1.2, its IDR and the P frame after it each
+    /// `zerolatency`: Constrained Baseline, level 1.2, its IDR and the P frame after it each
     /// in three slices, one a thread; x264's version SEI taken out.
     pub const BASELINE_KEYFRAME: &[u8] = &[
         0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x0c, 0xda, 0x05, 0x06, 0x6c, 0x05, 0xa8, 0x10, 0x10, 0x32, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00,
@@ -146,8 +145,8 @@ mod tests {
         assert_eq!(pass(320, 192, FRAME).unwrap(), Region { decode: None, keyframe: false });
     }
 
-    /// libx264's Constrained Baseline, sliced among its threads, names its
-    /// decoder as the hardware's High profile does, from the SPS's own bytes.
+    /// A Constrained Baseline stream, sliced among its encoder's threads,
+    /// names its decoder as a High profile one does, from the SPS's own bytes.
     #[test]
     fn a_sliced_constrained_baseline_keyframe_names_its_decoder() {
         use super::sample::{BASELINE_FRAME, BASELINE_KEYFRAME};
