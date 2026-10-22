@@ -988,8 +988,10 @@ enum HpOpening {
 struct HpRequest {
     msg: Vec<u8>,
     /// Whether it changes the displays. One that does stops the media stream and
-    /// has the region held until its layout; the session-ready request for the
-    /// mode showing does neither.
+    /// has the region held until its layout. The session-ready request for the
+    /// mode showing does neither: no changed layout answers it, and the stream is
+    /// stopped when the Mac announces its ports again, as it does after every
+    /// configuration, an unchanged one included.
     changes: bool,
 }
 
@@ -1412,7 +1414,8 @@ impl DesktopState {
             }
             // The session-ready request for the canonical mode still goes, for
             // its dynamic resolution, but changes no display: no changed layout
-            // need answer it, so nothing is held for one.
+            // need answer it, so nothing is held for one. The Mac restarts the
+            // media stream for it all the same, announcing its ports again.
             debug!("vnc: turning on dynamic resolution at the {}x{} points showing", want.0, want.1);
             self.hp.drop_due();
             let msg = vnc_apple::set_display_configuration(&self.hp_modes(want), true);
@@ -10804,7 +10807,8 @@ mod tests {
 
     /// Native's session-ready request goes even for the mode showing, for its
     /// dynamic resolution, and holds nothing: no changed layout comes to answer
-    /// it, the region stays armed, and the media stream is left running.
+    /// it, the region stays armed, and the media stream is left for the Mac's
+    /// announcement of its ports to stop.
     #[test]
     fn the_session_ready_request_for_the_mode_showing_holds_nothing() {
         let desktop = shared_desktop((1024, 768), None, None);

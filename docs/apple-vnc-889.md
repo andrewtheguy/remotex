@@ -582,7 +582,9 @@ for 60 Hz unless its preference or display capability says otherwise; Remotex's
 - **The session-ready size goes even when it is the canonical one,** since it
   is what turns dynamic resolution on. A configuration asking for the mode
   showing changes no display, so nothing waits for a changed layout to answer
-  it.
+  it. The Mac restarts the media stream for it all the same, as for any
+  configuration in High Performance: it stops the stream, sends the unchanged
+  layout again, and announces its ports again with message 1.
 - **800×600 points is the least Apple's viewer asks for,** at 1x and at 2x
   alike: its window goes no smaller. Below it the virtual Mac sent no picture
   of some displays. At 1x it made whatever it was asked, and its encoder
@@ -1298,7 +1300,9 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
   5900 and 5901, the RFB port and the next, and 5902 for a second display. The viewer receives on the same
   numbers. The Mac sends message 1 once a stream, for the first `SetEncodings`
   naming 1010, and a later one brings none. It sends it again after each display
-  change while that stream lasts, and never in reply to an offer.
+  change while that stream lasts, and after each `SetDisplayConfiguration`, one
+  asking for the displays already showing included, and never in reply to an
+  offer.
 - **message 2**, AVConference's answer: the common eight-byte header, `u16`
   lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
   those blobs. Remotex checks that their lengths describe the whole body and
