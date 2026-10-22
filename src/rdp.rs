@@ -379,7 +379,7 @@ async fn await_desktop(
 /// left at another size — is drawn at it from the start.
 ///
 /// The density is the client screen's whatever names the points, as a High
-/// Performance Mac opens its virtual display (`opening_mode` in src/vnc.rs): a
+/// Performance Mac's virtual display is sized (`hp_modes` in src/vnc.rs): a
 /// Retina client gets a sharp desktop at a kept size too, and with the graphics
 /// pipeline follows the screen's density later as a session started with resize
 /// does, over Display Control ([`Flags::kept`]).

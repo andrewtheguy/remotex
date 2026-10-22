@@ -524,8 +524,9 @@ display at the same canonical 1920×1080-point, 2x mode, without dynamic
 resolution. Once that layout has arrived and the Mac has answered the media
 stream's offer for those displays, it sends a second configuration, with
 dynamic resolution, whose dynamic mode is the size the session keeps, the target's `size` or the default, or in a session
-started with resize the full size of the browser's screen, at that screen's
-density either way. This stable creation phase lets macOS restore the displays'
+started with resize the window's size, as Apple's viewer sizes its displays from
+its window (the full size of the browser's screen until the window has
+reported), at that screen's density either way. This stable creation phase lets macOS restore the displays'
 saved arrangement and window placement before their live sizes are applied: on
 the virtual Mac, a window left on the second display under Apple's viewer came
 back there under remotex. In a session started with resize, each later viewport report asks for a new size,
@@ -574,7 +575,14 @@ for 60 Hz unless its preference or display capability says otherwise; Remotex's
   dynamic resolution only once its media stream is set up, so the stream is
   offered first for the canonical displays, and the size goes out when the Mac
   answers that offer. Its change then stops the stream, which is offered again
-  for the new displays once they have settled.
+  for the new displays once they have settled. Remotex waits 5 s for that
+  answer: an offer still out then holds the size until it is answered anyway,
+  so the wait only bounds a session whose offer never went. A login at the Mac
+  during the wait ends it, and the size goes out to the new agent at once.
+- **The session-ready size goes even when it is the canonical one,** since it
+  is what turns dynamic resolution on. A configuration asking for the mode
+  showing changes no display, so nothing waits for a changed layout to answer
+  it.
 - **800×600 points is the least Apple's viewer asks for,** at 1x and at 2x
   alike: its window goes no smaller. Below it the virtual Mac sent no picture
   of some displays. At 1x it made whatever it was asked, and its encoder
@@ -611,7 +619,7 @@ changes, as read from Apple's viewer and daemon and as macOS 26 answered:
   a session that asks for more than the Mac states, before it sends one.
 - **One configuration names both.** The display count is 2 and the descriptors
   follow back to back, each led by its own length, which is how the Mac steps
-  from one to the next. Remotex sends the one-mode descriptor above for each
+  from one to the next. Remotex sends the five-mode descriptor above for each
   display, in the opening configuration and in every resize, the second's at
   the density of the screen its tab's window is on once that tab has reported
   one, and at the first's until then. The Mac creates the

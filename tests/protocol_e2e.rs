@@ -1340,7 +1340,10 @@ async fn next_mac_request(rx: &mut mpsc::UnboundedReceiver<MacRequest>) -> MacRe
 
 /// The next request past any polls held to one pixel, and how many of those
 /// there were: a display change or a media-stream offer sees one at the end of
-/// each update meanwhile, however many the fake happens to send.
+/// each update meanwhile, however many the fake happens to send. A full-size
+/// poll is no held one: it comes back as the next request, which fails the
+/// caller's expectation, so a session that stopped holding polls while a
+/// display change was out still fails here.
 async fn next_mac_request_past_held(rx: &mut mpsc::UnboundedReceiver<MacRequest>) -> (MacRequest, usize) {
     let mut held = 0;
     loop {

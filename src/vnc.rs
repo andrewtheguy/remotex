@@ -832,6 +832,15 @@ const HP_LAYOUT_QUIET: Duration = Duration::from_millis(500);
 /// the cover and every later resize for the rest of the session.
 const HP_RESIZE_STUCK: Duration = Duration::from_secs(30);
 
+/// How long a virtual-display session's session-ready request waits for the Mac
+/// to answer the media stream's first offer, as Apple's viewer waits for its
+/// media session ([`HpOpening::Media`]). The virtual Mac named its ports about a
+/// second after the canonical layout and answered the offer a second later; an
+/// offer still out at the deadline holds the request until its answer anyway,
+/// so this only bounds a session whose offer never went, which would otherwise
+/// stay covered.
+const HP_MEDIA_WAIT: Duration = Duration::from_secs(5);
+
 /// The pixel region a High Performance session asks for while its display is
 /// being reconfigured: one pixel at the origin, which every mode has.
 ///
@@ -947,19 +956,41 @@ struct HpResize {
     quiet_until: Option<tokio::time::Instant>,
     /// The browser has been told a resize is in progress.
     shown: bool,
-    /// The session's first layout has not arrived. A virtual-display session
-    /// opens covered ([`Self::opening`]) until the canonical display exists.
-    awaiting_layout: bool,
-    /// The first request after the opening layout is native Screen Sharing's
-    /// session-ready reconfiguration. It goes out even when its requested mode
-    /// equals the canonical display already showing: the two-stage lifecycle,
-    /// not only the resulting dimensions, is what lets macOS restore display and
-    /// window state before the viewer applies its live size.
-    force_next: bool,
-    /// The session-ready request waits for the Mac's answer to the media
-    /// stream's first offer, as native switches to dynamic resolution only once
-    /// its media session is set up.
-    awaiting_media: bool,
+    /// Native's opening, until its session-ready request has gone. That request
+    /// goes out even when it asks for the canonical mode already showing: it is
+    /// what turns on dynamic resolution, and the two-stage lifecycle, not only
+    /// the resulting dimensions, is what lets macOS restore display and window
+    /// state before the viewer applies its live size.
+    opening: HpOpening,
+    /// Whether the session-ready request waits for a media stream.
+    media: bool,
+}
+
+/// Where a virtual-display session is in native's opening: its displays created
+/// at the canonical mode, then the session-ready request for the window's.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum HpOpening {
+    /// Past it, or never in it: requests are the window's own.
+    #[default]
+    Done,
+    /// The canonical display's first layout has not arrived.
+    Layout,
+    /// The canonical display is up, and the session-ready request waits for the
+    /// Mac to answer the media stream's first offer, which goes out for it
+    /// meanwhile, or for this deadline ([`HP_MEDIA_WAIT`]).
+    Media(tokio::time::Instant),
+    /// The session-ready request is due.
+    Ready,
+}
+
+/// A High Performance `SetDisplayConfiguration` taken to go out.
+#[derive(Debug, PartialEq, Eq)]
+struct HpRequest {
+    msg: Vec<u8>,
+    /// Whether it changes the displays. One that does stops the media stream and
+    /// has the region held until its layout; the session-ready request for the
+    /// mode showing does neither.
+    changes: bool,
 }
 
 /// What [`HpResize::step`] says to do next.
@@ -983,26 +1014,23 @@ impl HpResize {
     /// `want` has settled. With a `media` stream that request also waits for
     /// [`Self::media_answered`].
     fn opening(want: (u16, u16), media: bool) -> Self {
-        Self {
-            want: Some(want),
-            awaiting_layout: true,
-            force_next: true,
-            shown: true,
-            awaiting_media: media,
-            ..Self::default()
-        }
+        Self { want: Some(want), shown: true, opening: HpOpening::Layout, media, ..Self::default() }
     }
 
     /// The Mac answered a media-stream offer. `true` when that releases the
     /// session-ready request.
     fn media_answered(&mut self) -> bool {
-        std::mem::take(&mut self.awaiting_media)
+        let waiting = matches!(self.opening, HpOpening::Media(_));
+        if waiting {
+            self.opening = HpOpening::Ready;
+        }
+        waiting
     }
 
     /// Whether the session-ready request is held for the media stream, which may
     /// be offered meanwhile for the canonical display.
     fn holds_for_media(&self) -> bool {
-        self.awaiting_media && !self.awaiting_layout && self.phase == HpPhase::Idle
+        matches!(self.opening, HpOpening::Media(_)) && self.phase == HpPhase::Idle
     }
 
     /// The window reported `want` points. `noop` is whether that is the desktop
@@ -1015,14 +1043,15 @@ impl HpResize {
             self.phase = HpPhase::Idle;
             self.since = None;
         }
-        if noop && self.phase == HpPhase::Idle && !self.force_next {
+        let opening = self.opening != HpOpening::Done;
+        if noop && self.phase == HpPhase::Idle && !opening {
             self.want = None;
             self.send_at = None;
         } else {
             self.want = Some(want);
             // The opening size is applied as soon as the canonical layout makes
             // the session ready, like native. Later window changes are debounced.
-            self.send_at = (!self.force_next).then_some(now + HP_RESIZE_SETTLE);
+            self.send_at = (!opening).then_some(now + HP_RESIZE_SETTLE);
         }
     }
 
@@ -1030,7 +1059,10 @@ impl HpResize {
     /// out; the Mac also repeats a layout unchanged — its opening one arrives twice,
     /// the second after a request may already have gone — and that answers nothing.
     fn layout(&mut self, changed: bool, now: tokio::time::Instant) {
-        self.awaiting_layout = false;
+        if self.opening == HpOpening::Layout {
+            self.opening =
+                if self.media { HpOpening::Media(now + HP_MEDIA_WAIT) } else { HpOpening::Ready };
+        }
         if changed && matches!(self.phase, HpPhase::InFlight(_)) {
             self.phase = HpPhase::Idle;
             self.since = None;
@@ -1057,7 +1089,7 @@ impl HpResize {
     /// Whether nothing is pending, out or covered — the Mac is not about to change
     /// the display, so a media-stream offer made now is not torn down by one.
     fn settled(&self) -> bool {
-        !self.shown && !self.awaiting_layout && self.phase == HpPhase::Idle && self.want.is_none()
+        !self.shown && self.opening == HpOpening::Done && self.phase == HpPhase::Idle && self.want.is_none()
     }
 
     /// The points due to go out, taken at an update boundary; the request is in
@@ -1068,15 +1100,20 @@ impl HpResize {
         };
         self.phase = HpPhase::InFlight(want);
         self.since = Some(now);
-        let force = std::mem::take(&mut self.force_next);
+        let force = std::mem::take(&mut self.opening) == HpOpening::Ready;
         Some((want, force))
     }
 
     /// The Mac moved the session to another agent, which inherits no request:
     /// whatever was out is let go, and `want` goes out next.
+    /// An opening still waiting for its layout or media stream is past waiting:
+    /// the new agent has neither, and its request goes out next.
     fn handed_over(&mut self, want: (u16, u16), now: tokio::time::Instant) {
         self.phase = HpPhase::Idle;
         self.since = None;
+        if self.opening != HpOpening::Done {
+            self.opening = HpOpening::Ready;
+        }
         self.report(want, false, now);
     }
 
@@ -1106,8 +1143,18 @@ impl HpResize {
         }
         // The opening configuration is itself unanswered until then, and the
         // session-ready request waits on the media stream.
-        if self.awaiting_layout || self.awaiting_media {
-            return None;
+        match self.opening {
+            HpOpening::Layout => return None,
+            HpOpening::Media(until) if now < until => return None,
+            HpOpening::Media(_) => {
+                debug!(
+                    "vnc: the Mac has not answered a media-stream offer in {}s; \
+                     sending the session-ready resize without it",
+                    HP_MEDIA_WAIT.as_secs()
+                );
+                self.opening = HpOpening::Ready;
+            }
+            HpOpening::Ready | HpOpening::Done => {}
         }
         if let Some(want) = self.want {
             if self.send_at.is_some_and(|at| now < at) {
@@ -1135,8 +1182,10 @@ impl HpResize {
         if self.phase != HpPhase::Idle {
             return self.since.map(|since| since + HP_RESIZE_STUCK);
         }
-        if self.awaiting_layout || self.awaiting_media {
-            return None;
+        match self.opening {
+            HpOpening::Layout => return None,
+            HpOpening::Media(until) => return Some(until),
+            HpOpening::Ready | HpOpening::Done => {}
         }
         if self.want.is_some() {
             // No settle time means due at once: the opening size, applied as
@@ -1351,19 +1400,29 @@ impl DesktopState {
 
     /// The `SetDisplayConfiguration` for a High Performance resize that is due,
     /// taken by the read loop at an update boundary — see [`HpResize`]. `None`
-    /// when nothing is due, or when what is due is the desktop already showing.
-    fn hp_take_request(&mut self, now: tokio::time::Instant) -> Option<Vec<u8>> {
+    /// when nothing is due, or when what is due is the desktop already showing,
+    /// unless it is the session-ready request, which goes anyway.
+    fn hp_take_request(&mut self, now: tokio::time::Instant) -> Option<HpRequest> {
         let (want, force) = self.hp.take_due(now)?;
-        if !force && self.hp_noop(want) {
-            debug!("vnc: the window settled on the current desktop; nothing to ask for");
+        if self.hp_noop(want) {
+            if !force {
+                debug!("vnc: the window settled on the current desktop; nothing to ask for");
+                self.hp.drop_due();
+                return None;
+            }
+            // The session-ready request for the canonical mode still goes, for
+            // its dynamic resolution, but changes no display: no changed layout
+            // need answer it, so nothing is held for one.
+            debug!("vnc: turning on dynamic resolution at the {}x{} points showing", want.0, want.1);
             self.hp.drop_due();
-            return None;
+            let msg = vnc_apple::set_display_configuration(&self.hp_modes(want), true);
+            return Some(HpRequest { msg, changes: false });
         }
         debug!(
             "vnc: requesting Apple virtual-display resize to {}x{} points at {:?}x",
             want.0, want.1, self.hp_densities(),
         );
-        Some(vnc_apple::set_display_configuration(&self.hp_modes(want), true))
+        Some(HpRequest { msg: vnc_apple::set_display_configuration(&self.hp_modes(want), true), changes: true })
     }
 
     /// The framebuffer the Mac's rectangles are addressed in: the desktop, or the
@@ -3996,8 +4055,8 @@ enum ResizeAsk {
 /// asked for at least is raised to it for a virtual display
 /// ([`vnc_apple::raised_to_minimum`]).
 ///
-/// A High Performance Mac owns a virtual display, so replacing its one-mode
-/// `SetDisplayConfiguration` is the resize request — and the mode it requests is
+/// A High Performance Mac owns a virtual display, so resending its
+/// `SetDisplayConfiguration` with a new first mode is the resize request — and the mode it requests is
 /// the resolved points at the client screen's density, which is how moving the
 /// window to a Retina display re-renders the same desktop at 2x. wlshare uses
 /// `SetDesktopSize` once the server declares support via an ExtendedDesktopSize
@@ -4137,7 +4196,7 @@ async fn hp_send_due(
         let offer_out = media.is_some_and(|m| m.lock().unwrap().pending());
         let held = offer_out || d.in_update;
         let request = if held { None } else { d.hp_take_request(tokio::time::Instant::now()) };
-        if request.is_some() {
+        if request.as_ref().is_some_and(|request| request.changes) {
             stream_stopped(&mut d, tab);
             if let Some(media) = media {
                 media.lock().unwrap().stopped();
@@ -4146,8 +4205,12 @@ async fn hp_send_due(
         let drained = draining && !matches!(d.hp.phase, HpPhase::Draining(_));
         (request, drained, d.push_interval_us)
     };
-    if let Some(msg) = request {
-        send_all(uplink, &[vnc_apple::auto_framebuffer_update(interval, HP_HOLD_REQUEST), msg]).await?;
+    match request {
+        Some(HpRequest { msg, changes: true }) => {
+            send_all(uplink, &[vnc_apple::auto_framebuffer_update(interval, HP_HOLD_REQUEST), msg]).await?;
+        }
+        Some(HpRequest { msg, changes: false }) => send(uplink, &msg).await?,
+        None => {}
     }
     Ok(drained)
 }
@@ -5922,17 +5985,12 @@ async fn read_rect<R: AsyncRead + Unpin>(
             let mut body = vec![0u8; usize::from(len)];
             reader.read_exact(&mut body).await?;
             let media = shared.media.as_ref().expect("guarded");
-            let (down, answered) = {
-                let mut media = media.lock().unwrap();
-                let pending = media.pending();
-                let down = media.on_reply(&body)?;
-                (down, pending && !media.pending())
-            };
-            if answered && desktop.lock().unwrap().hp.media_answered() {
+            let replied = media.lock().unwrap().on_reply(&body)?;
+            if replied.answered && desktop.lock().unwrap().hp.media_answered() {
                 debug!("vnc: the media stream is up; the session-ready resize may go out");
                 shared.hp_wake.notify_one();
             }
-            if !down {
+            if !replied.down {
                 return Ok(RectEffect::NOTHING);
             }
             let (armed, interval) = {
@@ -10700,7 +10758,7 @@ mod tests {
     ) -> Option<Vec<u8>> {
         tokio::time::advance(HP_RESIZE_SETTLE).await;
         hp_resize_step(uplink, desktop, None, &SharedTab::default(), sink).await.unwrap();
-        desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now())
+        desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now()).map(|request| request.msg)
     }
 
     /// The configuration asked for `points` at `density`.
@@ -10727,6 +10785,22 @@ mod tests {
         assert_eq!(written(&wire), update_request(false, HP_HOLD_REQUEST));
         assert_eq!(desktop.lock().unwrap().poll_size(), HP_HOLD_REQUEST, "polling is held");
         assert!(desktop.lock().unwrap().pending.is_none());
+    }
+
+    /// Native's session-ready request goes even for the mode showing, for its
+    /// dynamic resolution, and holds nothing: no changed layout comes to answer
+    /// it, the region stays armed, and the media stream is left running.
+    #[test]
+    fn the_session_ready_request_for_the_mode_showing_holds_nothing() {
+        let desktop = shared_desktop((1024, 768), None, None);
+        let now = tokio::time::Instant::now();
+        let mut d = desktop.lock().unwrap();
+        d.hp = HpResize::opening((1024, 768), false);
+        d.hp.layout(true, now);
+        assert_eq!(d.hp.step(now), Some(HpStep::Drain));
+        let request = d.hp_take_request(now).expect("the session-ready request goes");
+        assert_eq!(request, HpRequest { msg: hp_config((1024, 768), 1.0), changes: false });
+        assert!(!d.hp.holds_pixels(), "nothing waits for a layout to answer it");
     }
 
     /// A Mac whose preferred codec is the media stream sends no update to wait
@@ -10909,7 +10983,7 @@ mod tests {
         desktop.lock().unwrap().hp.layout(true, tokio::time::Instant::now());
         hp_resize_step(&uplink, &desktop, None, &SharedTab::default(), &sink).await.unwrap();
         assert_eq!(
-            desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now()),
+            desktop.lock().unwrap().hp_take_request(tokio::time::Instant::now()).map(|request| request.msg),
             Some(hp_config((1600, 1200), 2.0))
         );
     }
@@ -10967,7 +11041,7 @@ mod tests {
         assert!(hp.holds_for_media());
         assert!(!hp.settled());
         assert_eq!(hp.step(ms(5_000)), None, "held for the media stream");
-        assert_eq!(hp.deadline(ms(5_000)), None);
+        assert_eq!(hp.deadline(ms(5_000)), Some(ms(1_000) + HP_MEDIA_WAIT), "or for its deadline");
 
         assert!(hp.media_answered());
         assert!(!hp.media_answered(), "only the first answer releases it");
@@ -10975,6 +11049,34 @@ mod tests {
         assert_eq!(hp.deadline(ms(5_000)), Some(ms(5_000)));
         assert_eq!(hp.step(ms(5_000)), Some(HpStep::Drain));
         assert_eq!(hp.take_due(ms(5_000)), Some(((1728, 902), true)));
+    }
+
+    /// An offer that never goes, or is never answered, does not keep the session
+    /// covered: the session-ready request goes at the deadline.
+    #[test]
+    fn hp_sends_the_session_ready_resize_without_a_media_answer_at_the_deadline() {
+        let t0 = tokio::time::Instant::now();
+        let mut hp = HpResize::opening((1728, 902), true);
+        hp.layout(true, t0);
+        assert_eq!(hp.deadline(t0), Some(t0 + HP_MEDIA_WAIT));
+        assert_eq!(hp.step(t0 + HP_MEDIA_WAIT - Duration::from_millis(1)), None);
+        assert_eq!(hp.step(t0 + HP_MEDIA_WAIT), Some(HpStep::Drain));
+        assert_eq!(hp.take_due(t0 + HP_MEDIA_WAIT), Some(((1728, 902), true)));
+        assert!(!hp.media_answered(), "an answer after the deadline releases nothing");
+    }
+
+    /// A login at the Mac mid-opening hands the session to an agent that has
+    /// neither the canonical display nor its stream: the request goes at once.
+    #[test]
+    fn hp_hand_over_ends_the_wait_for_the_media_stream() {
+        let t0 = tokio::time::Instant::now();
+        let mut hp = HpResize::opening((1728, 902), true);
+        hp.layout(true, t0);
+        assert!(hp.holds_for_media());
+        hp.handed_over((1728, 902), t0);
+        assert!(!hp.holds_for_media());
+        assert_eq!(hp.step(t0), Some(HpStep::Drain));
+        assert_eq!(hp.take_due(t0), Some(((1728, 902), true)), "still the session-ready request");
     }
 
     /// A drag's stream of sizes is one request, for the size it came to rest at,
