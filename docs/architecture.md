@@ -781,7 +781,7 @@ wire format, no record and no second stream. See
 | `crates/remotex-rdp-graphics/` | the RDP client's graphics, a crate of its own: the codecs, the graphics pipeline's compositor and the framebuffer, which the page's WebAssembly module runs too (`frontend/wasm/egfx`) |
 | `rdp_clipboard.rs` | `CF_UNICODETEXT` and the line endings either direction needs |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
-| `vnc_apple_media.rs` | High Performance's media stream: the offer, SRTP, HEVC depacketizing and decoding, and the sound's receiver |
+| `vnc_apple_media.rs` | High Performance's media stream: the offer, SRTP, HEVC and H.264 depacketizing into access units for the browser, and the sound's receiver |
 | `aac_eld.rs` | what that stream's AAC-ELD sound is, for the browser that decodes it |
 | `camera.rs`, `mic.rs` | browser camera and microphone bridges into the active engine |
 | `shadow.rs` | change detection: what the client already has |
@@ -1358,7 +1358,7 @@ Three controls with similar names therefore remain separate:
   progress and stands in front while both hold.
 - **The dial does not reach it.** `video_quality` and the adaptive
   walk govern only the tiles and wlshare's VP9, which no session of the target
-  has, so they are refused on the target, as the Opus keys are, which have no sound to reach. Nor does
+  has, so they are refused on the target. Nor does
   anything here enable or disable the Mac's separate, always-on High
   Performance controller.
 - **The sound always passes, on `/ws/audio`.** Whichever picture is passed,
@@ -1962,11 +1962,13 @@ would not take.
 
 The tiles follow the browser's link by its painting, as above. A passed stream is
 coded by the remote, so it can follow that link only if the remote is told how the
-link is doing. Today three of the five passthroughs are:
+link is doing. Today three of the five passthroughs are; the table lists all
+five:
 
 | Passed stream | Who adapts it | What it hears of the browser's link | Target keys that reach it |
 |---|---|---|---|
-| wlshare's VP9 (`wlshare` subtype, always passed) | wlshare's `QualityWalk`: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
+| wlshare's VP9 (`wlshare` subtype, passed where chosen) | wlshare's `QualityWalk`: quality, then frame rate | Each fence echo is held for the queue ahead of the frame on the browser's link (`VideoSink::fence_hold`) | `video_quality` as its ceiling (`WLQ`); `render_adaptive = false` holds it at the dial (`WLSD`) |
+| wlshare's tiles with motion (`wlshare` subtype, passed where chosen) | No one: its moving regions are held at the dial | Each fence echo is held as the VP9's is, and nothing adapts to it | `video_quality` as what the regions are held at (`WLQ`); `render_adaptive` reaches nothing of it |
 | An RDP host's graphics pipeline (passed whenever it is on) | The Windows host: frame rate by acknowledgements; with Adaptive, its H.264's rate control by its network detection, and its Progressive quality by its socket | Frames are acknowledged once the page has composed them; with Adaptive, the detection is answered at the page's pace, and while two large frames wait the host's socket goes unread through a small receive buffer; with High quality, nothing more | None: always on, and `video_quality` and `render_adaptive` reach nothing of it |
 | A High Performance Mac's HEVC or H.264 (always passed) | The Mac's rate controller, a target of 20–60 Mbit/s that a still screen comes far under | Nothing: the delay in its rate reports ends at the gateway | None: the video keys are refused on the target |
 | A Standard Mac's Adaptive picture (passed where chosen) | The Mac: how many updates it sends, and whether it refines them while the screen moves | Its connection, read as the page paints, through a small receive buffer | None: `render_adaptive` is refused on the target, and `video_quality` reaches its tiles alone |
@@ -2310,8 +2312,10 @@ and `GET /api/targets` carries it:
 - **Sound is off, Opus or lossless.** `choices.audio` says `off`, `opus` or
   `flac` (`Sound` in `src/config.rs`). On a target that offers it the picker
   shows a Sound tick, and under a ticked one the two formats side by side, Opus
-  on the left, which ticking takes, and lossless on the right. Opus is sent at the rate the target's audio
-  keys hold; lossless is FLAC, with no rate ([Lossless sound](#lossless-sound)).
+  on the left, which ticking takes, and lossless on the right. Opus is sent at the
+  gateway's fixed ceiling, 320 kbit/s, walking below it with the link
+  ([Audio frames](#audio-frames)); lossless is FLAC, with no rate
+  ([Lossless sound](#lossless-sound)).
   A `connect` that names none takes none.
 - **The choice reaches the remote.** A session started without sound asks for
   none: RDP names no sound channel and a `wlshare` target lists no audio
@@ -2372,7 +2376,7 @@ one. Both appear on the client's session card, which
 
 `GET /api/targets` carries `subtype` too, beside the options each target offers
 (`resize`, `audio`, `passthroughs`, `placement`,
-`pipeline` and `standardView`), and the sizes it keeps
+`pipeline`, `standardView`, `camera` and `microphone`), and the sizes it keeps
 (`size`, the configured one, and `defaultSize`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
 not something to discover after connecting. The row uses the config spelling
@@ -2611,8 +2615,8 @@ A session started with its sound lossless is sent it as FLAC,
 on the same socket and in the same frames: `audioFormat` says `codec` `flac`, an
 empty `head`, the source's own `sampleRate` and a `packetFrames` of twenty
 milliseconds of it, and each packet is one FLAC frame. It is a choice at the picker, on an
-`rdp` or a `wlshare` target, and not a config key; the target's Opus keys do
-nothing in such a session, since there is no rate to set or walk. A browser
+`rdp` or a `wlshare` target, and not a config key; there is no rate to set or
+walk in such a session. A browser
 whose decoder does not play FLAC greys it, with the reason, Safari's among
 them.
 

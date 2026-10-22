@@ -1220,8 +1220,9 @@ ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
 Remotex passes the picture to the browser in every session, as the Mac's HEVC,
-which the picker offers a browser that decodes it, or as its H.264, offered to
-any: each access unit goes to the browser as it came, described by the stream's
+which the picker offers a browser that decodes it, in its own decoder or the
+page's software one where the gateway serves it, or as its H.264, offered to
+any browser with a `VideoDecoder`: each access unit goes to the browser as it came, described by the stream's
 own sequence parameter set, and a PLI is its repaint.
 The sound is never decoded here either: in every session each sound unit goes on
 `/ws/audio` as it came, described by the AudioSpecificConfig below. Either
@@ -1582,11 +1583,11 @@ other failures (see [Liveness](#the-stream)).
     its decoding order number
     ([Repeats of a still screen](#repeats-of-a-still-screen)), and in a stream
     of one tile, after lost packets, asks for a refresh and drops pictures
-    until the marked one or an IDR. With 0.3% of the picture's packets dropped
-    on the way to a gateway decoding the stream, the Mac's encoder logged three
-    refreshes and no IDR after the stream's first, and no picture failed to
-    decode. A browser decoding a passed stream across a refresh has not been
-    watched.
+    until the marked one or an IDR. Measured while the gateway still decoded
+    the stream: with 0.3% of the picture's packets dropped on the way to it,
+    the Mac's encoder logged three refreshes and no IDR after the stream's
+    first, and no picture failed to decode. A browser decoding a passed stream
+    across a refresh has not been watched.
   - **Remotex sends a PLI** where whoever is shown the stream has nothing left
     to predict from: when a stream starts without an IDR (the first packets
     can arrive before the socket is bound), when a display comes back into
@@ -1712,8 +1713,9 @@ four strips do not fit it sends no picture at all (below).
   Every packet carries a 16-bit decoding order number, which counts each
   strip's picture across all four SSRCs without a gap, and a picture's order
   count is its place in that order. Merged in that order the pictures decode
-  as one stream of strip-sized pictures, which is how remotex decodes them: one
-  decoder, each picture placed by the SSRC it came under.
+  as one stream of strip-sized pictures, which is how the page decodes them:
+  one decoder, the browser's or the page's own, each picture placed by the
+  strip number the gateway passes it with.
 - **Strips predict from each other at a keyframe.** A keyframe is an IDR of
   strip 0 followed by an intra picture of each other strip, not an IDR, at
   the same timestamp. After it a strip's pictures name two earlier ones of the
@@ -1736,14 +1738,15 @@ four strips do not fit it sends no picture at all (below).
   PLI asks for it. It asks for no refresh, and acknowledges each picture it
   hands on, which is what stops a strip's repeats of a still screen
   ([Repeats of a still screen](#repeats-of-a-still-screen)).
-- **The display is shown a frame at a time.** The gateway holds a frame's
-  strips until it has all four for one timestamp, a strip of the next frame
-  arrives, or 8 ms pass with no strip: the Mac codes a frame's strips one after
-  another, and they arrived up to 7 ms apart.
+- **The display is shown a frame at a time.** Nothing in a strip says how
+  many its frame has, so the gateway holds the latest strip until the next
+  frame's first strip arrives, the fourth strip of the frame is taken, or 8 ms
+  pass with no strip, and passes it on marked as its frame's last: the Mac
+  codes a frame's strips one after another, and they arrived up to 7 ms apart.
 - **A passed stream is in strips too.** Each strip goes out as a unit of its
   own, in the decoding order, under the display's size, with its number and
-  whether it is the last of its frame, which the gateway knows as it knows when
-  to show a frame it decodes, and the page puts the display together and shows
+  whether it is the last of its frame, decided by the strip that follows it or
+  the wait above, and the page puts the display together and shows
   it at each frame's last strip: in its own decoder, where the browser's own
   refuses the HEVC, and otherwise from the pictures the browser's
   `VideoDecoder` outputs, one a strip, each drawn whole under a clip of the

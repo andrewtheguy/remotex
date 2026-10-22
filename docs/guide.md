@@ -70,7 +70,7 @@ config key.
 | `vnc`, `wlshare` | yes | off, Opus or FLAC | its VP9, or its tiles with motion, always passed | — |
 | `vnc`, `ard` | no | none | the Mac's Adaptive picture, passed (beta), or none: the gateway's tiles of the Mac's Full quality | — |
 | `vnc`, `ard` with `virtual_display` | yes | none | as `ard` | — |
-| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264, always passed | — |
+| `vnc`, `ard-high-performance` | yes | always carried | the Mac's HEVC, or its H.264 (alpha), always passed | — |
 
 - **Size.** A desktop either keeps one size, the target's `size = "1920x1080"`
   or 1440×900 where it sets none, or follows the window: the remote is asked to
@@ -89,7 +89,7 @@ config key.
 - **Passthrough.** Sends the remote's own stream to the browser as it came
   instead of tiles coded by the gateway. A High Performance Mac's picture is
   always passed, and which stream is the choice: its HEVC, greyed where the
-  browser cannot take it, or its H.264, which is offered to every browser with
+  browser cannot take it, or its H.264 (alpha), which is offered to every browser with
   a `VideoDecoder` and needs no HEVC decoder in the page. On an `rdp` target with the
   pipeline on it is no choice: the picker says it is always passed, with no box
   to tick, and a browser that

@@ -56,8 +56,8 @@ https://github.com/user-attachments/assets/1b5dfc6f-8510-490b-bd88-d4c52c48b0a5
 
 ## Features
 
-- **One browser client.** It needs WebCodecs and nothing else: Chrome, Edge or
-  Safari on a desktop, Chrome on Android, and Safari on an iPhone or iPad.
+- **One browser client.** It needs a secure context and WebCodecs, nothing
+  installed: Chrome, Edge or Safari on a desktop, Chrome on Android, and Safari on an iPhone or iPad.
   Firefox runs it too, but its native decoders take neither a High Performance
   Mac's HEVC nor its AAC-ELD, so there the Mac's picture is its H.264, or its
   HEVC in the page's software decoder. For desktop use, install the page as a Chrome or
