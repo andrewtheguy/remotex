@@ -185,6 +185,11 @@ editor, a Helm values file, a templated ConfigMap. A local instance's config is
 the TUI's to write: its `p` asks for the name and the password and writes both
 tables itself.
 
+A value may also be left empty, `workstation = ""`, as a placeholder for a
+password not set yet: the target answers with the empty password until the
+real value is pasted over it, and a config whose names are all placeholders
+needs no `[master]` or master password.
+
 Every value is AES-256-GCM under a key derived from your **master password**
 and the config's own salt. A served gateway reads it from a file named by
 `[server].master_password_file`: a container secret, a systemd credential, or

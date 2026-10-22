@@ -3729,9 +3729,14 @@ key, tells a wrong master password apart before any value is tried. One master
 password opens every config made under it, while each file's salt gives each
 its own key. Inline `password` and `vnc_password` are unknown keys.
 
+An empty value is a placeholder, the empty password set up before the real
+one is encrypted over it: it decrypts to nothing, so it needs no `[master]`,
+and a config whose targets name only placeholders needs no master password to
+start.
+
 Reading a file checks only shape: every name a target gives is in
-`[passwords]`, every value has the prefix and length of one, and `[master]` is
-there to open them. `check-config` therefore needs no master password. The
+`[passwords]`, every value but a placeholder has the prefix and length of one,
+and `[master]` is there to open them. `check-config` therefore needs no master password. The
 values are decrypted into the targets once, at start-up, and a target's
 `password` and `vnc_password` hold the plaintext from then on, exactly as
 before.
