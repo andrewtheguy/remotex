@@ -2513,7 +2513,12 @@ async fn connect(
 
     let types = read_security_types(&mut reader).await?;
     let macos = is_macos_server(minor, &types);
-    let chosen = choose_security(&types, config.subtype, &config.password, &config.vnc_password)?;
+    let chosen = choose_security(
+        &types,
+        config.subtype,
+        config.password_ref.is_some(),
+        config.vnc_password_ref.is_some(),
+    )?;
     if macos && chosen != SECURITY_ARD {
         // Said once, at the only moment it can still be acted on, because the
         // symptom is otherwise unreadable: a login screen that will not accept
@@ -7964,11 +7969,15 @@ fn auth_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
 /// for RSA-AES, the encrypted type and so the one preferred when both are
 /// possible; `vnc_password` is a secret belonging to the *machine* for
 /// `VncAuth`, which tells the server nothing about who is connecting.
+///
+/// Whether the target has each is whether it names it (`has_account`,
+/// `has_vnc_password`), not whether it is empty: a `[passwords]` placeholder is
+/// the empty password, answered as one.
 fn choose_security(
     types: &[u8],
     subtype: Option<Subtype>,
-    password: &str,
-    vnc_password: &str,
+    has_account: bool,
+    has_vnc_password: bool,
 ) -> anyhow::Result<u8> {
     // Both Apple subtypes authenticate the same way and neither falls back: the
     // credentials are a macOS account's, and there is nothing else on the list that
@@ -7990,12 +7999,12 @@ fn choose_security(
     ]
     .into_iter()
     .find(|t| types.contains(t));
-    if !password.is_empty()
+    if has_account
         && let Some(rsa_aes) = rsa_aes
     {
         return Ok(rsa_aes);
     }
-    if !vnc_password.is_empty() && types.contains(&SECURITY_VNC_AUTH) {
+    if has_vnc_password && types.contains(&SECURITY_VNC_AUTH) {
         return Ok(SECURITY_VNC_AUTH);
     }
     if types.contains(&SECURITY_NONE) {
@@ -8285,16 +8294,16 @@ mod tests {
     #[test]
     fn the_subtype_decides_the_authentication() {
         assert_eq!(
-            choose_security(&MACOS_TYPES, Some(Subtype::Ard), "pw", "").unwrap(),
+            choose_security(&MACOS_TYPES, Some(Subtype::Ard), true, false).unwrap(),
             SECURITY_ARD
         );
         // The very same server, answered anonymously, because that is what a
         // target without the subtype asked for — and it is what costs you the
         // Mac's own screen.
-        assert_eq!(choose_security(&MACOS_TYPES, None, "", "pw").unwrap(), SECURITY_VNC_AUTH);
+        assert_eq!(choose_security(&MACOS_TYPES, None, false, true).unwrap(), SECURITY_VNC_AUTH);
         // A subtype the server cannot answer is a configuration error, not a
         // reason to authenticate as nobody.
-        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], Some(Subtype::Ard), "pw", "")
+        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], Some(Subtype::Ard), true, false)
             .unwrap_err();
         assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
 
@@ -8302,10 +8311,10 @@ mod tests {
         // above it differs, the security type does not — and names itself when the
         // server cannot answer.
         assert_eq!(
-            choose_security(&MACOS_TYPES, Some(Subtype::ArdHighPerformance), "pw", "").unwrap(),
+            choose_security(&MACOS_TYPES, Some(Subtype::ArdHighPerformance), true, false).unwrap(),
             SECURITY_ARD
         );
-        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdHighPerformance), "pw", "")
+        let err = choose_security(&[SECURITY_NONE], Some(Subtype::ArdHighPerformance), true, false)
             .unwrap_err();
         assert!(format!("{err:#}").contains("\"ard-high-performance\""), "{err:#}");
     }
@@ -8366,13 +8375,19 @@ mod tests {
 
     #[test]
     fn security_falls_back_the_way_it_always_did() {
-        assert_eq!(choose_security(&[SECURITY_NONE], None, "", "").unwrap(), SECURITY_NONE);
+        assert_eq!(choose_security(&[SECURITY_NONE], None, false, false).unwrap(), SECURITY_NONE);
         // A password with no VncAuth on offer is not a failure: an open server
         // is still an open server.
-        assert_eq!(choose_security(&[SECURITY_NONE], None, "", "pw").unwrap(), SECURITY_NONE);
-        let err = choose_security(&[SECURITY_VNC_AUTH], None, "", "").unwrap_err();
+        assert_eq!(choose_security(&[SECURITY_NONE], None, false, true).unwrap(), SECURITY_NONE);
+        // A named password is answered even when it is a placeholder's empty one,
+        // never traded for None.
+        assert_eq!(
+            choose_security(&[SECURITY_VNC_AUTH, SECURITY_NONE], None, false, true).unwrap(),
+            SECURITY_VNC_AUTH
+        );
+        let err = choose_security(&[SECURITY_VNC_AUTH], None, false, false).unwrap_err();
         assert!(format!("{err:#}").contains("requires a password"), "{err:#}");
-        let err = choose_security(&[19], None, "", "pw").unwrap_err();
+        let err = choose_security(&[19], None, false, true).unwrap_err();
         assert!(format!("{err:#}").contains("no supported VNC security type"), "{err:#}");
     }
 
@@ -8383,36 +8398,36 @@ mod tests {
     fn an_account_takes_rsa_aes_at_its_widest() {
         use crate::vnc_rsa_aes::{SECURITY_RSA_AES_128, SECURITY_RSA_AES_256};
         assert_eq!(
-            choose_security(&WAYVNC_TYPES, None, "pw", "").unwrap(),
+            choose_security(&WAYVNC_TYPES, None, true, false).unwrap(),
             SECURITY_RSA_AES_256
         );
         assert_eq!(
-            choose_security(&[SECURITY_RSA_AES_128, SECURITY_VNC_AUTH], None, "pw", "").unwrap(),
+            choose_security(&[SECURITY_RSA_AES_128, SECURITY_VNC_AUTH], None, true, false).unwrap(),
             SECURITY_RSA_AES_128
         );
         // Encrypted beats the classic challenge when the target could do either;
         // the classic one is still what a vnc_password-only target gets.
         assert_eq!(
-            choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, "pw", "vncpw").unwrap(),
+            choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, true, true).unwrap(),
             SECURITY_RSA_AES_128
         );
         assert_eq!(
-            choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, "", "vncpw").unwrap(),
+            choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, false, true).unwrap(),
             SECURITY_VNC_AUTH
         );
         // The Apple subtype still wants Apple's type, whatever else is offered.
-        let err = choose_security(&WAYVNC_TYPES, Some(Subtype::Ard), "pw", "").unwrap_err();
+        let err = choose_security(&WAYVNC_TYPES, Some(Subtype::Ard), true, false).unwrap_err();
         assert!(format!("{err:#}").contains("not macOS Screen Sharing"), "{err:#}");
         // wlshare offers RSA-AES at both widths and nothing else; an account
         // takes the widest.
         assert_eq!(
-            choose_security(&[SECURITY_RSA_AES_256, SECURITY_RSA_AES_128], None, "pw", "").unwrap(),
+            choose_security(&[SECURITY_RSA_AES_256, SECURITY_RSA_AES_128], None, true, false).unwrap(),
             SECURITY_RSA_AES_256
         );
         // And the refusal says which credential is missing.
-        let err = choose_security(&WAYVNC_TYPES, None, "", "vncpw").unwrap_err();
+        let err = choose_security(&WAYVNC_TYPES, None, false, true).unwrap_err();
         assert!(format!("{err:#}").contains("username and password"), "{err:#}");
-        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, "", "").unwrap_err();
+        let err = choose_security(&[SECURITY_VNC_AUTH, SECURITY_RSA_AES_128], None, false, false).unwrap_err();
         assert!(format!("{err:#}").contains("nor vnc_password"), "{err:#}");
     }
 

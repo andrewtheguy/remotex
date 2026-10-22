@@ -455,6 +455,26 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_beside_a_value_opens_as_the_empty_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remotex.toml");
+        let text = "[[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword_ref = \"win11\"\n\n\
+                    [[targets]]\nname = \"new\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword_ref = \"later\"\n";
+        std::fs::write(&path, text).unwrap();
+        let master = master("one master");
+        init_file(&path, &master).unwrap();
+        set_file(&path, "win11", "hunter2", &master).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap() + "later = \"\"\n";
+
+        let mut file = crate::config::ConfigFile::parse(&written).unwrap();
+        assert!(file.needs_master());
+        let key = file.key(&master).unwrap();
+        file.unlock(Some(&key)).unwrap();
+        assert_eq!(file.targets[0].password, "hunter2");
+        assert!(file.targets[1].password.is_empty());
+    }
+
+    #[test]
     fn names_are_bare_keys() {
         valid_name("win11").unwrap();
         valid_name("mac_mini-2").unwrap();

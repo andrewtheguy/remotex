@@ -1749,7 +1749,9 @@ pub struct ConfigFile {
     pub master: Option<MasterSection>,
     /// The `[passwords]` table: each target password, encrypted, by the name a
     /// target's `password_ref` or `vnc_password_ref` gives it. Written by
-    /// what `remotex password encrypt` prints, or by the TUI's `p`.
+    /// what `remotex password encrypt` prints, or by the TUI's `p`. An empty value
+    /// is a placeholder: the empty password, kept until a real one replaces it,
+    /// and nothing to decrypt.
     #[serde(default)]
     pub passwords: BTreeMap<String, String>,
     #[serde(default)]
@@ -2153,19 +2155,22 @@ impl ConfigFile {
         Ok(config)
     }
 
-    /// Every password a target names is in `[passwords]`, every value there has the
-    /// shape of one `remotex password encrypt` prints, and a `[master]` block is there to
-    /// open them — all of it checked without the key, which reading a file never has.
+    /// Every password a target names is in `[passwords]`, every value there but a
+    /// placeholder has the shape of one `remotex password encrypt` prints, and a
+    /// `[master]` block is there to open them — all of it checked without the key,
+    /// which reading a file never has.
     fn check_passwords(&self) -> anyhow::Result<()> {
         if let Some(master) = &self.master {
             master.validate().context("invalid [master]")?;
         }
         for (name, value) in &self.passwords {
             crate::vault::valid_name(name).context("in [passwords]")?;
-            crate::vault::check_value(name, value)?;
+            if !value.is_empty() {
+                crate::vault::check_value(name, value)?;
+            }
         }
         anyhow::ensure!(
-            self.passwords.is_empty() || self.master.is_some(),
+            self.passwords.values().all(String::is_empty) || self.master.is_some(),
             "[passwords] has no [master] block to open it — `remotex password master` prints one"
         );
         for target in &self.targets {
@@ -2185,12 +2190,15 @@ impl ConfigFile {
         Ok(())
     }
 
-    /// Whether any target names a password, and so whether this file needs its
-    /// master password before it can serve.
+    /// Whether any target names an encrypted password, and so whether this file
+    /// needs its master password before it can serve. A placeholder needs none.
     pub fn needs_master(&self) -> bool {
-        self.targets
-            .iter()
-            .any(|target| target.password_ref.is_some() || target.vnc_password_ref.is_some())
+        self.targets.iter().any(|target| {
+            [&target.password_ref, &target.vnc_password_ref]
+                .into_iter()
+                .flatten()
+                .any(|name| self.passwords.get(name).is_some_and(|value| !value.is_empty()))
+        })
     }
 
     /// The key that opens this file's `[passwords]`, from `master`.
@@ -2203,18 +2211,23 @@ impl ConfigFile {
     }
 
     /// Decrypt every password a target names into the target, with the key from
-    /// [`Self::key`]. A file that names none needs no key, and is given `None`.
+    /// [`Self::key`]. A file that names none, or only placeholders, needs no key,
+    /// and is given `None`; a placeholder leaves its password empty.
     pub fn unlock(&mut self, key: Option<&Key>) -> anyhow::Result<()> {
         if !self.needs_master() {
             return Ok(());
         }
         let key = key.context("the config names passwords, and nothing gave its master password")?;
+        let open = |name: &str| match self.passwords[name].as_str() {
+            "" => Ok(String::new()),
+            value => key.decrypt(name, value),
+        };
         for target in &mut self.targets {
             if let Some(name) = &target.password_ref {
-                target.password = key.decrypt(name, &self.passwords[name])?;
+                target.password = open(name)?;
             }
             if let Some(name) = &target.vnc_password_ref {
-                target.vnc_password = key.decrypt(name, &self.passwords[name])?;
+                target.vnc_password = open(name)?;
             }
         }
         Ok(())
@@ -3708,6 +3721,19 @@ mod tests {
         let orphaned = format!("{no_master}[passwords]\npi = \"{}{}\"\n", crate::vault::PREFIX, "A".repeat(40));
         let err = ConfigFile::parse(&orphaned).unwrap_err();
         assert!(format!("{err:#}").contains("no [master]"), "{err:#}");
+    }
+
+    /// An empty `[passwords]` value is a placeholder for a password not set yet: it
+    /// takes no `[master]`, no master password file and no key, and is the empty
+    /// password until an encrypted value replaces it.
+    #[test]
+    fn a_placeholder_password_needs_no_master() {
+        let placeholder = format!("{}\n[passwords]\npi = \"\"\n", vnc_toml(r#"vnc_password_ref = "pi""#));
+        check(&placeholder).unwrap();
+        let mut file = ConfigFile::parse(&placeholder).unwrap();
+        assert!(!file.needs_master());
+        file.unlock(None).unwrap();
+        assert!(file.targets[0].vnc_password.is_empty());
     }
 
     /// A served config that names passwords names the file its master password is
