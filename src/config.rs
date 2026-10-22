@@ -973,12 +973,13 @@ pub struct TargetConfig {
     /// from its `SetDisplayConfiguration` descriptor and sends each as a media
     /// stream of its own, which is Apple's viewer's "2 Virtual Displays", passed
     /// through or not. A `wlshare` target asks wlshare for the count with the
-    /// outputs extension's `VirtualDisplays` at every connect, and wlshare on sway
-    /// makes and unplugs headless outputs until there are that many, each a list
-    /// of its own, so a desk started with one output becomes two and starts on
-    /// *All Displays*; wlshare on another compositor says in every list that it
-    /// makes none, and the outputs are the compositor's. Refused on every other
-    /// target, where it would be silently inert.
+    /// outputs extension's `VirtualDisplays` on every connect, once its first
+    /// list says wlshare makes as many, and wlshare on sway makes and unplugs
+    /// headless outputs until there are that many, each a list of its own, so a
+    /// desk started with one output becomes two and starts on *All Displays*;
+    /// wlshare on another compositor says in every list that it makes none, is
+    /// asked nothing, and the outputs are the compositor's. Refused on every
+    /// other target, where it would be silently inert.
     ///
     /// Alpha: checked against one Windows 11 host and one Mac, a virtual one; the
     /// second display's density follows the first's, and nothing of it has been

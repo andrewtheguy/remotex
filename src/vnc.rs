@@ -1719,6 +1719,9 @@ struct DisplayState {
     /// The most virtual displays the server makes, as its last list said; `None`
     /// before the first.
     wlshare_most: Option<u8>,
+    /// The session's `VirtualDisplays` request has been decided on, at its first
+    /// list: sent where the server makes as many as asked, and not otherwise.
+    wlshare_asked: bool,
 }
 
 impl DisplayState {
@@ -2796,13 +2799,6 @@ async fn rfb38_preface(
         };
         let lists = Listing::new(encodings, plan);
         uplink.send(&set_encodings(lists.listed((server.width, server.height)))).await?;
-        if !beside {
-            // How many outputs the desk is to have, as an RDP client's monitor
-            // layout says it: answered with the list, and acted on by a
-            // wlshare on sway, each output it makes or unplugs a list of its
-            // own. See docs/wlshare-outputs.md.
-            uplink.send(&virtual_displays(config.virtual_displays)).await?;
-        }
         Some(Arc::new(lists))
     } else {
         uplink.send(&set_encodings(&rfb38_encoding_list())).await?;
@@ -6599,7 +6595,13 @@ async fn read_output_list<R: AsyncRead + Unpin>(
         displays.len()
     );
     let asked = desktop.lock().unwrap().wlshare_displays;
-    let (msg, switched, ask) = {
+    // The server makes virtual displays, as many as the target asks, and this
+    // list is not yet that many: the request, sent on the first list, is
+    // about to change it, so the list is provisional — not one to start *All
+    // Displays* from, which would open a tab on an output about to go.
+    let headless = displays.iter().filter(|d| d.virtual_display).count();
+    let provisional = most > 0 && asked <= most && headless != usize::from(asked);
+    let (msg, switched, ask, request) = {
         let mut state = display.lock().unwrap();
         // Once per server: the target asked for more than this wlshare makes,
         // which is one on a compositor that is not sway. The outputs are then
@@ -6610,13 +6612,19 @@ async fn read_output_list<R: AsyncRead + Unpin>(
                 warn!("vnc: the target asks for {asked} virtual displays and the server makes up to {most}; its outputs are what they are");
             }
         }
+        // How many outputs the desk is to have, as an RDP client's monitor
+        // layout says it, asked once, on the first list, of a server that
+        // makes as many: answered with the list, and acted on by a wlshare on
+        // sway, each output it makes or unplugs a list of its own. See
+        // docs/wlshare-outputs.md.
+        let request = (!std::mem::replace(&mut state.wlshare_asked, true) && asked <= most).then_some(asked);
         // The shared output moved to another: not the session's first list, and
         // not to nothing at all.
         let switched = state.listed && state.wlshare_shared != active && active != 0;
         // A desk that has just become two outputs starts on *All Displays*, as
         // two virtual displays do, unless one output alone was picked: the
         // canvas is asked onto the first when wlshare put it on the other.
-        let ask = if displays.len() == 2 && state.wlshare_outputs.len() != 2 && !state.wlshare_picked {
+        let ask = if displays.len() == 2 && state.wlshare_outputs.len() != 2 && !state.wlshare_picked && !provisional {
             state.wlshare_all = true;
             displays.first().map(|first| first.id).filter(|first| *first != active)
         } else {
@@ -6628,10 +6636,14 @@ async fn read_output_list<R: AsyncRead + Unpin>(
         // Sent only on a change, as the Apple path sends its own: every
         // `SetEncodings` is answered with a list, and a reconnecting browser is
         // told the current one by the reattach path.
-        (changed.then(|| state.displays_msg()).flatten(), switched, ask)
+        (changed.then(|| state.displays_msg()).flatten(), switched, ask, request)
     };
     if let Some(msg) = msg {
         sink.msg(msg).await?;
+    }
+    if let Some(count) = request {
+        debug!("vnc: asking the server for {count} virtual display(s)");
+        send(uplink, &virtual_displays(count)).await?;
     }
     if let Some(id) = ask {
         debug!("vnc: asking the server for output {id}, the first of two");
@@ -7900,10 +7912,10 @@ fn select_output(id: u32) -> [u8; 8] {
 }
 
 /// The wlshare `VirtualDisplays` request: operation 1 where a `SelectOutput` has
-/// 0, then the count after two bytes of padding. Sent once a `wlshare` session
-/// has listed its encodings, with the target's `virtual_displays`, and answered
-/// by the server with a list; what it brings about arrives as the outputs come
-/// and go.
+/// 0, then the count after two bytes of padding. Sent with the target's
+/// `virtual_displays` on a session's first `OutputList`, when that says the
+/// server makes as many ([`read_output_list`]), and answered by the server with
+/// a list; what it brings about arrives as the outputs come and go.
 fn virtual_displays(count: u8) -> [u8; 8] {
     let mut msg = [0u8; 8];
     msg[0] = MSG_WLSHARE_OUTPUTS;
@@ -9232,8 +9244,15 @@ mod tests {
 
     /// The body of an `OutputList` after its message type, built from
     /// wlshare's docs/architecture.md rather than from [`output_info`]'s own reading.
+    /// The list from a server that makes no virtual displays: the outputs are
+    /// what they are, and a request is never sent.
     fn output_list_body(active: u32, outputs: &[Listed]) -> Vec<u8> {
-        let mut body = vec![2u8]; // up to two virtual displays
+        output_list_body_making(0, active, outputs)
+    }
+
+    /// The list from a server that makes up to `most` virtual displays.
+    fn output_list_body_making(most: u8, active: u32, outputs: &[Listed]) -> Vec<u8> {
+        let mut body = vec![most];
         body.extend_from_slice(&(outputs.len() as u16).to_be_bytes());
         body.extend_from_slice(&active.to_be_bytes());
         for output in outputs {
@@ -9583,6 +9602,59 @@ mod tests {
         body.extend_from_slice(&(MAX_OUTPUTS + 1).to_be_bytes());
         body.extend_from_slice(&0u32.to_be_bytes());
         assert!(read_output_list(&mut body.as_slice(), &uplink, &desktop, &display, &sink).await.is_err());
+    }
+
+    /// The target's virtual displays are asked of a server that makes them, on
+    /// its first list, and a list short of the count asked — one output where
+    /// two were asked, two where one was — is not one to start *All Displays*
+    /// from: the next list, with the count asked, is.
+    #[tokio::test]
+    async fn virtual_displays_are_asked_on_the_first_list_and_all_displays_waits_for_the_count() {
+        let listed = |id, name| Listed { id, name, size: (1280, 800), scale: 1.0, headless: true };
+        let one = [listed(3, "HEADLESS-1")];
+        let two = [listed(3, "HEADLESS-1"), listed(7, "HEADLESS-2")];
+
+        // Two asked of a desk with one: the request goes out, and the desk is
+        // listed as it is.
+        let (uplink, sent) = test_uplink();
+        let desktop = shared_desktop((1280, 800), None, None);
+        desktop.lock().unwrap().wlshare_displays = 2;
+        let (sink, mut rx) = test_sink();
+        let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
+        read_output_list(&mut output_list_body_making(2, 3, &one).as_slice(), &uplink, &desktop, &display, &sink).await.unwrap();
+        assert_eq!(written(&sent), virtual_displays(2));
+        let Some(ServerMsg::Displays { active: 3, displays }) = forwarded(&sink, &mut rx).await else {
+            panic!("the one output was not listed as it is");
+        };
+        assert_eq!(displays.len(), 1);
+        // The second arrives: All Displays, and nothing asked again.
+        read_output_list(&mut output_list_body_making(2, 3, &two).as_slice(), &uplink, &desktop, &display, &sink).await.unwrap();
+        assert_eq!(written(&sent), virtual_displays(2), "the request went once");
+        let Some(ServerMsg::Displays { active, .. }) = forwarded(&sink, &mut rx).await else {
+            panic!("the two outputs were not listed");
+        };
+        assert_eq!(active, DisplayState::COMBINED);
+
+        // One asked of a desk left with two: no tab for an output about to go.
+        let (uplink, sent) = test_uplink();
+        let desktop = shared_desktop((1280, 800), None, None);
+        let (sink, mut rx) = test_sink();
+        let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
+        read_output_list(&mut output_list_body_making(2, 3, &two).as_slice(), &uplink, &desktop, &display, &sink).await.unwrap();
+        assert_eq!(written(&sent), virtual_displays(1));
+        let Some(ServerMsg::Displays { active: 3, .. }) = forwarded(&sink, &mut rx).await else {
+            panic!("the canvas's output was not listed as the shared one");
+        };
+        assert!(!display.lock().unwrap().wlshare_tab());
+
+        // A server that makes none is asked nothing, whatever the target says.
+        let (uplink, sent) = test_uplink();
+        let desktop = shared_desktop((1280, 800), None, None);
+        desktop.lock().unwrap().wlshare_displays = 2;
+        let (sink, _rx) = test_sink();
+        let display: SharedDisplay = Arc::new(std::sync::Mutex::new(DisplayState::default()));
+        read_output_list(&mut output_list_body(3, &one).as_slice(), &uplink, &desktop, &display, &sink).await.unwrap();
+        assert!(written(&sent).is_empty());
     }
 
     /// The two requests' wire: the operation byte, two of padding, then the id or

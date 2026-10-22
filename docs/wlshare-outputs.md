@@ -162,9 +162,13 @@ same key asks a Windows host for two monitors and a Mac for two virtual
 displays, and `1`, the default, asks for one. The request is the outputs
 extension's other client message, `VirtualDisplays`: the same eight bytes as a
 `SelectOutput` with an operation byte of 1 where that has 0, and the count where
-that has the id. The gateway sends it once a session has listed its encodings,
-on every connect, and never from a display's tab, whose connection is beside the
-session's and has no say.
+that has the id. The gateway sends it on a session's first `OutputList`, the
+answer to its `SetEncodings`, when that list says the server makes at least as
+many as the target asks, on every connect; never to a server that makes none,
+and never from a display's tab, whose connection is beside the session's and
+has no say. A list short of the count asked — one output where two were asked,
+or two where one was, the second about to go — does not start *All Displays*:
+the list with the count asked does.
 
 wlshare acts on it where its compositor is sway, through sway's IPC: it makes
 headless outputs and unplugs them until there are as many as asked, one at a
@@ -179,10 +183,10 @@ stay as they are once the session is gone, until the next connection says.
 
 Every `OutputList` says in its first byte after the type how many virtual
 displays the server makes at most — two on sway, none elsewhere — so the
-gateway logs once, per list that says so, when the target asks for more than the
-server makes, and goes on with the outputs the compositor has. A wlshare on
-labwc, say, is such a server: `virtual_displays = 2` there changes nothing, and
-the picker lists what the compositor has.
+gateway asks nothing of a server that makes fewer than the target wants, logs
+that once, and goes on with the outputs the compositor has. A wlshare on labwc,
+say, is such a server: `virtual_displays = 2` there changes nothing, and the
+picker lists what the compositor has.
 
 `tests/wlshare_e2e.rs` runs it against a container whose sway starts with
 HEADLESS-1 alone: the `wlshare` target asks for two, wlshare has sway make
