@@ -3375,9 +3375,8 @@ same descriptor again with mode 0 built from the size the session keeps, or from
 the connecting client's screen resolution in a session started with resize, at
 that screen's density either way; the other four modes remain native's fixed
 presets. The dynamic mode sits under the Mac's fixed 3840×2160 backing ceiling.
-The descriptor matches native's fields and ordering; its 30 Hz refresh, instead
-of native's ordinary 60 Hz, is the intentional exception because the browser is
-sent 30 frames a second. Once connected, the remote
+Its 30 Hz refresh, instead of native's ordinary 60 Hz, is the intentional
+exception because the browser is sent 30 frames a second. Once connected, the remote
 Mac's physical displays are disabled and all of its windows are placed on that
 virtual display. Apple's
 official macOS Screen Sharing client can choose up to two virtual displays, and so

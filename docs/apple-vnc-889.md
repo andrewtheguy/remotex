@@ -539,9 +539,9 @@ one descriptor with five modes:
 |---|---|
 | name | 120 bytes, UTF-8 and zero-filled: `Screen Sharing Virtual Display`, and `Screen Sharing Virtual Display #2` for the second, which are the names Apple's viewer's displays have. It is what the Mac calls the display, in its Displays settings and to its applications; left empty, the displays have no name and the Mac lists them as ` (1)` and ` (2)`. |
 | display flags | 1: dynamic resolution. Bit 1, never sent, tells the Mac to leave the refresh rate alone and ignore the mode's. |
-| display type | 0, unspecified |
-| physical size | 0×0, unspecified |
-| maximum backing size | 0×0, unspecified |
+| display type | 4, virtual |
+| physical size | millimetres, as big-endian `f32` |
+| maximum backing size | 3840×2160, a fixed ceiling |
 | current and preferred mode | index 0 |
 | rotations | 7, Apple's captured value. The agent hands it unchanged to macOS as the virtual display's rotations setting. |
 | mode count | 5 |
@@ -560,10 +560,12 @@ for 60 Hz unless its preference or display capability says otherwise; Remotex's
 30 Hz in all five modes is the one deliberate virtual-display request difference.
 
 **Rules that follow from the measurements:**
-- **3840×2160 is the dynamic-mode ceiling.** Native leaves the descriptor's
-  optional maximum fields at zero. Remotex applies the measured backing limit
-  before building mode 0; the Mac otherwise answers an out-of-bounds request
-  with its old layout.
+- **The maximum is a ceiling.** Putting the current mode there made the Mac refuse
+  anything larger. With 3840×2160 it accepted every size asked for, including
+  bursts of them and sizes below the 800×600 Apple's own UI allows.
+- **The physical and maximum sizes are required.** With either left at zero the
+  Mac creates no display: macOS refuses the configuration as an invalid size, and
+  the session stays on the Mac's own display, answering no resize.
 - **800×600 points is the least Apple's viewer asks for,** at 1x and at 2x
   alike: its window goes no smaller. Below it the virtual Mac sent no picture
   of some displays. At 1x it made whatever it was asked, and its encoder
