@@ -707,6 +707,9 @@ struct DesktopState {
     /// How many virtual displays the session asked the Mac for, one or two: the
     /// target's `virtual_displays`. Every display configuration names that many.
     hp_displays: usize,
+    /// How many virtual displays a `wlshare` session asked wlshare for, one or
+    /// two: the target's `virtual_displays`, one on every other session.
+    wlshare_displays: u8,
     /// Every virtual display is asked for with even sides, a pixel less than the
     /// window on an odd one ([`vnc_apple::VirtualMode::even_sided`]): the session
     /// passes the Mac's H.264, of which a physical Mac sends no picture with an
@@ -1713,6 +1716,9 @@ struct DisplayState {
     /// One output alone was the picker's last choice, which a desk becoming two
     /// outputs again does not undo.
     wlshare_picked: bool,
+    /// The most virtual displays the server makes, as its last list said; `None`
+    /// before the first.
+    wlshare_most: Option<u8>,
 }
 
 impl DisplayState {
@@ -2338,6 +2344,7 @@ async fn session(
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
             poll,
             hp_displays: if virtual_display { usize::from(config.virtual_displays) } else { 1 },
+            wlshare_displays: if config.wlshare() { config.virtual_displays } else { 1 },
             beside: (config.wlshare() && !beside)
                 .then(|| BesidePlan { config: config.clone(), choices, display }),
             plan,
@@ -2418,6 +2425,8 @@ struct Flags {
     /// How many virtual displays a High Performance session asked the Mac for:
     /// the target's `virtual_displays`, one on every other session.
     hp_displays: usize,
+    /// How many a `wlshare` session asked wlshare for, the same way.
+    wlshare_displays: u8,
     /// What a `wlshare` target's second output is connected to with, when it is
     /// shown in a tab of its own. `None` on every other target, and on that
     /// connection itself.
@@ -2787,6 +2796,13 @@ async fn rfb38_preface(
         };
         let lists = Listing::new(encodings, plan);
         uplink.send(&set_encodings(lists.listed((server.width, server.height)))).await?;
+        if !beside {
+            // How many outputs the desk is to have, as an RDP client's monitor
+            // layout says it: answered with the list, and acted on by a
+            // wlshare on sway, each output it makes or unplugs a list of its
+            // own. See docs/wlshare-outputs.md.
+            uplink.send(&virtual_displays(config.virtual_displays)).await?;
+        }
         Some(Arc::new(lists))
     } else {
         uplink.send(&set_encodings(&rfb38_encoding_list())).await?;
@@ -3199,6 +3215,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         host_density,
         poll,
         hp_displays,
+        wlshare_displays,
         beside: beside_plan,
         plan,
         media,
@@ -3250,6 +3267,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         push_interval_us: push_interval_us(media_stream),
         hp,
         hp_displays,
+        wlshare_displays,
         virtuals: Vec::new(),
         span: None,
         view: HpView::default(),
@@ -6558,6 +6576,7 @@ async fn read_output_list<R: AsyncRead + Unpin>(
 ) -> anyhow::Result<()> {
     let mut header = [0u8; OUTPUT_LIST_HEADER];
     reader.read_exact(&mut header).await?;
+    let most = header[0];
     let count = u16::from_be_bytes([header[1], header[2]]);
     let active = u32::from_be_bytes([header[3], header[4], header[5], header[6]]);
     // A count no desk reaches. The entries are self-describing, so an
@@ -6576,11 +6595,21 @@ async fn read_output_list<R: AsyncRead + Unpin>(
         displays.push(output_info(&entry, &name));
     }
     debug!(
-        "vnc: the server lists {} output(s), sharing id {active}",
+        "vnc: the server lists {} output(s), sharing id {active}, and makes up to {most} virtual display(s)",
         displays.len()
     );
+    let asked = desktop.lock().unwrap().wlshare_displays;
     let (msg, switched, ask) = {
         let mut state = display.lock().unwrap();
+        // Once per server: the target asked for more than this wlshare makes,
+        // which is one on a compositor that is not sway. The outputs are then
+        // what the compositor has, and the session goes on with them.
+        if state.wlshare_most != Some(most) {
+            state.wlshare_most = Some(most);
+            if asked > most {
+                warn!("vnc: the target asks for {asked} virtual displays and the server makes up to {most}; its outputs are what they are");
+            }
+        }
         // The shared output moved to another: not the session's first list, and
         // not to nothing at all.
         let switched = state.listed && state.wlshare_shared != active && active != 0;
@@ -7805,8 +7834,8 @@ fn set_desktop_size(size: (u16, u16), screen: Screen) -> [u8; 24] {
 /// height, then the scale.
 const OUTPUT_SCALE_BODY: usize = 9;
 
-/// The bytes after the type of a wlshare `OutputList`: padding, the entry count,
-/// then the shared output's id.
+/// The bytes after the type of a wlshare `OutputList`: the most virtual displays
+/// the server makes, the entry count, then the shared output's id.
 const OUTPUT_LIST_HEADER: usize = 7;
 /// The fixed part of one `OutputList` entry: id, width, height, scale, flags and
 /// the length of the name that follows it.
@@ -7858,14 +7887,28 @@ fn client_density(pixels: (u16, u16), scale: f32) -> [u8; 10] {
     msg
 }
 
-/// The wlshare `SelectOutput` request: the id of the output to share, after three
-/// bytes of padding. Sent for a [`ClientMsg::SelectDisplay`] naming an id from
-/// the last `OutputList`, and answered by the server with another list.
+/// The wlshare `SelectOutput` request: the id of the output to share, after the
+/// operation byte, 0, and two bytes of padding. Sent for a
+/// [`ClientMsg::SelectDisplay`] naming an id from the last `OutputList`, and
+/// answered by the server with another list.
 fn select_output(id: u32) -> [u8; 8] {
     let mut msg = [0u8; 8];
     msg[0] = MSG_WLSHARE_OUTPUTS;
-    // msg[1..4]: padding
+    // msg[1]: operation 0, select; msg[2..4]: padding
     msg[4..8].copy_from_slice(&id.to_be_bytes());
+    msg
+}
+
+/// The wlshare `VirtualDisplays` request: operation 1 where a `SelectOutput` has
+/// 0, then the count after two bytes of padding. Sent once a `wlshare` session
+/// has listed its encodings, with the target's `virtual_displays`, and answered
+/// by the server with a list; what it brings about arrives as the outputs come
+/// and go.
+fn virtual_displays(count: u8) -> [u8; 8] {
+    let mut msg = [0u8; 8];
+    msg[0] = MSG_WLSHARE_OUTPUTS;
+    msg[1] = 1;
+    msg[4..8].copy_from_slice(&u32::from(count).to_be_bytes());
     msg
 }
 
@@ -9190,7 +9233,7 @@ mod tests {
     /// The body of an `OutputList` after its message type, built from
     /// wlshare's docs/architecture.md rather than from [`output_info`]'s own reading.
     fn output_list_body(active: u32, outputs: &[Listed]) -> Vec<u8> {
-        let mut body = vec![0u8]; // padding
+        let mut body = vec![2u8]; // up to two virtual displays
         body.extend_from_slice(&(outputs.len() as u16).to_be_bytes());
         body.extend_from_slice(&active.to_be_bytes());
         for output in outputs {
@@ -9542,11 +9585,14 @@ mod tests {
         assert!(read_output_list(&mut body.as_slice(), &uplink, &desktop, &display, &sink).await.is_err());
     }
 
-    /// The selection's wire: the id, big-endian, after three bytes of padding.
+    /// The two requests' wire: the operation byte, two of padding, then the id or
+    /// the count, big-endian.
     #[test]
-    fn a_selected_output_is_asked_for_by_id() {
+    fn a_selected_output_is_asked_for_by_id_and_virtual_displays_by_count() {
         assert_eq!(select_output(7), [0xE1, 0, 0, 0, 0, 0, 0, 7]);
         assert_eq!(select_output(u32::MAX), [0xE1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(virtual_displays(1), [0xE1, 1, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(virtual_displays(2), [0xE1, 1, 0, 0, 0, 0, 0, 2]);
     }
 
     // ── wlshare's audio extension ───────────────────────────────────────────
@@ -10333,6 +10379,7 @@ mod tests {
             push_interval_us: vnc_apple::PUSH_INTERVAL_STANDARD_US,
             hp: HpResize::default(),
             hp_displays: 1,
+            wlshare_displays: 1,
             virtuals: Vec::new(),
             span: None,
             view: HpView::default(),

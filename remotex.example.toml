@@ -378,9 +378,11 @@ password_ref = "example"
 # link away in a tab of its own; the picker shows either alone, and the host
 # renders the other for the windows left on it. Neither is encoded by the
 # gateway: each is passed as the remote sent it, so an rdp target takes 2 only
-# with its pipeline on, and refuses `egfx = false` beside it. 1 is the one desktop every target opens; at most 2. RDP
-# and `subtype = "ard-high-performance"` — the key is shared by the target types
-# that can create virtual displays, and refused elsewhere. On RDP the pipeline is
+# with its pipeline on, and refuses `egfx = false` beside it. 1 is the one desktop every target opens; at most 2. RDP,
+# `subtype = "ard-high-performance"` and `subtype = "wlshare"` — the key is shared
+# by the target types that can create virtual displays, and refused elsewhere. A
+# wlshare on sway makes and unplugs headless outputs until there are as many as
+# asked; on another compositor the outputs are what the compositor has. On RDP the pipeline is
 # passed beside 2 as beside 1: the browser composes the whole
 # span once and shows one display of it, and the second display's tab is painted
 # from the same picture; a Mac sends each display as a stream of its own (the

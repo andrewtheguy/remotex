@@ -437,9 +437,11 @@ server is read as any VNC server is.
 - **Alpha:** a desktop with exactly two outputs, monitors or headless ones, is
   listed with *All Displays* and starts on it: the first stays here and the second opens at
   `/display/2` in a new tab of the same browser, with its own pointer and
-  keyboard, as on an `rdp` target with two virtual displays. No key asks for it;
-  the outputs are the compositor's, and `virtual_displays` is not a key of this
-  target. It needs wlshare 0.0.54 or later.
+  keyboard, as on an `rdp` target with two virtual displays. `virtual_displays = 2`
+  asks wlshare for two, as it asks a Windows host or a Mac: on sway wlshare has
+  the compositor make a second headless output, and a session started with two
+  and asked for one, the default, keeps one; on another compositor the outputs
+  are what the compositor has.
 
 The example uses the account wlshare runs as, checked through PAM over
 RSA-AES. If wlshare instead has a `password_file`, keep that server password

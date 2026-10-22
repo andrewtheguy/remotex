@@ -4,8 +4,9 @@
 #
 # wlshare is the one generic VNC server that answers the gateway's private
 # density and outputs extensions, so this is the image that exercises them.
-# Headless sway gives it two HEADLESS-* outputs — the only kind wlshare ever
-# resizes or rescales — with no GPU and no input devices. Nothing draws on
+# Headless sway gives it one HEADLESS-* output — the only kind wlshare ever
+# resizes or rescales — and makes the second when the gateway's target asks
+# wlshare for two virtual displays, with no GPU and no input devices. Nothing draws on
 # them, which is the point: a desktop that never changes is where a capture
 # waiting on damage shows itself. sway and wlroots 0.19 come from wlshare's APT
 # repository, because trixie's own wlroots 0.18 paints the cursor into a
@@ -57,7 +58,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends /tmp/wlshare.deb \
     && rm -rf /var/lib/apt/lists/* /tmp/wlshare.deb
 # HEADLESS-1 is shared first at 1024x768 and scale 1; HEADLESS-2 is the second
-# output a switch lands on, a different size at scale 2.
+# output a switch lands on, a different size at scale 2. sway makes it when the
+# gateway's target asks wlshare for two virtual displays, and the mode and scale
+# here apply to it as it appears.
 RUN printf '%s\n' \
     'xwayland disable' \
     'output HEADLESS-1 mode --custom 1024x768 scale 1' \
@@ -72,8 +75,9 @@ RUN printf '%s\n' \
     'microphone = true' \
     > /etc/wlshare-e2e.toml
 # Start PipeWire, WirePlumber and its PulseAudio server for the sound and the
-# microphone node, then sway, add the second
-# output once its IPC answers, and run wlshare in the foreground. Neither audio
+# microphone node, then sway, and once its IPC answers run wlshare in the
+# foreground with SWAYSOCK naming it, which is what lets wlshare make the second
+# output when the gateway asks for two virtual displays. Neither audio
 # daemon has a D-Bus here, and neither needs one. The waits are bounded, so a daemon
 # that cannot start names itself instead of leaving the test to time out on
 # something else.
@@ -100,7 +104,6 @@ RUN printf '%s\n' \
     '  sleep 0.1' \
     'done' \
     'export SWAYSOCK=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock)' \
-    'swaymsg create_output >/dev/null' \
     'exec env WAYLAND_DISPLAY=wayland-1 /usr/bin/wlshare --config /etc/wlshare-e2e.toml' \
     > /usr/local/bin/dummy-wlshare && chmod +x /usr/local/bin/dummy-wlshare
 USER desk

@@ -962,8 +962,8 @@ pub struct TargetConfig {
     /// *asked* for; the list the picker shows is what the remote laid out, so a
     /// server that opens one desktop shows no picker.
     ///
-    /// Shared by every target type that can create virtual displays: `rdp` and
-    /// `ard-high-performance`. A Windows host lays the displays out from the
+    /// Shared by every target type that can create virtual displays: `rdp`,
+    /// `ard-high-performance` and `wlshare`. A Windows host lays the displays out from the
     /// connect-time monitor data ([MS-RDPBCGR] 2.2.1.3.6) and from each monitor
     /// layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2), as one desktop
     /// spanning both. Passed through, that desktop is composed once in the
@@ -972,8 +972,13 @@ pub struct TargetConfig {
     /// A Mac in High Performance mode creates each
     /// from its `SetDisplayConfiguration` descriptor and sends each as a media
     /// stream of its own, which is Apple's viewer's "2 Virtual Displays", passed
-    /// through or not. Refused on every other target, where it would be silently
-    /// inert.
+    /// through or not. A `wlshare` target asks wlshare for the count with the
+    /// outputs extension's `VirtualDisplays` at every connect, and wlshare on sway
+    /// makes and unplugs headless outputs until there are that many, each a list
+    /// of its own, so a desk started with one output becomes two and starts on
+    /// *All Displays*; wlshare on another compositor says in every list that it
+    /// makes none, and the outputs are the compositor's. Refused on every other
+    /// target, where it would be silently inert.
     ///
     /// Alpha: checked against one Windows 11 host and one Mac, a virtual one; the
     /// second display's density follows the first's, and nothing of it has been
@@ -2025,9 +2030,9 @@ impl ConfigFile {
                 target.protocol.name()
             );
             // A count of virtual displays is a count the engine asks the remote
-            // for, and two remotes create them: a Windows host and a Mac in High
-            // Performance mode. On any other target the key would be read and
-            // change nothing.
+            // for, and three remotes create them: a Windows host, a Mac in High
+            // Performance mode and wlshare on sway. On any other target the key
+            // would be read and change nothing.
             anyhow::ensure!(
                 (1..=MAX_VIRTUAL_DISPLAYS).contains(&target.virtual_displays),
                 "target {:?} sets virtual_displays = {}, which must be 1 to {MAX_VIRTUAL_DISPLAYS}",
@@ -2037,10 +2042,11 @@ impl ConfigFile {
             anyhow::ensure!(
                 target.virtual_displays == 1
                     || target.protocol == Protocol::Rdp
-                    || target.subtype == Some(Subtype::ArdHighPerformance),
+                    || target.subtype == Some(Subtype::ArdHighPerformance)
+                    || target.wlshare(),
                 "target {:?} sets virtual_displays = {}, and only an rdp target or one with \
-                 subtype = \"ard-high-performance\" lays out more than one virtual display. \
-                 Remove the key.",
+                 subtype = \"ard-high-performance\" or subtype = \"wlshare\" lays out more than \
+                 one virtual display. Remove the key.",
                 target.name,
                 target.virtual_displays
             );
@@ -4141,9 +4147,10 @@ mod tests {
     }
 
     /// A count of virtual displays is one unless asked, at most two, and a key
-    /// only an rdp target and a High Performance Mac take: everywhere else it
-    /// would change nothing. The pipeline's passthrough keeps its row beside two:
-    /// the browser composes the span once and shows a display of it.
+    /// only an rdp target, a High Performance Mac and a wlshare target take:
+    /// everywhere else it would change nothing. The pipeline's passthrough keeps
+    /// its row beside two: the browser composes the span once and shows a
+    /// display of it.
     #[test]
     fn virtual_displays_are_one_unless_asked_and_only_where_they_are_created() {
         let one = ConfigFile::parse_fixture(&rdp_toml("")).unwrap().targets.remove(0);
@@ -4177,6 +4184,14 @@ vnc_password_ref = \"x\"")).unwrap_err();
         ))
         .unwrap_err();
         assert!(format!("{err:#}").contains("lays out more than one virtual display"), "{err:#}");
+        // wlshare makes them on sway, so the key is taken.
+        let wlshare = ConfigFile::parse_fixture(&vnc_toml(
+            "subtype = \"wlshare\"\nusername = \"andrew\"\npassword_ref = \"h\"\nvirtual_displays = 2",
+        ))
+        .unwrap()
+        .targets
+        .remove(0);
+        assert_eq!(wlshare.virtual_displays, 2);
         let mac = ConfigFile::parse_fixture(&vnc_toml(
             "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword_ref = \"h\"\nvirtual_displays = 2",
         ))

@@ -3,8 +3,10 @@
 //!
 //! Builds wlshare from its checkout — `../wlshare` beside this repository, or
 //! wherever `REMOTEX_TEST_WLSHARE_DIR` names — and starts it on a headless sway
-//! (`tests/wlshare-dummy/`) with two outputs, HEADLESS-1 at 1024x768 and scale 1
-//! and HEADLESS-2 at 1280x800 and scale 2, then drives a session through the
+//! (`tests/wlshare-dummy/`) with one output, HEADLESS-1 at 1024x768 and scale 1;
+//! the `wlshare` target asks for two virtual displays, so wlshare has sway make
+//! HEADLESS-2, at 1280x800 and scale 2 by sway's configuration, before the desk
+//! is listed as two. The tests then drive a session through the
 //! gateway as a 2x browser would. Every step is
 //! asserted twice: on what the browser is told, and on what sway says the output
 //! became, so a gateway that reports a density or a size the server never
@@ -103,7 +105,8 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         domain: None,
         size: None,
         egfx: None,
-        virtual_displays: 1,
+        // The second output is wlshare's to make on sway, asked for here.
+        virtual_displays: 2,
         video_quality: None,
         render_adaptive: None,
         virtual_display: false,
