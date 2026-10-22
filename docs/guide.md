@@ -190,7 +190,7 @@ password not set yet: the target answers with the empty password until the
 real value is pasted over it, and a config whose names are all placeholders
 needs no `[master]` or master password.
 
-Every value is AES-256-GCM under a key derived from your **master password**
+Every other value is AES-256-GCM under a key derived from your **master password**
 and the config's own salt. A served gateway reads it from a file named by
 `[server].master_password_file`: a container secret, a systemd credential, or
 a file only the gateway's account can read. The file holds the master password
@@ -201,12 +201,12 @@ you never type it. Nothing but the TUI reads the keychain.
 
 | Started as | Master password from |
 |---|---|
-| `remotex serve` | `[server].master_password_file`; refused without it, never asked |
+| `remotex serve` | `[server].master_password_file`; refused without it when a target names an encrypted value, never asked |
 | `remotex tui` | the keychain; generated and kept there when it has none; refused when the keychain will not answer, never asked |
 | `remotex password` | `[server].master_password_file`, else asked |
 
-A local instance has no `[server]` block, so the TUI always uses the keychain,
-and needs one.
+A local instance has no `[server]` block, so its master password always comes
+from the keychain.
 
 A wrong master password is reported as one at start-up. Changing the master
 password means setting each password again under a new `[master]`.
@@ -518,7 +518,7 @@ credentials. An instance's config has the same `[branding]` and `[[targets]]`
 as a gateway's and no `[server]` block: the TUI owns the port and proxies each
 subdomain to that instance's private Unix socket or named pipe.
 
-A config that names passwords needs the master password to start (see
+A config that names encrypted passwords needs the master password to start (see
 [Target passwords](#target-passwords)). The TUI takes it from the keychain,
 generating one there the first time, then hands each worker only the key to
 its own config. An instance config copied from another account's keychain

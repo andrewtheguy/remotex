@@ -3646,7 +3646,7 @@ they do not authenticate the public loopback surface. Do not run the TUI on a
 machine shared with users who must not reach its desktops.
 
 Each hidden worker reads one line from stdin first — the key to its config's
-`[passwords]`, or an empty line for a config that names none (see
+`[passwords]`, or an empty line for a config that names none or only placeholders (see
 [Target passwords](#target-passwords)) — binds its private endpoint, prints one
 JSON readiness line — `{"endpoint","token"}` — after binding, reads only that
 instance's `remotex.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,
@@ -3744,7 +3744,7 @@ before.
 Where the master password comes from is each audience's:
 
 - `remotex serve` reads `[server].master_password_file`, and a config that
-  names passwords without it refuses to start. It never asks at a terminal: a
+  names encrypted passwords without it refuses to start. It never asks at a terminal: a
   service manager and a person must start it the same way. Nor does it read
   the keychain, which is the TUI's alone: a served gateway runs where no
   keychain answers as often as where one does (a container, a headless Linux
