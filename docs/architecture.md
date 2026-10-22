@@ -31,7 +31,7 @@ quality and walk the target's render plan resolves to, at 4:4:4 for a browser
 whose own decoder takes it and 4:2:0 for one that does not — or, in a session
 started with its tiles with motion, chosen at the picker, its own tiles, exact PNG
 where the desktop is still and a video stream of its own for each region that moves,
-VP9 or the host's hardware H.264, passed the same way. A `wlshare` desktop
+VP9 or H.264 by the host's hardware or libx264, passed the same way. A `wlshare` desktop
 too large for that stream, in a session that does not resize it, has no picture:
 the session stays up and the page offers the server's outputs — see
 [past the ceiling](#past-the-ceiling). A Mac is reached over Apple's own RFB
@@ -501,8 +501,8 @@ whichever the session was started with, chosen at the picker's Picture group
 frames untouched. Its VP9, *Video*, is the picture of a session that names
 none, listed with the plan's dial, walk and chroma as pseudo-encodings beside
 it. Its tiles with motion, exact PNG tiles where the desktop is still and a
-4:2:0 video stream of its own for each region that moves, VP9 or the host's
-hardware H.264 for a browser that takes it, are wlshare's picture
+4:2:0 video stream of its own for each region that moves, VP9 or H.264 by the
+host's hardware or libx264 for a browser that takes it, are wlshare's picture
 for a link with room to spare — a fraction of the VP9's encoder time and a
 picture that ends exact, for several times its bytes — listed with the dial
 alone, which its regions are held at: they select no chroma, 4:2:0 for every
@@ -1098,8 +1098,8 @@ session started with its tiles with motion, chosen at the picker as *Tiles with
 motion* against its VP9, lists in place of `WLSV`: the desktop as exact PNG
 tiles where it is still, and a video stream of its own, 4:2:0, for each region
 that moves, at most four at once — VP9 profile 0 at libvpx's least search, or
-H.264 from the wlshare host's hardware encoder where it has one and this browser
-takes it — and every tile a stream carried sent again as PNG once it is still,
+H.264 from the wlshare host's hardware encoder, or libx264 where it has none, and
+this browser takes it — and every tile a stream carried sent again as PNG once it is still,
 so the picture ends exact. It is Motion, which this gateway removed because here
 it sat between a native protocol and the page, done where the compositor's
 pixels are coded once; its rules and measurements are wlshare's

@@ -980,7 +980,7 @@ impl TileUnit {
 
 /// An access unit of one moving region's stream in wlshare's tiles
 /// ([`ServerMsg::TilesStart`] on a `wlshare` target that asks for them), VP9 or the
-/// H.264 of the host's hardware encoder, carried as a `REGION` record inside a
+/// H.264 of the host's hardware encoder or libx264, carried as a `REGION` record inside a
 /// [`batch`] frame, as wlshare sent it.
 ///
 /// The contract every client implements:

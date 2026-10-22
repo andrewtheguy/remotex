@@ -188,7 +188,7 @@ const MAX_WLSHARE_VP9_FRAME: u32 = 64 << 20;
 /// session started with it ([`crate::config::Passthrough::WlshareTilesMotion`]) lists
 /// in place of [`ENCODING_WLSHARE_VP9`]: the desktop as exact PNG
 /// tiles where it is still and a video stream of its own, 4:2:0, for each region that
-/// moves — VP9, or H.264 where the host has a hardware encoder, as wlshare
+/// moves — VP9, or H.264 by the host's hardware encoder or libx264, as wlshare
 /// chooses — each rectangle of an update one of them, passed through untouched
 /// ([`VideoSink::pass_tile`], [`VideoSink::pass_region`]). The dial beside it,
 /// [`ENCODING_WLSHARE_VP9_QUALITY_BASE`]'s, is what the regions are held at.
