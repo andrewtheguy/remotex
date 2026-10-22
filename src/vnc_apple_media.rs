@@ -2287,9 +2287,8 @@ impl PassQueue {
 /// from them, in its own decoder or from what the browser's decodes of each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Receive {
-    /// The HEVC, in `strips` where the display's height allows, or whole, each
-    /// picture the display, for a session that asked for it so
-    /// ([`crate::config::Choices::whole`]).
+    /// The HEVC, in `strips`, or whole, each picture the display, for a session
+    /// that asked for it so ([`crate::config::Choices::whole`]).
     Hevc { strips: bool },
     /// The H.264, each picture the display: in strips the Mac codes it again
     /// from scratch every frame, still screen or not.

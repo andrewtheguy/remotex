@@ -57,8 +57,10 @@ would take is in [`roadmap.md`](roadmap.md).
 One long sequence, every step of it a question the host answers before the next
 may be asked: the security negotiation, TLS, the credentials, the channels, the
 logon, the licence, the capability exchange, and the four PDUs that make the share
-live. `rdp_client/connect.rs` is that order, written as one function on purpose —
-the steps share nothing but the socket and what the last one said.
+live. `rdp_client/connect.rs` is that order, written as two functions on purpose,
+`connect` up to the host's Demand Active and `activate` for the capability
+exchange and the four PDUs after it — the steps share nothing but the socket and
+what the last one said.
 
 The security negotiation offers `HYBRID` and nothing else, so a server that cannot
 do NLA is refused rather than logged on to some other way. The TLS certificate

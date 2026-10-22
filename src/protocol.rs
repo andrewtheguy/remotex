@@ -1276,7 +1276,7 @@ pub enum ServerMsg {
     Connected {
         name: String,
         protocol: &'static str,
-        /// The target's `subtype`, where it has one — `ard` or
+        /// The target's `subtype`, where it has one — `wlshare`, `ard` or
         /// `ard-high-performance` — and `None` for plain
         /// RDP and plain VNC.
         ///
