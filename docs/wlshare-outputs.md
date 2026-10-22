@@ -119,10 +119,10 @@ A desk with exactly two outputs is listed with a third entry, *All Displays*
 (alpha), which is what such a desk starts on, at its first list and whenever its
 outputs become two unless one output alone was picked: the first output stays on the canvas and the second opens at
 `/display/2` in a tab of its own, as an RDP target's or a High Performance Mac's
-second virtual display does. The entry is the gateway's, not wlshare's, and no
-target key asks for it: the outputs are the compositor's, two monitors on a
-desk or two headless outputs it was started with (`WLR_HEADLESS_OUTPUTS=2`, or
-sway's `create_output`).
+second virtual display does. The entry is the gateway's, not wlshare's: the outputs are the compositor's, two
+monitors on a desk, two headless outputs it was started with
+(`WLR_HEADLESS_OUTPUTS=2`), or the two the target asked wlshare for
+([Virtual displays](#virtual-displays)).
 
 wlshare shows a connection one output, so the tab is a second connection
 ([A display beside](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#a-display-beside)).
@@ -154,6 +154,44 @@ monitors, 1920×1080 and 1024×768: each tab was sent its own output's size and
 pictures while the canvas kept the first, and wlshare logged the second
 connection as `showing output … beside`. `tests/wlshare_e2e.rs` runs the same
 against a container.
+
+## Virtual displays
+
+`virtual_displays = 2` on a `wlshare` target asks wlshare for two outputs, as the
+same key asks a Windows host for two monitors and a Mac for two virtual
+displays, and `1`, the default, asks for one. The request is the outputs
+extension's other client message, `VirtualDisplays`: the same eight bytes as a
+`SelectOutput` with an operation byte of 1 where that has 0, and the count where
+that has the id. The gateway sends it on a session's first `OutputList`, the
+answer to its `SetEncodings`, when that list says the server makes at least as
+many as the target asks, on every connect; never to a server that makes none,
+and never from a display's tab, whose connection is beside the session's and
+has no say. A list short of the count asked — one output where two were asked,
+or two where one was, the second about to go — does not start *All Displays*:
+the list with the count asked does.
+
+wlshare acts on it where its compositor is sway, through sway's IPC: it makes
+headless outputs and unplugs them until there are as many as asked, one at a
+time, each a list of its own ([wlshare's
+`docs/architecture.md`](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#virtual-displays)).
+So a desk started with one headless output and asked for two is listed as one,
+then as two, at which the session starts on *All Displays* and the second
+display's tab opens; a desk started with two and asked for one loses its second,
+as a Windows host with two monitors asked for one does. The count is of headless
+outputs: a monitor somebody is sitting at is never one of them. The outputs
+stay as they are once the session is gone, until the next connection says.
+
+Every `OutputList` says in its first byte after the type how many virtual
+displays the server makes at most — two on sway, none elsewhere — so the
+gateway asks nothing of a server that makes fewer than the target wants, logs
+that once, and goes on with the outputs the compositor has. A wlshare on labwc,
+say, is such a server: `virtual_displays = 2` there changes nothing, and the
+picker lists what the compositor has.
+
+`tests/wlshare_e2e.rs` runs it against a container whose sway starts with
+HEADLESS-1 alone: the `wlshare` target asks for two, wlshare has sway make
+HEADLESS-2, at the mode and scale sway's configuration names for it, and the
+desk is listed as two and starts on *All Displays*.
 
 ## Measured
 
