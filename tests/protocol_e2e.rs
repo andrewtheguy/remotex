@@ -430,14 +430,18 @@ const MAC_SCREEN_WIDTH: u16 = 1024;
 const MAC_SCREEN_HEIGHT: u16 = 768;
 /// The window a resize reports: the least a Mac's virtual display is asked for.
 const MAC_WINDOW: (u16, u16) = (800, 600);
+/// The points Apple's viewer creates every virtual display at, at 2x, before the
+/// session-ready configuration sizes it.
+const MAC_NATIVE_OPENING: (u16, u16) = (1920, 1080);
 const MAC_CLIPBOARD_SESSION: u32 = 0x1234_5678;
 const MAC_REMOTE_CLIPBOARD: &str = "copied on virtual Mac ✓";
 const MAC_BROWSER_CLIPBOARD: &str = "sent from browser ☕";
 
 #[derive(Debug, PartialEq, Eq)]
 enum MacRequest {
-    /// A virtual-display mode: its points, and the density its pixels state.
-    Configuration((u16, u16), u16),
+    /// A virtual-display mode: its points, the density its pixels state, and
+    /// whether the descriptor asks for dynamic resolution.
+    Configuration((u16, u16), u16, bool),
     Display(u32),
     AutoPasteboard(bool),
     AutoFramebuffer((u16, u16)),
@@ -600,14 +604,24 @@ fn fake_mac_layout(id: u32, (w, h): (u16, u16), density: u16) -> Vec<u8> {
 }
 
 /// Parse `SetDisplayConfiguration` independently of the implementation that wrote
-/// it, asserting the descriptor and mode-table fields consumed by the server.
-/// Returns the mode's points and the density its pixels state — the pixel pair
-/// must be a whole multiple of the scaled pair, or the mode contradicts itself.
-fn fake_mac_read_configuration(body: &[u8]) -> ((u16, u16), u16) {
+/// it, asserting the descriptor and mode-table fields consumed by the server: the
+/// requested mode, then Apple's viewer's four fixed ones, and a maximum and a
+/// physical size that follow the largest of them, as Apple's viewer sends them.
+/// Returns the first mode's points, the density its pixels state — the pixel pair
+/// must be a whole multiple of the scaled pair, or the mode contradicts itself —
+/// and whether the display asks for dynamic resolution.
+fn fake_mac_read_configuration(body: &[u8]) -> ((u16, u16), u16, bool) {
     const D: usize = 8;
     const DESCRIPTOR_HEAD: usize = 0x9c;
     const MODE_ENTRY: usize = 0x1c;
-    assert_eq!(body.len(), D + DESCRIPTOR_HEAD + MODE_ENTRY);
+    const MODES: usize = 5;
+    const PRESETS: [(u32, u32, u32, u32); 4] = [
+        (2880, 1800, 1440, 900),
+        (3840, 2160, 1920, 1080),
+        (2880, 1620, 1440, 810),
+        (2624, 1696, 1312, 848),
+    ];
+    assert_eq!(body.len(), D + DESCRIPTOR_HEAD + MODES * MODE_ENTRY);
 
     let be16 = |at: usize| u16::from_be_bytes([body[at], body[at + 1]]);
     let be32 = |at: usize| {
@@ -617,13 +631,19 @@ fn fake_mac_read_configuration(body: &[u8]) -> ((u16, u16), u16) {
     assert_eq!(be16(2), 1, "one display descriptor");
     assert_eq!(be32(4), 0, "configuration flags");
 
-    let modes = usize::from(be16(D + 0x9a));
-    assert_eq!(modes, 1);
-    assert_eq!(usize::from(be16(D)), DESCRIPTOR_HEAD + MODE_ENTRY);
-    assert_eq!(be32(D + 0x7a), 1, "display_flags");
-    assert_eq!(be32(D + 0x7e), 4, "virtual display_type");
-    assert_eq!(be32(D + 0x8a), 3840, "fixed dynamic maximum width");
-    assert_eq!(be32(D + 0x8e), 2160, "fixed dynamic maximum height");
+    assert_eq!(usize::from(be16(D + 0x9a)), MODES, "mode count");
+    assert_eq!(usize::from(be16(D)), DESCRIPTOR_HEAD + MODES * MODE_ENTRY);
+    let flags = be32(D + 0x7a);
+    assert!(flags <= 1, "display_flags {flags:#x}: dynamic resolution at most");
+    assert_eq!(be32(D + 0x7e), 0, "display_type, unset as Apple's viewer leaves it");
+    let largest = |at: usize| {
+        (0..MODES).map(|mode| be32(D + DESCRIPTOR_HEAD + mode * MODE_ENTRY + at)).max().unwrap()
+    };
+    let (max_w, max_h) = (largest(0), largest(4));
+    assert_eq!((be32(D + 0x8a), be32(D + 0x8e)), (max_w, max_h), "maximum: the largest mode");
+    let mm = |at: usize| f32::from_be_bytes(body[at..at + 4].try_into().unwrap());
+    let at_264_dpi = |px: u32| (f64::from(px) * 25.4 / 264.0) as f32;
+    assert_eq!((mm(D + 0x82), mm(D + 0x86)), (at_264_dpi(max_w), at_264_dpi(max_h)), "millimetres");
     assert_eq!(be16(D + 0x92), 0, "current mode");
     assert_eq!(be16(D + 0x94), 0, "preferred mode");
     assert_eq!(be32(D + 0x96), 7, "native dynamic rotations value");
@@ -645,9 +665,16 @@ fn fake_mac_read_configuration(body: &[u8]) -> ((u16, u16), u16) {
         u32::from(points.1) * u32::from(density),
         "pixel height states the same density as the width"
     );
-    assert_eq!(&body[mode + 16..mode + 24], &30.0f64.to_be_bytes(), "30 Hz");
-    assert_eq!(be32(mode + 24), 0, "mode flags");
-    (points, density)
+    for (index, preset) in PRESETS.into_iter().enumerate() {
+        let at = mode + (1 + index) * MODE_ENTRY;
+        assert_eq!((be32(at), be32(at + 4), be32(at + 8), be32(at + 12)), preset, "preset {index}");
+    }
+    for index in 0..MODES {
+        let at = mode + index * MODE_ENTRY;
+        assert_eq!(&body[at + 16..at + 24], &30.0f64.to_be_bytes(), "mode {index} at 30 Hz");
+        assert_eq!(be32(at + 24), 0, "mode {index} flags");
+    }
+    (points, density, flags == 1)
 }
 
 /// Build the server-to-client Apple pasteboard message independently of the
@@ -1162,8 +1189,8 @@ async fn serve_fake_mac_records(
                 let size = usize::from(u16::from_be_bytes([head[1], head[2]]));
                 let mut body = vec![0u8; size];
                 records.read_exact(&mut body).await?;
-                let (points, density) = fake_mac_read_configuration(&body);
-                let _ = requests.send(MacRequest::Configuration(points, density));
+                let (points, density, dynamic) = fake_mac_read_configuration(&body);
+                let _ = requests.send(MacRequest::Configuration(points, density, dynamic));
                 configurations.push((points, density));
                 // Setup is answered by the first non-incremental request below.
                 // A steady-state dynamic configuration is answered immediately by
@@ -1309,6 +1336,22 @@ async fn next_mac_request(rx: &mut mpsc::UnboundedReceiver<MacRequest>) -> MacRe
         .await
         .expect("timed out waiting for a display-control request")
         .expect("the display-control channel closed")
+}
+
+/// The next request past any polls held to one pixel, and how many of those
+/// there were: a display change or a media-stream offer sees one at the end of
+/// each update meanwhile, however many the fake happens to send. A full-size
+/// poll is no held one: it comes back as the next request, which fails the
+/// caller's expectation, so a session that stopped holding polls while a
+/// display change was out still fails here.
+async fn next_mac_request_past_held(rx: &mut mpsc::UnboundedReceiver<MacRequest>) -> (MacRequest, usize) {
+    let mut held = 0;
+    loop {
+        match next_mac_request(rx).await {
+            MacRequest::HeldFramebuffer => held += 1,
+            other => return (other, held),
+        }
+    }
 }
 
 /// Start the app against the connection-dropping RDP endpoint.
@@ -2320,41 +2363,57 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
     .await
     .unwrap();
 
-    // High Performance's opening: the pasteboard enable, the display configuration
-    // at the client's screen, then the arming.
+    // High Performance's opening: the pasteboard enable, the display at Apple's
+    // viewer's canonical mode without dynamic resolution, then the arming.
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1)
+        MacRequest::Configuration(MAC_NATIVE_OPENING, 2, false)
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
     );
+    // The canonical layout re-arms, and with no media stream to wait for, the
+    // session-ready configuration follows it: dynamic, at the client's screen,
+    // with polling held until its layout.
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_NATIVE_OPENING.0 * 2, MAC_NATIVE_OPENING.1 * 2))
+    );
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoFramebuffer((1, 1)));
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1, true)
+    );
+    let (rearm, held) = next_mac_request_past_held(&mut requests).await;
+    assert_eq!(rearm, MacRequest::AutoPasteboard(true));
+    assert!(held > 0, "polling did not hold to one pixel while the display change was out");
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT))
+    );
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], MAC_NATIVE_OPENING.0 * 2, "{resize}");
+    assert_eq!(resize["scale"], 2.0, "{resize}");
     let resize = expect_resize_msg(&mut ws).await;
     assert_eq!(resize["w"], MAC_SCREEN_WIDTH, "{resize}");
     assert_eq!(resize["h"], MAC_SCREEN_HEIGHT, "{resize}");
     let msg = expect_displays(&mut ws).await;
     assert_eq!(msg["displays"][0]["virtual"], true, "{msg}");
     // The picture is the Mac's zlib, inflated here and sent as tiles behind their
-    // `tilesStart`: they arrive with no stream up, where High Performance would
-    // still be waiting on its offer.
+    // `tilesStart`, with no stream up. The arming pushes it, and it is never
+    // polled for between updates.
     expect_fake_tiles(&mut ws, true).await;
-    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT))
-    );
-    // The arming pushes the picture, which is never polled for between updates.
-    expect_fake_tiles(&mut ws, false).await;
     assert!(requests.try_recv().is_err(), "a Standard session polled the Mac");
 
     // A resize is High Performance's: the narrowed arming, the new configuration,
     // the held poll, and the Mac's answering layout.
     ws.send(Message::text(format!(r#"{{"type":"viewport","w":{},"h":{}}}"#, MAC_WINDOW.0, MAC_WINDOW.1))).await.unwrap();
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoFramebuffer((1, 1)));
-    assert_eq!(next_mac_request(&mut requests).await, MacRequest::Configuration(MAC_WINDOW, 1));
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::Configuration(MAC_WINDOW, 1, true));
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::HeldFramebuffer);
     let resize = expect_resize_msg(&mut ws).await;
     assert_eq!(resize["w"], MAC_WINDOW.0, "{resize}");
@@ -2372,7 +2431,7 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
         .expect("the fake Mac task failed");
     assert_eq!(
         configurations,
-        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), (MAC_WINDOW, 1)],
+        vec![(MAC_NATIVE_OPENING, 2), ((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), (MAC_WINDOW, 1)],
         "unexpected display configurations"
     );
 }
@@ -2465,6 +2524,41 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
     assert!(configurations.is_empty(), "Standard asked for a virtual display: {configurations:?}");
 }
 
+/// High Performance's opening after its canonical configuration, in Apple's
+/// viewer's order: the canonical layout re-arms, the media stream is offered for
+/// it behind encodings listing the stream first, and only its answer lets the
+/// session-ready configuration out, dynamic, at the client's screen of `points`
+/// at `density`. Its layout re-arms on the region held to one pixel, since the
+/// stream is the picture, and once it has settled the stream is offered again.
+async fn expect_native_opening(
+    requests: &mut mpsc::UnboundedReceiver<MacRequest>,
+    points: (u16, u16),
+    density: u16,
+) {
+    assert_eq!(
+        next_mac_request(requests).await,
+        MacRequest::AutoPasteboard(true),
+        "the canonical layout did not re-arm its pasteboard"
+    );
+    assert_eq!(
+        next_mac_request(requests).await,
+        MacRequest::AutoFramebuffer((MAC_NATIVE_OPENING.0 * 2, MAC_NATIVE_OPENING.1 * 2))
+    );
+    let (offer, _) = next_mac_request_past_held(requests).await;
+    assert_eq!(offer, MacRequest::Offer { media_first: true }, "the stream is offered for the canonical display");
+    let (narrowed, _) = next_mac_request_past_held(requests).await;
+    assert_eq!(narrowed, MacRequest::AutoFramebuffer((1, 1)), "the region was not narrowed ahead of the change");
+    assert_eq!(next_mac_request(requests).await, MacRequest::Configuration(points, density, true));
+    assert_eq!(
+        next_mac_request(requests).await,
+        MacRequest::AutoPasteboard(true),
+        "the session-ready layout did not re-arm its pasteboard"
+    );
+    assert_eq!(next_mac_request(requests).await, MacRequest::AutoFramebuffer((1, 1)));
+    let (offer, _) = next_mac_request_past_held(requests).await;
+    assert_eq!(offer, MacRequest::Offer { media_first: true }, "the stream is offered again for the settled display");
+}
+
 /// The whole `ard-high-performance` RFB wire, end to end: authentication, record setup,
 /// initial and dynamic virtual-display configurations, pixels, and native Apple
 /// pasteboard messages in both directions.
@@ -2489,16 +2583,21 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1)
+        MacRequest::Configuration(MAC_NATIVE_OPENING, 2, false)
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
     );
+    expect_native_opening(&mut requests, (MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1).await;
 
-    // ServerInit precedes the encrypted display request, then the answering layout
-    // replaces that provisional geometry with the opening virtual mode.
+    // ServerInit precedes the encrypted display request, then the canonical
+    // layout replaces that provisional geometry, and the session-ready one
+    // replaces it with the client's screen.
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], MAC_NATIVE_OPENING.0 * 2, "{resize}");
+    assert_eq!(resize["scale"], 2.0, "{resize}");
     let resize = expect_resize_msg(&mut ws).await;
     assert_eq!(resize["w"], MAC_SCREEN_WIDTH, "{resize}");
     assert_eq!(resize["h"], MAC_SCREEN_HEIGHT, "{resize}");
@@ -2514,23 +2613,6 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     // No picture: the Mac's ZRLE is stepped over, and the picture is the media
     // stream alone, which this fake Mac never delivers, so the browser has been
     // told its screen is not available.
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::AutoPasteboard(true),
-        "the virtual display's answering layout did not re-arm its pasteboard"
-    );
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT))
-    );
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::IncrementalFramebuffer
-    );
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::IncrementalFramebuffer
-    );
 
     // Remote → browser. Selecting the already-active display gives the fake Mac
     // a deterministic point to announce a pasteboard change; the gateway fetches
@@ -2540,27 +2622,23 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     )))
     .await
     .unwrap();
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::Display(MAC_VIRTUAL_DISPLAY)
-    );
+    let (display, _) = next_mac_request_past_held(&mut requests).await;
+    assert_eq!(display, MacRequest::Display(MAC_VIRTUAL_DISPLAY));
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::ClipboardFetch(0)
     );
+    // Polls held to one pixel go on, which bring the fetch's reply no update to
+    // wait behind: with the stream the picture, the Mac sends no pixels.
+    let (fence, _) = next_mac_request_past_held(&mut requests).await;
     assert_eq!(
-        next_mac_request(&mut requests).await,
+        fence,
         MacRequest::Fence { flags: 0, payload: b"clip".to_vec() },
         "an incremental framebuffer request overtook the clipboard reply"
     );
     actions
         .send(MacAction::CompleteClipboardFetch)
         .expect("the fake Mac stopped before completing the clipboard fetch");
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::IncrementalFramebuffer,
-        "framebuffer polling did not resume after the clipboard reply"
-    );
     let remote_clipboard = expect_clipboard(&mut ws).await;
     assert_eq!(remote_clipboard.text, MAC_REMOTE_CLIPBOARD);
     assert!(remote_clipboard.changed_at_ms.is_some());
@@ -2573,8 +2651,9 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     )))
     .await
     .unwrap();
+    let (send, _) = next_mac_request_past_held(&mut requests).await;
     assert_eq!(
-        next_mac_request(&mut requests).await,
+        send,
         MacRequest::ClipboardSend {
             session_id: MAC_CLIPBOARD_SESSION,
             text: MAC_BROWSER_CLIPBOARD.to_owned(),
@@ -2587,37 +2666,32 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     ws.send(Message::text(format!(r#"{{"type":"viewport","w":{},"h":{}}}"#, MAC_WINDOW.0, MAC_WINDOW.1)))
         .await
         .unwrap();
+    let (narrowed, _) = next_mac_request_past_held(&mut requests).await;
     assert_eq!(
-        next_mac_request(&mut requests).await,
+        narrowed,
         MacRequest::AutoFramebuffer((1, 1)),
         "the armed region was not narrowed ahead of the display change"
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Configuration(MAC_WINDOW, 1)
-    );
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::HeldFramebuffer,
-        "polling did not hold to one pixel while the display change was out"
+        MacRequest::Configuration(MAC_WINDOW, 1, true)
     );
     let resize = expect_resize_msg(&mut ws).await;
     assert_eq!(resize["w"], MAC_WINDOW.0, "{resize}");
     assert_eq!(resize["h"], MAC_WINDOW.1, "{resize}");
     assert_eq!(resize["scale"], 1.0, "{resize}");
+    let (rearm, _) = next_mac_request_past_held(&mut requests).await;
+    assert_eq!(rearm, MacRequest::AutoPasteboard(true), "the dynamic layout did not re-arm its pasteboard");
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::AutoPasteboard(true),
-        "the dynamic layout did not re-arm its pasteboard"
+        MacRequest::AutoFramebuffer((1, 1)),
+        "the region stays held to one pixel while the stream is the picture"
     );
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::AutoFramebuffer(MAC_WINDOW)
-    );
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::IncrementalFramebuffer
-    );
+    // The changed display took the stream down; it is offered again once the
+    // layout has settled, which also has the fake back at its read loop when
+    // the disconnect closes the session.
+    let (offer, _) = next_mac_request_past_held(&mut requests).await;
+    assert_eq!(offer, MacRequest::Offer { media_first: true });
 
     ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
     expect_picker(&mut ws).await;
@@ -2627,7 +2701,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         .expect("the fake Mac task failed");
     assert_eq!(
         configurations,
-        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), (MAC_WINDOW, 1)],
+        vec![(MAC_NATIVE_OPENING, 2), ((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 1), (MAC_WINDOW, 1)],
         "unexpected display configurations"
     );
 }
@@ -2655,41 +2729,24 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
-        MacRequest::Configuration((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 2)
+        MacRequest::Configuration(MAC_NATIVE_OPENING, 2, false)
     );
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
     );
+    expect_native_opening(&mut requests, (MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 2).await;
 
-    // ServerInit's provisional geometry first, then the answering layout: the
-    // backing pixels doubled and the density that earned them, which presents
-    // the desktop at its screen-point size.
+    // ServerInit's provisional geometry first, then the canonical layout, then
+    // the session-ready one: the backing pixels doubled and the density that
+    // earned them, which presents the desktop at its screen-point size.
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
+    let resize = expect_resize_msg(&mut ws).await;
+    assert_eq!(resize["w"], MAC_NATIVE_OPENING.0 * 2, "{resize}");
     let resize = expect_resize_msg(&mut ws).await;
     assert_eq!(resize["w"], MAC_SCREEN_WIDTH * 2, "{resize}");
     assert_eq!(resize["h"], MAC_SCREEN_HEIGHT * 2, "{resize}");
     assert_eq!(resize["scale"], 2.0, "{resize}");
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::AutoPasteboard(true),
-        "the answering layout re-arms its pasteboard"
-    );
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH * 2, MAC_SCREEN_HEIGHT * 2))
-    );
-    // The re-arm rides with one more update request; wait for the next so the
-    // fake Mac is back at its read loop — and sees a clean end of stream rather
-    // than a mid-write break — when the disconnect closes the session.
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::IncrementalFramebuffer
-    );
-    assert_eq!(
-        next_mac_request(&mut requests).await,
-        MacRequest::IncrementalFramebuffer
-    );
 
     ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
     expect_picker(&mut ws).await;
@@ -2699,7 +2756,8 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
         .expect("the fake Mac task failed");
     assert_eq!(
         configurations,
-        vec![((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 2)],
+        vec![(MAC_NATIVE_OPENING, 2), ((MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT), 2)],
         "unexpected display configurations"
     );
 }
+

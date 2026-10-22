@@ -236,13 +236,14 @@ const MODE_ENTRY: usize = 0x1c;
 const DESCRIPTOR_HEAD: usize = 0x9c;
 /// Bytes of a display configuration before its first descriptor.
 const CONFIG_HEAD: usize = 0x0c;
-/// Dots per inch used to derive the descriptor's physical dimensions. This is the
-/// value that reproduces the dimensions in the reverse-engineered reference.
-const NOMINAL_DPI: f32 = 132.0;
-/// Native Screen Sharing's fixed dynamic-display backing ceiling. These are the
-/// descriptor's bounds, not its current mode: macOS fixes them when it creates the
-/// virtual display, so deriving them from the initial mode silently caps every
-/// later resize to that initial width and height.
+/// Millimetres per backing pixel of a descriptor's physical size: Apple's viewer
+/// leaves the size to its serializer, which gives the largest mode 264 dots per
+/// inch, 132 per point at 2x.
+const MM_PER_PIXEL: f64 = 25.4 / 264.0;
+/// Native Screen Sharing's dynamic-display backing ceiling: the largest backing
+/// size its dynamic mode asks for, and so, with the presets reaching it, the
+/// descriptor's maximum. macOS fixes the maximum when it creates the virtual
+/// display, so a smaller one caps every later resize.
 const DYNAMIC_MAX_WIDTH: u32 = 3840;
 const DYNAMIC_MAX_HEIGHT: u32 = 2160;
 /// The most points a virtual display covers on every client: the ceiling at the 2x
@@ -488,22 +489,38 @@ pub fn virtual_display_mode((w, h): (u16, u16), density: f32) -> VirtualMode {
 pub const DISPLAY_HZ: u8 = 30;
 
 /// `SetDisplayConfiguration`: request one virtual display per mode in `modes`,
-/// each advertising that one mode, refreshed [`DISPLAY_HZ`] times a second. The
-/// Mac takes one or two, and creates the second to the right of the first.
+/// each advertising native Screen Sharing's five-mode table, refreshed
+/// [`DISPLAY_HZ`] times a second. The Mac takes one or two, and creates the second
+/// to the right of the first.
 ///
-/// This is sent while establishing a virtual-display session and again for
-/// each accepted viewport change, every display's descriptor each time.
-/// `display_flags` bit 0 enables dynamic resolution;
-/// it is deliberately set even for the initial configured size, so reconnecting
-/// restores the Mac's Dynamic resolution checkbox to on if it was changed there.
+/// Mode zero is the requested dynamic mode; the remaining four are the presets
+/// native sends unchanged on setup and every resize. This is sent while
+/// establishing a virtual-display session and again for each accepted viewport
+/// change, every display's descriptor each time.
+/// `display_flags` bit 0, `dynamic`, enables dynamic resolution. As in native,
+/// the opening configuration goes without it and every resize with it, which
+/// also turns the Mac's Dynamic resolution checkbox back on if it was changed
+/// there.
 ///
-/// The descriptor layout follows the reverse-engineered wire specification: the
-/// mode's leading dimensions are the render (pixel) resolution, the scaled pair
-/// the logical resolution, and the physical millimetres follow the logical size —
-/// a denser screen has more pixels, not more glass. Each descriptor leads with
-/// its own length, which is how the Mac steps from one to the next.
-pub fn set_display_configuration(modes: &[VirtualMode]) -> Vec<u8> {
-    let descriptor = DESCRIPTOR_HEAD + MODE_ENTRY;
+/// A mode's leading dimensions are the render (pixel) resolution and its scaled
+/// pair the logical resolution. The display type is left 0, as native leaves
+/// it. The maximum is each axis' largest mode, and the physical millimetres
+/// follow it at [`MM_PER_PIXEL`], as native's serializer fills them: the Mac
+/// refuses to create a display whose physical or maximum size is zero. Each
+/// descriptor leads with its own length, which is how the Mac steps from one to
+/// the next. The 30 Hz refresh is Remotex's sole intentional difference from
+/// native's ordinary 60 Hz request: the browser is sent 30 frames per second and
+/// a 60 Hz virtual display only doubles the Mac's HEVC decoding work.
+pub fn set_display_configuration(modes: &[VirtualMode], dynamic: bool) -> Vec<u8> {
+    const PRESETS: [VirtualMode; 4] = [
+        VirtualMode { pixels: (2880, 1800), scaled: (1440, 900) },
+        VirtualMode { pixels: (3840, 2160), scaled: (1920, 1080) },
+        VirtualMode { pixels: (2880, 1620), scaled: (1440, 810) },
+        VirtualMode { pixels: (2624, 1696), scaled: (1312, 848) },
+    ];
+    const MODE_COUNT: usize = 1 + PRESETS.len();
+
+    let descriptor = DESCRIPTOR_HEAD + MODE_COUNT * MODE_ENTRY;
     let mut body = Vec::with_capacity(CONFIG_HEAD - 4 + descriptor * modes.len());
     body.extend_from_slice(&1u16.to_be_bytes()); // version
     body.extend_from_slice(
@@ -520,13 +537,18 @@ pub fn set_display_configuration(modes: &[VirtualMode]) -> Vec<u8> {
         );
         display.extend_from_slice(display_name(index).as_bytes());
         display.resize(0x7a, 0); // the name's 120 bytes, zero-filled
-        display.extend_from_slice(&1u32.to_be_bytes()); // display_flags: dynamic resolution
-        display.extend_from_slice(&4u32.to_be_bytes()); // display_type: virtual
-        let mm = |px: u16| (f32::from(px) / NOMINAL_DPI * 25.4).to_be_bytes();
-        display.extend_from_slice(&mm(scaled.0));
-        display.extend_from_slice(&mm(scaled.1));
-        display.extend_from_slice(&DYNAMIC_MAX_WIDTH.to_be_bytes());
-        display.extend_from_slice(&DYNAMIC_MAX_HEIGHT.to_be_bytes());
+        display.extend_from_slice(&u32::from(dynamic).to_be_bytes()); // display_flags
+        display.extend_from_slice(&0u32.to_be_bytes()); // display_type
+        let all = || std::iter::once(VirtualMode { pixels, scaled }).chain(PRESETS);
+        let max = (
+            all().map(|mode| mode.pixels.0).max().expect("modes"),
+            all().map(|mode| mode.pixels.1).max().expect("modes"),
+        );
+        let mm = |px: u16| ((f64::from(px) * MM_PER_PIXEL) as f32).to_be_bytes();
+        display.extend_from_slice(&mm(max.0));
+        display.extend_from_slice(&mm(max.1));
+        display.extend_from_slice(&u32::from(max.0).to_be_bytes());
+        display.extend_from_slice(&u32::from(max.1).to_be_bytes());
         display.extend_from_slice(&0u16.to_be_bytes()); // current_mode_index
         display.extend_from_slice(&0u16.to_be_bytes()); // preferred_mode_index
         // Native Screen Sharing's full dynamic descriptor sends 7 here. The agent
@@ -534,18 +556,27 @@ pub fn set_display_configuration(modes: &[VirtualMode]) -> Vec<u8> {
         // matching the captured dynamic shape matters more than guessing a tidier
         // upright-only value.
         display.extend_from_slice(&7u32.to_be_bytes());
-        display.extend_from_slice(&1u16.to_be_bytes()); // mode_count
+        display.extend_from_slice(&(MODE_COUNT as u16).to_be_bytes());
         debug_assert_eq!(display.len(), DESCRIPTOR_HEAD);
-        for value in [pixels.0, pixels.1, scaled.0, scaled.1] {
-            display.extend_from_slice(&u32::from(value).to_be_bytes());
+        for mode in all() {
+            for value in [mode.pixels.0, mode.pixels.1, mode.scaled.0, mode.scaled.1] {
+                display.extend_from_slice(&u32::from(value).to_be_bytes());
+            }
+            display.extend_from_slice(&f64::from(DISPLAY_HZ).to_be_bytes()); // refresh_rate_hz
+            display.extend_from_slice(&0u32.to_be_bytes()); // mode flags
         }
-        display.extend_from_slice(&f64::from(DISPLAY_HZ).to_be_bytes()); // refresh_rate_hz
-        display.extend_from_slice(&0u32.to_be_bytes()); // mode flags
         debug_assert_eq!(display.len(), descriptor);
         body.extend_from_slice(&display);
     }
     message(SET_DISPLAY_CONFIGURATION, &body)
 }
+
+/// The mode native Screen Sharing uses to create every virtual display before
+/// its session-ready resize: 1920x1080 points rendered at 2x. Creating stable,
+/// symmetric displays first lets macOS restore their saved arrangement and
+/// window placement before the viewer applies its window's current size.
+pub const NATIVE_OPENING_MODE: VirtualMode =
+    VirtualMode { pixels: (3840, 2160), scaled: (1920, 1080) };
 
 /// What the Mac calls virtual display `index`, in its Displays settings and
 /// wherever a display is named: Apple's viewer's own names. A descriptor without
@@ -1245,47 +1276,74 @@ mod tests {
     }
 
     #[test]
-    fn a_virtual_display_configuration_has_one_mode_under_the_fixed_dynamic_ceiling() {
-        let msg = set_display_configuration(&[virtual_display_mode((1600, 1000), 1.0)]);
+    fn a_virtual_display_configuration_matches_natives_five_mode_descriptor() {
+        let msg = set_display_configuration(&[virtual_display_mode((1600, 1000), 1.0)], true);
+        let descriptor = DESCRIPTOR_HEAD + 5 * MODE_ENTRY;
         assert_eq!(msg[0], 0x1d);
         assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
-        assert_eq!(msg.len(), CONFIG_HEAD + DESCRIPTOR_HEAD + MODE_ENTRY);
+        assert_eq!(msg.len(), CONFIG_HEAD + descriptor);
         assert_eq!(be16(&msg, 4), 1); // version
         assert_eq!(be16(&msg, 6), 1); // display_count
 
         let display = &msg[CONFIG_HEAD..];
-        assert_eq!(usize::from(be16(display, 0)), DESCRIPTOR_HEAD + MODE_ENTRY);
-        assert_eq!(be32(display, 0x7a), 1, "display_flags");
-        assert_eq!(be32(display, 0x7e), 4, "virtual display_type");
+        assert_eq!(usize::from(be16(display, 0)), descriptor);
+        assert_eq!(be32(display, 0x7a), 1, "display_flags: dynamic resolution");
+        assert_eq!(be32(display, 0x7e), 0, "display_type, left as native leaves it");
+        let mm = |at| f32::from_be_bytes(display[at..at + 4].try_into().unwrap());
+        assert_eq!((mm(0x82), mm(0x86)), (369.45456, 207.81818), "the largest mode at 264 dpi");
         assert_eq!(be32(display, 0x8a), DYNAMIC_MAX_WIDTH, "maximum width");
         assert_eq!(be32(display, 0x8e), DYNAMIC_MAX_HEIGHT, "maximum height");
         assert_eq!(be16(display, 0x92), 0, "current mode");
         assert_eq!(be16(display, 0x94), 0, "preferred mode");
         assert_eq!(be32(display, 0x96), 7, "native dynamic rotations value");
-        assert_eq!(be16(display, 0x9a), 1, "one mode");
-        assert_eq!(be32(display, 0x9c), 1600);
-        assert_eq!(be32(display, 0xa0), 1000);
-        assert_eq!(be32(display, 0xa4), 1600, "1x scaled width");
-        assert_eq!(be32(display, 0xa8), 1000, "1x scaled height");
-        assert_eq!(&display[0xac..0xb4], &[0x40, 0x3e, 0, 0, 0, 0, 0, 0], "30 Hz");
-        assert_eq!(be32(display, 0xb4), 0, "mode flags");
+        assert_eq!(be16(display, 0x9a), 5, "native mode count");
+
+        let expected = [
+            (1600, 1000, 1600, 1000),
+            (2880, 1800, 1440, 900),
+            (3840, 2160, 1920, 1080),
+            (2880, 1620, 1440, 810),
+            (2624, 1696, 1312, 848),
+        ];
+        for (index, expected) in expected.into_iter().enumerate() {
+            let mode = DESCRIPTOR_HEAD + index * MODE_ENTRY;
+            assert_eq!(
+                (be32(display, mode), be32(display, mode + 4), be32(display, mode + 8), be32(display, mode + 12)),
+                expected,
+                "mode {index}"
+            );
+            assert_eq!(&display[mode + 16..mode + 24], &30.0f64.to_be_bytes(), "mode {index} refresh");
+            assert_eq!(be32(display, mode + 24), 0, "mode {index} flags");
+        }
 
         // The ceiling is a capability of the virtual display, not another copy of
         // its mode. If the initial 1280x800 request put 1280x800 here, the live Mac
         // would reject an otherwise valid 1281x600 steady-state configuration and
         // answer with the old layout.
-        let smaller = set_display_configuration(&[virtual_display_mode((1280, 800), 1.0)]);
+        let smaller = set_display_configuration(&[virtual_display_mode((1280, 800), 1.0)], true);
         let display = &smaller[CONFIG_HEAD..];
         assert_eq!(be32(display, 0x8a), DYNAMIC_MAX_WIDTH);
         assert_eq!(be32(display, 0x8e), DYNAMIC_MAX_HEIGHT);
     }
 
     #[test]
+    fn the_opening_configuration_goes_without_dynamic_resolution() {
+        let opening = set_display_configuration(&[NATIVE_OPENING_MODE; 2], false);
+        let resize = set_display_configuration(&[NATIVE_OPENING_MODE; 2], true);
+        let descriptor = DESCRIPTOR_HEAD + 5 * MODE_ENTRY;
+        for at in [CONFIG_HEAD, CONFIG_HEAD + descriptor] {
+            assert_eq!(be32(&opening, at + 0x7a), 0, "opening display_flags");
+            assert_eq!(be32(&resize, at + 0x7a), 1, "resize display_flags");
+            assert_eq!(opening[at + 0x7e..at + descriptor], resize[at + 0x7e..at + descriptor]);
+        }
+    }
+
+    #[test]
     fn two_virtual_displays_are_two_descriptors_each_led_by_its_length() {
         let first = virtual_display_mode((1600, 1000), 2.0);
         let second = virtual_display_mode((1280, 800), 2.0);
-        let msg = set_display_configuration(&[first, second]);
-        let descriptor = DESCRIPTOR_HEAD + MODE_ENTRY;
+        let msg = set_display_configuration(&[first, second], true);
+        let descriptor = DESCRIPTOR_HEAD + 5 * MODE_ENTRY;
         assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
         assert_eq!(msg.len(), CONFIG_HEAD + 2 * descriptor);
         assert_eq!(be16(&msg, 6), 2, "display_count");
@@ -1294,7 +1352,7 @@ mod tests {
         let names = ["Screen Sharing Virtual Display", "Screen Sharing Virtual Display #2"];
         for (index, mode) in [first, second].into_iter().enumerate() {
             let at = CONFIG_HEAD + index * descriptor;
-            let alone = set_display_configuration(&[mode]);
+            let alone = set_display_configuration(&[mode], true);
             assert_eq!(msg[at + 0x7a..at + descriptor], alone[CONFIG_HEAD + 0x7a..]);
             assert_eq!(usize::from(be16(&msg, at)), descriptor);
             let name = &msg[at + 2..at + 0x7a];
@@ -1309,15 +1367,15 @@ mod tests {
         let mode = virtual_display_mode((1600, 1000), 2.0);
         assert_eq!(mode, VirtualMode { pixels: (3200, 2000), scaled: (1600, 1000) });
 
-        let msg = set_display_configuration(&[mode]);
+        let msg = set_display_configuration(&[mode], true);
         let display = &msg[CONFIG_HEAD..];
         assert_eq!(be32(display, 0x9c), 3200, "render width");
         assert_eq!(be32(display, 0xa0), 2000, "render height");
         assert_eq!(be32(display, 0xa4), 1600, "scaled width");
         assert_eq!(be32(display, 0xa8), 1000, "scaled height");
-        // The glass does not grow with the density: physical millimetres follow
-        // the logical size, so 1x and 2x modes of the same points agree here.
-        let one_x = set_display_configuration(&[virtual_display_mode((1600, 1000), 1.0)]);
+        // The glass does not grow with the density: the millimetres follow the
+        // largest mode, the same at either density.
+        let one_x = set_display_configuration(&[virtual_display_mode((1600, 1000), 1.0)], true);
         assert_eq!(display[0x82..0x8a], one_x[CONFIG_HEAD..][0x82..0x8a]);
     }
 

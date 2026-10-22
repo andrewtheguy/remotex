@@ -2906,14 +2906,11 @@ impl MediaStream {
             .unwrap_or_else(|| anyhow::anyhow!("its receiver stopped"))
     }
 
-    /// Act on an encoding-1010 rectangle. `true` when a stream offered for the
-    /// displays went down with it: the Mac named its ports again, which it does
-    /// after every display change, its own included, and the browser is told the
-    /// screen is not available until the offer that naming allows delivers.
+    /// Act on an encoding-1010 rectangle, and say what it was ([`Replied`]).
     ///
     /// An error ends the session: the Mac refused the stream, or described one this
     /// side cannot receive. Apple's viewer shows the refusal and closes.
-    pub fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<bool> {
+    pub fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<Replied> {
         match parse_media_reply(body)? {
             MediaReply::Ports { audio_port, video_port, video2_port } => {
                 let videos: Vec<u16> = [Some(video_port), video2_port].into_iter().flatten().collect();
@@ -2937,7 +2934,7 @@ impl MediaStream {
                 // The Mac names the same ports every time, and the receiver carries
                 // on across display changes.
                 if self.receiver.as_ref().is_some_and(|(bound, _)| *bound == ports) {
-                    return Ok(down);
+                    return Ok(Replied { down, answered: false });
                 }
                 if let Some((_, receiver)) = self.receiver.take() {
                     receiver.abort();
@@ -2948,7 +2945,7 @@ impl MediaStream {
                 );
                 let receiver = self.receive(&ports)?;
                 self.receiver = Some((ports, receiver));
-                return Ok(down);
+                return Ok(Replied { down, answered: false });
             }
             MediaReply::Answer { videos } => {
                 anyhow::ensure!(
@@ -2963,6 +2960,7 @@ impl MediaStream {
                 if matches!(self.owed, Owed::Answer(_)) {
                     self.owed = Owed::Nothing;
                 }
+                return Ok(Replied { down: false, answered: true });
             }
             // What the Mac answers a viewer that asks for the stream while
             // another holds it.
@@ -2975,13 +2973,25 @@ impl MediaStream {
             ),
             MediaReply::Other(kind) => log::debug!("vnc: ignoring media-stream message type {kind}"),
         }
-        Ok(false)
+        Ok(Replied::default())
     }
 
     /// Bind the ports the Mac named and start receiving on them.
     fn receive(&self, ports: &Ports) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         Ok(tokio::spawn(Receiver::bind(self, ports)?.run()))
     }
+}
+
+/// What an encoding-1010 rectangle was, as [`MediaStream::on_reply`] read it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Replied {
+    /// A stream offered for the displays went down with it: the Mac named its
+    /// ports again, which it does after every display change, its own included,
+    /// and the browser is told the screen is not available until the offer that
+    /// naming allows delivers.
+    pub down: bool,
+    /// The Mac accepted an offer.
+    pub answered: bool,
 }
 
 impl Drop for MediaStream {
@@ -4798,7 +4808,7 @@ mod tests {
         assert_eq!(msg[0], 0x1c);
         assert!(m.pending());
         assert!(m.offer(&[(1280, 800)]).is_none(), "not while one is out");
-        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(m.on_reply(&unhex(ANSWER)).unwrap().answered);
         assert!(!m.pending());
         assert!(m.offer(&[(1600, 1000)]).is_none(), "the stream runs at this size");
         m.stopped();
@@ -4823,7 +4833,7 @@ mod tests {
         assert!(format!("{bound:#}").contains("for the Mac's media stream"), "{bound:#}");
         assert_eq!(m.deadline(), None, "named");
         assert!(matches!(m.offer(&[(1600, 1000)]), Some(Offer::Configuration(_))));
-        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(m.on_reply(&unhex(ANSWER)).unwrap().answered);
 
         m.on_reply(&unhex(PORTS)).unwrap_err();
         assert_eq!(m.offered, None, "the stream is down");
@@ -4861,7 +4871,7 @@ mod tests {
         let unanswered = m.overdue(first).expect("overdue at the deadline");
         assert!(unanswered.to_string().contains("did not answer"), "{unanswered}");
 
-        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(m.on_reply(&unhex(ANSWER)).unwrap().answered);
         let portless = m.overdue(first).expect("still overdue once answered");
         assert!(portless.to_string().contains("named no ports"), "{portless}");
 
@@ -4925,7 +4935,7 @@ mod tests {
         assert_eq!(m.deadline(), Some(unanswered), "and still owes its answer");
         assert!(m.overdue(unanswered).expect("overdue unanswered").to_string().contains("did not answer"));
         *m.legs[0].unsent.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
-        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(m.on_reply(&unhex(ANSWER)).unwrap().answered);
         assert!(!m.withheld(0), "nor is a report from before the offer its stream's");
         let sound = std::time::Instant::now();
         *m.sounded.lock().unwrap() = Some(sound);
@@ -4971,7 +4981,7 @@ mod tests {
 
         let mut m = media();
         offer_on_ports(&mut m, (320, 136));
-        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(m.on_reply(&unhex(ANSWER)).unwrap().answered);
         let sound = std::time::Instant::now();
         *m.sounded.lock().unwrap() = Some(sound);
         *m.sound_heard.lock().unwrap() = Some(sound);
@@ -4991,7 +5001,7 @@ mod tests {
         // The other order: a sender's first, its pictures lost, then a still screen.
         let mut lost = media();
         offer_on_ports(&mut lost, (1600, 1000));
-        assert!(!lost.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(lost.on_reply(&unhex(ANSWER)).unwrap().answered);
         lost.legs[0].report(sender[1], std::time::Instant::now());
         assert!(!lost.withheld(0));
         assert!(heard_since(&lost.legs[0].heard, std::time::Instant::now() - std::time::Duration::from_secs(1)).is_some());
@@ -5006,13 +5016,13 @@ mod tests {
         let mut next = media();
         next.legs[0].report(sender[1], std::time::Instant::now() - std::time::Duration::from_secs(1));
         offer_on_ports(&mut next, (320, 136));
-        assert!(!next.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(next.on_reply(&unhex(ANSWER)).unwrap().answered);
         next.legs[0].report(receiver[1], std::time::Instant::now());
         assert!(next.withheld(0));
 
         let mut still = media();
         offer_on_ports(&mut still, (1600, 1000));
-        assert!(!still.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(still.on_reply(&unhex(ANSWER)).unwrap().answered);
         *still.legs[0].pictured.lock().unwrap() = Some(std::time::Instant::now());
         still.legs[0].report(receiver[1], std::time::Instant::now());
         assert!(!still.withheld(0), "behind a picture it is a still screen");
@@ -5037,7 +5047,7 @@ mod tests {
         m.legs[0].report(RTCP_RECEIVER_REPORT, std::time::Instant::now());
         assert!(!woken(&m).await, "and not the next");
 
-        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(m.on_reply(&unhex(ANSWER)).unwrap().answered);
         m.stopped();
         offer_on_ports(&mut m, (1600, 1000));
         assert!(woken(&m).await, "the next offer's own wake");
@@ -5070,7 +5080,7 @@ mod tests {
 
         let one = m.on_reply(&unhex(ANSWER)).unwrap_err();
         assert!(format!("{one:#}").contains("answered 1 video leg(s) of the 2"), "{one:#}");
-        assert!(!m.on_reply(&unhex("000200020000000000020003000100000000aabbccddeeff")).unwrap());
+        assert_eq!(m.on_reply(&unhex("000200020000000000020003000100000000aabbccddeeff")).unwrap(), Replied { down: false, answered: true });
         assert!(!m.pending());
 
         // Message 1 without the second leg, to this session, and with it, to a
@@ -5186,7 +5196,7 @@ mod tests {
         let unanswered = m.overdue(first).expect("unanswered at the deadline");
         assert!(unanswered.to_string().contains("did not answer"), "{unanswered}");
 
-        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        assert!(m.on_reply(&unhex(ANSWER)).unwrap().answered);
         assert_eq!(m.deadline(), None, "answered, for a display that has gone");
         assert!(m.offer(&[(1280, 800)]).is_some(), "the new display's offer goes out");
     }

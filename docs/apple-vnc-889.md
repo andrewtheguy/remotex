@@ -519,42 +519,70 @@ whatever its screens come to.
 ### The High Performance virtual display
 
 High Performance hides the Mac's physical screens and moves every window to a
-virtual display. Remotex creates one at the size the session keeps, the target's
-`size` or the default, or in a session started with resize at the full size of
-the browser's screen, and at that screen's density either way, as Apple's client
-does. The window layout macOS produces depends on that opening size:
-windows squeezed onto a small opening display do not spread out again when it
-grows. In a session started with resize, each viewport report asks for a new
-size, and the next layout confirms it. Everything in this section and the next holds as well
+virtual display. Like Apple's client, Remotex first creates every requested
+display at the same canonical 1920×1080-point, 2x mode, without dynamic
+resolution. Once that layout has arrived and the Mac has answered the media
+stream's offer for those displays, it sends a second configuration, with
+dynamic resolution, whose dynamic mode is the size the session keeps, the target's `size` or the default, or in a session
+started with resize the window's size, as Apple's viewer sizes its displays from
+its window (the full size of the browser's screen until the window has
+reported), at that screen's density either way. This stable creation phase lets macOS restore the displays'
+saved arrangement and window placement before their live sizes are applied: on
+the virtual Mac, a window left on the second display under Apple's viewer came
+back there under remotex. In a session started with resize, each later viewport report asks for a new size,
+and the next layout confirms it. Everything in this section and the next holds as well
 for the unofficial `virtual_display = true` under `ard`, which sends the same
-messages; on macOS 26 the Mac answered them the same way with no media stream
-offered, and that is the only macOS it was tried on.
+messages, its second configuration following the first layout since no media
+stream is offered there; on macOS 26 the Mac answered them the same way, and
+that is the only macOS it was tried on.
 
 `SetDisplayConfiguration` (`0x1d`) carries a display count and, for each display,
-one descriptor with one mode:
+one descriptor with five modes:
 
 | Descriptor field | Value remotex sends |
 |---|---|
 | name | 120 bytes, UTF-8 and zero-filled: `Screen Sharing Virtual Display`, and `Screen Sharing Virtual Display #2` for the second, which are the names Apple's viewer's displays have. It is what the Mac calls the display, in its Displays settings and to its applications; left empty, the displays have no name and the Mac lists them as ` (1)` and ` (2)`. |
-| display flags | 1: dynamic resolution. Bit 1, never sent, tells the Mac to leave the refresh rate alone and ignore the mode's. |
-| display type | 4, virtual |
-| physical size | millimetres, as big-endian `f32` |
-| maximum backing size | 3840×2160, a fixed ceiling |
+| display flags | 0 in the opening configuration, then 1: dynamic resolution. Bit 1, never sent, tells the Mac to leave the refresh rate alone and ignore the mode's. |
+| display type | 0, as Apple's viewer sends |
+| physical size | millimetres, as big-endian `f32`: the maximum backing size at 264 dpi, 369.45×207.82 |
+| maximum backing size | each side's largest mode: 3840×2160, which the presets reach |
+| current and preferred mode | index 0 |
 | rotations | 7, Apple's captured value. The agent hands it unchanged to macOS as the virtual display's rotations setting. |
-| mode count | 1 |
+| mode count | 5 |
 
-The mode itself holds:
+Each mode holds:
 - a backing size;
 - a logical ("scaled") size;
 - a refresh rate: 30 Hz (see the media stream's rate below);
 - flags (bit 0 HDR).
 
-A backing size twice the logical one makes a 2x display.
+Mode 0 is the requested dynamic mode. The remaining table matches Apple's
+viewer and stays fixed across setup and resize: 2880×1800 over 1440×900,
+3840×2160 over 1920×1080, 2880×1620 over 1440×810, and 2624×1696 over
+1312×848. A backing size twice the logical one makes a 2x display. Native asks
+for 60 Hz unless its preference or display capability says otherwise; Remotex's
+30 Hz in all five modes is the one deliberate virtual-display request difference.
 
 **Rules that follow from the measurements:**
 - **The maximum is a ceiling.** Putting the current mode there made the Mac refuse
   anything larger. With 3840×2160 it accepted every size asked for, including
   bursts of them and sizes below the 800×600 Apple's own UI allows.
+- **The physical and maximum sizes are required.** With either left at zero the
+  Mac creates no display: macOS refuses the configuration as an invalid size, and
+  the session stays on the Mac's own display, answering no resize. Apple's viewer
+  fills both from its largest mode.
+- **The window's size waits for the media stream.** Apple's viewer switches to
+  dynamic resolution only once its media stream is set up, so the stream is
+  offered first for the canonical displays, and the size goes out when the Mac
+  answers that offer. Its change then stops the stream, which is offered again
+  for the new displays once they have settled. Remotex waits 5 s for that
+  answer: an offer still out then holds the size until it is answered anyway,
+  so the wait only bounds a session whose offer never went. A login at the Mac
+  during the wait ends it, and the size goes out to the new agent at once.
+- **The session-ready size goes even when it is the canonical one,** since it
+  is what turns dynamic resolution on. A configuration asking for the mode
+  showing changes no display, so nothing waits for a changed layout to answer
+  it.
 - **800×600 points is the least Apple's viewer asks for,** at 1x and at 2x
   alike: its window goes no smaller. Below it the virtual Mac sent no picture
   of some displays. At 1x it made whatever it was asked, and its encoder
@@ -571,9 +599,10 @@ A backing size twice the logical one makes a 2x display.
 - **Ask for 1x or 2x only.** The Mac does not round a fractional ratio. 1.5x and
   1.25x modes produced 2x displays of fewer points, with zoomed text and a Dock
   shrunk to fit.
-- **The first descriptor is always dynamic,** even in a session started without
-  resize, so a reconnect re-enables the Mac's Dynamic resolution setting. Resize
-  controls only whether remotex acts on later viewport reports.
+- **Every descriptor after the opening one is dynamic,** even in a session
+  started without resize, so a reconnect re-enables the Mac's Dynamic resolution
+  setting, as Apple's viewer's does. Resize controls only whether Remotex acts on
+  later viewport reports.
 - **The display outlives its session briefly.** A reconnect within a few seconds
   finds it still there with the same id; after about 45 seconds the Mac is back on
   its physical display. The new session's own layout arrives either way.
@@ -590,7 +619,7 @@ changes, as read from Apple's viewer and daemon and as macOS 26 answered:
   a session that asks for more than the Mac states, before it sends one.
 - **One configuration names both.** The display count is 2 and the descriptors
   follow back to back, each led by its own length, which is how the Mac steps
-  from one to the next. Remotex sends the one-mode descriptor above for each
+  from one to the next. Remotex sends the five-mode descriptor above for each
   display, in the opening configuration and in every resize, the second's at
   the density of the screen its tab's window is on once that tab has reported
   one, and at the first's until then. The Mac creates the

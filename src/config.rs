@@ -79,12 +79,13 @@ pub enum Subtype {
     /// any of it.
     ///
     /// High Performance Screen Sharing uses a virtual display rather than the
-    /// Mac's physical displays. This gateway requests one virtual display at the
+    /// Mac's physical displays. This gateway creates each virtual display at
+    /// Apple's viewer's canonical 1920×1080-point 2x mode and then asks for the
     /// session's opening size ([`TargetConfig::opening_size`]). Apple's native
     /// pasteboard payloads are carried inside the encrypted record transport.
-    /// In a session that follows the window,
-    /// viewport reports replace the virtual display's one advertised mode and the
-    /// Mac answers with its new layout.
+    /// In a session that follows the window, viewport reports replace the first
+    /// of the display's five advertised modes and the Mac answers with its new
+    /// layout.
     ///
     /// The picture and the sound go together — the Mac refuses one without the
     /// other, and mutes its own output while the sound leg runs — so a session
@@ -896,7 +897,7 @@ pub struct TargetConfig {
     /// ([`Sizing::Window`]) does not use it — see [`Self::opening_size`].
     ///
     /// How a kept size is stated depends on the engine: RDP connects at it, a
-    /// Mac's virtual display is created at it, and a wlshare server is asked for
+    /// Mac's virtual display is sized to it once created, and a wlshare server is asked for
     /// it with one `SetDesktopSize`, as soon as it declares support
     /// (`Flags::kept` in src/vnc.rs) — on a physical output it refuses, and keeps
     /// its own. The key is refused where no session states a size
