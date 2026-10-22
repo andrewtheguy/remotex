@@ -193,13 +193,18 @@ test("the video row waits for the format, then names it and its decoder", () => 
   );
 });
 
-test("wlshare's tiles with motion say what is drawn where once a region has moved, and which decoder takes the motion", () => {
+test("wlshare's tiles with motion say what is drawn where once a region has moved, which codec wlshare chose, and which decoder takes the motion", () => {
   assert.equal(
     videoLabel(
       { decode: "", tiles: true, regions: "vp09.00.21.08.01.06.06.06.00" },
       null,
     ),
     "Tiles with motion: VP9 regions where the desktop moves (vp09.00.21.08.01.06.06.06.00), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder",
+  );
+  // The host's hardware H.264, announced from the stream's own parameter set.
+  assert.equal(
+    videoLabel({ decode: "", tiles: true, regions: "avc1.64001f" }, null),
+    "Tiles with motion: H.264 regions where the desktop moves (avc1.64001f), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder",
   );
 });
 
