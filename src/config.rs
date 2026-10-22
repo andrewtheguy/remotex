@@ -211,7 +211,7 @@ pub struct RenderPlan {
     /// wlshare's picture is its tiles rather than its VP9
     /// ([`Passthrough::WlshareTilesMotion`], chosen at the picker): exact PNG tiles where the
     /// desktop is still and a video stream of its own, 4:2:0, for each region that
-    /// moves — VP9, or the host's hardware H.264, as wlshare chooses, each region's
+    /// moves — VP9, or H.264, the host's hardware encoder's where it has one, as wlshare chooses, each region's
     /// stream saying which — asked of the server and passed as it comes. Set only with
     /// [`Self::wlshare`], and never with [`Self::adaptive`]: the regions are held at
     /// [`Self::quality`].

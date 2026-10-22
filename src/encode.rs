@@ -594,7 +594,7 @@ pub struct VideoSink {
 }
 
 /// The codec byte a region stream's START names ([`VideoSink::pass_region`]): VP9
-/// by libvpx, or H.264 by the wlshare host's hardware encoder, wlshare's choice,
+/// by libvpx, or H.264, the wlshare host's hardware encoder's where it has one, wlshare's choice,
 /// which the browser decodes either way.
 pub const REGION_VP9: u8 = 0;
 pub const REGION_H264: u8 = 1;
