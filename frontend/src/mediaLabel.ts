@@ -164,15 +164,27 @@ export interface VideoStreamInfo {
   // Nor this: tiles, the gateway's or wlshare's, images this page decodes
   // (`tilesStart`). `decode` names nothing.
   tiles?: boolean;
-  // wlshare's tiles' moving regions, a VP9 stream each: the first region's
-  // `regionFormat`, and absent until one has moved, as it always is of the
-  // gateway's tiles, which have none.
+  // wlshare's tiles' moving regions, a stream each of the codec wlshare chose,
+  // VP9 or the host's hardware H.264: the first region's `regionFormat`, and
+  // absent until one has moved, as it always is of the gateway's tiles, which
+  // have none.
   regions?: string;
   // Decoded by the page's WebAssembly decoder (softwareDecoder.ts) and not by
   // the browser's own: a Mac's HEVC where the browser's own does not take it.
   software?: boolean;
   // How many strips each picture of the stream comes in, where more than one.
   strips?: number;
+}
+
+/** The codec a region's WebCodecs string names: `vp09.` is VP9, `avc1.` is H.264. */
+function regionCodec(decode: string): string {
+  if (decode.startsWith("vp09.")) {
+    return "VP9";
+  }
+  if (decode.startsWith("avc1.")) {
+    return "H.264";
+  }
+  return decode;
 }
 
 /**
@@ -200,9 +212,10 @@ export function videoLabel(
     return "Not in use: the host's graphics pipeline is composed by this browser";
   }
   if (stream.tiles) {
-    // Every region is VP9, which the browser's own decoder decodes.
+    // Every region is the codec its WebCodecs string names, VP9 or H.264 as
+    // wlshare chose, which the browser's own decoder decodes.
     return stream.regions
-      ? `Tiles with motion: VP9 regions where the desktop moves (${stream.regions}), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder`
+      ? `Tiles with motion: ${regionCodec(stream.regions)} regions where the desktop moves (${stream.regions}), PNG tiles where it is still · passthrough from the remote · decoded by the browser's native decoder`
       : "Not in use: the tiles are images this page decodes";
   }
   const strips = (stream.strips ?? 1) > 1 ? ` in ${stream.strips} strips` : "";
