@@ -2865,13 +2865,15 @@ capturing, scaling and encoding 4K every frame, where 1440×900 comes to
 tablet that starts a session with resize opens it at the default and then asks
 once for its screen in landscape, and a phone is never offered resize.
 
-A kept size is stated the way each engine states one. RDP connects at it, a Mac's
-virtual display is created at it, and a `wlshare` target asks for it with a
-single `SetDesktopSize` as soon as the server declares support — seeded into the
-same held-request slot a viewport report uses, so it goes out on the first
-`ExtendedDesktopSize` rect and no earlier. A physical output refuses the request
-and keeps its own size. A plain `vnc` target and Standard `ard` have no size to
-state (`TargetConfig::sized`), and `size` is refused on both at config load.
+A kept size is stated the way each engine states one. RDP connects at it; a Mac
+first creates its virtual display at native Screen Sharing's canonical
+1920×1080-point, 2x mode and applies the kept size once that layout arrives; and
+a `wlshare` target asks for it with a single `SetDesktopSize` as soon as the
+server declares support — seeded into the same held-request slot a viewport
+report uses, so it goes out on the first `ExtendedDesktopSize` rect and no
+earlier. A physical output refuses the request and keeps its own size. A plain
+`vnc` target and Standard `ard` have no size to state (`TargetConfig::sized`),
+and `size` is refused on both at config load.
 
 A kept size opens at the client screen's density whatever names the points, on
 RDP and a High Performance Mac alike, which is how Apple's Screen Sharing opens a
@@ -2922,8 +2924,9 @@ From the first report until the
 answering layout has held still for half a second, the gateway sends `resizing`
 with `active: true`, and the page covers the desktop with a dimmed, blurred
 "Resizing…" as Apple's client does, instead of showing each intermediate mode. A
-session opens covered. The display it connects to is the Mac's own, and the
-virtual display and then the window's size follow. While the cover is up the page sends the Mac no input, releasing what was held; the menu stays reachable, and a
+session opens covered. The display it connects to is the Mac's own, then its
+canonical virtual display arrives, and the session-ready configuration applies
+the window's size. While the cover is up the page sends the Mac no input, releasing what was held; the menu stays reachable, and a
 browser that reattaches mid-resize is told again. No other engine sends
 `resizing`. Once the display has settled, a session with a media stream says
 "Screen not available" in its place until the stream's first picture of the new
@@ -3365,11 +3368,16 @@ revision, so right and middle swap bits for both subtypes.
 with `virtual_display = true`: everything in this paragraph about the display and
 its resizing, with Standard's own picture, no media stream offered and no sound.
 Apple's viewer never offers that combination; it was tested on macOS 26 only.)
-The gateway sends
-`SetDisplayConfiguration` (`0x1d`) during setup, with one mode built from the
-size the session keeps, or from the connecting client's screen resolution in a
-session started with resize, at that screen's density either way. The mode sits under the
-native descriptor's fixed 3840×2160 backing ceiling. Once connected, the remote
+The gateway sends `SetDisplayConfiguration` (`0x1d`) during setup as native
+Screen Sharing does: every requested display starts at 1920×1080 points rendered
+at 2x, with native's five-mode descriptor. After the first layout it sends the
+same descriptor again with mode 0 built from the size the session keeps, or from
+the connecting client's screen resolution in a session started with resize, at
+that screen's density either way; the other four modes remain native's fixed
+presets. The dynamic mode sits under the Mac's fixed 3840×2160 backing ceiling.
+The descriptor matches native's fields and ordering; its 30 Hz refresh, instead
+of native's ordinary 60 Hz, is the intentional exception because the browser is
+sent 30 frames a second. Once connected, the remote
 Mac's physical displays are disabled and all of its windows are placed on that
 virtual display. Apple's
 official macOS Screen Sharing client can choose up to two virtual displays, and so
