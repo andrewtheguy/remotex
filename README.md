@@ -37,23 +37,31 @@ side.
 ## Demo
 
 ### Windows -> Mac with One Remote Virtual Display
-https://github.com/user-attachments/assets/ccd81a84-9ef1-4b0b-a5a6-01c8fbc1b41c
+
+https://github.com/user-attachments/assets/982bf2d0-3fac-4a3c-8213-27412d10977d
 
 
 
 ### Windows -> Mac with Two Remote Virtual Displays
 
-- Windows -> Mac with Two Remote Virtual Displays in the first half together with another new tab running connection to another windows RDP instance on a new tab on the second half.
+- Windows -> Mac with Two Remote Virtual Displays shown in separate browser tabs with a window being able to be dragged across displays right between the two tabs.
 
-https://github.com/user-attachments/assets/596640b5-9b35-45c3-a875-87934d1c0c0f
+https://github.com/user-attachments/assets/a31030c8-dab9-467c-9231-20329e138e7d
+
+
+
 
 ### iOS -> Windows
+https://github.com/user-attachments/assets/21b869ad-d353-4c64-aac2-9b980893dd2f
 
-https://github.com/user-attachments/assets/4d9fe60d-8585-477b-bf1b-349105ececc6
+
 
 ### iOS -> Mac
 
-https://github.com/user-attachments/assets/1b5dfc6f-8510-490b-bd88-d4c52c48b0a5
+
+https://github.com/user-attachments/assets/cde4e192-340f-47dd-86db-3d2d89049007
+
+
 
 ## Features
 
