@@ -65,6 +65,22 @@ https://github.com/user-attachments/assets/cde4e192-340f-47dd-86db-3d2d89049007
 
 
 
+### Mac -> Windows at Retina Density with Audio
+
+- Windows' own Remote Desktop shown at the Mac's Retina density, with the remote's sound playing in the browser.
+
+https://github.com/user-attachments/assets/52dae40b-05ce-4621-b680-8fe035ea6a47
+
+
+
+### Mac -> Linux (wlshare on Sway) at Retina Density with Audio
+
+- wlshare on Sway shown at the Mac's Retina density, with the remote's sound, and the remote desktop resizing to follow the browser into and out of immersive full screen.
+
+https://github.com/user-attachments/assets/3fee2e51-309a-482f-8303-75aa59df4fdf
+
+
+
 ## Features
 
 - **One browser client.** It needs a secure context and WebCodecs, nothing
