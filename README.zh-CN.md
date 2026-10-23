@@ -61,7 +61,7 @@ https://github.com/user-attachments/assets/52dae40b-05ce-4621-b680-8fe035ea6a47
 
 - 以 Mac 的 Retina 密度显示 Sway 上的 wlshare，带远程的声音，进入和退出沉浸式全屏时远程桌面会随浏览器调整大小。
 
-https://github.com/user-attachments/assets/3fee2e51-309a-482f-8303-75aa59df4fdf
+https://github.com/user-attachments/assets/494f262a-ddcd-4461-8217-8b248562df44
 
 
 

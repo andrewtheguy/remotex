@@ -77,7 +77,7 @@ https://github.com/user-attachments/assets/52dae40b-05ce-4621-b680-8fe035ea6a47
 
 - wlshare on Sway shown at the Mac's Retina density, with the remote's sound, and the remote desktop resizing to follow the browser into and out of immersive full screen.
 
-https://github.com/user-attachments/assets/3fee2e51-309a-482f-8303-75aa59df4fdf
+https://github.com/user-attachments/assets/494f262a-ddcd-4461-8217-8b248562df44
 
 
 
