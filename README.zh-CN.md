@@ -53,7 +53,7 @@ https://github.com/user-attachments/assets/cde4e192-340f-47dd-86db-3d2d89049007
 
 - 以 Mac 的 Retina 密度显示 Windows 自带的远程桌面，并在浏览器中播放远程的声音。
 
-VIDEO_URL_WINDOWS_RETINA
+https://github.com/user-attachments/assets/3dfd0dc2-dc7d-4d41-b99e-1340f685390c
 
 
 
@@ -61,7 +61,7 @@ VIDEO_URL_WINDOWS_RETINA
 
 - 以 Mac 的 Retina 密度显示 Sway 上的 wlshare，带远程的声音，进入和退出沉浸式全屏时远程桌面会随浏览器调整大小。
 
-VIDEO_URL_LINUX_RETINA
+https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
 
 
 
