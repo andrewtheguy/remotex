@@ -3,10 +3,10 @@
 // mounts, beside the one about VP9 at 4:4:4 (nativeVp9.ts).
 //
 // The two halves are separate questions with separate consequences:
-// - The picture. A session started with the Mac's picture passed sends its HEVC as
-//   it came, instead of VP9 encoded from decoded pictures. The picker offers that
-//   choice to a browser that says yes here, or whose page can decode the picture
-//   itself, and greys it for any other, which starts the target with VP9. The answer rides every
+// - The picture. A session started with the Mac's HEVC is sent it as it came. The
+//   picker offers that choice to a browser that says yes here, or whose page can
+//   decode the picture itself, and greys it for any other, which is offered the
+//   Mac's H.264 instead (targetChoices.ts). The answer rides every
 //   session socket this page opens (`gateway.ts`): a page that comes back to its
 //   session saying no is returned to the picker instead of being sent what it
 //   cannot decode.
@@ -33,12 +33,12 @@
 // where the page runs it and the gateway serves it (softwareDecoder.ts): the
 // session socket states both answers, and the gateway is not told which decodes.
 //
-// A doubt reads as VP9's question reads one (nativeVp9.ts): VP9 at 4:2:0 is what
-// every page here decodes, so only a definite "yes" hands the Mac's picture to the
-// browser's own decoder, and anything that throws reads as "no". The one target it
-// can leave unstartable is a Mac on a gateway whose host lacks the HEVC decoder's
-// library, which has no other picture to send, seen from a page that cannot decode
-// the picture itself.
+// A doubt reads as VP9's question reads one (nativeVp9.ts): a picture the
+// browser's own decoder then refused would go undecoded, so only a definite "yes"
+// hands the Mac's picture to it, and anything that throws reads as "no", leaving
+// the picture to the page's decoder or the choice to the H.264. The one browser
+// that can find such a target unstartable is one without WebCodecs, where neither
+// of the Mac's pictures has a decoder (targetChoices.ts).
 
 /**
  * The picture asked about: the largest the Mac announces, a 3840×2160 display's, as

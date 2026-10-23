@@ -94,7 +94,7 @@ https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
   H.264 still work, with no sound.
   Firefox runs it too, but its native decoders take neither a High Performance
   Mac's HEVC nor its AAC-ELD, so there the Mac's picture is its H.264, or its
-  HEVC in the page's software decoder. For desktop use, install the page as a Chrome or
+  HEVC in the page's software decoder, with no sound. For desktop use, install the page as a Chrome or
   Edge app.
 - **Remote-sized, density-aware display.** RDP with its default graphics
   pipeline, wlshare and a Mac's virtual display can follow the browser window at

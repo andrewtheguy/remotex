@@ -67,7 +67,7 @@ https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
 
 ## 功能
 
-- **单一的浏览器客户端。** 需要安全上下文（secure context），视频流和声音还需要 WebCodecs，无需安装任何东西：桌面上的 Chrome、Edge 或 Safari，Android 上的 Chrome，以及 iPhone 或 iPad 上的 Safari。没有 WebCodecs 时，网关的图块、标准模式 Mac 的 Adaptive 画面以及不含 H.264 的 RDP 管道仍可使用，但没有声音。Firefox 也能运行，但它的原生解码器既不支持高性能模式 Mac 的 HEVC，也不支持其 AAC-ELD，因此在 Firefox 中 Mac 的画面使用其 H.264，或在页面的软件解码器中使用其 HEVC。桌面使用时，建议将页面安装为 Chrome 或 Edge 应用。
+- **单一的浏览器客户端。** 需要安全上下文（secure context），视频流和声音还需要 WebCodecs，无需安装任何东西：桌面上的 Chrome、Edge 或 Safari，Android 上的 Chrome，以及 iPhone 或 iPad 上的 Safari。没有 WebCodecs 时，网关的图块、标准模式 Mac 的 Adaptive 画面以及不含 H.264 的 RDP 管道仍可使用，但没有声音。Firefox 也能运行，但它的原生解码器既不支持高性能模式 Mac 的 HEVC，也不支持其 AAC-ELD，因此在 Firefox 中 Mac 的画面使用其 H.264，或在页面的软件解码器中使用其 HEVC，且没有声音。桌面使用时，建议将页面安装为 Chrome 或 Edge 应用。
 - **按远程尺寸、感知像素密度的显示。** 使用默认图形管道的 RDP、wlshare 以及 Mac 的虚拟显示器可以按屏幕像素密度跟随浏览器窗口改变尺寸。Mac 的物理显示器按其报告的密度显示。标准 VNC 无法报告密度，按 1x 显示。
 - **高性能模式 Mac 上两个可调整尺寸的虚拟显示器（alpha）。** 每个显示器有自己的浏览器标签页，每个标签页的窗口决定其显示器的尺寸。macOS 26 上 Apple 自己的查看器不提供这一功能：有两个虚拟显示器时，它会提示动态分辨率不可用。
 - **远程自己的画面在浏览器中解码，或使用网关的图块。** Windows 主机的图形管道直通给浏览器合成，在局域网下以高质量绘制，或（alpha）以主机按浏览器链路调整的 H.264 绘制。高性能模式 Mac 的 HEVC 或 H.264 始终原样直通，两者都不随浏览器链路自适应：静止画面数据量很小，运动画面则很大。H.264 不需要页面中的 HEVC 解码器，因此任何构建都能让任意浏览器访问高性能模式 Mac。标准模式 Mac 自己的 Adaptive 画面直通（beta），在页面中解码，并按浏览器链路调节节奏：精度保持不变，较慢的链路只是更新更少、细化更晚。wlshare 直通的 VP9 同样跟随浏览器链路。由网关编码画面时，例如普通 VNC 服务器，或标准模式 Mac 的 Full 质量（在网关解压的无损 zlib），网关发送 64×64 图块：颜色少的图块用精确的 PNG，运动区域用 JPEG，静止后再精确地重发一次，发送速度与浏览器的绘制速度一致，最终收敛到无损。

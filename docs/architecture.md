@@ -3725,8 +3725,9 @@ binds a socket instead, for a gateway that only ever answers a reverse proxy on
 the same machine: the socket is created `0660` so the filesystem decides who may
 connect, a leftover from a killed gateway is taken over on the next start, one
 that something is still serving refuses the start, and the file is removed when
-the gateway stops. No client addresses that form directly — the page reaches its
-gateway over one HTTP origin and up to five WebSockets, all of which need a host
+the gateway stops. No client addresses that form directly — the client reaches its
+gateway over one HTTP origin and up to five WebSocket paths, a second display's
+tab opening `/ws/display` and the first tab the others, all of which need a host
 and a port, so whatever terminates the proxy is what a browser talks to. An embedded
 gateway is that arrangement in one process tree: the worker listens on its
 private endpoint — `<instance>/gateway.sock`, or a named pipe on Windows — and
