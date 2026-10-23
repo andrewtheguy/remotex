@@ -65,9 +65,9 @@ https://github.com/user-attachments/assets/cde4e192-340f-47dd-86db-3d2d89049007
 
 
 
-### Mac -> Windows at Retina Density with Audio
+### Mac -> Windows at Retina/HiDPI Density with Audio
 
-- Windows' own Remote Desktop shown at the Mac's Retina density, with the remote's sound playing in the browser.
+- Windows' own Remote Desktop shown at the Mac's Retina/HiDPI density, with the remote's sound playing in the browser.
 
 https://github.com/user-attachments/assets/3dfd0dc2-dc7d-4d41-b99e-1340f685390c
 

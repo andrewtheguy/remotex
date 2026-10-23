@@ -49,9 +49,9 @@ https://github.com/user-attachments/assets/cde4e192-340f-47dd-86db-3d2d89049007
 
 
 
-### Mac -> Windows，Retina 密度并带声音
+### Mac -> Windows，Retina/HiDPI 密度并带声音
 
-- 以 Mac 的 Retina 密度显示 Windows 自带的远程桌面，并在浏览器中播放远程的声音。
+- 以 Mac 的 Retina/HiDPI 密度显示 Windows 自带的远程桌面，并在浏览器中播放远程的声音。
 
 https://github.com/user-attachments/assets/3dfd0dc2-dc7d-4d41-b99e-1340f685390c
 
