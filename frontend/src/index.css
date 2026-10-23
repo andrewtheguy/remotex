@@ -561,6 +561,7 @@ body {
 /* An open target's options and its Start, hung under the target's button and
    indented to its text. */
 .picker-options {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
@@ -616,6 +617,61 @@ body {
 .picker-option-note {
   color: #8b949e;
   font-size: 0.78rem;
+}
+
+/* An option and the (i) holding what choosing it does. */
+.picker-option-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: #c9d1d9;
+}
+
+.picker-info-button {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.1rem;
+  padding: 0;
+  border: 1px solid #6e7681;
+  border-radius: 50%;
+  background: transparent;
+  color: #8b949e;
+  font:
+    italic 600 0.65rem / 1 Georgia,
+    serif;
+  cursor: pointer;
+}
+
+.picker-info-button:hover,
+.picker-info-button[aria-expanded="true"] {
+  border-color: #8b949e;
+  color: #e6edf3;
+}
+
+/* The note floats over what follows, across the target's options rather than
+   the option's own column, which under a sound or pipeline is half of them. */
+.picker-tip {
+  position: absolute;
+  z-index: 1;
+  left: 0.9rem;
+  right: 0.9rem;
+  margin-top: 0.3rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #161b22;
+  box-shadow: 0 6px 16px rgba(1, 4, 9, 0.6);
+  color: #c9d1d9;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+@media (hover: hover) {
+  .picker-info-button:hover + .picker-tip {
+    display: block;
+  }
 }
 
 /* The two ways under a chosen option, side by side under its text: a ticked

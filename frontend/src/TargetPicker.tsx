@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { AppVersion } from "./AppVersion.tsx";
 import { decodesAppleMedia } from "./appleMedia.ts";
 import { connectionShortLabel } from "./connectionLabel.ts";
@@ -208,42 +208,28 @@ export default function TargetPicker({
                       <fieldset className="picker-choice">
                         <legend>Size</legend>
                         {options.sizes.map((size) => (
-                          <label key={size.value} className="picker-option">
-                            <input
-                              type="radio"
-                              name={`picker-size-${t.name}`}
-                              checked={options.choices.size === size.value}
-                              disabled={pendingTarget !== null}
-                              onChange={() =>
-                                setRemembered((was) =>
-                                  rememberChoice(
-                                    was,
-                                    t.name,
-                                    "size",
-                                    size.value,
-                                  ),
-                                )
-                              }
-                            />
-                            <span className="picker-option-text">
-                              <span>{size.label}</span>
-                              <span className="picker-option-note">
-                                {size.note}
-                              </span>
-                            </span>
-                          </label>
+                          <PickerOption
+                            key={size.value}
+                            type="radio"
+                            name={`picker-size-${t.name}`}
+                            checked={options.choices.size === size.value}
+                            locked={pendingTarget !== null}
+                            onChange={() =>
+                              setRemembered((was) =>
+                                rememberChoice(was, t.name, "size", size.value),
+                              )
+                            }
+                            label={size.label}
+                            note={size.note}
+                          />
                         ))}
                       </fieldset>
                     ) : (
-                      <p className="picker-choice">
-                        <span className="picker-choice-heading">Size</span>
-                        <span className="picker-option-text">
-                          <span>{options.sizes[0].label}</span>
-                          <span className="picker-option-note">
-                            {options.sizes[0].note}
-                          </span>
-                        </span>
-                      </p>
+                      <StatedChoice
+                        heading="Size"
+                        label={options.sizes[0].label}
+                        note={options.sizes[0].note}
+                      />
                     )}
                     {/* The remote's sound, where the target offers it. */}
                     {options.soundRow && (
@@ -309,17 +295,11 @@ export default function TargetPicker({
                     {/* A stream passed in every session is said, not
                         offered. */}
                     {options.passed && (
-                      <p className="picker-choice">
-                        <span className="picker-choice-heading">
-                          Passthrough
-                        </span>
-                        <span className="picker-option-text">
-                          <span>{options.passed.label}</span>
-                          <span className="picker-option-note">
-                            {options.passed.note}
-                          </span>
-                        </span>
-                      </p>
+                      <StatedChoice
+                        heading="Passthrough"
+                        label={options.passed.label}
+                        note={options.passed.note}
+                      />
                     )}
                     {/* How the host draws the pipeline, on an RDP target
                         with one. */}
@@ -434,19 +414,16 @@ function ViewChoice({
     <fieldset className="picker-choice">
       <legend>Displays</legend>
       {views.map((view) => (
-        <label key={view.value} className="picker-option">
-          <input
-            type="radio"
-            name={`picker-view-${target}`}
-            checked={chosen === view.value}
-            disabled={locked}
-            onChange={() => choose(view.value)}
-          />
-          <span className="picker-option-text">
-            <span>{view.label}</span>
-            <span className="picker-option-note">{view.note}</span>
-          </span>
-        </label>
+        <PickerOption
+          key={view.value}
+          type="radio"
+          name={`picker-view-${target}`}
+          checked={chosen === view.value}
+          locked={locked}
+          onChange={() => choose(view.value)}
+          label={view.label}
+          note={view.note}
+        />
       ))}
     </fieldset>
   );
@@ -475,22 +452,17 @@ function PictureChoice({
     <fieldset className="picker-choice">
       <legend>Picture</legend>
       {pictures.map((picture) => (
-        <label
+        <PickerOption
           key={picture.value ?? "tiles"}
-          className={`picker-option${picture.disabled ? " picker-option-unavailable" : ""}`}
-        >
-          <input
-            type="radio"
-            name={`picker-picture-${target}`}
-            checked={chosen === picture.value}
-            disabled={picture.disabled || locked}
-            onChange={() => choose(picture.value)}
-          />
-          <span className="picker-option-text">
-            <span>{picture.label}</span>
-            <span className="picker-option-note">{picture.note}</span>
-          </span>
-        </label>
+          type="radio"
+          name={`picker-picture-${target}`}
+          checked={chosen === picture.value}
+          unavailable={picture.disabled}
+          locked={locked}
+          onChange={() => choose(picture.value)}
+          label={picture.label}
+          note={picture.note}
+        />
       ))}
     </fieldset>
   );
@@ -513,18 +485,15 @@ function SoundChoice({
 }) {
   return (
     <>
-      <label className="picker-option">
-        <input
-          type="checkbox"
-          checked={row.checked}
-          disabled={row.disabled || locked}
-          onChange={(e) => choose(e.target.checked ? "opus" : "off")}
-        />
-        <span className="picker-option-text">
-          <span>{row.label}</span>
-          <span className="picker-option-note">{row.note}</span>
-        </span>
-      </label>
+      <PickerOption
+        type="checkbox"
+        checked={row.checked}
+        unavailable={row.disabled}
+        locked={locked}
+        onChange={(checked) => choose(checked ? "opus" : "off")}
+        label={row.label}
+        note={row.note}
+      />
       {row.checked && (
         <div
           className="picker-suboptions"
@@ -532,22 +501,17 @@ function SoundChoice({
           aria-label="Sound format"
         >
           {row.formats.map((format) => (
-            <label
+            <PickerOption
               key={format.value}
-              className={`picker-option${format.disabled ? " picker-option-unavailable" : ""}`}
-            >
-              <input
-                type="radio"
-                name={`picker-sound-${target}`}
-                checked={chosen === format.value}
-                disabled={format.disabled || locked}
-                onChange={() => choose(format.value)}
-              />
-              <span className="picker-option-text">
-                <span>{format.label}</span>
-                <span className="picker-option-note">{format.note}</span>
-              </span>
-            </label>
+              type="radio"
+              name={`picker-sound-${target}`}
+              checked={chosen === format.value}
+              unavailable={format.disabled}
+              locked={locked}
+              onChange={() => choose(format.value)}
+              label={format.label}
+              note={format.note}
+            />
           ))}
         </div>
       )}
@@ -575,18 +539,15 @@ function DeviceChoices({
   ] as const;
   return rows.map(([device, row]) =>
     row ? (
-      <label key={device} className="picker-option">
-        <input
-          type="checkbox"
-          checked={row.checked}
-          disabled={locked}
-          onChange={(e) => choose(device, e.target.checked)}
-        />
-        <span className="picker-option-text">
-          <span>{row.label}</span>
-          <span className="picker-option-note">{row.note}</span>
-        </span>
-      </label>
+      <PickerOption
+        key={device}
+        type="checkbox"
+        checked={row.checked}
+        locked={locked}
+        onChange={(checked) => choose(device, checked)}
+        label={row.label}
+        note={row.note}
+      />
     ) : null,
   );
 }
@@ -614,46 +575,163 @@ function PipelineChoice({
     <fieldset className="picker-choice">
       <legend>Graphics</legend>
       {row.modes.map((mode) => (
-        <label
+        <PickerOption
           key={mode.value}
-          className={`picker-option${mode.disabled ? " picker-option-unavailable" : ""}`}
-        >
-          <input
-            type="radio"
-            name={`picker-pipeline-${target}`}
-            checked={(mode.value === "adaptive") === adaptive}
-            disabled={mode.disabled || locked}
-            onChange={() =>
-              choose(
-                mode.value === "adaptive" ? "adaptive-desktop" : "high-quality",
-              )
-            }
-          />
-          <span className="picker-option-text">
-            <span>{mode.label}</span>
-            <span className="picker-option-note">{mode.note}</span>
-          </span>
-        </label>
+          type="radio"
+          name={`picker-pipeline-${target}`}
+          checked={(mode.value === "adaptive") === adaptive}
+          unavailable={mode.disabled}
+          locked={locked}
+          onChange={() =>
+            choose(
+              mode.value === "adaptive" ? "adaptive-desktop" : "high-quality",
+            )
+          }
+          label={mode.label}
+          note={mode.note}
+        />
       ))}
       {adaptive && (
         <div className="picker-suboptions" role="radiogroup" aria-label="H.264">
           {row.h264.map((option) => (
-            <label key={option.value} className="picker-option">
-              <input
-                type="radio"
-                name={`picker-h264-${target}`}
-                checked={chosen === option.value}
-                disabled={option.disabled || locked}
-                onChange={() => choose(option.value)}
-              />
-              <span className="picker-option-text">
-                <span>{option.label}</span>
-                <span className="picker-option-note">{option.note}</span>
-              </span>
-            </label>
+            <PickerOption
+              key={option.value}
+              type="radio"
+              name={`picker-h264-${target}`}
+              checked={chosen === option.value}
+              unavailable={option.disabled}
+              locked={locked}
+              onChange={() => choose(option.value)}
+              label={option.label}
+              note={option.note}
+            />
           ))}
         </div>
       )}
     </fieldset>
+  );
+}
+
+// One option under a target: its input and label, with what choosing it does
+// behind an (i) beside it. One the target offers and this browser cannot have
+// is greyed, with the reason said under its label instead, where it is seen
+// without asking.
+function PickerOption({
+  type,
+  name,
+  checked,
+  unavailable = false,
+  locked,
+  onChange,
+  label,
+  note,
+}: {
+  type: "radio" | "checkbox";
+  name?: string;
+  checked: boolean;
+  unavailable?: boolean;
+  locked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+  note: string;
+}) {
+  const noteId = useId();
+  return (
+    <div className="picker-option-row">
+      <label
+        className={`picker-option${unavailable ? " picker-option-unavailable" : ""}`}
+      >
+        <input
+          type={type}
+          name={name}
+          checked={checked}
+          disabled={unavailable || locked}
+          aria-describedby={unavailable ? undefined : noteId}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span className="picker-option-text">
+          <span>{label}</span>
+          {unavailable && <span className="picker-option-note">{note}</span>}
+        </span>
+      </label>
+      {!unavailable && <InfoTip id={noteId} about={label} note={note} />}
+    </div>
+  );
+}
+
+// What the session will have where it is no choice: said under its heading,
+// with why behind an (i).
+function StatedChoice({
+  heading,
+  label,
+  note,
+}: {
+  heading: string;
+  label: string;
+  note: string;
+}) {
+  const noteId = useId();
+  return (
+    <div className="picker-choice">
+      <span className="picker-choice-heading">{heading}</span>
+      <div className="picker-option-row">
+        <span>{label}</span>
+        <InfoTip id={noteId} about={label} note={note} />
+      </div>
+    </div>
+  );
+}
+
+// The (i) beside an option: its note, shown over what follows while the button
+// is hovered or after it is tapped, and closed by another tap, a tap elsewhere
+// or Escape. The note stays in the page, hidden, as its option's description.
+function InfoTip({
+  id,
+  about,
+  note,
+}: {
+  id: string;
+  about: string;
+  note: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const outside = (e: PointerEvent) => {
+      if (!root.current?.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", onEscape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", onEscape);
+    };
+  }, [open]);
+  return (
+    <span className="picker-info" ref={root}>
+      <button
+        type="button"
+        className="picker-info-button"
+        aria-label={`About ${about}`}
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => setOpen((was) => !was)}
+      >
+        i
+      </button>
+      <span id={id} className="picker-tip" hidden={!open}>
+        {note}
+      </span>
+    </span>
   );
 }
