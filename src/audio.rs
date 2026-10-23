@@ -446,7 +446,7 @@ impl AudioListener {
             waves: broadcast::Receiver<Bytes>,
             /// Samples not yet a whole block's worth, as the engine gave them.
             pending: Vec<u8>,
-            /// One block as libFLAC takes it, a signed integer to a sample.
+            /// One block as the encoder takes it, a signed integer to a sample.
             block: Vec<i32>,
         }
 

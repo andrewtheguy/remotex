@@ -639,10 +639,10 @@ pub enum Sound {
     /// wlshare's own Opus packets, coded there at that rate, passed as they came.
     Opus,
     /// Lossless: wlshare's own FLAC frames passed as they came, or an RDP
-    /// host's PCM coded as FLAC here by libFLAC, decoded by the browser's own
-    /// decoder either way, which Safari's does not. The uncompressed rate less
-    /// a third or so, about a megabit a second of music, with no walk under it:
-    /// for a link with room.
+    /// host's PCM coded as FLAC here by `sound_flac`'s own encoder, decoded by
+    /// the browser's own decoder either way, which Safari's does not. The
+    /// uncompressed rate less a third or so, about a megabit a second of music,
+    /// with no walk under it: for a link with room.
     Flac,
 }
 
