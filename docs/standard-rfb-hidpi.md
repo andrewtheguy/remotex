@@ -14,7 +14,7 @@ pixel width and height and nothing else, so a sway output at `scale 2` renders a
 framebuffer its VNC server cannot describe as anything but pixels, and a client
 cannot ask about.
 
-Density over VNC is therefore an extension outside RFB, and zdesk lists
+Density over VNC is therefore an extension outside RFB, and zDesk lists
 extensions for one server on one kind of target: wlshare, on a target with
 `subtype = "wlshare"`. That subtype is closer to `ard-high-performance` than to
 standard VNC: it names the server, and its picture, density, display list and
@@ -25,16 +25,16 @@ never told one, and that holds when the server it reaches is wlshare itself. The
 engine reports `UNSCALED` (`src/vnc.rs`), the browser shows every pixel
 one-to-one, and the Info card reads `1728×883 at 1x` under a browser at 2x.
 
-Every other kind of target has a wire that carries density, and zdesk reads it
+Every other kind of target has a wire that carries density, and zDesk reads it
 from there:
 
-- **RDP** — the client *declares* it. zdesk puts the browser screen's density,
+- **RDP** — the client *declares* it. zDesk puts the browser screen's density,
   quantized to 100% or 200%, in the monitor layout's `DesktopScaleFactor`
   (`src/rdp.rs`), asks for the desktop in pixels at that density, and the host is
   bound to honour it. This is why xrdp shows 2x with nothing to configure.
 - **Apple Screen Sharing** — the server *reports* it. Apple's display layout
   message carries each screen's logical size, backing size and scale factor as a
-  double (`src/vnc_apple.rs`), and zdesk reads it off every layout.
+  double (`src/vnc_apple.rs`), and zDesk reads it off every layout.
 - **wlshare** — the server *reports* it and takes the client's. A `wlshare`
   target lists wlshare's density extension: the server reports its output's
   scale, and the browser's density is declared back to it with the window, or

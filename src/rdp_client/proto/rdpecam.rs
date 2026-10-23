@@ -737,7 +737,7 @@ mod tests {
 
     /// A camera the host has negotiated with, been told about, and opened the channel of.
     fn attached(format: Format) -> Rdpecam {
-        let mut cam = Rdpecam::new("Zdesk Camera");
+        let mut cam = Rdpecam::new("zDesk Camera");
         cam.opened(ENUMERATOR, ENUMERATION);
         cam.push(ENUMERATION, &[2, SELECT_VERSION_RESPONSE]);
         cam.plug(format);
@@ -778,7 +778,7 @@ mod tests {
     /// 4.1: the version request is the first message, and the response settles it.
     #[test]
     fn the_enumeration_channel_opens_with_the_version_request() {
-        let mut cam = Rdpecam::new("Zdesk Camera");
+        let mut cam = Rdpecam::new("zDesk Camera");
         assert!(cam.wants(ENUMERATOR));
         assert!(!cam.wants(DEVICE_CHANNEL), "no device channel before one is announced");
         let turn = cam.opened(ENUMERATOR, ENUMERATION);
@@ -1103,7 +1103,7 @@ mod tests {
             turn.replies,
             vec![
                 (ENUMERATION, cam.device_removed(DEVICE_CHANNEL)),
-                (ENUMERATION, cam.device_added("Zdesk Camera", DEVICE_CHANNEL)),
+                (ENUMERATION, cam.device_added("zDesk Camera", DEVICE_CHANNEL)),
             ]
         );
         assert_eq!(cam.opened(DEVICE_CHANNEL, 9).outputs, vec![Output::Attached]);
@@ -1126,7 +1126,7 @@ mod tests {
         let turn = cam.opened(ENUMERATOR, 11);
         assert_eq!(turn.replies, vec![(11, vec![2, SELECT_VERSION_REQUEST])]);
         let turn = cam.push(11, &[2, SELECT_VERSION_RESPONSE]);
-        assert_eq!(turn.replies, vec![(11, cam.device_added("Zdesk Camera", DEVICE_CHANNEL))]);
+        assert_eq!(turn.replies, vec![(11, cam.device_added("zDesk Camera", DEVICE_CHANNEL))]);
     }
 
     #[test]

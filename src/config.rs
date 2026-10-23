@@ -1537,7 +1537,7 @@ pub struct ServerSection {
 }
 
 /// The default display name when `[branding].text` is unset.
-pub const DEFAULT_BRANDING: &str = "zdesk";
+pub const DEFAULT_BRANDING: &str = "zDesk";
 
 /// The `[branding]` table as written: what the deployment calls itself, and the
 /// image it puts in the browser tab.

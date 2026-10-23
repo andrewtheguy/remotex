@@ -1100,7 +1100,7 @@ mod tests {
                 .unwrap(),
             ),
             branding: crate::config::Branding {
-                text: "zdesk".to_owned(),
+                text: "zDesk".to_owned(),
                 logo: None,
             },
             dev_hostname: dev_hostname.map(str::to_owned),
@@ -1321,14 +1321,14 @@ mod tests {
     #[test]
     fn config_response_contains_only_public_branding() {
         let json = serde_json::to_string(&ConfigResponse {
-            branding: "zdesk".to_owned(),
+            branding: "zDesk".to_owned(),
             logo: false,
             throughput: false,
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"branding":"zdesk","logo":false,"throughput":false}"#
+            r#"{"branding":"zDesk","logo":false,"throughput":false}"#
         );
     }
 

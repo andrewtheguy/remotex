@@ -931,7 +931,7 @@ Session Host role never creates it, and Microsoft's own client gets no camera
 against such a host either. On it the client asks for version 2, the host answers
 with the highest it speaks that is not higher, and nothing more is said until the
 browser enables its camera. That plug is what sends the Device Added Notification —
-a display name, `Zdesk Camera`, and the name of a device channel — and the host
+a display name, `zDesk Camera`, and the name of a device channel — and the host
 then opens that channel by name. A version the client does not speak ends the
 protocol on that channel, as MS-RDPECAM 3.2.5.2 requires.
 

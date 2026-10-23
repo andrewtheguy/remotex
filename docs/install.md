@@ -1,4 +1,4 @@
-# Installing zdesk
+# Installing zDesk
 
 ## Native packages
 
@@ -157,7 +157,7 @@ foreground:
 zdesk serve
 ```
 
-Then open <http://localhost:52380>. [Using zdesk](guide.md) says how each
+Then open <http://localhost:52380>. [Using zDesk](guide.md) says how each
 kind of target is set up and how the page is reached from another machine.
 
 ## Container
@@ -254,7 +254,7 @@ sudo rm -rf /usr/local/share/doc/zdesk
 sudo pkgutil --forget com.andrewtheguy.zdesk.gateway
 ```
 
-On Windows, remove zdesk from **Apps & features**.
+On Windows, remove zDesk from **Apps & features**.
 
 None of these touch the live config or state. Remove `/etc/zdesk` and
 `/var/lib/zdesk` on Linux, `/usr/local/etc/zdesk` and

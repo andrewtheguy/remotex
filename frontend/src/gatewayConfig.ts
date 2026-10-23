@@ -15,7 +15,7 @@ export interface GatewayConfig {
 }
 
 const FALLBACK: GatewayConfig = {
-  branding: "zdesk",
+  branding: "zDesk",
   logo: false,
   throughput: false,
 };

@@ -19,7 +19,7 @@ use log::debug;
 use tokio::sync::mpsc;
 
 /// The name Windows shows beside the redirected device.
-pub const CAMERA_DEVICE_NAME: &str = "Zdesk Camera";
+pub const CAMERA_DEVICE_NAME: &str = "zDesk Camera";
 
 /// The geometry and rate of the H.264 the browser will send, as announced on the
 /// camera socket's first message and advertised to the remote verbatim.

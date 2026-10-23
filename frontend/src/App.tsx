@@ -32,9 +32,9 @@ type AuthState = "checking" | "unauthenticated" | "authenticated";
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   // Deployment branding (login screen, interstitials, tab title). Defaults to
-  // "zdesk" and stays there until GET /api/config answers — a public route,
+  // "zDesk" and stays there until GET /api/config answers — a public route,
   // so it resolves before login.
-  const [branding, setBranding] = useState("zdesk");
+  const [branding, setBranding] = useState("zDesk");
 
   useEffect(() => {
     let cancelled = false;

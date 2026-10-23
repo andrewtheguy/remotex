@@ -1,4 +1,4 @@
-# Using zdesk
+# Using zDesk
 
 What an operator and a user need to know once the gateway is
 [installed](install.md): how the page is reached, what a session is started
@@ -278,7 +278,7 @@ touch.
 
 By default a Windows host draws much of its desktop lossily, as RemoteFX
 Progressive and ClearCodec's NSCodec, which blur text and colours slightly. Its
-own policy decides that, and no setting in zdesk overrides it. To have it draw
+own policy decides that, and no setting in zDesk overrides it. To have it draw
 every pixel exactly:
 
 1. On the host, open the Local Group Policy Editor (`gpedit.msc`) and go to

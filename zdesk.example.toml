@@ -29,7 +29,7 @@
 # no icon.
 #
 #[branding]
-#text = "zdesk"
+#text = "zDesk"
 #logo = "/path/to/logo.png"
 #
 # A logo is either a path to an image file (.png, .ico, .svg, .jpg, .gif or
