@@ -118,7 +118,7 @@ pub fn bind_all(
                 // `listeners` drops here, releasing anything already taken.
                 anyhow::bail!(
                     "{socket} is already in use — something else is serving that \
-                     port (an earlier `remotex serve`?). Stop it first; starting \
+                     port (an earlier `zdesk serve`?). Stop it first; starting \
                      beside it would leave two gateways answering {addr} \
                      unpredictably"
                 );
@@ -347,7 +347,7 @@ pub fn router_with_sessions(
 ///   `127.0.0.1`;
 /// - `localhost`;
 /// - **anything under `.localhost`**, which RFC 6761 §6.3 reserves for loopback in
-///   its entirety. So `gw-a.remotex.localhost`, the `gateway-1.localhost` of some
+///   its entirety. So `gw-a.zdesk.localhost`, the `gateway-1.localhost` of some
 ///   other tool and any other label somebody types are all this machine, and all of
 ///   them are names this gateway may find itself serving under.
 ///
@@ -361,7 +361,7 @@ fn is_loopback_name(name: &str) -> bool {
     name == "localhost" || name.ends_with(".localhost")
 }
 
-/// Send a loopback browser to `<label>.remotex.localhost`, so this gateway has a
+/// Send a loopback browser to `<label>.zdesk.localhost`, so this gateway has a
 /// cookie origin of its own (see `[server].dev_subdomain`).
 ///
 /// Three deliberate limits, because a redirect is a thing to be careful with:
@@ -374,7 +374,7 @@ fn is_loopback_name(name: &str) -> bool {
 ///   is no input that makes it point somewhere else.
 /// - **The home page only**, and not merely "not the API". Opening the gateway is
 ///   the one request that decides which origin everything else belongs to: the
-///   document that lands on `<label>.remotex.localhost` asks for its assets, its `/api`
+///   document that lands on `<label>.zdesk.localhost` asks for its assets, its `/api`
 ///   and its `/ws` from there by itself. Redirecting anything else would be
 ///   redundant at best and harmful at worst — a `fetch` that followed a
 ///   cross-origin redirect would drop its credentials, and a WebSocket upgrade
@@ -410,7 +410,7 @@ async fn dev_hostname_redirect(State(state): State<AppState>, req: Request, next
     };
     let name = name.trim_start_matches('[').trim_end_matches(']');
     // Any loopback name that is not *this* gateway's own, which is stricter than it
-    // first looks and deliberately so. `gw-b.remotex.localhost` on gateway A's port is a
+    // first looks and deliberately so. `gw-b.zdesk.localhost` on gateway A's port is a
     // browser about to give gateway A a cookie under gateway B's name — the exact
     // collision this whole mechanism exists to prevent, arrived at by editing the
     // port in the URL bar and not the label. So the test is not "did you come in on
@@ -448,7 +448,7 @@ async fn dev_hostname_redirect(State(state): State<AppState>, req: Request, next
 /// Middleware guarding everything session-related: whatever this gateway's
 /// [`GatewayAuth`] asks for, or no service.
 ///
-/// Both modes read the same `remotex_session` cookie and differ only in what
+/// Both modes read the same `zdesk_session` cookie and differ only in what
 /// makes it valid — a login gateway looks the value up in [`AuthSessions`], an
 /// embedded one compares it against the token it minted at startup. One carrier
 /// for both, because a cookie is the only credential a *document* can carry: the
@@ -463,7 +463,7 @@ async fn require_auth(State(state): State<AppState>, req: Request, next: Next) -
 }
 
 /// The header an answer states this gateway's version in.
-const VERSION_HEADER: HeaderName = HeaderName::from_static("x-remotex-version");
+const VERSION_HEADER: HeaderName = HeaderName::from_static("x-zdesk-version");
 
 /// State this gateway's version on a response.
 ///
@@ -1100,7 +1100,7 @@ mod tests {
                 .unwrap(),
             ),
             branding: crate::config::Branding {
-                text: "remotex".to_owned(),
+                text: "zdesk".to_owned(),
                 logo: None,
             },
             dev_hostname: dev_hostname.map(str::to_owned),
@@ -1141,26 +1141,26 @@ mod tests {
     /// The hole this closes, and the reason the rule is "not already where you
     /// belong" rather than "arrived on a bare address".
     ///
-    /// `gw-b.remotex.localhost:52675` is somebody who edited the port in the URL bar and
+    /// `gw-b.zdesk.localhost:52675` is somebody who edited the port in the URL bar and
     /// not the label. Serving it would put *this* gateway's cookie under the other
     /// one's hostname, which is precisely the collision the whole mechanism exists
     /// to prevent — so it is redirected like any other name that is not ours.
     #[tokio::test]
     async fn another_gateways_hostname_on_this_port_is_redirected_here() {
         for host in [
-            "gw-b.remotex.localhost:52675",
+            "gw-b.zdesk.localhost:52675",
             "gateway-1.localhost:52675",
             // A sub-subdomain of our own name is still not our own name.
-            "x.gw-a.remotex.localhost:52675",
+            "x.gw-a.zdesk.localhost:52675",
             // Nor is the suffix every gateway's name hangs off: no gateway is
             // called that, and a cookie left there would be every gateway's.
-            "remotex.localhost:52675",
+            "zdesk.localhost:52675",
             // The rest of 127/8 is loopback too, not just .0.1.
             "127.0.0.2:52675",
         ] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), host, "/").await,
-                Some("http://gw-a.remotex.localhost:52675/".to_owned()),
+                redirect_for(dev_router(Some("gw-a.zdesk.localhost")), host, "/").await,
+                Some("http://gw-a.zdesk.localhost:52675/".to_owned()),
                 "{host} should have been sent to this gateway's own hostname"
             );
         }
@@ -1172,12 +1172,12 @@ mod tests {
     #[tokio::test]
     async fn this_gateways_own_hostname_is_never_redirected_again() {
         for host in [
-            "gw-a.remotex.localhost:52675",
-            "GW-A.REMOTEX.LOCALHOST:52675",
-            "gw-a.remotex.localhost",
+            "gw-a.zdesk.localhost:52675",
+            "GW-A.ZDESK.LOCALHOST:52675",
+            "gw-a.zdesk.localhost",
         ] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), host, "/").await,
+                redirect_for(dev_router(Some("gw-a.zdesk.localhost")), host, "/").await,
                 None,
                 "{host} is already where it belongs"
             );
@@ -1190,15 +1190,15 @@ mod tests {
     async fn a_loopback_browser_is_sent_to_the_dev_hostname() {
         for host in ["127.0.0.1:52675", "localhost:52675", "[::1]:52675"] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), host, "/").await,
-                Some("http://gw-a.remotex.localhost:52675/".to_owned()),
+                redirect_for(dev_router(Some("gw-a.zdesk.localhost")), host, "/").await,
+                Some("http://gw-a.zdesk.localhost:52675/".to_owned()),
                 "{host} should have been redirected"
             );
         }
         // No port in the Host is legal (port 80) and must not invent one.
         assert_eq!(
-            redirect_for(dev_router(Some("gw-a.remotex.localhost")), "localhost", "/").await,
-            Some("http://gw-a.remotex.localhost/".to_owned())
+            redirect_for(dev_router(Some("gw-a.zdesk.localhost")), "localhost", "/").await,
+            Some("http://gw-a.zdesk.localhost/".to_owned())
         );
     }
 
@@ -1207,8 +1207,8 @@ mod tests {
     #[tokio::test]
     async fn a_request_that_did_not_arrive_on_loopback_is_left_alone() {
         for host in [
-            "remotex.example.com",
-            "remotex.example.com:52675",
+            "zdesk.example.com",
+            "zdesk.example.com:52675",
             "192.0.2.10:52675",
             "[fdb8:d92a::1]:52675",
             // Not loopback however much it reads like it: the suffix is what
@@ -1217,7 +1217,7 @@ mod tests {
             "notlocalhost:52675",
         ] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), host, "/").await,
+                redirect_for(dev_router(Some("gw-a.zdesk.localhost")), host, "/").await,
                 None,
                 "{host} must not be redirected"
             );
@@ -1231,7 +1231,7 @@ mod tests {
     async fn nothing_but_the_home_page_is_redirected() {
         for path in ["/api/health", "/api/auth/status", "/ws", "/assets/app.js"] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), "127.0.0.1:52675", path).await,
+                redirect_for(dev_router(Some("gw-a.zdesk.localhost")), "127.0.0.1:52675", path).await,
                 None,
                 "{path} must not be redirected"
             );
@@ -1321,14 +1321,14 @@ mod tests {
     #[test]
     fn config_response_contains_only_public_branding() {
         let json = serde_json::to_string(&ConfigResponse {
-            branding: "remotex".to_owned(),
+            branding: "zdesk".to_owned(),
             logo: false,
             throughput: false,
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"branding":"remotex","logo":false,"throughput":false}"#
+            r#"{"branding":"zdesk","logo":false,"throughput":false}"#
         );
     }
 

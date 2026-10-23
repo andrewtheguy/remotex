@@ -183,7 +183,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         placement: config.placement,
         monitors: narrow(monitors),
         scale_percent: config.scale_percent,
-        client_name: "remotex",
+        client_name: "zdesk",
         keyboard_layout: KEYBOARD_LAYOUT,
         selected_protocol: protocol.bits(),
         channels: &wanted,

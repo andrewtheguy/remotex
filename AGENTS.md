@@ -76,7 +76,7 @@ rule as an exception, rather than refusing it or bending the rule unlisted.
 
 ## Packaging and platforms
 
-- The native `embedded-gateway` feature is the `remotex tui` control plane and
+- The native `embedded-gateway` feature is the `zdesk tui` control plane and
   its hidden `serve-embedded` workers, on Unix and Windows alike, each worker's
   private endpoint a Unix socket or an owner-only named pipe behind
   `src/embedded/transport.rs`. Containers must be built through

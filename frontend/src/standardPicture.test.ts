@@ -11,7 +11,7 @@ import { loadStandard } from "./standardPicture.ts";
 
 const module = readFileSync(
   new URL(
-    "../wasm/apple-adaptive/pkg/remotex_apple_adaptive_bg.wasm",
+    "../wasm/apple-adaptive/pkg/zdesk_apple_adaptive_bg.wasm",
     import.meta.url,
   ),
 );

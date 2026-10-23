@@ -125,7 +125,7 @@ pub fn next_clipboard_time(previous: Option<u64>) -> u64 {
     previous.map_or(now, |last| now.max(last.saturating_add(1)))
 }
 
-/// A remote clipboard value held by an engine, plus when remotex last observed
+/// A remote clipboard value held by an engine, plus when zdesk last observed
 /// that clipboard change. `None` is honest for content that predates the
 /// session: VNC and RDP do not expose an OS clipboard timestamp, so there is no
 /// reliable time to invent until a change arrives on their clipboard channel.

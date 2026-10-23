@@ -15,7 +15,7 @@ const version = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? "dev";
 // build.rs. Either way the one bundle is compiled into the gateway binary
 // (src/assets.rs), which serves it over HTTP from an origin root. The gateway is
 // the only thing that serves the page: there is no dev server in front of it.
-const outDir = process.env.REMOTEX_FRONTEND_OUT_DIR ?? "dist";
+const outDir = process.env.ZDESK_FRONTEND_OUT_DIR ?? "dist";
 
 export default defineConfig({
   // Absolute asset URLs: the gateway serves the page from an origin root, and

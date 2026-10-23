@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use common::{Ws, connect_ws};
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, TargetConfig};
-use remotex::protocol::MAX_CLIPBOARD_BYTES;
-use remotex::server;
+use zdesk::config::{AppConfig, Protocol, TargetConfig};
+use zdesk::protocol::MAX_CLIPBOARD_BYTES;
+use zdesk::server;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -766,7 +766,7 @@ fn fake_mac_update(
     update.extend_from_slice(&h.to_be_bytes());
     match standard {
         Some(encoding) => {
-            let body = if encoding == remotex::vnc_apple::ENCODING_ZLIB {
+            let body = if encoding == zdesk::vnc_apple::ENCODING_ZLIB {
                 zlib.write_all(&vec![shade; usize::from(w) * usize::from(h) * 4]).unwrap();
                 zlib.flush().unwrap();
                 std::mem::take(zlib.get_mut())
@@ -847,7 +847,7 @@ async fn serve_fake_mac(
     requests: mpsc::UnboundedSender<MacRequest>,
     mut actions: mpsc::UnboundedReceiver<MacAction>,
 ) -> std::io::Result<Vec<((u16, u16), u16)>> {
-    use remotex::vnc_record::{Keys, RecordReader, RecordWriter};
+    use zdesk::vnc_record::{Keys, RecordReader, RecordWriter};
     use tokio::io::AsyncReadExt as _;
 
     stream.write_all(b"RFB 003.889\n").await?;
@@ -991,9 +991,9 @@ async fn serve_fake_mac(
 
 /// The record-layer half of [`serve_fake_mac`]: everything after the rekey.
 async fn serve_fake_mac_records(
-    mut records: remotex::vnc_record::RecordReader<tokio::net::tcp::OwnedReadHalf>,
+    mut records: zdesk::vnc_record::RecordReader<tokio::net::tcp::OwnedReadHalf>,
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
-    mut writer: remotex::vnc_record::RecordWriter,
+    mut writer: zdesk::vnc_record::RecordWriter,
     answer: MacStream,
     requests: mpsc::UnboundedSender<MacRequest>,
     actions: &mut mpsc::UnboundedReceiver<MacAction>,
@@ -1059,7 +1059,7 @@ async fn serve_fake_mac_records(
                     .0
                     .iter()
                     .map(|&e| i32::from_be_bytes(e))
-                    .find(|&e| e == remotex::vnc_apple::ENCODING_ADAPTIVE || e == remotex::vnc_apple::ENCODING_ZLIB);
+                    .find(|&e| e == zdesk::vnc_apple::ENCODING_ADAPTIVE || e == zdesk::vnc_apple::ENCODING_ZLIB);
                 if lists_media && !std::mem::replace(&mut media_listed, true) {
                     let mut update = vec![0u8, 0];
                     update.extend_from_slice(&1u16.to_be_bytes());
@@ -1253,10 +1253,10 @@ async fn serve_fake_mac_records(
 /// the bound address.
 async fn spawn_app(target: TargetConfig) -> SocketAddr {
     let config = AppConfig {
-        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
+        listen: zdesk::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         targets: vec![target],
         auth: common::test_auth(),
-        branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
+        branding: zdesk::config::Branding { text: "zdesk".to_owned(), logo: None },
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
@@ -1303,7 +1303,7 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
 /// fake Mac checks the credentials against.
 fn mac_target(port: u16) -> TargetConfig {
     TargetConfig {
-        subtype: Some(remotex::config::Subtype::ArdHighPerformance),
+        subtype: Some(zdesk::config::Subtype::ArdHighPerformance),
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
         // No size: the virtual display opens at the screen the connect names.
@@ -1829,7 +1829,7 @@ async fn an_oversize_wlshare_desktop_holds_the_session_without_a_picture() {
     let (w, h) = (3842, 2);
     let vnc_port = spawn_fake_vnc_sized(w, h).await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::Wlshare),
+        subtype: Some(zdesk::config::Subtype::Wlshare),
         ..target(Protocol::Vnc, vnc_port)
     })
     .await;
@@ -1886,7 +1886,7 @@ async fn an_oversize_vnc_desktop_under_resize_is_refused() {
     let (w, h) = (3842, 2);
     let vnc_port = spawn_fake_vnc_sized(w, h).await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::Wlshare),
+        subtype: Some(zdesk::config::Subtype::Wlshare),
         ..target(Protocol::Vnc, vnc_port)
     })
     .await;
@@ -2349,7 +2349,7 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
     let (mac_port, mut requests, _actions, fake_mac) =
         spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::Ard),
+        subtype: Some(zdesk::config::Subtype::Ard),
         virtual_display: true,
         ..mac_target(mac_port)
     })
@@ -2445,7 +2445,7 @@ async fn standard_refuses_a_virtual_display_the_mac_does_not_offer() {
     let (mac_port, mut requests, _actions, fake_mac) =
         spawn_fake_mac_with(commands, MacStream::Refuse).await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::Ard),
+        subtype: Some(zdesk::config::Subtype::Ard),
         virtual_display: true,
         ..mac_target(mac_port)
     })
@@ -2471,7 +2471,7 @@ async fn standard_refuses_a_virtual_display_the_mac_does_not_offer() {
 async fn standard_speaks_apples_revision_on_the_physical_screen() {
     let (mac_port, mut requests, _actions, fake_mac) = spawn_fake_mac().await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::Ard),
+        subtype: Some(zdesk::config::Subtype::Ard),
         ..mac_target(mac_port)
     })
     .await;

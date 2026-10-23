@@ -38,13 +38,13 @@
 //
 //     cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_HEVC_TARGET=macvmhevc \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=… \
+//     ZDESK_PLAYWRIGHT_HEVC_TARGET=macvmhevc \
 //     bun run test:hevc
 //
-// Against a gateway without the archive, set REMOTEX_PLAYWRIGHT_HEVC_WASM=0: the
+// Against a gateway without the archive, set ZDESK_PLAYWRIGHT_HEVC_WASM=0: the
 // same target must then offer no such decoder.
 //
 // This module is what the two share: the test, the session it watches, and what
@@ -54,12 +54,12 @@ import { expect, type Page, test } from "@playwright/test";
 import { BASE_URL, logInAndConnectTo } from "./support";
 
 /// The opt-in, and the target name in one, as the video spec's.
-export const HEVC_TARGET = process.env.REMOTEX_PLAYWRIGHT_HEVC_TARGET;
+export const HEVC_TARGET = process.env.ZDESK_PLAYWRIGHT_HEVC_TARGET;
 
 /// Whether the gateway under test serves the decoder: said by whoever configured
 /// it, because asking the gateway would let one that lost its decoder pass as one
 /// configured without.
-const SERVES_DECODER = process.env.REMOTEX_PLAYWRIGHT_HEVC_WASM !== "0";
+const SERVES_DECODER = process.env.ZDESK_PLAYWRIGHT_HEVC_WASM !== "0";
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;

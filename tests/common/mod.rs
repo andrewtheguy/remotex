@@ -25,9 +25,9 @@ pub const TEST_PASSWORD: &str = "hunter2";
 /// browser reaches; the embedded one has its own suite
 /// (`tests/embedded_gateway_e2e.rs`).
 #[allow(dead_code)]
-pub fn test_auth() -> remotex::auth::GatewayAuth {
-    let encoded = remotex::auth::generate(TEST_USER, TEST_PASSWORD, 4).unwrap();
-    remotex::auth::GatewayAuth::Login(remotex::auth::SitePasswd::parse(&encoded).unwrap())
+pub fn test_auth() -> zdesk::auth::GatewayAuth {
+    let encoded = zdesk::auth::generate(TEST_USER, TEST_PASSWORD, 4).unwrap();
+    zdesk::auth::GatewayAuth::Login(zdesk::auth::SitePasswd::parse(&encoded).unwrap())
 }
 
 /// Pull `name` out of the operator's UAT config, for a test that borrows a
@@ -36,11 +36,11 @@ pub fn test_auth() -> remotex::auth::GatewayAuth {
 /// repository, and the same file that drives manual QA drives these tests.
 /// The caller overrides whatever dial settings its assertions need.
 #[allow(dead_code)]
-pub fn uat_target(name: &str) -> remotex::config::TargetConfig {
+pub fn uat_target(name: &str) -> zdesk::config::TargetConfig {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tmp/test_uat.toml");
     let text = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("these tests need the local UAT config at {path}: {e}"));
-    let mut config = remotex::config::ConfigFile::parse(&text).expect("tmp/test_uat.toml should parse");
+    let mut config = zdesk::config::ConfigFile::parse(&text).expect("tmp/test_uat.toml should parse");
     // Its passwords open as a served gateway's would: [server].master_password_file.
     let key = config.needs_master().then(|| {
         let master = config
@@ -72,7 +72,7 @@ impl ScratchDir {
     pub fn new(tag: &str) -> Self {
         Self(
             tempfile::Builder::new()
-                .prefix(&format!("remotex-{tag}-"))
+                .prefix(&format!("zdesk-{tag}-"))
                 .tempdir()
                 .unwrap(),
         )
@@ -129,7 +129,7 @@ pub async fn login(addr: SocketAddr) -> String {
             name.eq_ignore_ascii_case("set-cookie").then(|| value.trim())
         })
         .expect("login sets the session cookie");
-    // "remotex_session=<token>; HttpOnly; …" → the name=token pair.
+    // "zdesk_session=<token>; HttpOnly; …" → the name=token pair.
     cookie.split(';').next().unwrap().to_owned()
 }
 
@@ -359,7 +359,7 @@ pub fn paint_ack(frame: &[u8]) -> String {
 /// carrying it was well formed.
 #[allow(dead_code)]
 pub fn batch_records(frame: &[u8]) -> Vec<BatchRecord> {
-    use remotex::protocol::batch;
+    use zdesk::protocol::batch;
 
     assert!(frame.len() >= batch::HEADER_LEN, "frame is shorter than a batch header");
     assert_eq!(frame[0], batch::FRAME_KIND, "unexpected frame kind");
@@ -459,7 +459,7 @@ impl Coverage {
 
     /// A tile record sent, which must lie on the tile grid and inside the desktop.
     pub fn add(&mut self, tile: &BatchTile) {
-        const TILE: u16 = remotex::tiles::TILE;
+        const TILE: u16 = zdesk::tiles::TILE;
         assert!(
             tile.x.is_multiple_of(TILE) && tile.y.is_multiple_of(TILE),
             "a tile at ({}, {}) off the {TILE}-pixel grid",
@@ -485,7 +485,7 @@ impl Coverage {
 
     /// Whether every tile of the desktop has been sent.
     pub fn whole(&self) -> bool {
-        self.sent.len() == usize::from(self.w.div_ceil(remotex::tiles::TILE)) * usize::from(self.h.div_ceil(remotex::tiles::TILE))
+        self.sent.len() == usize::from(self.w.div_ceil(zdesk::tiles::TILE)) * usize::from(self.h.div_ceil(zdesk::tiles::TILE))
     }
 }
 
@@ -504,7 +504,7 @@ pub struct StandardRect {
 /// envelope as [`batch_units`] does.
 #[allow(dead_code)]
 pub fn standard_rects(frame: &[u8]) -> Vec<StandardRect> {
-    use remotex::protocol::batch;
+    use zdesk::protocol::batch;
 
     assert!(frame.len() >= batch::HEADER_LEN, "frame is shorter than a batch header");
     assert_eq!(frame[0], batch::FRAME_KIND, "unexpected frame kind");
@@ -681,13 +681,13 @@ pub async fn connect_target_with(ws: &mut Ws, target: &str, choices: &str) {
 /// `info` would hang the test run with no output instead of moving on to the
 /// other runtime.
 ///
-/// `REMOTEX_TEST_CONTAINER_RUNTIME` forces the choice when both work.
+/// `ZDESK_TEST_CONTAINER_RUNTIME` forces the choice when both work.
 #[allow(dead_code)]
 pub fn container_runtime() -> &'static str {
     let usable = |runtime: &str| runtime_responds(runtime, Duration::from_secs(10));
-    if let Ok(forced) = std::env::var("REMOTEX_TEST_CONTAINER_RUNTIME") {
+    if let Ok(forced) = std::env::var("ZDESK_TEST_CONTAINER_RUNTIME") {
         let forced: &'static str = Box::leak(forced.into_boxed_str());
-        assert!(usable(forced), "REMOTEX_TEST_CONTAINER_RUNTIME={forced} cannot be reached");
+        assert!(usable(forced), "ZDESK_TEST_CONTAINER_RUNTIME={forced} cannot be reached");
         return forced;
     }
     for runtime in ["podman", "docker"] {
@@ -782,7 +782,7 @@ impl Drop for Container {
 
 /// The address these tests reach a published container port on.
 ///
-/// `127.0.0.1` for a local engine. Set `REMOTEX_TEST_CONTAINER_HOST` to the
+/// `127.0.0.1` for a local engine. Set `ZDESK_TEST_CONTAINER_HOST` to the
 /// engine host's address when the engine is **remote** — a `podman system
 /// connection` or `docker context` pointing at another machine over SSH. A
 /// remote engine publishes ports on *its own* loopback, so a test connecting to
@@ -794,7 +794,7 @@ impl Drop for Container {
 /// hardware" (no nested virt), and there is nothing to fix on this side.
 #[allow(dead_code)]
 pub fn container_host() -> String {
-    std::env::var("REMOTEX_TEST_CONTAINER_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned())
+    std::env::var("ZDESK_TEST_CONTAINER_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned())
 }
 
 /// Build the image from `tests/<context>` (cached after the first run) and

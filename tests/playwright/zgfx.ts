@@ -3,7 +3,7 @@
 // the commands are inside.
 //
 // Written from [MS-RDPEGFX] 2.2.5 and 3.1.9.1 and not from the gateway's decoder
-// (crates/remotex-rdp-graphics/src/proto/zgfx.rs), so a spec that reads the
+// (crates/zdesk-rdp-graphics/src/proto/zgfx.rs), so a spec that reads the
 // commands with it checks the wire against the specification and not the gateway
 // against itself.
 

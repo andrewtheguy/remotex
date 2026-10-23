@@ -1,22 +1,22 @@
-# remotex configuration example
+# zdesk configuration example
 #
 # Copy this tracked template before adding credentials; in a checkout:
 #
-#   cp remotex.example.toml remotex.toml
+#   cp zdesk.example.toml zdesk.toml
 #
-# Pass that copy explicitly, for example `cargo run -- serve --config remotex.toml`.
+# Pass that copy explicitly, for example `cargo run -- serve --config zdesk.toml`.
 # The config is global-only: --config <path> if given, else the installed global config
-# (/etc/remotex/remotex.toml from a Linux package,
-# /usr/local/etc/remotex/remotex.toml from the macOS package, or
-# %ProgramData%\remotex\remotex.toml from the Windows package; the container uses
-# /opt/remotex/etc/remotex.toml). There are no per-user or
+# (/etc/zdesk/zdesk.toml from a Linux package,
+# /usr/local/etc/zdesk/zdesk.toml from the macOS package, or
+# %ProgramData%\zdesk\zdesk.toml from the Windows package; the container uses
+# /opt/zdesk/etc/zdesk.toml). There are no per-user or
 # working-directory files. The listen address below is the one setting that can
-# also come from outside this file (--listen, or REMOTEX_LISTEN); everything
+# also come from outside this file (--listen, or ZDESK_LISTEN); everything
 # else, credentials included, is configured here. Keep this file readable only
 # by the service user — it holds the login hash, and the targets' passwords,
 # encrypted, in [passwords] below.
 #
-#   chmod 600 remotex.toml
+#   chmod 600 zdesk.toml
 #
 # This is a served gateway's file.
 
@@ -25,11 +25,11 @@
 # with two spellings is one of them going stale.
 #
 # text is the login screen, the interstitials, and the browser tab title;
-# defaults to "remotex". logo is the page's tab icon; without it the page keeps
+# defaults to "zdesk". logo is the page's tab icon; without it the page keeps
 # no icon.
 #
 #[branding]
-#text = "remotex"
+#text = "zdesk"
 #logo = "/path/to/logo.png"
 #
 # A logo is either a path to an image file (.png, .ico, .svg, .jpg, .gif or
@@ -71,9 +71,9 @@
 #
 # The database is meter.sqlite3 in the gateway's state directory unless database
 # names another file; a relative path is taken from that directory too. The state
-# directory is /var/lib/remotex for the Linux packages, /usr/local/var/remotex for
-# the macOS package, %ProgramData%\remotex on Windows, /opt/remotex/var in the
-# container, and the instance directory under `remotex tui`. A config named with --config keeps it in the config's own
+# directory is /var/lib/zdesk for the Linux packages, /usr/local/var/zdesk for
+# the macOS package, %ProgramData%\zdesk on Windows, /opt/zdesk/var in the
+# container, and the instance directory under `zdesk tui`. A config named with --config keeps it in the config's own
 # directory. The directory must be writable: SQLite keeps its -wal and -shm files
 # beside the database.
 #
@@ -89,17 +89,17 @@
 # page then decodes the picture with it; a browser whose own decoder takes the
 # picture keeps decoding it there. Nothing at the picker chooses it. It is
 # andrewtheguy/hevc-wasm's decoder compiled to WebAssembly, whose licence keeps
-# it out of every remotex build: download
+# it out of every zdesk build: download
 # the release this gateway pins from the private andrewtheguy/hevc-wasm-archives,
 #
 #   gh release download v0.0.17 --repo andrewtheguy/hevc-wasm-archives \
 #     --pattern hevc-wasm-v0.0.17.tar.gz
 #
-# as it is, into share/remotex in the gateway's release tree, beside the
-# share/doc/remotex that holds this file: /usr/share/remotex for the .deb and
-# .rpm, /usr/local/share/remotex for the macOS .pkg, share\remotex under the
-# .msi's install directory (C:\Program Files\remotex\share\remotex), and
-# /opt/remotex/current/share/remotex in the
+# as it is, into share/zdesk in the gateway's release tree, beside the
+# share/doc/zdesk that holds this file: /usr/share/zdesk for the .deb and
+# .rpm, /usr/local/share/zdesk for the macOS .pkg, share\zdesk under the
+# .msi's install directory (C:\Program Files\zdesk\share\zdesk), and
+# /opt/zdesk/current/share/zdesk in the
 # container image. It belongs to the binary, not to the state directory: it is
 # pinned to this version, so an upgrade that pins another release wants that one
 # beside it. A gateway run from a Cargo build looks in its config's directory.
@@ -112,15 +112,15 @@
 # compositor's threads; the decoder's threads require that isolation too.
 #
 #[hevc_wasm]
-#archive = "/srv/remotex/hevc-wasm-v0.0.17.tar.gz"
+#archive = "/srv/zdesk/hevc-wasm-v0.0.17.tar.gz"
 
 # The targets' passwords. A target never writes one: it names it, with
 # password_ref or vnc_password_ref, and [passwords] keeps it under that name,
 # encrypted with a key derived from your master password and the salt in
 # [master]. Neither table is typed: each is printed for you to paste here.
 #
-#   remotex password master -c remotex.toml    # prints the [master] block
-#   remotex password encrypt -c remotex.toml   # prints a value: example = "…"
+#   zdesk password master -c zdesk.toml    # prints the [master] block
+#   zdesk password encrypt -c zdesk.toml   # prints a value: example = "…"
 #
 # A served gateway reads the master password from the file
 # [server].master_password_file names; `password` reads it there too, or asks
@@ -131,13 +131,13 @@
 #check = "…"
 #
 #[passwords]
-#example = "$RX;1;AES-256-GCM;…"
+#example = "$ZD;1;AES-256-GCM;…"
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,
 # because it is one decision — a host without a port is half an answer.
 #
-# --listen (or REMOTEX_LISTEN in the environment) overrides this, whole: the
+# --listen (or ZDESK_LISTEN in the environment) overrides this, whole: the
 # command line cannot supply one half and leave the other to this file. Bracket
 # an IPv6 literal, as in "[::1]:52380". A container publishing this port wants
 # "0.0.0.0:52380".
@@ -147,7 +147,7 @@
 # this machine and nothing else. Everything after "unix:" is the path, so a file
 # name is never parsed for a port:
 #
-#listen = "unix:/run/remotex/gateway.sock"
+#listen = "unix:/run/zdesk/gateway.sock"
 #
 # The socket is created 0660 — owner and group, so the proxy's user reaches it by
 # sharing the group and no other local account reaches it at all, which is the
@@ -159,7 +159,7 @@
 # HTTP origin and up to four WebSockets — so whatever terminates the proxy is what it
 # talks to.
 # Web login (required): username:bcrypt_hash guarding the whole surface.
-# Generate with:  remotex gen-passwd <username>
+# Generate with:  zdesk gen-passwd <username>
 site_passwd = ""
 
 # A file holding the master password that opens [passwords]: a container's
@@ -167,13 +167,13 @@ site_passwd = ""
 # relative path is taken from this file's directory. A config that names
 # passwords and not this file refuses to start; the gateway never asks at a
 # terminal, and never reads the keychain.
-#master_password_file = "/run/secrets/remotex_master"
+#master_password_file = "/run/secrets/zdesk_master"
 
 # DEVELOPMENT ONLY, and inert in any deployment. Gives this gateway its own
 # hostname on loopback: a browser opening the home page under *any* loopback name
 # that is not this one — 127.0.0.1, ::1, anything in 127/8, localhost, the bare
-# remotex.localhost, or another gateway's <other>.remotex.localhost — is redirected
-# to http://<label>.remotex.localhost:<port>/, keeping the port. The port decides
+# zdesk.localhost, or another gateway's <other>.zdesk.localhost — is redirected
+# to http://<label>.zdesk.localhost:<port>/, keeping the port. The port decides
 # which gateway answers, and that gateway names itself, so http://127.0.0.1:52676/
 # lands on the label configured *here*.
 #
@@ -192,7 +192,7 @@ site_passwd = ""
 # (RFC 6761) and is a distinct cookie origin, so two gateways become two
 # independent logins in one browser. Running two gateways against one target is
 # the only way to test session takeover, which is why this exists at all. The
-# names hang off .remotex.localhost so they are one suffix to recognise in a
+# names hang off .zdesk.localhost so they are one suffix to recognise in a
 # browser's history and to clear cookies for, and so no bare label this project
 # hands out can collide with whatever else already answers on this machine.
 #
@@ -310,7 +310,7 @@ host = "192.0.2.10"
 
 # Credentials (used server-side only; never sent to the browser). The password
 # is named here and kept in [passwords] as example = "…", the value
-# `remotex password encrypt` prints.
+# `zdesk password encrypt` prints.
 username = "Administrator"
 password_ref = "example"
 # A VNC server's own password (RFB VncAuth) — a separate key because it is a
@@ -504,7 +504,7 @@ password_ref = "example"
 # the picture, Apple's Adaptive passed or the gateway's tiles of the Full quality,
 # the native pasteboard, no sound, no media stream offered and
 # no decoders needed, so it runs in every build. Apple's own viewer never offers
-# a virtual display without the media stream, so nothing but remotex has
+# a virtual display without the media stream, so nothing but zdesk has
 # exercised the Mac's side of this; it was tested against macOS 26 only, and a
 # macOS update is free to break it while leaving the two official modes alone.
 # Refused on "ard-high-performance", which always has the display.
@@ -526,7 +526,7 @@ password_ref = "example"
 # where the window drives it, at that screen's density either way. Once connected, the
 # Mac's physical displays are disabled and all of its windows are placed on this
 # virtual display. Apple's official macOS Screen Sharing client can choose up to
-# two virtual displays; remotex requests one, or two with `virtual_displays = 2`
+# two virtual displays; zdesk requests one, or two with `virtual_displays = 2`
 # on the target (alpha, described with the key above). In a session started with
 # resize, viewport reports continuously replace the virtual display's mode as the
 # window changes.

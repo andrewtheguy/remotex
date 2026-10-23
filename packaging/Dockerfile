@@ -1,4 +1,4 @@
-# Runtime image for an already-built remotex release — nothing is compiled here.
+# Runtime image for an already-built zdesk release — nothing is compiled here.
 #
 # The build context starts as an extracted release tarball (see
 # build-tarball.sh), but its binary must be replaced with the output of
@@ -8,8 +8,8 @@
 # .github/workflows/release.yml wires this up; to do it by hand:
 #
 #   mkdir -p tmp/docker-context
-#   tar -xzf remotex-0.0.145-linux-x86_64.tar.gz -C tmp/docker-context --strip-components=1
-#   bash packaging/build-container-binary.sh tmp/docker-context/bin/remotex
+#   tar -xzf zdesk-0.0.145-linux-x86_64.tar.gz -C tmp/docker-context --strip-components=1
+#   bash packaging/build-container-binary.sh tmp/docker-context/bin/zdesk
 #   docker build -f packaging/Dockerfile --build-arg VERSION=0.0.145 tmp/docker-context
 #
 # The base has to be at least as new as the builder: the release binaries are
@@ -17,7 +17,7 @@
 # fine — a base with an *older* glibc would not.
 FROM debian:trixie-slim
 
-LABEL org.opencontainers.image.source=https://github.com/andrewtheguy/remotex
+LABEL org.opencontainers.image.source=https://github.com/andrewtheguy/zdesk
 
 # The RDP/VNC TLS paths accept self-signed server certificates, but rustls still
 # wants a system trust store for anything conventionally signed.
@@ -25,27 +25,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# The version is part of the on-disk layout, not decoration: remotex derives its
-# config path from its own location — <prefix>/versions/<version>/bin/remotex
-# resolves to <prefix>/etc/remotex.toml and keeps state in <prefix>/var (see
+# The version is part of the on-disk layout, not decoration: zdesk derives its
+# config path from its own location — <prefix>/versions/<version>/bin/zdesk
+# resolves to <prefix>/etc/zdesk.toml and keeps state in <prefix>/var (see
 # src/config.rs). That layout is what makes bare `serve` find
-# /opt/remotex/etc/remotex.toml.
+# /opt/zdesk/etc/zdesk.toml.
 ARG VERSION
 RUN test -n "${VERSION}" || { echo "the VERSION build-arg is required" >&2; exit 1; }
 
-COPY bin/remotex /opt/remotex/versions/${VERSION}/bin/remotex
+COPY bin/zdesk /opt/zdesk/versions/${VERSION}/bin/zdesk
 # The example config only: the web client is compiled into the binary.
-COPY share /opt/remotex/versions/${VERSION}/share
+COPY share /opt/zdesk/versions/${VERSION}/share
 
 # `current` is the stable path the entrypoint uses; canonicalizing it is how the
 # binary finds the versioned root.
-RUN ln -s "versions/${VERSION}" /opt/remotex/current && mkdir -p /opt/remotex/etc
+RUN ln -s "versions/${VERSION}" /opt/zdesk/current && mkdir -p /opt/zdesk/etc
 
 # A normal native release binary has the embedded gateway feature enabled. Fail
 # closed if one is accidentally placed in this context: release CI also checks,
 # but keeping the invariant here covers every manual or downstream image build.
 RUN set -eu; \
-    binary=/opt/remotex/current/bin/remotex; \
+    binary=/opt/zdesk/current/bin/zdesk; \
     "$binary" --version >/dev/null; \
     case "$("$binary" --help)" in \
       *"  tui "*) echo "container binary exposes tui" >&2; exit 1 ;; \
@@ -61,16 +61,16 @@ RUN set -eu; \
 # read-only, it holds credentials (no VOLUME here: an anonymous volume for a
 # config directory just accumulates):
 #
-#   docker run -p 52380:52380 -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro ...
+#   docker run -p 52380:52380 -v ./zdesk.toml:/opt/zdesk/etc/zdesk.toml:ro ...
 #
 # It must set [server] listen = "0.0.0.0:52380" — or the run must pass
-# -e REMOTEX_LISTEN=0.0.0.0:52380, which is the same setting from the one place a
+# -e ZDESK_LISTEN=0.0.0.0:52380, which is the same setting from the one place a
 # container has that is not the mounted file; the 127.0.0.1 default is
 # unreachable from outside the container. A template ships at
-# /opt/remotex/current/share/doc/remotex/remotex.example.toml.
+# /opt/zdesk/current/share/doc/zdesk/zdesk.example.toml.
 EXPOSE 52380
 
-# remotex installs its own SIGINT/SIGTERM handler (src/main.rs) and spawns no
+# zdesk installs its own SIGINT/SIGTERM handler (src/main.rs) and spawns no
 # child processes, so it is fine as PID 1 — no init shim needed.
-ENTRYPOINT ["/opt/remotex/current/bin/remotex"]
+ENTRYPOINT ["/opt/zdesk/current/bin/zdesk"]
 CMD ["serve"]

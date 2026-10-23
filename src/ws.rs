@@ -1048,15 +1048,15 @@ async fn camera(
 
     // Diagnostics for the half no unit test reaches — a real browser feeding a real
     // host. `samples_seen` answers the first question every camera bug asks ("is the
-    // browser sending anything at all?") and is logged at close. `REMOTEX_CAMERA_DUMP`
+    // browser sending anything at all?") and is logged at close. `ZDESK_CAMERA_DUMP`
     // additionally appends every access unit's raw bytes to that path: Annex B
     // concatenates into a replayable elementary stream, so the exact stream a host
     // rejected can be inspected with ffprobe.
     let mut samples_seen: u64 = 0;
-    let mut dump = std::env::var_os("REMOTEX_CAMERA_DUMP")
+    let mut dump = std::env::var_os("ZDESK_CAMERA_DUMP")
         .and_then(|path| std::fs::File::create(path).ok());
     if dump.is_some() {
-        info!("ws: dumping camera samples (REMOTEX_CAMERA_DUMP)");
+        info!("ws: dumping camera samples (ZDESK_CAMERA_DUMP)");
     }
 
     loop {

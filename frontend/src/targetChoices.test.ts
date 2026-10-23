@@ -684,7 +684,7 @@ test("choices are remembered per target", () => {
 });
 
 test("unreadable storage remembers nothing and still returns the choice", () => {
-  storage.set("remotex.targetChoices", "not json");
+  storage.set("zdesk.targetChoices", "not json");
   assert.deepEqual(readRememberedChoices(), {});
   (globalThis as unknown as { localStorage: unknown }).localStorage = {
     getItem: () => {

@@ -53,7 +53,7 @@ const ENABLE_ASYNCIO: u32 = 0x0000_0001;
 
 /// What this end calls itself in the Client Name Request. Shown nowhere a person
 /// looks, since nothing is redirected under it.
-const COMPUTER_NAME: &str = "remotex";
+const COMPUTER_NAME: &str = "zdesk";
 
 /// The client's side of the handshake.
 #[derive(Debug, Default)]
@@ -213,10 +213,10 @@ mod tests {
         let name = &replies[1];
         assert_eq!(&name[..4], &[0x72, 0x44, 0x4E, 0x43]);
         assert_eq!(&name[4..8], &1u32.to_le_bytes(), "Unicode");
-        assert_eq!(&name[12..16], &16u32.to_le_bytes(), "seven characters and a terminator");
-        assert_eq!(&name[16..18], b"r\0");
-        assert_eq!(&name[28..30], b"x\0");
-        assert_eq!(&name[30..], &[0, 0], "the terminator");
+        assert_eq!(&name[12..16], &12u32.to_le_bytes(), "five characters and a terminator");
+        assert_eq!(&name[16..18], b"z\0");
+        assert_eq!(&name[24..26], b"k\0");
+        assert_eq!(&name[26..], &[0, 0], "the terminator");
     }
 
     /// The capability request is answered with the general set alone, its I/O codes

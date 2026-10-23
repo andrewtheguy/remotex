@@ -37,21 +37,21 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_GRACE: Duration = Duration::from_millis(1500);
 const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST_HEAD: usize = 64 * 1024;
-const MASTER_HOST: &str = "remotex.localhost";
+const MASTER_HOST: &str = "zdesk.localhost";
 /// The binary's version, so the header answers what `--version` would without
 /// leaving the TUI. Every instance is a worker of this same binary.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A first launch's complete instance config: no server block and no pretend
 /// target. The TUI creates this atomically before adding the instance to its list.
-pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
+pub const INSTANCE_TEMPLATE: &str = r#"# A zdesk local instance.
 #
 # There is no [server] block. The TUI control plane owns the shared loopback
 # listener, this instance's subdomain, its private endpoint, and its launch
 # token. Only [branding] and [[targets]] belong here.
 
 # [branding]
-# text = "remotex"
+# text = "zdesk"
 # logo = "/path/to/logo.png"
 
 # A target names its password; [passwords] keeps it encrypted under the
@@ -88,26 +88,26 @@ pub fn default_instances_dir() -> anyhow::Result<PathBuf> {
         let data = std::env::var_os("LOCALAPPDATA")
             .filter(|value| !value.is_empty())
             .context("LOCALAPPDATA is not set; pass --instances-dir")?;
-        Ok(PathBuf::from(data).join("remotex").join("instances"))
+        Ok(PathBuf::from(data).join("zdesk").join("instances"))
     }
     #[cfg(target_os = "macos")]
     {
         let home = std::env::home_dir().context("cannot find the home directory; pass --instances-dir")?;
-        Ok(home.join("Library/Application Support/remotex/instances"))
+        Ok(home.join("Library/Application Support/zdesk/instances"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-            return Ok(PathBuf::from(data).join("remotex/instances"));
+            return Ok(PathBuf::from(data).join("zdesk/instances"));
         }
         let home = std::env::home_dir().context("cannot find the home directory; pass --instances-dir")?;
-        Ok(home.join(".local/share/remotex/instances"))
+        Ok(home.join(".local/share/zdesk/instances"))
     }
 }
 
 /// Run the terminal UI and its shared-port router until `q` or a shutdown signal.
 pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
-    let binary = std::env::current_exe().context("cannot locate the remotex executable")?;
+    let binary = std::env::current_exe().context("cannot locate the zdesk executable")?;
     let mut supervisor = Supervisor::open(options.instances_dir.clone(), binary).await?;
     let router = SharedPort::bind(options.port, supervisor.routes()).await?;
 
@@ -334,7 +334,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     terminal.suspend()?;
     supervisor.shutdown().await;
     drop(router);
-    println!("remotex: every instance stopped");
+    println!("zdesk: every instance stopped");
     Ok(())
 }
 
@@ -498,7 +498,7 @@ fn editor_command(editor: &str, path: &Path) -> Command {
 /// The line is handed over raw, because cmd does not split its command line the
 /// way a program's `argv` is split and an escaped argument would reach it with
 /// its escapes. `/s` strips exactly the outer pair of quotes, leaving
-/// `<editor> "%REMOTEX_EDIT_PATH%"`. The path arrives in that variable rather than
+/// `<editor> "%ZDESK_EDIT_PATH%"`. The path arrives in that variable rather than
 /// in the line, because cmd expands `%NAME%` inside quotes too and a directory may
 /// be called `%TEMP%`; what a variable expands to is not expanded again, and a
 /// Windows path cannot hold a `"` to break out of its quotes. `/v:off` keeps a `!`
@@ -508,8 +508,8 @@ fn editor_command(editor: &str, path: &Path) -> Command {
 fn editor_command(editor: &str, path: &Path) -> Command {
     let mut command = Command::new("cmd.exe");
     command
-        .env("REMOTEX_EDIT_PATH", path)
-        .raw_arg(format!("/d /v:off /s /c \"{editor} \"%REMOTEX_EDIT_PATH%\"\""));
+        .env("ZDESK_EDIT_PATH", path)
+        .raw_arg(format!("/d /v:off /s /c \"{editor} \"%ZDESK_EDIT_PATH%\"\""));
     command
 }
 
@@ -671,7 +671,7 @@ fn render(
         &mut frame,
         0,
         width,
-        &format!("remotex {VERSION} local control plane"),
+        &format!("zdesk {VERSION} local control plane"),
         Some(Color::Cyan),
         true,
     )?;
@@ -1277,7 +1277,7 @@ impl Supervisor {
 /// How a gateway this manager did not stop came to end.
 ///
 /// The gateway exits 0 on SIGINT or SIGTERM after logging "shutdown signal
-/// received", and on its stdin closing; a `pkill` aimed at some other remotex
+/// received", and on its stdin closing; a `pkill` aimed at some other zdesk
 /// therefore shows up here as a clean exit, not a crash. Only a non-zero code
 /// or a crash is a failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1382,7 +1382,7 @@ impl std::fmt::Display for ExitKind {
             Self::Clean => write!(
                 f,
                 "the gateway shut down cleanly (exit code 0) without this control plane asking; \
-                 something else sent it SIGINT or SIGTERM, such as a pkill matching 'remotex serve'"
+                 something else sent it SIGINT or SIGTERM, such as a pkill matching 'zdesk serve'"
             ),
             // A worker has a console of its own on Windows, so no Ctrl+C typed
             // anywhere reaches it: there is no outside hand to name.
@@ -1499,11 +1499,11 @@ fn create_private_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 fn bootstrap_config(dir: &Path) -> anyhow::Result<()> {
-    let path = dir.join("remotex.toml");
+    let path = dir.join("zdesk.toml");
     if path.exists() {
         return Ok(());
     }
-    let temporary = dir.join(format!("remotex.toml.{}.new", std::process::id()));
+    let temporary = dir.join(format!("zdesk.toml.{}.new", std::process::id()));
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -1551,7 +1551,7 @@ pub struct SharedPort {
 impl SharedPort {
     /// Take both loopbacks at `port`, under `serve`'s binding policy.
     ///
-    /// The port is the caller's and is never asked of the kernel: `remotex.localhost`
+    /// The port is the caller's and is never asked of the kernel: `zdesk.localhost`
     /// and every instance subdomain are typed into a browser, and a port the operator
     /// did not choose is one nobody can type. That is why there is no ephemeral path
     /// here even for tests — a test picks a concrete free port the way `serve`'s do,
@@ -1625,21 +1625,21 @@ async fn route_connection(
     }
 
     let Some(name) = host.strip_suffix(&format!(".{MASTER_HOST}")) else {
-        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown remotex host\n", &[]).await?;
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown zdesk host\n", &[]).await?;
         return Ok(());
     };
     if valid_instance_name(name).is_err() {
-        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown remotex instance\n", &[]).await?;
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown zdesk instance\n", &[]).await?;
         return Ok(());
     }
     let published = routes.inner.read().await.get(name).cloned();
     let Some(published) = published else {
-        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown remotex instance\n", &[]).await?;
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown zdesk instance\n", &[]).await?;
         return Ok(());
     };
     let Some(target) = published.target else {
         let body = format!(
-            "instance {name} is {}; start it from the remotex TUI\n",
+            "instance {name} is {}; start it from the zdesk TUI\n",
             published.status.label()
         );
         write_response(&mut client, "503 Service Unavailable", "text/plain; charset=utf-8", &body, &[]).await?;
@@ -1655,13 +1655,13 @@ async fn route_connection(
     // inside a document. What follows is that **any local user may drive any
     // instance** — including one who could not open the worker's owner-only
     // endpoint directly. This is a single-user desktop tool: do not run
-    // `remotex tui` on a machine you share with people you would not give the
+    // `zdesk tui` on a machine you share with people you would not give the
     // desktops to. A launch nonce would not change that, only make it a step
     // longer: the page it authenticates has to keep something the next request
     // presents, and the redirect is where that something is handed over.
     if !cookie_has_token(parsed.cookie.as_deref(), &target.token) {
         let cookie = format!(
-            "remotex_session={}; HttpOnly; SameSite=Strict; Path=/",
+            "zdesk_session={}; HttpOnly; SameSite=Strict; Path=/",
             target.token
         );
         write_response(
@@ -1777,7 +1777,7 @@ fn cookie_has_token(cookie: Option<&str>, expected: &str) -> bool {
     cookie.is_some_and(|cookies| {
         cookies.split(';').any(|pair| {
             pair.trim().split_once('=').is_some_and(|(name, value)| {
-                name == "remotex_session" && crate::auth::secrets_match(expected, value)
+                name == "zdesk_session" && crate::auth::secrets_match(expected, value)
             })
         })
     })
@@ -1822,7 +1822,7 @@ fn landing_page(port: u16, instances: &BTreeMap<String, PublishedInstance>) -> S
         rows.push_str("<li>No instances. Press <kbd>n</kbd> in the TUI to create one.</li>");
     }
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"2\"><meta name=\"viewport\" content=\"width=device-width\"><title>remotex instances</title><style>body{{font:16px system-ui;max-width:720px;margin:4rem auto;padding:0 1rem;background:#101014;color:#eee}}a{{color:#85b7ff}}span{{color:#999;margin-left:.5rem}}li{{margin:.8rem 0}}</style></head><body><h1>remotex instances</h1><p>Start and stop gateways in the terminal control plane.</p><ul>{rows}</ul></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"2\"><meta name=\"viewport\" content=\"width=device-width\"><title>zdesk instances</title><style>body{{font:16px system-ui;max-width:720px;margin:4rem auto;padding:0 1rem;background:#101014;color:#eee}}a{{color:#85b7ff}}span{{color:#999;margin-left:.5rem}}li{{margin:.8rem 0}}</style></head><body><h1>zdesk instances</h1><p>Start and stop gateways in the terminal control plane.</p><ul>{rows}</ul></body></html>"
     )
 }
 
@@ -1881,7 +1881,7 @@ mod tests {
 
         let page = describe_instance(&instance, 52380).join("\n");
         assert!(page.contains(&spec("state", "running")), "{page}");
-        assert!(page.contains("http://work.remotex.localhost:52380"), "{page}");
+        assert!(page.contains("http://work.zdesk.localhost:52380"), "{page}");
         assert!(page.contains(&spec("shown as", "work laptop")), "{page}");
         assert!(page.contains("target win"), "{page}");
         assert!(page.contains("192.168.1.20:3389"), "the standard port is filled in: {page}");
@@ -1912,7 +1912,7 @@ mod tests {
     }
 
     /// A clean exit this manager did not request is not a failure, and the
-    /// account of it says which it was, so a `pkill` aimed at some other remotex
+    /// account of it says which it was, so a `pkill` aimed at some other zdesk
     /// is not read as a crash.
     #[cfg(unix)]
     #[test]
@@ -1991,10 +1991,10 @@ mod tests {
     #[test]
     fn request_parsing_separates_host_target_and_cookie() {
         let parsed = parse_request(
-            b"GET /api/targets?q=1 HTTP/1.1\r\nHost: Work.remotex.localhost:52380\r\nCookie: other=1; remotex_session=secret\r\n\r\n",
+            b"GET /api/targets?q=1 HTTP/1.1\r\nHost: Work.zdesk.localhost:52380\r\nCookie: other=1; zdesk_session=secret\r\n\r\n",
         )
         .unwrap();
-        assert_eq!(hostname(&parsed.host), "work.remotex.localhost");
+        assert_eq!(hostname(&parsed.host), "work.zdesk.localhost");
         assert_eq!(parsed.target, "/api/targets?q=1");
         assert!(cookie_has_token(parsed.cookie.as_deref(), "secret"));
         assert!(!cookie_has_token(parsed.cookie.as_deref(), "other"));
@@ -2004,7 +2004,7 @@ mod tests {
     fn a_new_instance_gets_the_embedded_config_shape() {
         let temp = tempfile::tempdir().unwrap();
         bootstrap_config(temp.path()).unwrap();
-        let text = std::fs::read_to_string(temp.path().join("remotex.toml")).unwrap();
+        let text = std::fs::read_to_string(temp.path().join("zdesk.toml")).unwrap();
         assert!(!text.lines().any(|line| line.trim() == "[server]"));
         super::super::check(&text).unwrap();
     }
@@ -2017,7 +2017,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("%TEMP% & !PATH! ^ (x)");
         std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("remotex.toml");
+        let path = dir.join("zdesk.toml");
         std::fs::write(&path, "the-right-file").unwrap();
 
         let output = editor_command("type", &path).output().await.unwrap();
@@ -2033,7 +2033,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_instance_another_gateway_holds_is_refused_before_spawning() {
         let root = tempfile::tempdir().unwrap();
-        let mut supervisor = Supervisor::open(root.path().to_path_buf(), PathBuf::from("no-such-remotex"))
+        let mut supervisor = Supervisor::open(root.path().to_path_buf(), PathBuf::from("no-such-zdesk"))
             .await
             .unwrap();
         supervisor.create("alpha").await.unwrap();
@@ -2075,14 +2075,14 @@ mod tests {
 
         let first_response = request(
             router.port(),
-            "one.remotex.localhost",
-            Some("remotex_session=token-one"),
+            "one.zdesk.localhost",
+            Some("zdesk_session=token-one"),
         )
         .await;
         let second_response = request(
             router.port(),
-            "two.remotex.localhost",
-            Some("remotex_session=token-two"),
+            "two.zdesk.localhost",
+            Some("zdesk_session=token-two"),
         )
         .await;
         assert!(first_response.ends_with("one"), "{first_response}");
@@ -2105,9 +2105,9 @@ mod tests {
             },
         );
         let router = SharedPort::bind(free_port(), routes).await.unwrap();
-        let response = request(router.port(), "one.remotex.localhost", None).await;
+        let response = request(router.port(), "one.zdesk.localhost", None).await;
         assert!(response.starts_with("HTTP/1.1 307 Temporary Redirect"), "{response}");
-        assert!(response.contains("Set-Cookie: remotex_session=launch-token;"), "{response}");
+        assert!(response.contains("Set-Cookie: zdesk_session=launch-token;"), "{response}");
         assert!(response.contains("Location: /"), "{response}");
     }
 
@@ -2138,7 +2138,7 @@ mod tests {
         assert_eq!(crate::keychain::load().unwrap().unwrap().as_str(), generated.as_str());
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("remotex.toml");
+        let path = dir.path().join("zdesk.toml");
         let target = "[[targets]]\nname = \"w\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword_ref = \"w\"\n";
         let foreign = MasterPassword::new("another account's".to_owned()).unwrap();
         let (_, orphan) = Key::create(&foreign).unwrap();

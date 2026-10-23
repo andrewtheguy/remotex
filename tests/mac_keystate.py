@@ -7,7 +7,7 @@ right-hand modifier onto the left keycode in the per-key state
 (CGEventSourceKeyState reports keycode 55 for a right Command press), but the
 NX_DEVICE* flag bits keep the sides distinct. Every other key is polled by
 keycode. Run it in a Terminal on the Mac, in the logged-in GUI session, then
-press keys through remotex:
+press keys through zdesk:
 
     python3 tests/mac_keystate.py
 

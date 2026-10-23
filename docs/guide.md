@@ -1,10 +1,10 @@
-# Using remotex
+# Using zdesk
 
 What an operator and a user need to know once the gateway is
 [installed](install.md): how the page is reached, what a session is started
 with, how each kind of target is set up, and the local multi-instance control
 plane. Every configuration key is in the annotated
-[`remotex.example.toml`](../remotex.example.toml), and the design behind all of
+[`zdesk.example.toml`](../zdesk.example.toml), and the design behind all of
 it is in [Architecture](architecture.md).
 
 ## The client
@@ -163,8 +163,8 @@ password_ref = "workstation"
 The two tables are printed for you to paste, never typed:
 
 ```sh
-remotex password master -c remotex.toml     # once per config: prints [master]
-remotex password encrypt -c remotex.toml    # prints one value for [passwords]
+zdesk password master -c zdesk.toml     # once per config: prints [master]
+zdesk password encrypt -c zdesk.toml    # prints one value for [passwords]
 ```
 
 ```toml
@@ -173,7 +173,7 @@ salt = "…"
 check = "…"
 
 [passwords]
-workstation = "$RX;1;AES-256-GCM;…"
+workstation = "$ZD;1;AES-256-GCM;…"
 ```
 
 `password encrypt` asks for the password twice, or reads one line from a pipe,
@@ -201,9 +201,9 @@ you never type it. Nothing but the TUI reads the keychain.
 
 | Started as | Master password from |
 |---|---|
-| `remotex serve` | `[server].master_password_file`; refused without it when a target names an encrypted value, never asked |
-| `remotex tui` | the keychain; generated and kept there when it has none; refused when the keychain will not answer, never asked |
-| `remotex password` | `[server].master_password_file`, else asked |
+| `zdesk serve` | `[server].master_password_file`; refused without it when a target names an encrypted value, never asked |
+| `zdesk tui` | the keychain; generated and kept there when it has none; refused when the keychain will not answer, never asked |
+| `zdesk password` | `[server].master_password_file`, else asked |
 
 A local instance has no `[server]` block, so its master password always comes
 from the keychain.
@@ -278,7 +278,7 @@ touch.
 
 By default a Windows host draws much of its desktop lossily, as RemoteFX
 Progressive and ClearCodec's NSCodec, which blur text and colours slightly. Its
-own policy decides that, and no setting in remotex overrides it. To have it draw
+own policy decides that, and no setting in zdesk overrides it. To have it draw
 every pixel exactly:
 
 1. On the host, open the Local Group Policy Editor (`gpedit.msc`) and go to
@@ -389,7 +389,7 @@ connection with the same error as wrong credentials. See
   - The HEVC passthrough sends the HEVC only when the page's startup probe finds a
     decoder path. Support depends on the browser, platform and GPU, so the
     picker is authoritative. The gateway can also serve the optional software
-    picture decoder described in [`remotex.example.toml`](../remotex.example.toml).
+    picture decoder described in [`zdesk.example.toml`](../zdesk.example.toml).
   - The Mac mutes its own speakers while it streams, so a session always
     carries AAC-ELD sound. The page probes that separately; if it cannot decode
     the sound, the session continues without audio and the menu says why.
@@ -489,19 +489,19 @@ Native installs include a terminal control plane that runs several gateways on
 one machine, each with its own config and browser origin:
 
 ```sh
-remotex tui
+zdesk tui
 ```
 
 It listens on loopback only, on port 52380 unless `--port` or
-`REMOTEX_TUI_PORT` says otherwise, and refuses to start on a port something else
-is serving. Open <http://remotex.localhost:52380>; each running instance is at
-`http://<instance>.remotex.localhost:52380`.
+`ZDESK_TUI_PORT` says otherwise, and refuses to start on a port something else
+is serving. Open <http://zdesk.localhost:52380>; each running instance is at
+`http://<instance>.zdesk.localhost:52380`.
 
 | Key | Action |
 |---|---|
 | `↑`/`↓`, `k`/`j` | select an instance |
 | `n` | create an instance |
-| `e` | edit its `remotex.toml` in `$VISUAL` or `$EDITOR` (`vi`, or Notepad on Windows); the edit is checked, and applies when the instance is restarted |
+| `e` | edit its `zdesk.toml` in `$VISUAL` or `$EDITOR` (`vi`, or Notepad on Windows); the edit is checked, and applies when the instance is restarted |
 | `p` | encrypt a password into its `[passwords]`, asking for the name and the password; a config without `[master]` gets one first |
 | `s`, `x`, `r` | start, stop, restart it |
 | `a` | start every stopped one |
@@ -511,10 +511,10 @@ is serving. Open <http://remotex.localhost:52380>; each running instance is at
 | `q`, Esc | stop every instance and quit |
 
 Each immediate subdirectory of the instances root is one instance:
-`~/.local/share/remotex/instances` on Linux (or
-`$XDG_DATA_HOME/remotex/instances`),
-`~/Library/Application Support/remotex/instances` on macOS, and
-`%LOCALAPPDATA%\remotex\instances` on Windows; `--instances-dir` chooses
+`~/.local/share/zdesk/instances` on Linux (or
+`$XDG_DATA_HOME/zdesk/instances`),
+`~/Library/Application Support/zdesk/instances` on macOS, and
+`%LOCALAPPDATA%\zdesk\instances` on Windows; `--instances-dir` chooses
 another. The root is private to your account, because the configs hold
 credentials. An instance's config has the same `[branding]` and `[[targets]]`
 as a gateway's and no `[server]` block: the TUI owns the port and proxies each
@@ -530,7 +530,7 @@ each password again with `p`.
 The private files and worker endpoints protect credentials from other local
 users, but the shared loopback listener does not authenticate the OS user: any
 account on the machine can open the landing page and drive a running instance.
-Do not run `remotex tui` on a machine shared with users who must not reach those
+Do not run `zdesk tui` on a machine shared with users who must not reach those
 desktops.
 
 See [Local multi-instance control plane](architecture.md#local-multi-instance-control-plane).

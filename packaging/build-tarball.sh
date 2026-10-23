@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Build a distro-agnostic release tarball for the current OS/arch.
 #
-# Produces dist/remotex-<version>-<os>-<arch>.tar.gz, the payload the native
+# Produces dist/zdesk-<version>-<os>-<arch>.tar.gz, the payload the native
 # packages and the container image are built from:
 #
-#   remotex-<version>/
+#   zdesk-<version>/
 #   ├── VERSION
-#   ├── bin/remotex                # release binary
-#   └── share/doc/remotex/
-#       ├── remotex.example.toml   # config template
+#   ├── bin/zdesk                # release binary
+#   └── share/doc/zdesk/
+#       ├── zdesk.example.toml   # config template
 #       └── LICENSE
 #
 # Run on each target platform you want to ship (macOS builds the mac tarball,
@@ -40,14 +40,14 @@ case "$(uname -m)" in
   *) arch="$(uname -m)" ;;
 esac
 
-pkg="remotex-${version}"
+pkg="zdesk-${version}"
 stage="$(mktemp -d)"
 root="${stage}/${pkg}"
 trap 'rm -rf "$stage"' EXIT
 
 echo ">> building release binary"
 # build.rs creates the frontend in Cargo's OUT_DIR. Release CI sets
-# REMOTEX_PREBUILT_FRONTEND=frontend/dist so each target stages the one
+# ZDESK_PREBUILT_FRONTEND=frontend/dist so each target stages the one
 # platform-independent bundle built by the frontend job instead of running Bun.
 # No env coaxing here for any prebuilt C library. Remote audio links
 # `opus-prebuilt` and `libflac-prebuilt` — each pulls a prebuilt static archive
@@ -58,10 +58,10 @@ echo ">> building release binary"
 cargo build --release
 
 echo ">> assembling ${pkg}"
-mkdir -p "$root/bin" "$root/share/doc/remotex"
-cp target/release/remotex "$root/bin/remotex"
-cp remotex.example.toml LICENSE "$root/share/doc/remotex/"
-chmod +x "$root/bin/remotex"
+mkdir -p "$root/bin" "$root/share/doc/zdesk"
+cp target/release/zdesk "$root/bin/zdesk"
+cp zdesk.example.toml LICENSE "$root/share/doc/zdesk/"
+chmod +x "$root/bin/zdesk"
 printf '%s\n' "$version" > "$root/VERSION"
 
 mkdir -p dist

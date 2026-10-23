@@ -10,7 +10,7 @@
 // (src/server.rs, `state_version`).
 
 /** The header an answer states the gateway's version in. */
-export const VERSION_HEADER = "X-Remotex-Version";
+export const VERSION_HEADER = "X-Zdesk-Version";
 
 /**
  * What to tell the user when `res` came from a gateway of another version than

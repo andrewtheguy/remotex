@@ -16,7 +16,7 @@ test("a target with no subtype is just its protocol", () => {
 });
 
 test("the two Apple modes say which one they are, in the config's own spelling", () => {
-  // The spelling is kept so the line can be found in `remotex.toml`, and the
+  // The spelling is kept so the line can be found in `zdesk.toml`, and the
   // description because "ard" says nothing to anybody who did not write it.
   assert.equal(
     connectionLabel("vnc", "ard"),

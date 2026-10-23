@@ -14,9 +14,9 @@ use tokio::time::{Duration, Instant};
 use crate::config::Placement;
 use super::connect::{self, Connected, Joined};
 use super::error::Error;
-use remotex_rdp_graphics::framebuffer::{Framebuffer, Rect, affordable, stage};
-use remotex_rdp_graphics::fidelity::Fidelity;
-use remotex_rdp_graphics::gfx::{self, Graphics};
+use zdesk_rdp_graphics::framebuffer::{Framebuffer, Rect, affordable, stage};
+use zdesk_rdp_graphics::fidelity::Fidelity;
+use zdesk_rdp_graphics::gfx::{self, Graphics};
 use super::camera::{Camera, CameraCommand, CameraFeed, CameraInput, CameraQueues, CameraSink};
 use super::input::{Clipboard, Command, Input};
 use super::pointer::Cursor;
@@ -31,7 +31,7 @@ use super::proto::share::{self, Pdu};
 use super::microphone::{MicrophoneFeed, MicrophoneInput, MicrophoneQueue, MicrophoneSink};
 use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpeai, rdpecam, rdpsnd, tls};
 use super::proto::gfx as gfx_proto;
-pub use remotex_rdp_graphics::proto::gfx::Placed;
+pub use zdesk_rdp_graphics::proto::gfx::Placed;
 
 // ------------------------------------------------------------------ configuration
 
@@ -185,7 +185,7 @@ pub enum Event {
     /// [`Connect::egfx`]: one message off the channel as the host sent it, still in
     /// its bulk compression, and every one of them, in order, since each is
     /// compressed against the ones before it. Whoever composes them unwraps them
-    /// ([`remotex_rdp_graphics::Compositor::unwrap`]).
+    /// ([`zdesk_rdp_graphics::Compositor::unwrap`]).
     ///
     /// `frame` is the last frame the message ends, and an [`Event::Frame`] follows
     /// it. The host is owed that frame's acknowledgement, and those of any it ended

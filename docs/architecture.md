@@ -1,9 +1,9 @@
 # Architecture
 
-remotex is a single-user gateway for RDP and VNC targets, including Macs reached
+zdesk is a single-user gateway for RDP and VNC targets, including Macs reached
 through their built-in Screen Sharing service. A Rust backend owns the remote
 protocol session and exposes one common HTTP/WebSocket interface to the React SPA,
-which is the only client. [Using remotex](guide.md) is the operator's view of
+which is the only client. [Using zdesk](guide.md) is the operator's view of
 the same system.
 
 ## Data path
@@ -73,7 +73,7 @@ area and points here; read the area's section before changing what it covers.
 - Remote credentials remain in the server-side TOML configuration, encrypted
   in its `[passwords]` under the account's master password, and never reach the
   browser. See [Target passwords](#target-passwords).
-- Clients speak only the remotex protocol and never implement RDP or RFB.
+- Clients speak only the zdesk protocol and never implement RDP or RFB.
 - Protocol engines speak each protocol's baseline to every server, and the
   project prioritizes three: Windows' own Remote Desktop, macOS's built-in Screen
   Sharing and wlshare. Behavior specific to one of them is welcome, and when work
@@ -86,7 +86,7 @@ Screen Sharing in both of its modes, and wlshare on Linux. Windows and macOS
 come first: they are what most people connect to, so features are tested and
 optimized on them first. wlshare follows them, though it integrates the most
 seamlessly of the three, since what RFB lacks is added to it. The table compares
-how each integrates with remotex and with its host's operating system: how its
+how each integrates with zdesk and with its host's operating system: how its
 displays are chosen and resized, whether it carries sound and the browser's
 camera and microphone, and how its picture reaches the browser.
 
@@ -223,7 +223,7 @@ whose bitmap updates are sent as tiles by the gateway.
 - The bundle holds two WebAssembly modules, each a directory of its own under
   `frontend/wasm`, all built by the frontend's build for
   `wasm32-unknown-unknown`. `frontend/wasm/egfx` is the compositor, around
-  `crates/remotex-rdp-graphics`, built with threads by the dated nightly that
+  `crates/zdesk-rdp-graphics`, built with threads by the dated nightly that
   directory's `rust-toolchain.toml` pins. The pin is that module's alone: the
   gateway and the graphics crate build on stable. Its threads share a memory, so
   every file `src/assets.rs` serves carries the two cross-origin isolation
@@ -726,7 +726,7 @@ page that said it composes one can start the target: a cross-origin isolated
 page, for the compositor's threads, with a WebGL 2 canvas to present on
 (`frontend/src/rdpGraphics.ts`). Any other has Start disabled with the reason,
 and has no tiles to fall back to; `egfx = false` is the target for it. The page
-composes with the gateway's own compositor, `crates/remotex-rdp-graphics`,
+composes with the gateway's own compositor, `crates/zdesk-rdp-graphics`,
 bound to WebAssembly by `frontend/wasm/egfx`: keep that crate building for
 `wasm32-unknown-unknown`. One decoder and compositor is the gateway's rule; do
 not write a second one there. The page, which already carries software
@@ -778,7 +778,7 @@ wire format, no record and no second stream. See
 | `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
 | `rdp.rs` | RDP engine: damage, input, cursor, resize, clipboard, over `rdp_client` |
 | `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session and input queue |
-| `crates/remotex-rdp-graphics/` | the RDP client's graphics, a crate of its own: the codecs, the graphics pipeline's compositor and the framebuffer, which the page's WebAssembly module runs too (`frontend/wasm/egfx`) |
+| `crates/zdesk-rdp-graphics/` | the RDP client's graphics, a crate of its own: the codecs, the graphics pipeline's compositor and the framebuffer, which the page's WebAssembly module runs too (`frontend/wasm/egfx`) |
 | `rdp_clipboard.rs` | `CF_UNICODETEXT` and the line endings either direction needs |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `vnc_apple_media.rs` | High Performance's media stream: the offer, SRTP, HEVC and H.264 depacketizing into access units for the browser, and the sound's receiver |
@@ -1183,7 +1183,7 @@ Three controls with similar names therefore remain separate:
 |---|---|---|
 | Standard **Adaptive** / **Full** | Apple's viewer and the picker, in Standard mode only | Which RFB framebuffer encodings the viewer asks for |
 | High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder's target, within its fixed 20–60 Mbit/s range, by the gateway's reports |
-| `render_adaptive` | A remotex target key, on by default, a `wlshare` target's alone | wlshare's VP9 walk; refused on both Apple subtypes, whose picture is never VP9 |
+| `render_adaptive` | A zdesk target key, on by default, a `wlshare` target's alone | wlshare's VP9 walk; refused on both Apple subtypes, whose picture is never VP9 |
 
 - **The browser says whether it can.** The page asks once, at load (`frontend/src/appleMedia.ts`),
   and states the answer as `apple_media=true|false` on every session socket,
@@ -1228,7 +1228,7 @@ Three controls with similar names therefore remain separate:
   with (`src/assets.rs`). No build holds the decoder, whose licence keeps it out
   of every artifact: the operator downloads the
   release archive from the private `andrewtheguy/hevc-wasm-archives` into
-  `share/remotex` in the gateway's release tree, beside `share/doc/remotex`,
+  `share/zdesk` in the gateway's release tree, beside `share/doc/zdesk`,
   where the gateway looks for it and, finding it, serves it with nothing
   configured; `[hevc_wasm].archive` names a file kept elsewhere (`config::data_dir`):
   the archive is pinned to the binary's version, so it is kept with the binary
@@ -1563,7 +1563,7 @@ the pipeline.
 - **What passes** (`VideoSink::pass_graphics`). The RDP client still owns the
   channel: it answers the capability exchange, unwraps the bulk compression to
   read the commands' headers, and writes every frame's acknowledgement
-  (`Graphics::passing` in `crates/remotex-rdp-graphics/src/gfx.rs`). It decodes
+  (`Graphics::passing` in `crates/zdesk-rdp-graphics/src/gfx.rs`). It decodes
   nothing. What goes to the engine as `Event::Graphics` is each message as the
   host sent it, still compressed, in order, naming the last frame it ends; the
   page unwraps it with a history of its own, started at `graphicsStart`
@@ -1611,7 +1611,7 @@ the pipeline.
   for one unit. The part of the picture the
   unit's mask shows is copied into the compositor's memory, and the run is then
   composed, painting those rectangles from the samples
-  (`crates/remotex-rdp-graphics/src/avc.rs`), converted to RGB as MS-RDPEGFX has
+  (`crates/zdesk-rdp-graphics/src/avc.rs`), converted to RGB as MS-RDPEGFX has
   it, full-range BT.709. Which decoder is the browser's
   choice, as it is for the desktop's own stream ([The codec](#the-codec)): the
   configuration states no `hardwareAcceleration`, and it does state the stream's
@@ -1730,7 +1730,7 @@ the pipeline.
   host, it has not been checked by eye, and what the copy across the browser
   costs, or how far the tab runs behind the page, has not been measured.
 - **The page composes with the gateway's compositor.** The RDP client's graphics
-  are a crate, `crates/remotex-rdp-graphics`, that the gateway is built with and
+  are a crate, `crates/zdesk-rdp-graphics`, that the gateway is built with and
   that `frontend/wasm/egfx` binds for the page, built for
   `wasm32-unknown-unknown` by the frontend's build (`bun run build:wasm`), so
   there is one reading of the protocol and its codecs. It runs in the paint
@@ -1794,7 +1794,7 @@ the pipeline.
   host. The page shows nothing until `graphicsStart`.
 - **The Info card says whether the host draws losslessly.** For every session
   with the pipeline the gateway reads each draw's codec off the commands it
-  passes (`crates/remotex-rdp-graphics/src/fidelity.rs`), ClearCodec's subcodecs
+  passes (`crates/zdesk-rdp-graphics/src/fidelity.rs`), ClearCodec's subcodecs
   included, and sends `hostPicture` when the host draws with something new. The
   card's *Host's picture* row reads it: exact only for uncompressed, planar,
   alpha and ClearCodec without NSCodec. A pipeline that starts over starts it
@@ -2115,7 +2115,7 @@ Authentication and desktop ownership are separate:
 1. `POST /api/auth/login` creates the login cookie.
 2. `POST /api/session` claims the single slot. A conflicting claim returns
    `409` unless the request reclaims its token or forces takeover. Its answer
-   and `GET /api/targets`' state the gateway's version in `X-Remotex-Version`,
+   and `GET /api/targets`' state the gateway's version in `X-Zdesk-Version`,
    and a page whose own differs, a tab left open across an upgrade, opens no
    session and lists no target: it says both versions and offers a reload.
 3. `/ws?session=<token>&apple_media=true|false&page_hevc=true|false&rdp_graphics=true|false&rdp_h264=true|false&vp9_444=true|false`
@@ -2581,7 +2581,7 @@ each has been rediscovered the hard way more than once:
   yet", and the browser's Audio button has nothing to play. A session with no
   sound is not, by that alone, a session with anything wrong; start a sound on the
   remote before deciding the client is broken; `examples/rdp_client_probe.rs` asserts
-  the negotiation only under `REMOTEX_UAT_AUDIO=1`, which says one is playing.
+  the negotiation only under `ZDESK_UAT_AUDIO=1`, which says one is playing.
 - **No `rdpdr`, no sound.** A host redirects no audio to a client that named
   `rdpsnd` without also naming the device-redirection channel, even with no device
   to redirect. `rdp_client/proto/rdpdr.rs` is that channel's opening handshake and
@@ -2670,7 +2670,7 @@ output while it streams. See
 An **`ard`** engine carries no sound: Standard has no measured audio path, so
 the target has no audio bridge and offers no sound. Standard mode never
 touches the Mac's sound output either, which keeps playing where the Mac sends it
-— its speakers, or an AirPlay receiver outside remotex.
+— its speakers, or an AirPlay receiver outside zdesk.
 
 A **`wlshare`** session started with sound has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and wlshare announces that it speaks it
@@ -2803,7 +2803,7 @@ when an application records. The client offers exactly one of the host's 16-bit
 PCM formats, preferring mono and 16 kHz, and cuts the decoded PCM into the
 `FramesPerPacket` groups the host named. A full sixteen-buffer queue drops its
 oldest audio. `examples/rdp_client_probe.rs` drives this negotiation against a real
-host under `REMOTEX_UAT_MICROPHONE=1` and feeds a tone while the host's Recording
+host under `ZDESK_UAT_MICROPHONE=1` and feeds a tone while the host's Recording
 panel holds the device open. See
 [The RDP client](rdp-client.md#microphone-ms-rdpeai).
 
@@ -3359,7 +3359,7 @@ ClientInit byte (the enhanced ServerInit, without the session-select exchange
 `0x40` asks for), and a cleartext `SetEncryption` prelude after which every byte in
 both directions rides inside an AES-128-CBC record layer keyed by a rekey message
 the server delivers, of all places, inside a framebuffer rectangle. Apple's viewer
-asks for that layer only under a preference that is off by default; remotex always
+asks for that layer only under a preference that is off by default; zdesk always
 does. `src/vnc_record.rs` is that transport, exposed to the rest of the engine as
 an ordinary `AsyncRead` and a per-message sink; `src/vnc_apple.rs` is the message
 and payload layer above it. The Mac reads the pointer mask positionally on this
@@ -3383,7 +3383,7 @@ exception because the browser is sent 30 frames a second. Once connected, the re
 Mac's physical displays are disabled and all of its windows are placed on that
 virtual display. Apple's
 official macOS Screen Sharing client can choose up to two virtual displays, and so
-can a target: Remotex requests one, or two with `virtual_displays = 2` (alpha). Every descriptor after the opening one enables
+can a target: Zdesk requests one, or two with `virtual_displays = 2` (alpha). Every descriptor after the opening one enables
 dynamic resolution, so every fresh session turns it on. In a session started with resize, the window continuously drives the
 virtual display through Apple's dynamic-resolution feature: later viewport reports
 resend the same full descriptor with the requested mode, and the Mac's answering
@@ -3611,18 +3611,18 @@ reclaim actions.
 
 ### Local multi-instance control plane
 
-`remotex tui --port <port>` is the native local control plane. It discovers one
+`zdesk tui --port <port>` is the native local control plane. It discovers one
 instance per immediate subdirectory, creates and edits its serverless
-`remotex.toml`, and starts, stops or
-restarts each gateway from its own list. `remotex.localhost:<port>` is a landing
-page; `<instance>.remotex.localhost:<port>` is that instance's browser origin.
+`zdesk.toml`, and starts, stops or
+restarts each gateway from its own list. `zdesk.localhost:<port>` is a landing
+page; `<instance>.zdesk.localhost:<port>` is that instance's browser origin.
 
 ```text
-browser: <instance>.remotex.localhost:<port>
+browser: <instance>.zdesk.localhost:<port>
                     │ Host-routed HTTP and WebSockets
                     ▼
              TUI master process
-                    │ <instance>/gateway.sock, or \\.\pipe\remotex-<random> on Windows
+                    │ <instance>/gateway.sock, or \\.\pipe\zdesk-<random> on Windows
                     ▼
        hidden serve-embedded subprocess
 ```
@@ -3630,7 +3630,7 @@ browser: <instance>.remotex.localhost:<port>
 The master is the only TCP listener, and it takes its port the way `serve` takes
 its address: `DEFAULT_PORT` (52380, the one `[server].listen` defaults to —
 they are two ways to serve, never two servers) unless `--port` or
-`REMOTEX_TUI_PORT` overrides it. Both loopbacks are bound through the same
+`ZDESK_TUI_PORT` overrides it. Both loopbacks are bound through the same
 `server::bind_all` a served gateway uses, so the policy is one implementation: a
 family this host does not have is a warning, and a port already in use is fatal
 on either of them, because a browser picks the family and a master left holding
@@ -3649,7 +3649,7 @@ Each hidden worker reads one line from stdin first — the key to its config's
 `[passwords]`, or an empty line for a config that names none or only placeholders (see
 [Target passwords](#target-passwords)) — binds its private endpoint, prints one
 JSON readiness line — `{"endpoint","token"}` — after binding, reads only that
-instance's `remotex.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,
+instance's `zdesk.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,
 `Audience::Embedded`). Before any of that it claims the instance: an exclusive
 lock on `<instance>/gateway.lock` through std's `File::try_lock`, the same on
 every platform and released by the operating system however the worker ends. A
@@ -3658,7 +3658,7 @@ started by hand — is refused before it binds, and the TUI asks the same lock
 before it spawns, so it can say why. A killed worker leaves no lock to clear,
 and on Unix its leftover socket is simply replaced. On Unix the endpoint is `<instance>/gateway.sock` at mode
 `0600` in a `0700` directory. On Windows it is a named pipe
-(`src/embedded/transport.rs`): a random `\\.\pipe\remotex-<random>` per
+(`src/embedded/transport.rs`): a random `\\.\pipe\zdesk-<random>` per
 launch, because pipe names are one machine-wide namespace any user may create
 in, created as its first instance so the name printed is one the worker holds,
 with a DACL naming only the user and remote clients refused. Several instances
@@ -3668,7 +3668,7 @@ DACL naming the user and `SYSTEM`, inherited by the configs in them. A worker
 runs with a hidden console of its own, so the TUI's Ctrl+C and window close
 never reach it directly; closing the window still stops every worker, by ending
 the TUI and so their stdin. The master seeds the token as a host-only HttpOnly
-`remotex_session` cookie before proxying the browser to the child. Raw connection
+`zdesk_session` cookie before proxying the browser to the child. Raw connection
 proxying preserves both ordinary HTTP and WebSocket upgrades without another
 gateway protocol implementation.
 
@@ -3691,11 +3691,11 @@ Protocol-specific fields are validated at startup, including mutually exclusive
 credential fields and unsupported feature combinations.
 
 A gateway needs a target to offer and a credential to guard it, and is told where
-to listen. `remotex check-config` applies those rules to a file — or to text on
+to listen. `zdesk check-config` applies those rules to a file — or to text on
 stdin, which is what an unsaved edit is — without starting anything.
 
 Where it listens is one key, `[server].listen`, and the one setting a deployment
-can give from outside the file: `--listen`, or `REMOTEX_LISTEN` for a container
+can give from outside the file: `--listen`, or `ZDESK_LISTEN` for a container
 that has an environment but no argv to edit. An override replaces the address
 whole rather than either half of it, so the running address is always the one
 somebody wrote in one place.
@@ -3722,7 +3722,7 @@ endpoint.
 
 A target names its password (`password_ref`, `vnc_password_ref`) and the
 top-level `[passwords]` table holds each one as
-`$RX;1;AES-256-GCM;<base64(nonce ‖ ciphertext ‖ tag)>`, the password alone, so a
+`$ZD;1;AES-256-GCM;<base64(nonce ‖ ciphertext ‖ tag)>`, the password alone, so a
 value is printed before anyone names it (`src/vault.rs`). The key is Argon2id (64 MiB, 3 passes, 1 lane) of the
 account's master password and the file's `[master].salt`; `[master].check`, an HMAC under that
 key, tells a wrong master password apart before any value is tried. One master
@@ -3743,7 +3743,7 @@ before.
 
 Where the master password comes from is each audience's:
 
-- `remotex serve` reads `[server].master_password_file`, and a config that
+- `zdesk serve` reads `[server].master_password_file`, and a config that
   names encrypted passwords without it refuses to start. It never asks at a terminal: a
   service manager and a person must start it the same way. Nor does it read
   the keychain, which is the TUI's alone: a served gateway runs where no
@@ -3753,7 +3753,7 @@ Where the master password comes from is each audience's:
   deployment says things, so a container names its secret there rather than
   in the environment, where `docker inspect` and every child process would
   see it.
-- `remotex tui` takes it from the keychain (`src/keychain.rs`: keyring-core
+- `zdesk tui` takes it from the keychain (`src/keychain.rs`: keyring-core
   over the macOS Keychain, Windows Credential Manager, or the Secret Service
   over zbus, so no build needs libdbus), and when the keychain keeps none
   generates one (32 random bytes) and keeps it there, as Chrome's and Slack's
@@ -3770,7 +3770,7 @@ Where the master password comes from is each audience's:
   TUI reads it; a container build, which has neither, links no credential
   store.
 
-`remotex password master` prints a `[master]` block and `remotex password
+`zdesk password master` prints a `[master]` block and `zdesk password
 encrypt` prints one value under a config's `[master]`, each taking the master
 password from the config's `[server].master_password_file`, else asking at the
 terminal, and neither touches the keychain. Neither writes a file: a served
@@ -3807,7 +3807,7 @@ path is found before the meter is enabled.
 The default database is `meter.sqlite3` in the gateway's state directory. A
 relative `database` setting is resolved from that directory: the installed state
 directory for an installed `serve` config, the config file's directory with
-`--config`, or the instance directory under `remotex tui`.
+`--config`, or the instance directory under `zdesk tui`.
 
 #### Collection
 
@@ -3833,7 +3833,7 @@ beyond `max_records` are one transaction, ordered oldest first per target and
 socket. The default retention is one week of minute rows. Recording is best
 effort: the open timeframe is lost if the process stops, and a failed write is
 retried at the next close. Startup refuses a non-SQLite file, a database without
-the remotex application ID, or an unsupported schema version before modifying it.
+the zdesk application ID, or an unsupported schema version before modifying it.
 
 #### APIs and source selection
 

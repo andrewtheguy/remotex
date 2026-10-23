@@ -69,7 +69,7 @@ pub const ENUMERATOR: &str = "RDCamera_Device_Enumerator";
 
 /// The device channel's name. The protocol leaves it to the client, which names it in the
 /// Device Added Notification; one device is all this end announces.
-pub const DEVICE_CHANNEL: &str = "Remotex_Camera_0";
+pub const DEVICE_CHANNEL: &str = "Zdesk_Camera_0";
 
 /// The highest version this end speaks, and so the one it asks for.
 pub const VERSION: u8 = 2;
@@ -737,7 +737,7 @@ mod tests {
 
     /// A camera the host has negotiated with, been told about, and opened the channel of.
     fn attached(format: Format) -> Rdpecam {
-        let mut cam = Rdpecam::new("Remotex Camera");
+        let mut cam = Rdpecam::new("Zdesk Camera");
         cam.opened(ENUMERATOR, ENUMERATION);
         cam.push(ENUMERATION, &[2, SELECT_VERSION_RESPONSE]);
         cam.plug(format);
@@ -778,7 +778,7 @@ mod tests {
     /// 4.1: the version request is the first message, and the response settles it.
     #[test]
     fn the_enumeration_channel_opens_with_the_version_request() {
-        let mut cam = Rdpecam::new("Remotex Camera");
+        let mut cam = Rdpecam::new("Zdesk Camera");
         assert!(cam.wants(ENUMERATOR));
         assert!(!cam.wants(DEVICE_CHANNEL), "no device channel before one is announced");
         let turn = cam.opened(ENUMERATOR, ENUMERATION);
@@ -822,7 +822,7 @@ mod tests {
         let added = cam.device_added("Cam", DEVICE_CHANNEL);
         assert_eq!(turn.replies, vec![(ENUMERATION, added.clone())]);
         assert_eq!(&added[..10], &[2, 0x05, b'C', 0, b'a', 0, b'm', 0, 0, 0]);
-        assert_eq!(&added[10..], b"Remotex_Camera_0\0");
+        assert_eq!(&added[10..], b"Zdesk_Camera_0\0");
         assert!(cam.plug(VGA).replies.is_empty(), "plugging again in the same format is nothing");
     }
 
@@ -1103,7 +1103,7 @@ mod tests {
             turn.replies,
             vec![
                 (ENUMERATION, cam.device_removed(DEVICE_CHANNEL)),
-                (ENUMERATION, cam.device_added("Remotex Camera", DEVICE_CHANNEL)),
+                (ENUMERATION, cam.device_added("Zdesk Camera", DEVICE_CHANNEL)),
             ]
         );
         assert_eq!(cam.opened(DEVICE_CHANNEL, 9).outputs, vec![Output::Attached]);
@@ -1126,7 +1126,7 @@ mod tests {
         let turn = cam.opened(ENUMERATOR, 11);
         assert_eq!(turn.replies, vec![(11, vec![2, SELECT_VERSION_REQUEST])]);
         let turn = cam.push(11, &[2, SELECT_VERSION_RESPONSE]);
-        assert_eq!(turn.replies, vec![(11, cam.device_added("Remotex Camera", DEVICE_CHANNEL))]);
+        assert_eq!(turn.replies, vec![(11, cam.device_added("Zdesk Camera", DEVICE_CHANNEL))]);
     }
 
     #[test]

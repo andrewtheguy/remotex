@@ -12,7 +12,7 @@ import { leaveSession } from "./support";
 test.describe("a High Performance target, its HEVC decoded as a faked browser's own decoder says", () => {
   test.skip(
     !HEVC_TARGET,
-    "set REMOTEX_PLAYWRIGHT_HEVC_TARGET=<target> against a gateway with an ard-high-performance target",
+    "set ZDESK_PLAYWRIGHT_HEVC_TARGET=<target> against a gateway with an ard-high-performance target",
   );
   test.afterEach(async ({ page }) => {
     await leaveSession(page);

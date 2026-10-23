@@ -78,7 +78,7 @@ const SECURITY_ARD: u8 = 30;
 /// allocation and a very slow modular exponentiation.
 const MAX_ARD_KEY_BYTES: usize = 1024;
 /// Smallest DH key length accepted, in bytes: 64, a 512-bit group, the least
-/// Apple's viewer takes. So remotex logs in wherever Apple's viewer does, older
+/// Apple's viewer takes. So zdesk logs in wherever Apple's viewer does, older
 /// Macs' 512-bit group included, which Apple's own documentation calls the
 /// "older, less secure method".
 const MIN_ARD_KEY_BYTES: usize = 64;
@@ -2993,7 +2993,7 @@ fn wlshare_beside_encoding_list() -> Vec<i32> {
 ///
 /// Both modes encrypt. Apple's viewer asks for the record layer only when its
 /// `encryptionLevel` preference is 2 and leaves the session in cleartext by
-/// default; remotex always asks, so neither the account's keystrokes nor the
+/// default; zdesk always asks, so neither the account's keystrokes nor the
 /// media stream's keys cross the network in the clear.
 ///
 /// The one function in this file that knows the record layer is switched on here,
@@ -7548,7 +7548,7 @@ impl Buttons {
 
     /// The mask bit this button sets, or `None` for a button no server reads.
     /// RFB's mask has bits for buttons 8 and 9, but no server agrees on what
-    /// they mean and the ones remotex talks to ignore them. `Back` and
+    /// they mean and the ones zdesk talks to ignore them. `Back` and
     /// `Forward` are dropped rather than sent as a scroll notch, which is what
     /// those bits are on every server that does read them.
     fn bit(&self, button: MouseButton) -> Option<u8> {

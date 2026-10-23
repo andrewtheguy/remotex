@@ -1,5 +1,5 @@
 {
-  "name": "remotex-playwright-e2e",
+  "name": "zdesk-playwright-e2e",
   "private": true,
   "scripts": {
     "deps": "test -x node_modules/.bin/tsc || bun install --frozen-lockfile",

@@ -6,7 +6,7 @@ mod common;
 
 use std::net::Ipv4Addr;
 
-use remotex::embedded::manager::{SharedPort, Supervisor};
+use zdesk::embedded::manager::{SharedPort, Supervisor};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 #[tokio::test]
@@ -17,14 +17,14 @@ async fn instances_start_stop_and_share_the_master_port() {
         let dir = root.path().join(name);
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
-            dir.join("remotex.toml"),
+            dir.join("zdesk.toml"),
             format!("[branding]\ntext = \"{name}\"\n"),
         )
         .unwrap();
     }
 
     let mut supervisor =
-        Supervisor::open(root.path().to_path_buf(), env!("CARGO_BIN_EXE_remotex").into())
+        Supervisor::open(root.path().to_path_buf(), env!("CARGO_BIN_EXE_zdesk").into())
             .await
             .unwrap();
     let router = SharedPort::bind(free_port(), supervisor.routes()).await.unwrap();
@@ -39,8 +39,8 @@ async fn instances_start_stop_and_share_the_master_port() {
     assert!(two.contains("\"branding\":\"two\""), "{two}");
 
     let landing = request_master(router.port()).await;
-    assert!(landing.contains("one.remotex.localhost"), "{landing}");
-    assert!(landing.contains("two.remotex.localhost"), "{landing}");
+    assert!(landing.contains("one.zdesk.localhost"), "{landing}");
+    assert!(landing.contains("two.zdesk.localhost"), "{landing}");
 
     supervisor.stop("one").await.unwrap();
     let stopped = request(router.port(), "one", "/api/config", Some(&one_cookie)).await;
@@ -86,7 +86,7 @@ async fn request(port: u16, instance: &str, path: &str, cookie: Option<&str>) ->
     raw_request(
         port,
         &format!(
-            "GET {path} HTTP/1.1\r\nHost: {instance}.remotex.localhost:{port}\r\n{cookie}Connection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {instance}.zdesk.localhost:{port}\r\n{cookie}Connection: close\r\n\r\n"
         ),
     )
     .await
@@ -96,7 +96,7 @@ async fn request_master(port: u16) -> String {
     raw_request(
         port,
         &format!(
-            "GET / HTTP/1.1\r\nHost: remotex.localhost:{port}\r\nConnection: close\r\n\r\n"
+            "GET / HTTP/1.1\r\nHost: zdesk.localhost:{port}\r\nConnection: close\r\n\r\n"
         ),
     )
     .await

@@ -10,7 +10,7 @@
 // and the pointer is past the window, read off the socket as the page sends it,
 // against the position the pointer is at on the canvas. A browser hit-tests a
 // held drag's moves, so past the window they target the document and not the
-// desktop surface, which is what this guards. With `REMOTEX_PLAYWRIGHT_DRAG_MAC_SSH` set, the Mac is also asked
+// desktop surface, which is what this guards. With `ZDESK_PLAYWRIGHT_DRAG_MAC_SSH` set, the Mac is also asked
 // where its pointer is while a drag is held past the edge: on the display
 // beyond it. Whether a window dragged that way follows is left to a hand on a
 // physical Mac; a virtual one applies the drag too late to judge it.
@@ -18,11 +18,11 @@
 // It needs a gateway whose local config names a live host asked for two virtual
 // displays, RDP or High Performance Mac:
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52890/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_DRAG_TARGET=win2 \
-//     [REMOTEX_PLAYWRIGHT_DRAG_MAC_SSH=user@mac] \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52890/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=… \
+//     ZDESK_PLAYWRIGHT_DRAG_TARGET=win2 \
+//     [ZDESK_PLAYWRIGHT_DRAG_MAC_SSH=user@mac] \
 //     bunx playwright test '/display-drag\.spec\.ts$'
 import { execFileSync } from "node:child_process";
 import { expect, type Page, test } from "@playwright/test";
@@ -36,10 +36,10 @@ import {
 } from "./support";
 
 /// The opt-in, and the target name in one.
-const TARGET = process.env.REMOTEX_PLAYWRIGHT_DRAG_TARGET;
+const TARGET = process.env.ZDESK_PLAYWRIGHT_DRAG_TARGET;
 /// The Mac the target is, as `ssh` reaches it, for the window check; unset, the
 /// socket is all that is read.
-const MAC_SSH = process.env.REMOTEX_PLAYWRIGHT_DRAG_MAC_SSH;
+const MAC_SSH = process.env.ZDESK_PLAYWRIGHT_DRAG_MAC_SSH;
 /// How far past the window's edge the pointer is taken, in CSS pixels.
 const PAST = 300;
 
@@ -209,7 +209,7 @@ const MAC_TIMEOUT_MS = 20_000;
 test.describe("a drag held past the edge between two displays", () => {
   test.skip(
     !TARGET,
-    "set REMOTEX_PLAYWRIGHT_DRAG_TARGET=<target> against a gateway with a live host asked for two virtual displays",
+    "set ZDESK_PLAYWRIGHT_DRAG_TARGET=<target> against a gateway with a live host asked for two virtual displays",
   );
 
   test.afterEach(async ({ page }) => {

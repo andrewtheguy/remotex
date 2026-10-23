@@ -3,9 +3,9 @@ use clap::Parser;
 use log::info;
 #[cfg(unix)]
 use log::warn;
-use remotex::cli::{Cli, Commands, PasswordAction};
-use remotex::config::{AppConfig, ListenAddr};
-use remotex::server;
+use zdesk::cli::{Cli, Commands, PasswordAction};
+use zdesk::config::{AppConfig, ListenAddr};
+use zdesk::server;
 
 // jemalloc rather than glibc's malloc. Every session runs its engine on a thread of
 // its own and encodes on tokio's blocking pool, and glibc gives each allocating
@@ -31,12 +31,12 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Serve { config, listen } => {
             // The listen address is the one thing a deployment says outside the
-            // file — `--listen`, or `REMOTEX_LISTEN` for a container that has an
+            // file — `--listen`, or `ZDESK_LISTEN` for a container that has an
             // environment but no argv to edit. Everything else comes from the
             // TOML file, credentials included (see src/config.rs for why). Every
             // target is served; the browser picks one after login.
-            info!("remotex {}, features: {}", env!("CARGO_PKG_VERSION"), remotex::cli::features_line());
-            let (mut file, path) = remotex::config::load(config.as_deref())?;
+            info!("zdesk {}, features: {}", env!("CARGO_PKG_VERSION"), zdesk::cli::features_line());
+            let (mut file, path) = zdesk::config::load(config.as_deref())?;
             info!("config: {}", path.display());
             let key = if file.needs_master() {
                 let master = file.served_master(path.parent().unwrap_or(std::path::Path::new("")))?;
@@ -48,25 +48,25 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("in config file {}", path.display()))?;
             let config = file.resolve_with(
                 listen.as_deref(),
-                &remotex::config::state_dir(&path),
-                &remotex::config::data_dir(path.parent().unwrap_or(std::path::Path::new(""))),
+                &zdesk::config::state_dir(&path),
+                &zdesk::config::data_dir(path.parent().unwrap_or(std::path::Path::new(""))),
             )?;
             serve(config).await?;
         }
         #[cfg(feature = "embedded-gateway")]
         Commands::Tui { port, instances_dir } => {
             anyhow::ensure!(port != 0, "--port must be between 1 and 65535");
-            remotex::embedded::run_tui(remotex::embedded::TuiOptions {
+            zdesk::embedded::run_tui(zdesk::embedded::TuiOptions {
                 port,
                 instances_dir: instances_dir
                     .map(Ok)
-                    .unwrap_or_else(remotex::embedded::default_instances_dir)?,
+                    .unwrap_or_else(zdesk::embedded::default_instances_dir)?,
             })
             .await?;
         }
         #[cfg(feature = "embedded-gateway")]
         Commands::ServeEmbedded { instance_dir } => {
-            serve_embedded(&remotex::embedded::Instance::new(instance_dir)).await?;
+            serve_embedded(&zdesk::embedded::Instance::new(instance_dir)).await?;
         }
         Commands::CheckConfig {
             config,
@@ -77,15 +77,15 @@ async fn main() -> anyhow::Result<()> {
             // its configuration editor and show stderr to somebody about to fix the
             // file. `{:#}` keeps the whole `anyhow` chain, which
             // is what names the target the complaint is about.
-            let text = remotex::config::read_candidate(config.as_deref())?;
+            let text = zdesk::config::read_candidate(config.as_deref())?;
             #[cfg(feature = "embedded-gateway")]
             let result = if embedded {
-                remotex::embedded::check(&text)
+                zdesk::embedded::check(&text)
             } else {
-                remotex::config::check(&text)
+                zdesk::config::check(&text)
             };
             #[cfg(not(feature = "embedded-gateway"))]
-            let result = remotex::config::check(&text);
+            let result = zdesk::config::check(&text);
             if let Err(e) = result {
                 eprintln!("{e:#}");
                 std::process::exit(1);
@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
 /// credential to stdout, pipeable straight into the config.
 fn gen_passwd(username: &str) -> anyhow::Result<()> {
     let password = read_secret("Password", true)?;
-    let encoded = remotex::auth::generate(username, &password, remotex::auth::DEFAULT_COST)?;
+    let encoded = zdesk::auth::generate(username, &password, zdesk::auth::DEFAULT_COST)?;
     println!("{encoded}");
     Ok(())
 }
@@ -129,16 +129,16 @@ fn read_secret(label: &str, confirm: bool) -> anyhow::Result<String> {
     }
 }
 
-/// `remotex password`: print a config's `[master]` block or one of its `[passwords]`
+/// `zdesk password`: print a config's `[master]` block or one of its `[passwords]`
 /// values, for whoever deploys the config to paste. Nothing is written to a file.
 fn password(action: PasswordAction) -> anyhow::Result<()> {
     match action {
         PasswordAction::Master { config } => {
             // The installed config when there is one, as `encrypt` takes, so both
             // read the master password the gateway will; a first config can come later.
-            let path = config.or_else(|| remotex::config::installed_config_path().filter(|path| path.exists()));
+            let path = config.or_else(|| zdesk::config::installed_config_path().filter(|path| path.exists()));
             let (master, from_file) = command_master(path.as_deref(), true)?;
-            let (section, _) = remotex::vault::Key::create(&master)?;
+            let (section, _) = zdesk::vault::Key::create(&master)?;
             println!("[master]\nsalt = \"{}\"\ncheck = \"{}\"", section.salt, section.check);
             if !from_file {
                 eprintln!(
@@ -148,11 +148,11 @@ fn password(action: PasswordAction) -> anyhow::Result<()> {
             }
         }
         PasswordAction::Encrypt { config } => {
-            let path = remotex::config::config_path(config.as_deref())?;
-            let section = remotex::vault::master_of(&path)?;
+            let path = zdesk::config::config_path(config.as_deref())?;
+            let section = zdesk::vault::master_of(&path)?;
             // Asked once: a mistyped master is told as one by the block's check.
             let (master, _) = command_master(Some(&path), false)?;
-            let key = remotex::vault::Key::derive(&master, &section)
+            let key = zdesk::vault::Key::derive(&master, &section)
                 .with_context(|| format!("in {}", path.display()))?;
             let password = read_secret("Password", true)?;
             anyhow::ensure!(!password.is_empty(), "the password is empty");
@@ -162,18 +162,18 @@ fn password(action: PasswordAction) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The master password for a `remotex password` run, and whether it came from a
+/// The master password for a `zdesk password` run, and whether it came from a
 /// file: the `[server].master_password_file` of the config at `path`, else the
 /// terminal, asked twice there when `confirm` (a new `[master]` block has nothing
 /// to check it by). Never the keychain, which is the TUI's.
 fn command_master(
     path: Option<&std::path::Path>,
     confirm: bool,
-) -> anyhow::Result<(remotex::vault::MasterPassword, bool)> {
+) -> anyhow::Result<(zdesk::vault::MasterPassword, bool)> {
     use std::io::IsTerminal as _;
 
-    if let Some(file) = path.map(remotex::vault::master_file_of).transpose()?.flatten() {
-        return Ok((remotex::vault::MasterPassword::read_file(&file)?, true));
+    if let Some(file) = path.map(zdesk::vault::master_file_of).transpose()?.flatten() {
+        return Ok((zdesk::vault::MasterPassword::read_file(&file)?, true));
     }
     anyhow::ensure!(
         std::io::stdin().is_terminal(),
@@ -181,20 +181,20 @@ fn command_master(
          is not a terminal to ask at"
     );
     let master = read_secret("Master password", confirm)?;
-    Ok((remotex::vault::MasterPassword::new(master)?, false))
+    Ok((zdesk::vault::MasterPassword::new(master)?, false))
 }
 
 /// Run a managed embedded gateway, and stop when its parent does.
 ///
 /// Three ways out, and the first is the one the guarantee rests on: the parent's
 /// end of our stdin closing, which happens however the parent ended — see
-/// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
+/// [`zdesk::embedded::parent_closed`]. The signal handler is for a run started by
 /// hand, and the server arm only completes by failing.
 #[cfg(feature = "embedded-gateway")]
-async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Result<()> {
+async fn serve_embedded(instance: &zdesk::embedded::Instance) -> anyhow::Result<()> {
     // The parent writes the key line the moment this process starts, so this wait
     // is short; it is read before anything else reads stdin.
-    let key = tokio::task::spawn_blocking(remotex::embedded::read_key)
+    let key = tokio::task::spawn_blocking(zdesk::embedded::read_key)
         .await
         .context("the key reader panicked")??;
     // Ahead of the race below, because asking for the claim can wait, and waiting
@@ -209,8 +209,8 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
         // that wins decides whether a refused config is reported at all: `[server]`
         // in the file, and one run in five exits 0 with nothing on stderr.
         biased;
-        result = remotex::embedded::serve(instance, claim, key) => result?,
-        _ = remotex::embedded::parent_closed() => {
+        result = zdesk::embedded::serve(instance, claim, key) => result?,
+        _ = zdesk::embedded::parent_closed() => {
             info!("stdin closed: whatever started this gateway is gone; stopping");
         }
         _ = shutdown_signal() => info!("shutdown signal received; stopping"),
@@ -220,14 +220,14 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
 
 /// Read the software HEVC decoder the config resolved to, before the
 /// gateway listens, so an archive it cannot serve is a refused start.
-fn load_hevc_decoder(config: &AppConfig) -> anyhow::Result<Option<remotex::hevc_wasm::HevcDecoder>> {
+fn load_hevc_decoder(config: &AppConfig) -> anyhow::Result<Option<zdesk::hevc_wasm::HevcDecoder>> {
     let Some(archive) = &config.hevc_wasm else {
         return Ok(None);
     };
-    let decoder = remotex::hevc_wasm::HevcDecoder::load(archive)?;
+    let decoder = zdesk::hevc_wasm::HevcDecoder::load(archive)?;
     info!(
         "serving the software HEVC decoder hevc-wasm v{} from {}",
-        remotex::hevc_wasm::VERSION,
+        zdesk::hevc_wasm::VERSION,
         archive.display()
     );
     Ok(Some(decoder))
@@ -237,7 +237,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     if let Some(recording) = &config.meter {
         info!("recording websocket throughput to {}", recording.database.display());
     }
-    let throughput = remotex::throughput::start(
+    let throughput = zdesk::throughput::start(
         config.meter.as_ref(),
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
@@ -428,7 +428,7 @@ fn unix_bind_error(path: &std::path::Path, e: std::io::Error) -> anyhow::Error {
     let hint = if e.kind() == std::io::ErrorKind::InvalidInput {
         format!(
             " (this path is {} bytes, and a socket address holds about 100 — \
-             put the socket somewhere shorter, such as /tmp/remotex.sock)",
+             put the socket somewhere shorter, such as /tmp/zdesk.sock)",
             path.as_os_str().len()
         )
     } else {

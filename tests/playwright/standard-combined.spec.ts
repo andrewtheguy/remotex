@@ -15,17 +15,17 @@
 // acknowledgments. Nothing looks at a pixel.
 //
 // The one-screen case needs a gateway whose local config names a live Mac as an
-// `ard` target, REMOTEX_PLAYWRIGHT_STANDARD_TARGET; the Combined Display cases an
+// `ard` target, ZDESK_PLAYWRIGHT_STANDARD_TARGET; the Combined Display cases an
 // `ard` target on a Mac with a 1x screen beside a 2x one. Keep that gitignored
 // file under `tmp/`, for example `tmp/test_uat.toml`:
 //
 //     cargo run -- serve --config tmp/test_uat.toml
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52888/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_STANDARD_TARGET=macvmstandard \
-//     REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET=macvmstandard \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52888/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=… \
+//     ZDESK_PLAYWRIGHT_STANDARD_TARGET=macvmstandard \
+//     ZDESK_PLAYWRIGHT_STANDARD_COMBINED_TARGET=macvmstandard \
 //     bunx playwright test '/standard-combined\.spec\.ts$'
 import { expect, type Page, test } from "@playwright/test";
 
@@ -36,8 +36,8 @@ import {
   returnToPicker,
 } from "./support";
 
-const STANDARD_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_TARGET;
-const COMBINED_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET;
+const STANDARD_TARGET = process.env.ZDESK_PLAYWRIGHT_STANDARD_TARGET;
+const COMBINED_TARGET = process.env.ZDESK_PLAYWRIGHT_STANDARD_COMBINED_TARGET;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
@@ -219,7 +219,7 @@ async function assertTheSessionHolds(page: Page, seen: Session): Promise<void> {
 test.describe("a Standard Mac of one screen at a time, in the gateway's tiles", () => {
   test.skip(
     !STANDARD_TARGET,
-    "set REMOTEX_PLAYWRIGHT_STANDARD_TARGET=<target> against a gateway with a live Mac",
+    "set ZDESK_PLAYWRIGHT_STANDARD_TARGET=<target> against a gateway with a live Mac",
   );
 
   test.afterEach(async ({ page }) => {
@@ -263,7 +263,7 @@ test.describe("a Standard Mac of one screen at a time, in the gateway's tiles", 
 test.describe("a Standard Mac's Combined Display, composed by the gateway", () => {
   test.skip(
     !COMBINED_TARGET,
-    "set REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET=<target> against a gateway with a live Mac of a 1x and a 2x screen",
+    "set ZDESK_PLAYWRIGHT_STANDARD_COMBINED_TARGET=<target> against a gateway with a live Mac of a 1x and a 2x screen",
   );
 
   test.afterEach(async ({ page }) => {

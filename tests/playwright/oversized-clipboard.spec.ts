@@ -49,7 +49,7 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
   // Set *after* the session is up, on purpose: the gateway starts the remote
   // pasteboard watch during connection, so a value that was already there is not
   // a change and is never read at all. `logInAndConnect` returns once it is.
-  const localSentinel = `remotex-ui-local-${Date.now()}`;
+  const localSentinel = `zdesk-ui-local-${Date.now()}`;
   await page.evaluate(
     (text) => navigator.clipboard.writeText(text),
     localSentinel,
@@ -92,7 +92,7 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
   const input = page.getByLabel("Clipboard text");
   await expect(input).toBeVisible();
   await expect(input).toHaveValue("");
-  const typed = `remotex-ui-typed-${Date.now()}`;
+  const typed = `zdesk-ui-typed-${Date.now()}`;
   await input.fill(typed);
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Clipboard sent to remote")).toBeVisible();
@@ -106,7 +106,7 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
   // mirroring into the OS clipboard is best-effort by design (writeText can
   // reject), so it is the wrong signal for "did the value arrive". The approved
   // clipboard spec is where that mirror is covered.
-  const afterValue = `remotex-ui-after-${Date.now()}`;
+  const afterValue = `zdesk-ui-after-${Date.now()}`;
   setRemoteClipboard(afterValue);
   await page.getByRole("button", { name: "Close clipboard" }).click();
   await openClipboardPanel(page);

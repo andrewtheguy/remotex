@@ -132,7 +132,7 @@ export const MAX_CLIPBOARD_BYTES = 524_288;
 
 export interface ClipboardSnapshot {
   text: string;
-  // Unix epoch milliseconds when remotex observed the remote clipboard
+  // Unix epoch milliseconds when zdesk observed the remote clipboard
   // change. Null is honest for clipboard content that predates this session.
   changedAtMs: number | null;
   // Set when the remote's clipboard was refused for exceeding

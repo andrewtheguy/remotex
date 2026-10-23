@@ -314,7 +314,7 @@ mod tests {
         let (_, expected) = split(&canonical(&format!("D:(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})")));
         assert_eq!(entries, expected);
 
-        let config = dir.join("remotex.toml");
+        let config = dir.join("zdesk.toml");
         std::fs::write(&config, "").unwrap();
         let (_, entries) = split(&dacl_sddl(&config));
         let (_, expected) = split(&canonical(&format!("D:(A;ID;FA;;;SY)(A;ID;FA;;;{user})")));
@@ -330,7 +330,7 @@ mod tests {
         let dir = temp.path().join("instances");
         let instance = dir.join("alpha");
         std::fs::create_dir_all(&instance).unwrap();
-        let config = instance.join("remotex.toml");
+        let config = instance.join("zdesk.toml");
         let state = instance.join("state.db");
         std::fs::write(&config, "").unwrap();
         std::fs::write(&state, "").unwrap();

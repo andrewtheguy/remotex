@@ -6,8 +6,8 @@
 //! a time, and it prints what the host drew for it.
 //!
 //! ```sh
-//! REMOTEX_UAT_TARGET=windows-ent-sandbox REMOTEX_UAT_MOTION=tests/rdp_motion.ps1 \
-//!   REMOTEX_UAT_PAGE_KBPS=8000 \
+//! ZDESK_UAT_TARGET=windows-ent-sandbox ZDESK_UAT_MOTION=tests/rdp_motion.ps1 \
+//!   ZDESK_UAT_PAGE_KBPS=8000 \
 //!   cargo run --profile qa --example rdp_link_probe -- a_real_host_draws_for_a_slow_client
 //! ```
 //!
@@ -34,7 +34,7 @@
 //! - [`AUTODETECT_ENV`] takes part in the host's network detection ([MS-RDPBCGR]
 //!   2.2.14), answering with what this connection measures, so behind
 //!   [`THROTTLE_ENV`] the host is told of the slow link as well as finding it. Run
-//!   with `RUST_LOG=info,remotex::rdp_client=debug` to see what was measured and
+//!   with `RUST_LOG=info,zdesk::rdp_client=debug` to see what was measured and
 //!   what the host concluded.
 //! - [`MULTITRANSPORT_ENV`] claims reliable UDP with Soft-Sync ([MS-RDPBCGR]
 //!   2.2.1.3.8) and turns down every offer of it the host makes (2.2.15), so the
@@ -65,20 +65,20 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::proto::gfx::{self, H264, Message};
-use remotex::rdp_client::proto::wire::{Malformed, Reader};
-use remotex::rdp_client::{Compositor, Connect, Event, Session};
+use zdesk::rdp_client::proto::gfx::{self, H264, Message};
+use zdesk::rdp_client::proto::wire::{Malformed, Reader};
+use zdesk::rdp_client::{Compositor, Connect, Event, Session};
 
-const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
-const H264_ENV: &str = "REMOTEX_UAT_H264";
-const AUTODETECT_ENV: &str = "REMOTEX_UAT_AUTODETECT";
-const MULTITRANSPORT_ENV: &str = "REMOTEX_UAT_MULTITRANSPORT";
-const PACED_ENV: &str = "REMOTEX_UAT_PACED";
-const MOTION_ENV: &str = "REMOTEX_UAT_MOTION";
-const RUN_ENV: &str = "REMOTEX_UAT_LINK_SECS";
-const THROTTLE_ENV: &str = "REMOTEX_UAT_THROTTLE";
-const ACK_DELAY_ENV: &str = "REMOTEX_UAT_ACK_DELAY_MS";
-const PAGE_ENV: &str = "REMOTEX_UAT_PAGE_KBPS";
+const TARGET_ENV: &str = "ZDESK_UAT_TARGET";
+const H264_ENV: &str = "ZDESK_UAT_H264";
+const AUTODETECT_ENV: &str = "ZDESK_UAT_AUTODETECT";
+const MULTITRANSPORT_ENV: &str = "ZDESK_UAT_MULTITRANSPORT";
+const PACED_ENV: &str = "ZDESK_UAT_PACED";
+const MOTION_ENV: &str = "ZDESK_UAT_MOTION";
+const RUN_ENV: &str = "ZDESK_UAT_LINK_SECS";
+const THROTTLE_ENV: &str = "ZDESK_UAT_THROTTLE";
+const ACK_DELAY_ENV: &str = "ZDESK_UAT_ACK_DELAY_MS";
+const PAGE_ENV: &str = "ZDESK_UAT_PAGE_KBPS";
 
 const SIZE: (u32, u32) = (1280, 800);
 
@@ -456,7 +456,7 @@ async fn a_real_host_draws_for_a_slow_client() {
         height: SIZE.1,
         scale_percent: 0,
         monitors: 1,
-        placement: remotex::config::Placement::Right,
+        placement: zdesk::config::Placement::Right,
         resize: false,
         egfx: true,
         h264,

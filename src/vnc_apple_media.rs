@@ -3041,7 +3041,7 @@ const VIDEO_RECEIVE_BUFFER: usize = 4 << 20;
 /// ports is what that looks like, and the session ends at [`STREAM_START`].
 const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// `REMOTEX_HP_DUMP=<dir>`: the stream as it arrives, for replay outside the
+/// `ZDESK_HP_DUMP=<dir>`: the stream as it arrives, for replay outside the
 /// gateway (`tests/hp_capture.sh`). `video.h265` is every access unit the
 /// depacketizer completes, as Annex B, or `video.h264` of a session passed the
 /// Mac's H.264; `audio.eld` is every AAC-ELD unit, each
@@ -3068,7 +3068,7 @@ const DUMP_QUEUE: usize = 4096;
 impl MediaDump {
     /// `codec` is the picture's, which names its file.
     fn from_env(codec: Codec) -> Option<Self> {
-        let dir = std::path::PathBuf::from(std::env::var_os("REMOTEX_HP_DUMP")?);
+        let dir = std::path::PathBuf::from(std::env::var_os("ZDESK_HP_DUMP")?);
         let picture = match codec {
             Codec::Hevc => "video.h265",
             Codec::H264 => "video.h264",
@@ -3106,7 +3106,7 @@ impl MediaDump {
             log::warn!("vnc: not dumping the media stream: no writer thread: {e}");
             return None;
         }
-        log::info!("vnc: dumping the media stream to {} (REMOTEX_HP_DUMP)", dir.display());
+        log::info!("vnc: dumping the media stream to {} (ZDESK_HP_DUMP)", dir.display());
         Some(Self { units })
     }
 

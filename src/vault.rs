@@ -9,7 +9,7 @@
 //! check = "…"
 //!
 //! [passwords]
-//! win11 = "$RX;1;AES-256-GCM;…"
+//! win11 = "$ZD;1;AES-256-GCM;…"
 //! ```
 //!
 //! The key is never in the file. Argon2id derives it from the account's **master
@@ -18,7 +18,7 @@
 //! while no two of them share a key. `[master].check` is an HMAC under that key, so
 //! a wrong master password is told as one at start-up, before any value is tried.
 //! A value is the password alone: what it is called is the config's to say, so
-//! `remotex password encrypt` prints one to paste under whatever name a target
+//! `zdesk password encrypt` prints one to paste under whatever name a target
 //! gives it.
 //!
 //! Where the master password comes from is the deployment's to say, and each
@@ -38,18 +38,18 @@ use std::path::{Path, PathBuf};
 
 /// What every `[passwords]` value starts with: the program, the format's version
 /// and the cipher, so a value says what it is to anyone reading the file.
-pub const PREFIX: &str = "$RX;1;AES-256-GCM;";
+pub const PREFIX: &str = "$ZD;1;AES-256-GCM;";
 
 /// Argon2id's cost: 64 MiB, three passes, one lane — RFC 9106's second
 /// recommendation, a fraction of a second on a laptop, paid once per start and once
-/// per `remotex password` run.
+/// per `zdesk password` run.
 const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
 const ARGON2_PASSES: u32 = 3;
 const ARGON2_LANES: u32 = 1;
 
 /// What `[master].check` authenticates. A constant, because the check proves the
 /// key and nothing else.
-const CHECK_MESSAGE: &[u8] = b"remotex master password check";
+const CHECK_MESSAGE: &[u8] = b"zdesk master password check";
 
 const SALT_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
@@ -60,7 +60,7 @@ const TAG_LEN: usize = 16;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MasterSection {
-    /// 32 random bytes, base64, printed by `remotex password master`.
+    /// 32 random bytes, base64, printed by `zdesk password master`.
     pub salt: String,
     /// HMAC-SHA256 of a fixed message under the derived key, base64.
     pub check: String,
@@ -206,7 +206,7 @@ impl Key {
                 anyhow::anyhow!(
                     "[passwords].{name} does not open under this config's master password; \
                      it was encrypted under another [master] — encrypt it again with \
-                     `remotex password encrypt`"
+                     `zdesk password encrypt`"
                 )
             })?;
         String::from_utf8(plain).with_context(|| format!("[passwords].{name} is not UTF-8"))
@@ -232,7 +232,7 @@ fn decode_value(name: &str, value: &str) -> anyhow::Result<Vec<u8>> {
     let encoded = value.strip_prefix(PREFIX).with_context(|| {
         format!(
             "[passwords].{name} is not an encrypted value (it starts with {PREFIX:?}): paste \
-             what `remotex password encrypt` prints rather than the password"
+             what `zdesk password encrypt` prints rather than the password"
         )
     })?;
     let blob = BASE64
@@ -311,7 +311,7 @@ pub fn master_of(path: &Path) -> anyhow::Result<MasterSection> {
         .with_context(|| format!("{} is not valid TOML", path.display()))?;
     let section = only.master.with_context(|| {
         format!(
-            "{} has no [master] block — paste the one `remotex password master` prints",
+            "{} has no [master] block — paste the one `zdesk password master` prints",
             path.display()
         )
     })?;
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn a_plaintext_value_is_refused_by_shape() {
         let err = check_value("win11", "hunter2").unwrap_err();
-        assert!(format!("{err:#}").contains("remotex password encrypt"), "{err:#}");
+        assert!(format!("{err:#}").contains("zdesk password encrypt"), "{err:#}");
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn a_config_gets_its_master_and_passwords_written_in_place() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("remotex.toml");
+        let path = dir.path().join("zdesk.toml");
         let text = "# kept\n[[targets]]\nname = \"win\" # also kept\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword_ref = \"win11\"\n";
         std::fs::write(&path, text).unwrap();
         #[cfg(unix)]
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn a_placeholder_beside_a_value_opens_as_the_empty_password() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("remotex.toml");
+        let path = dir.path().join("zdesk.toml");
         let text = "[[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword_ref = \"win11\"\n\n\
                     [[targets]]\nname = \"new\"\nprotocol = \"rdp\"\nhost = \"h\"\nusername = \"u\"\npassword_ref = \"later\"\n";
         std::fs::write(&path, text).unwrap();

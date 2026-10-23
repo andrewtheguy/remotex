@@ -26,10 +26,10 @@ const READY_TIMEOUT: Duration = Duration::from_secs(20);
 /// opens under the master password in `dir`'s `master-password` — so the start
 /// goes through `[server].master_password_file`, as a service's would.
 fn config_text(dir: &common::ScratchDir) -> String {
-    let site_passwd = remotex::auth::generate("admin", "hunter2", 4).unwrap();
+    let site_passwd = zdesk::auth::generate("admin", "hunter2", 4).unwrap();
     dir.write("master-password", "correct horse\n");
-    let master = remotex::vault::MasterPassword::new("correct horse".to_owned()).unwrap();
-    let (section, key) = remotex::vault::Key::create(&master).unwrap();
+    let master = zdesk::vault::MasterPassword::new("correct horse".to_owned()).unwrap();
+    let (section, key) = zdesk::vault::Key::create(&master).unwrap();
     let value = key.encrypt("p").unwrap();
     format!(
         r#"
@@ -67,7 +67,7 @@ impl Drop for Gateway {
 
 fn start(config: &Path, socket: &Path) -> Gateway {
     Gateway(
-        Command::new(env!("CARGO_BIN_EXE_remotex"))
+        Command::new(env!("CARGO_BIN_EXE_zdesk"))
             .arg("serve")
             .arg("-c")
             .arg(config)
@@ -124,7 +124,7 @@ fn a_gateway_on_a_unix_socket_answers_and_cleans_up_after_itself() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = common::ScratchDir::new("unix-listen");
-    let config = dir.write("remotex.toml", &config_text(&dir));
+    let config = dir.write("zdesk.toml", &config_text(&dir));
     let socket = dir.path().join("gateway.sock");
 
     let mut gateway = start(&config, &socket);
@@ -174,7 +174,7 @@ fn a_gateway_on_a_unix_socket_answers_and_cleans_up_after_itself() {
 #[test]
 fn a_leftover_socket_does_not_stop_the_next_start() {
     let dir = common::ScratchDir::new("unix-leftover");
-    let config = dir.write("remotex.toml", &config_text(&dir));
+    let config = dir.write("zdesk.toml", &config_text(&dir));
     let socket = dir.path().join("gateway.sock");
 
     // What a killed process leaves: the file, with nothing serving it.

@@ -43,7 +43,7 @@ import init, {
   type InitInput,
   startPool,
   stopPool,
-} from "../wasm/egfx/pkg/remotex_egfx.js";
+} from "../wasm/egfx/pkg/zdesk_egfx.js";
 import type { PoolEvent, PoolSeat } from "./egfxPool.worker.ts";
 
 /**

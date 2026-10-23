@@ -15,10 +15,10 @@
 // It needs a gateway whose local config names a live RDP host with the pipeline on,
 // asked for two virtual displays:
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52890/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET=win2 \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52890/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=… \
+//     ZDESK_PLAYWRIGHT_EGFX_DISPLAYS_TARGET=win2 \
 //     bunx playwright test '/egfx-two-displays\.spec\.ts$'
 import { expect, type Page, test } from "@playwright/test";
 
@@ -31,7 +31,7 @@ import {
 } from "./support";
 
 /// The opt-in, and the target name in one.
-const TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET;
+const TARGET = process.env.ZDESK_PLAYWRIGHT_EGFX_DISPLAYS_TARGET;
 
 /// What every session here is started with: nothing chosen, the pipeline passed
 /// as it is in every session.
@@ -88,7 +88,7 @@ const last = <T>(items: T[] | undefined): T | undefined =>
 test.describe("a target that passes its pipeline over two virtual displays", () => {
   test.skip(
     !TARGET,
-    "set REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET=<target> against a gateway with a live RDP host asked for two virtual displays",
+    "set ZDESK_PLAYWRIGHT_EGFX_DISPLAYS_TARGET=<target> against a gateway with a live RDP host asked for two virtual displays",
   );
 
   test.afterEach(async ({ page }) => {
@@ -151,11 +151,11 @@ test.describe("a target that passes its pipeline over two virtual displays", () 
     expect(context.pages()).toHaveLength(2);
     expect(await tab.evaluate(() => performance.timeOrigin)).toBe(loaded);
     expect(
-      await page.evaluate(() => sessionStorage.getItem("remotex.sessionId")),
+      await page.evaluate(() => sessionStorage.getItem("zdesk.sessionId")),
     ).not.toBeNull();
     expect(
       await tab.evaluate(() => [
-        sessionStorage.getItem("remotex.sessionId"),
+        sessionStorage.getItem("zdesk.sessionId"),
         window.opener,
       ]),
     ).toEqual([null, null]);

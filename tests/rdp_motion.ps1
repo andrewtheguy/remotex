@@ -1,14 +1,14 @@
 # rdp_motion.ps1 start|stop: a full-screen moving picture on a Windows host's desktop, for the RDP probes that need
-# one (examples/rdp_link_probe.rs runs it as REMOTEX_UAT_MOTION; examples/rdp_damage_probe.rs's first case wants it
+# one (examples/rdp_link_probe.rs runs it as ZDESK_UAT_MOTION; examples/rdp_damage_probe.rs's first case wants it
 # running and its second wants it stopped). `start` draws an animation, every pixel changing each frame at about
 # 30 frames a second, in the desktop session of the user the probe logs on as, through a scheduled task, since an
 # SSH session has no desktop; `stop` closes it and removes the task. The host is reached with PowerShell over SSH
-# by REMOTEX_UAT_TARGET's name, the target in tmp/test_uat.toml, so that name must be an SSH host here as well.
+# by ZDESK_UAT_TARGET's name, the target in tmp/test_uat.toml, so that name must be an SSH host here as well.
 param([Parameter(Mandatory)][ValidateSet('start', 'stop')][string]$Action)
 $ErrorActionPreference = 'Stop'
 
-$hostName = $env:REMOTEX_UAT_TARGET
-if (-not $hostName) { throw 'set REMOTEX_UAT_TARGET to the Windows host' }
+$hostName = $env:ZDESK_UAT_TARGET
+if (-not $hostName) { throw 'set ZDESK_UAT_TARGET to the Windows host' }
 
 # The animation, run on the host in the user's desktop session: a borderless window over the whole primary screen,
 # bands of colour sliding across it and a square sweeping over them, so a codec has motion everywhere and nothing
@@ -21,7 +21,7 @@ $form.FormBorderStyle = 'None'
 $form.StartPosition = 'Manual'
 $form.Bounds = $screen
 $form.TopMost = $true
-$form.Text = 'remotex motion'
+$form.Text = 'zdesk motion'
 $form.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($form, $true)
 $script:frame = 0
 $form.Add_Paint({
@@ -53,8 +53,8 @@ $timer.Start()
 Invoke-Command -HostName $hostName -SSHTransport -ArgumentList $Action, $animation -ScriptBlock {
     param($Action, $Animation)
     $ErrorActionPreference = 'Stop'
-    $task = 'remotex-motion'
-    $dir = 'C:\ci-workspaces\remotex-motion'
+    $task = 'zdesk-motion'
+    $dir = 'C:\ci-workspaces\zdesk-motion'
     if ($Action -eq 'start') {
         New-Item -ItemType Directory -Force $dir | Out-Null
         Set-Content -Path "$dir\animation.ps1" -Value $Animation -Encoding utf8
@@ -65,12 +65,12 @@ Invoke-Command -HostName $hostName -SSHTransport -ArgumentList $Action, $animati
         Register-ScheduledTask -TaskName $task -Action $run -Principal $who -Force | Out-Null
         Start-ScheduledTask -TaskName $task
         Start-Sleep -Seconds 3
-        if (-not (Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" | Where-Object CommandLine -like '*remotex-motion*')) {
+        if (-not (Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" | Where-Object CommandLine -like '*zdesk-motion*')) {
             throw 'the animation did not start: is the user logged on to the desktop?'
         }
         'the animation is running'
     } else {
-        Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" | Where-Object CommandLine -like '*remotex-motion*' |
+        Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" | Where-Object CommandLine -like '*zdesk-motion*' |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
         Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
         'the animation is stopped'

@@ -12,7 +12,7 @@
 //! This is also the ZRLE test of record. The container paints a pattern on its
 //! root window (`tests/vnc-dummy/Containerfile`), so the rectangles hold real
 //! tiles rather than one solid colour, and a decoder bug fails here rather than
-//! going unnoticed. `remotex::vnc_encodings` logs which encoding a server actually
+//! going unnoticed. `zdesk::vnc_encodings` logs which encoding a server actually
 //! chose, which is the way to check.
 //!
 //! None of the assertions below depend on the encoding: the first update is
@@ -25,8 +25,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, TargetConfig};
-use remotex::server;
+use zdesk::config::{AppConfig, Protocol, TargetConfig};
+use zdesk::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -64,9 +64,9 @@ async fn wait_for_vnc_port(port: u16) {
 /// Start the real server pointed at the dummy VNC target.
 async fn spawn_app(vnc_port: u16) -> SocketAddr {
     let config = AppConfig {
-        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
+        listen: zdesk::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         auth: common::test_auth(),
-        branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
+        branding: zdesk::config::Branding { text: "zdesk".to_owned(), logo: None },
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
@@ -173,7 +173,7 @@ async fn vnc_session_streams_the_full_desktop_at_the_servers_own_size() {
     common::init_logging();
     let runtime = common::container_runtime();
     let (_container, vnc_port) =
-        common::start_dummy_server(runtime, "remotex-e2e-tigervnc", "vnc-dummy", 5900);
+        common::start_dummy_server(runtime, "zdesk-e2e-tigervnc", "vnc-dummy", 5900);
     wait_for_vnc_port(vnc_port).await;
 
     let addr = spawn_app(vnc_port).await;
@@ -300,7 +300,7 @@ async fn vnc_session_streams_the_full_desktop_at_the_servers_own_size() {
     // X client to own the selection, so whether it echoes a ServerCutText is
     // its business. The in-process test (tests/protocol_e2e.rs) pins the
     // contents round trip against a scripted server.
-    ws.send(Message::text(r#"{"type":"clipboard","text":"remotex e2e"}"#))
+    ws.send(Message::text(r#"{"type":"clipboard","text":"zdesk e2e"}"#))
         .await
         .unwrap();
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();

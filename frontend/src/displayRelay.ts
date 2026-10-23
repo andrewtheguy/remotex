@@ -25,7 +25,7 @@ import { coalesce, type Picture } from "./egfxCompositor.ts";
 import type { PicturePart } from "./egfxPicture.ts";
 
 /** The channel both ends open, named for the one thing it carries. */
-export const RELAY_CHANNEL = "remotex-display-relay";
+export const RELAY_CHANNEL = "zdesk-display-relay";
 
 /**
  * How many rectangles an update names at most: past this they are sent as the one

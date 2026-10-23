@@ -41,7 +41,7 @@ use super::wire::{Malformed, Reader, Writer};
 const SERVER_CHANNEL: u16 = 0x03EA;
 
 /// `sourceDescriptor`. Ignored by every server, logged by some.
-const SOURCE: &[u8] = b"remotex\0";
+const SOURCE: &[u8] = b"zdesk\0";
 
 /// Capability set types.
 const GENERAL: u16 = 0x01;

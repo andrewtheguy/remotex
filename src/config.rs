@@ -60,7 +60,7 @@ pub enum Subtype {
     /// With the unofficial [`TargetConfig::virtual_display`], the same session
     /// opens on one of the Mac's virtual displays instead — High Performance's
     /// display and resizing under Standard's picture, a combination Apple's viewer
-    /// never offers and remotex tested against macOS 26 alone.
+    /// never offers and zdesk tested against macOS 26 alone.
     Ard,
     /// The same Mac in High Performance Screen Sharing, as Apple's viewer has it:
     /// the same wire as [`Subtype::Ard`] on a virtual display, with the picture as
@@ -1437,7 +1437,7 @@ fn one_display() -> u8 {
 /// shape: [`DEFAULT_LISTEN`] below, and the TUI control plane's `--port`.
 ///
 /// One number for both because they are two ways to serve, never two servers:
-/// `remotex serve` is the deployed gateway and `remotex tui` is the local
+/// `zdesk serve` is the deployed gateway and `zdesk tui` is the local
 /// control plane, and running them at once is the collision each refuses to
 /// start into rather than a configuration to support.
 pub const DEFAULT_PORT: u16 = 52380;
@@ -1491,12 +1491,12 @@ pub struct ServerSection {
     ///
     /// One key rather than two because it is one decision:
     /// a host without a port and a port without a host are each half an answer,
-    /// and `--listen`/`REMOTEX_LISTEN` can only override the whole of it —
+    /// and `--listen`/`ZDESK_LISTEN` can only override the whole of it —
     /// overriding one half from the command line and taking the other from the
     /// file is how a gateway ends up on an address nobody wrote down.
     pub listen: Option<String>,
     /// Web-login credential: `username:bcrypt_hash`, generated with
-    /// `remotex gen-passwd <username>`. Required — without a login everything
+    /// `zdesk gen-passwd <username>`. Required — without a login everything
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
@@ -1515,11 +1515,11 @@ pub struct ServerSection {
     // stale. `deny_unknown_fields` refuses a file that still has it here.
     /// **Development only.** A label to give this gateway its own hostname on
     /// loopback: a browser arriving at `127.0.0.1`, `::1` or `localhost` is
-    /// redirected to `<label>.remotex.localhost`, keeping the port and path.
+    /// redirected to `<label>.zdesk.localhost`, keeping the port and path.
     ///
     /// It exists for one problem, which has no other clean answer: a cookie is
     /// scoped by *host* and ignores the port, so two gateways on one machine
-    /// share `remotex_session` and each login silently evicts the other. The
+    /// share `zdesk_session` and each login silently evicts the other. The
     /// gateway you were not touching then answers 401 to everything, and its
     /// browser drops to the login screen the next time anything asks — which
     /// reads as a session bug in whatever you were actually testing. Testing
@@ -1527,7 +1527,7 @@ pub struct ServerSection {
     ///
     /// Under `.localhost` because every name below it resolves to loopback without
     /// DNS (RFC 6761) and is a *distinct* cookie origin, so two gateways become two
-    /// independent logins in one browser. Under `.remotex.localhost` in particular
+    /// independent logins in one browser. Under `.zdesk.localhost` in particular
     /// so the names this project hands out are all one suffix, taken from nobody.
     ///
     /// Never reachable in a deployment: [`AppConfig::dev_hostname`] redirects only
@@ -1537,7 +1537,7 @@ pub struct ServerSection {
 }
 
 /// The default display name when `[branding].text` is unset.
-pub const DEFAULT_BRANDING: &str = "remotex";
+pub const DEFAULT_BRANDING: &str = "zdesk";
 
 /// The `[branding]` table as written: what the deployment calls itself, and the
 /// image it puts in the browser tab.
@@ -1658,7 +1658,7 @@ fn logo_media_type(declared: &str) -> anyhow::Result<&'static str> {
 ///
 /// It exists for the configs that have nowhere to put a file: an instance
 /// directory synced between machines, a container with one mounted config, a
-/// `remotex.toml` pasted into a gist. The path form stays the better one whenever
+/// `zdesk.toml` pasted into a gist. The path form stays the better one whenever
 /// there *is* somewhere — it survives an image being swapped without a restart,
 /// and it keeps the config readable.
 ///
@@ -1716,9 +1716,9 @@ fn resolve_logo(value: &str) -> anyhow::Result<Logo> {
 ///   is a valid new instance and the picker's job is to say so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Audience {
-    /// `remotex serve`: a browser's gateway.
+    /// `zdesk serve`: a browser's gateway.
     Served,
-    /// `remotex serve-embedded`: a managed local instance.
+    /// `zdesk serve-embedded`: a managed local instance.
     #[cfg(feature = "embedded-gateway")]
     Embedded,
 }
@@ -1755,7 +1755,7 @@ pub struct ConfigFile {
     pub master: Option<MasterSection>,
     /// The `[passwords]` table: each target password, encrypted, by the name a
     /// target's `password_ref` or `vnc_password_ref` gives it. Written by
-    /// what `remotex password encrypt` prints, or by the TUI's `p`. An empty value
+    /// what `zdesk password encrypt` prints, or by the TUI's `p`. An empty value
     /// is a placeholder: the empty password, kept until a real one replaces it,
     /// and nothing to decrypt.
     #[serde(default)]
@@ -1818,7 +1818,7 @@ pub struct AppConfig {
     /// The deployment's name and, when configured, the icon file behind
     /// `GET /api/logo`.
     pub branding: Branding,
-    /// `<label>.remotex.localhost` to send a loopback browser to, from
+    /// `<label>.zdesk.localhost` to send a loopback browser to, from
     /// `[server].dev_subdomain`. `None` disables the redirect entirely.
     ///
     /// Stored as the whole hostname rather than the label so the one place that
@@ -2163,7 +2163,7 @@ impl ConfigFile {
     }
 
     /// Every password a target names is in `[passwords]`, every value there but a
-    /// placeholder has the shape of one `remotex password encrypt` prints, and a
+    /// placeholder has the shape of one `zdesk password encrypt` prints, and a
     /// `[master]` block is there to open them — all of it checked without the key,
     /// which reading a file never has.
     fn check_passwords(&self) -> anyhow::Result<()> {
@@ -2178,7 +2178,7 @@ impl ConfigFile {
         }
         anyhow::ensure!(
             self.passwords.values().all(String::is_empty) || self.master.is_some(),
-            "[passwords] has no [master] block to open it — `remotex password master` prints one"
+            "[passwords] has no [master] block to open it — `zdesk password master` prints one"
         );
         for target in &self.targets {
             for (key, name) in [
@@ -2189,7 +2189,7 @@ impl ConfigFile {
                 anyhow::ensure!(
                     self.passwords.contains_key(name),
                     "target {:?} sets {key} = {name:?}, which [passwords] does not have — \
-                     add it as {name} = \"…\", pasting what `remotex password encrypt` prints",
+                     add it as {name} = \"…\", pasting what `zdesk password encrypt` prints",
                     target.name
                 );
             }
@@ -2213,7 +2213,7 @@ impl ConfigFile {
         let section = self
             .master
             .as_ref()
-            .context("the config has no [master] block — `remotex password master` prints one")?;
+            .context("the config has no [master] block — `zdesk password master` prints one")?;
         Key::derive(master, section)
     }
 
@@ -2362,7 +2362,7 @@ impl ConfigFile {
     /// Resolve the runtime configuration: validate the web-login credential and
     /// carry over every target profile (the browser picks one after login).
     ///
-    /// `listen` is `--listen`/`REMOTEX_LISTEN` when either was given, and it wins
+    /// `listen` is `--listen`/`ZDESK_LISTEN` when either was given, and it wins
     /// over `[server].listen`. That is the whole precedence: one address, from the
     /// command line if it is there and from the file otherwise.
     ///
@@ -2387,7 +2387,7 @@ impl ConfigFile {
             .filter(|s| !s.is_empty())
             .context(
                 "[server].site_passwd is required — generate one with \
-                 `remotex gen-passwd <username>`",
+                 `zdesk gen-passwd <username>`",
             )?;
         let site_passwd =
             SitePasswd::parse(site_passwd).context("invalid [server].site_passwd")?;
@@ -2434,7 +2434,7 @@ fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
         anyhow::ensure!(
             !path.is_empty(),
             "{UNIX_LISTEN_PREFIX} names no socket — write the path out, as in \
-             \"{UNIX_LISTEN_PREFIX}/run/remotex/gateway.sock\""
+             \"{UNIX_LISTEN_PREFIX}/run/zdesk/gateway.sock\""
         );
         // Refused here, at the one place the address is read, rather than at the
         // bind: `std::os::unix::net` does not exist on Windows, so a gateway there
@@ -2478,7 +2478,7 @@ fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
     Ok(ListenAddr::Tcp(format!("{host}:{port}")))
 }
 
-/// `<label>.remotex.localhost`, refusing anything that is not a single DNS label.
+/// `<label>.zdesk.localhost`, refusing anything that is not a single DNS label.
 ///
 /// The check is what makes the redirect target unforgeable: a `Location` built
 /// from an unvalidated string could name any host at all, and this one is
@@ -2486,10 +2486,10 @@ fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
 /// colon and no credentials. So the target is always some name under
 /// `.localhost`, which by RFC 6761 can only be loopback.
 ///
-/// The `remotex` label in the middle is what keeps a development gateway from
+/// The `zdesk` label in the middle is what keeps a development gateway from
 /// claiming a name somebody else's tooling may already answer to: `gw-a.localhost`
 /// is a name anything on this machine may have taken, while everything under
-/// `.remotex.localhost` is this project's by construction. It is one name to
+/// `.zdesk.localhost` is this project's by construction. It is one name to
 /// recognise in a browser's history and one suffix to clear cookies for.
 ///
 /// Length is bounded at 63, the DNS label limit, for the same reason the shape is
@@ -2505,13 +2505,13 @@ fn dev_hostname(label: &str) -> anyhow::Result<String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-'),
         "{label:?} must be one DNS label — ASCII letters, digits and hyphens only, \
-         and no dots (it is used as <label>.remotex.localhost)"
+         and no dots (it is used as <label>.zdesk.localhost)"
     );
     anyhow::ensure!(
         !label.starts_with('-') && !label.ends_with('-'),
         "{label:?} may not start or end with a hyphen"
     );
-    Ok(format!("{label}.remotex.localhost"))
+    Ok(format!("{label}.zdesk.localhost"))
 }
 
 /// Load the config file: the explicit `--config` path, or the global path of the
@@ -2592,11 +2592,11 @@ pub fn state_dir(config: &Path) -> PathBuf {
 }
 
 /// Where the gateway finds the files that come with its version but no build
-/// holds — the software HEVC decoder's archive: `share/remotex` in its release
-/// tree, beside the `share/doc/remotex` every release target installs. That is
-/// `/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
-/// the macOS `.pkg`, `share\remotex` under the `.msi`'s install directory,
-/// and `/opt/remotex/versions/<version>/share/remotex` in the container image.
+/// holds — the software HEVC decoder's archive: `share/zdesk` in its release
+/// tree, beside the `share/doc/zdesk` every release target installs. That is
+/// `/usr/share/zdesk` for the `.deb` and `.rpm`, `/usr/local/share/zdesk` for
+/// the macOS `.pkg`, `share\zdesk` under the `.msi`'s install directory,
+/// and `/opt/zdesk/versions/<version>/share/zdesk` in the container image.
 /// They follow the binary, not the config, and are
 /// replaced with it: they are pinned to its version, unlike the state directory.
 ///
@@ -2614,11 +2614,11 @@ fn data_dir_for_exe(exe: &Path) -> Option<PathBuf> {
     if !bin_dir.file_name()?.eq_ignore_ascii_case("bin") {
         return None;
     }
-    Some(bin_dir.parent()?.join("share").join("remotex"))
+    Some(bin_dir.parent()?.join("share").join("zdesk"))
 }
 
 /// The executable that is actually running, through any link to it: the
-/// container's `/opt/remotex/current` is one.
+/// container's `/opt/zdesk/current` is one.
 fn running_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.canonicalize().unwrap_or(exe))
@@ -2638,8 +2638,8 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     // delete a file containing credentials.
     if bin_dir == Path::new("/usr/bin") {
         return Some(InstalledLayout {
-            config: "/etc/remotex/remotex.toml".into(),
-            state_dir: "/var/lib/remotex".into(),
+            config: "/etc/zdesk/zdesk.toml".into(),
+            state_dir: "/var/lib/zdesk".into(),
         });
     }
 
@@ -2647,29 +2647,29 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     // prefix. Its configuration follows that prefix as well.
     if bin_dir == Path::new("/usr/local/bin") {
         return Some(InstalledLayout {
-            config: "/usr/local/etc/remotex/remotex.toml".into(),
-            state_dir: "/usr/local/var/remotex".into(),
+            config: "/usr/local/etc/zdesk/zdesk.toml".into(),
+            state_dir: "/usr/local/var/zdesk".into(),
         });
     }
 
-    // By default the Windows package installs the same tree under %ProgramFiles%\remotex:
-    // <root>\bin\remotex.exe, and the tree is relocatable. Its configuration lives
+    // By default the Windows package installs the same tree under %ProgramFiles%\zdesk:
+    // <root>\bin\zdesk.exe, and the tree is relocatable. Its configuration lives
     // outside that tree, under %ProgramData%, for the same reason as /etc above —
     // replacing the unpacked release must not touch a file holding credentials.
     #[cfg(windows)]
     if bin_dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("bin"))
         && let Some(program_data) = std::env::var_os("ProgramData")
     {
-        let program_data = PathBuf::from(program_data).join("remotex");
+        let program_data = PathBuf::from(program_data).join("zdesk");
         return Some(InstalledLayout {
-            config: program_data.join("remotex.toml"),
+            config: program_data.join("zdesk.toml"),
             state_dir: program_data,
         });
     }
 
     // The container image (packaging/Dockerfile) puts the binary at
-    // <prefix>/versions/<version>/bin/remotex, while configuration and state live
-    // outside the version, under /opt/remotex/etc and /opt/remotex/var.
+    // <prefix>/versions/<version>/bin/zdesk, while configuration and state live
+    // outside the version, under /opt/zdesk/etc and /opt/zdesk/var.
     let version_root = bin_dir.parent()?;
     let versions_dir = version_root.parent()?;
     if versions_dir.file_name()? != "versions" {
@@ -2677,7 +2677,7 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     }
     let prefix = versions_dir.parent()?;
     Some(InstalledLayout {
-        config: prefix.join("etc/remotex.toml"),
+        config: prefix.join("etc/zdesk.toml"),
         state_dir: prefix.join("var"),
     })
 }
@@ -2722,67 +2722,67 @@ mod tests {
 
     #[test]
     fn installed_paths_follow_each_install_layout() {
-        let linux = installed_layout_for_exe(Path::new("/usr/bin/remotex")).unwrap();
-        assert_eq!(linux.config, Path::new("/etc/remotex/remotex.toml"));
-        assert_eq!(linux.state_dir, Path::new("/var/lib/remotex"));
+        let linux = installed_layout_for_exe(Path::new("/usr/bin/zdesk")).unwrap();
+        assert_eq!(linux.config, Path::new("/etc/zdesk/zdesk.toml"));
+        assert_eq!(linux.state_dir, Path::new("/var/lib/zdesk"));
 
-        let mac = installed_layout_for_exe(Path::new("/usr/local/bin/remotex")).unwrap();
-        assert_eq!(mac.config, Path::new("/usr/local/etc/remotex/remotex.toml"));
-        assert_eq!(mac.state_dir, Path::new("/usr/local/var/remotex"));
+        let mac = installed_layout_for_exe(Path::new("/usr/local/bin/zdesk")).unwrap();
+        assert_eq!(mac.config, Path::new("/usr/local/etc/zdesk/zdesk.toml"));
+        assert_eq!(mac.state_dir, Path::new("/usr/local/var/zdesk"));
 
         // The container's tree is a Unix one; on Windows any `bin` directory is
         // the package's tree, which is the arm below.
         #[cfg(unix)]
         {
             let quick = installed_layout_for_exe(Path::new(
-                "/srv/remotex/versions/0.0.144/bin/remotex",
+                "/srv/zdesk/versions/0.0.144/bin/zdesk",
             ))
             .unwrap();
-            assert_eq!(quick.config, Path::new("/srv/remotex/etc/remotex.toml"));
-            assert_eq!(quick.state_dir, Path::new("/srv/remotex/var"));
+            assert_eq!(quick.config, Path::new("/srv/zdesk/etc/zdesk.toml"));
+            assert_eq!(quick.state_dir, Path::new("/srv/zdesk/var"));
         }
 
         #[cfg(windows)]
         {
             let installed = installed_layout_for_exe(Path::new(
-                r"C:\Program Files\remotex\bin\remotex.exe",
+                r"C:\Program Files\zdesk\bin\zdesk.exe",
             ))
             .unwrap();
             let program_data = PathBuf::from(std::env::var_os("ProgramData").unwrap());
-            assert_eq!(installed.config, program_data.join("remotex").join("remotex.toml"));
-            assert_eq!(installed.state_dir, program_data.join("remotex"));
+            assert_eq!(installed.config, program_data.join("zdesk").join("zdesk.toml"));
+            assert_eq!(installed.state_dir, program_data.join("zdesk"));
         }
 
-        assert!(installed_layout_for_exe(Path::new("/checkout/target/debug/remotex")).is_none());
+        assert!(installed_layout_for_exe(Path::new("/checkout/target/debug/zdesk")).is_none());
     }
 
     #[test]
-    fn the_data_directory_is_share_remotex_in_each_release_tree() {
+    fn the_data_directory_is_share_zdesk_in_each_release_tree() {
         let data = |exe: &str| data_dir_for_exe(Path::new(exe));
-        assert_eq!(data("/usr/bin/remotex"), Some("/usr/share/remotex".into()), ".deb and .rpm");
-        assert_eq!(data("/usr/local/bin/remotex"), Some("/usr/local/share/remotex".into()), ".pkg");
+        assert_eq!(data("/usr/bin/zdesk"), Some("/usr/share/zdesk".into()), ".deb and .rpm");
+        assert_eq!(data("/usr/local/bin/zdesk"), Some("/usr/local/share/zdesk".into()), ".pkg");
         assert_eq!(
-            data("/opt/remotex/versions/0.0.294/bin/remotex"),
-            Some("/opt/remotex/versions/0.0.294/share/remotex".into()),
+            data("/opt/zdesk/versions/0.0.294/bin/zdesk"),
+            Some("/opt/zdesk/versions/0.0.294/share/zdesk".into()),
             "the container image"
         );
         assert_eq!(
-            data("/home/me/remotex-0.0.294-linux-x86_64/bin/remotex"),
-            Some("/home/me/remotex-0.0.294-linux-x86_64/share/remotex".into()),
+            data("/home/me/zdesk-0.0.294-linux-x86_64/bin/zdesk"),
+            Some("/home/me/zdesk-0.0.294-linux-x86_64/share/zdesk".into()),
             "any other release tree"
         );
         #[cfg(windows)]
         assert_eq!(
-            data(r"C:\Program Files\remotex\bin\remotex.exe"),
-            Some(PathBuf::from(r"C:\Program Files\remotex\share\remotex")),
+            data(r"C:\Program Files\zdesk\bin\zdesk.exe"),
+            Some(PathBuf::from(r"C:\Program Files\zdesk\share\zdesk")),
             ".msi"
         );
-        assert_eq!(data("/checkout/target/debug/remotex"), None, "a Cargo build");
+        assert_eq!(data("/checkout/target/debug/zdesk"), None, "a Cargo build");
     }
 
     #[test]
     fn a_config_outside_an_installation_keeps_state_in_its_own_directory() {
-        assert_eq!(state_dir(Path::new("/home/me/remotex/uat.toml")), Path::new("/home/me/remotex"));
+        assert_eq!(state_dir(Path::new("/home/me/zdesk/uat.toml")), Path::new("/home/me/zdesk"));
         assert_eq!(state_dir(Path::new("uat.toml")), Path::new(""), "the working directory");
     }
 
@@ -2891,8 +2891,8 @@ mod tests {
     #[test]
     fn a_unix_socket_is_a_listen_address_too() {
         assert_eq!(
-            resolved(r#"listen = "unix:/run/remotex/gateway.sock""#).listen,
-            ListenAddr::Unix(PathBuf::from("/run/remotex/gateway.sock"))
+            resolved(r#"listen = "unix:/run/zdesk/gateway.sock""#).listen,
+            ListenAddr::Unix(PathBuf::from("/run/zdesk/gateway.sock"))
         );
         // Everything after the prefix is the path — a file name is not parsed for
         // a port, however much of one it looks like.
@@ -2966,7 +2966,7 @@ mod tests {
         }
     }
 
-    /// `--listen`/`REMOTEX_LISTEN` replaces the file's address whole, and is held
+    /// `--listen`/`ZDESK_LISTEN` replaces the file's address whole, and is held
     /// to the same shape — an override nobody validated is the one that turns a
     /// typo into a gateway on an address nothing reaches.
     #[test]
@@ -3004,10 +3004,10 @@ mod tests {
     // carrying a dot, a slash, a colon or credentials would point somewhere that is
     // not loopback at all.
     #[test]
-    fn a_dev_subdomain_becomes_one_label_under_remotex_localhost() {
+    fn a_dev_subdomain_becomes_one_label_under_zdesk_localhost() {
         assert_eq!(
             resolved(r#"dev_subdomain = "a""#).dev_hostname.as_deref(),
-            Some("a.remotex.localhost")
+            Some("a.zdesk.localhost")
         );
         // Unset, and whitespace-only, both disable it — as `branding` does.
         assert_eq!(resolved("").dev_hostname, None);
@@ -3015,19 +3015,19 @@ mod tests {
         // Trimmed, so a stray space cannot become part of a hostname.
         assert_eq!(
             resolved(r#"dev_subdomain = "  b  ""#).dev_hostname.as_deref(),
-            Some("b.remotex.localhost")
+            Some("b.zdesk.localhost")
         );
         // Digits and inner hyphens are legal in a DNS label.
         assert_eq!(
             resolved(r#"dev_subdomain = "gw-2""#).dev_hostname.as_deref(),
-            Some("gw-2.remotex.localhost")
+            Some("gw-2.zdesk.localhost")
         );
     }
 
     #[test]
     fn a_dev_subdomain_that_is_not_one_label_is_refused() {
         for bad in [
-            // A dot would move the name out from under `.remotex.localhost`
+            // A dot would move the name out from under `.zdesk.localhost`
             // entirely, which is the whole of what keeps the target on loopback.
             "a.b",
             "evil.example.com",
@@ -3054,7 +3054,7 @@ mod tests {
             resolved(&format!("dev_subdomain = {:?}", "a".repeat(63)))
                 .dev_hostname
                 .as_deref(),
-            Some(&*format!("{}.remotex.localhost", "a".repeat(63)))
+            Some(&*format!("{}.zdesk.localhost", "a".repeat(63)))
         );
     }
 
@@ -3071,7 +3071,7 @@ mod tests {
             r#"
             [branding]
             text = "  Acme Remote  "
-            logo = "/etc/remotex/acme.png"
+            logo = "/etc/zdesk/acme.png"
 
             [server]
             {}
@@ -3091,7 +3091,7 @@ mod tests {
         let LogoSource::File(path) = &logo.source else {
             panic!("a plain string is a path");
         };
-        assert_eq!(path, &PathBuf::from("/etc/remotex/acme.png"));
+        assert_eq!(path, &PathBuf::from("/etc/zdesk/acme.png"));
         assert_eq!(logo.mime, "image/png");
 
         // Whitespace-only → falls back to the default.
@@ -3104,7 +3104,7 @@ mod tests {
     /// a string, so the file fails to parse rather than quietly naming nothing.
     #[test]
     fn the_old_branding_string_is_refused() {
-        let toml = format!("branding = \"remotex\"\n{}", minimal());
+        let toml = format!("branding = \"zdesk\"\n{}", minimal());
         let err = ConfigFile::parse_fixture(&toml).expect_err("a string is not a [branding] table");
         assert!(format!("{err:#}").contains("branding"), "{err:#}");
     }
@@ -3113,7 +3113,7 @@ mod tests {
     /// and may leave the rest to the defaults.
     #[test]
     fn meter_is_recorded_in_the_state_directory_unless_a_database_is_named() {
-        let state = Path::new("/var/lib/remotex");
+        let state = Path::new("/var/lib/zdesk");
         let meter = |table: &str| {
             let toml = format!("{table}\n{}", minimal());
             ConfigFile::parse_fixture(&toml).unwrap().resolve_with(None, state, Path::new("")).unwrap().meter
@@ -3127,19 +3127,19 @@ mod tests {
         assert_eq!(
             meter("[meter]\nenabled = true"),
             Some(MeterConfig {
-                database: PathBuf::from("/var/lib/remotex/meter.sqlite3"),
+                database: PathBuf::from("/var/lib/zdesk/meter.sqlite3"),
                 max_records: 10_080,
             })
         );
         assert_eq!(
-            meter("[meter]\nenabled = true\ndatabase = \"/srv/meter/remotex.sqlite3\"")
+            meter("[meter]\nenabled = true\ndatabase = \"/srv/meter/zdesk.sqlite3\"")
                 .unwrap()
                 .database,
-            Path::new("/srv/meter/remotex.sqlite3")
+            Path::new("/srv/meter/zdesk.sqlite3")
         );
         assert_eq!(
             meter("[meter]\nenabled = true\ndatabase = \"meter/uat.sqlite3\"").unwrap().database,
-            Path::new("/var/lib/remotex/meter/uat.sqlite3"),
+            Path::new("/var/lib/zdesk/meter/uat.sqlite3"),
             "a relative database is taken from the state directory"
         );
 
@@ -3166,7 +3166,7 @@ mod tests {
             let toml = format!("{table}\n{}", minimal());
             ConfigFile::parse_fixture(&toml)
                 .unwrap()
-                .resolve_with(None, Path::new("/var/lib/remotex"), data)
+                .resolve_with(None, Path::new("/var/lib/zdesk"), data)
                 .unwrap()
                 .hevc_wasm
         };
@@ -3256,7 +3256,7 @@ mod tests {
     /// including by `check-config`, which resolves on the way through.
     #[test]
     fn a_logo_that_is_not_an_image_is_refused() {
-        for bad in ["logo = \"/etc/remotex/logo.pdf\"", "logo = \"/etc/remotex/logo\""] {
+        for bad in ["logo = \"/etc/zdesk/logo.pdf\"", "logo = \"/etc/zdesk/logo\""] {
             let toml = format!("[branding]\n{bad}\n{}", minimal());
             let err = ConfigFile::parse_fixture(&toml)
                 .and_then(ConfigFile::resolve)
@@ -3717,7 +3717,7 @@ mod tests {
             assert!(format!("{err:#}").contains("unknown field"), "{inline}: {err:#}");
         }
         let err = ConfigFile::parse(&vnc_toml(r#"vnc_password_ref = "pi""#)).unwrap_err();
-        assert!(format!("{err:#}").contains("remotex password encrypt"), "{err:#}");
+        assert!(format!("{err:#}").contains("zdesk password encrypt"), "{err:#}");
 
         let vaulted = vaulted(&vnc_toml(r#"vnc_password_ref = "pi""#));
         let typed = vaulted.replace(&format!("pi = \"{}", crate::vault::PREFIX), "pi = \"");

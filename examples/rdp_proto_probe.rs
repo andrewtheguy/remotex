@@ -1,6 +1,6 @@
 //! The gateway's own RDP code, against a real Windows host.
 //!
-//! [`remotex::rdp_client::proto`] is tested against the specification by its own unit
+//! [`zdesk::rdp_client::proto`] is tested against the specification by its own unit
 //! tests. This asks the other question — whether Windows agrees — by driving the
 //! connection sequence over a real socket with nothing else in the process: our bytes
 //! out, the host's bytes in, our decoding of the answer.
@@ -10,7 +10,7 @@
 //! named by [`TARGET_ENV`]:
 //!
 //! ```sh
-//! REMOTEX_UAT_TARGET=windows-ent-sandbox \
+//! ZDESK_UAT_TARGET=windows-ent-sandbox \
 //!   cargo run --example rdp_proto_probe -- a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence
 //! ```
 //!
@@ -38,28 +38,28 @@ mod common;
 
 use std::time::Duration;
 
-use remotex::rdp_client::proto::bitmap::{self, Scratch};
-use remotex::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
-use remotex::rdp_client::proto::credssp::{self, Credentials};
-use remotex::rdp_client::proto::fastpath::{self, Fragments};
-use remotex::rdp_client::proto::finalization::{self, Response};
-use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
-use remotex::rdp_client::proto::channel::Chunk;
-use remotex::rdp_client::proto::{channel, cliprdr, display, dvc};
+use zdesk::rdp_client::proto::bitmap::{self, Scratch};
+use zdesk::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
+use zdesk::rdp_client::proto::credssp::{self, Credentials};
+use zdesk::rdp_client::proto::fastpath::{self, Fragments};
+use zdesk::rdp_client::proto::finalization::{self, Response};
+use zdesk::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
+use zdesk::rdp_client::proto::channel::Chunk;
+use zdesk::rdp_client::proto::{channel, cliprdr, display, dvc};
 #[cfg(test)]
-use remotex::rdp_client::proto::input::{self, Button, Event};
-use remotex::rdp_client::proto::pointer::{self, Pointer};
-use remotex::rdp_client::proto::info::ClientInfo;
-use remotex::rdp_client::proto::share::{self, Pdu};
-use remotex::rdp_client::proto::{license, mcs, tls};
-use remotex::rdp_client::proto::x224::{
+use zdesk::rdp_client::proto::input::{self, Button, Event};
+use zdesk::rdp_client::proto::pointer::{self, Pointer};
+use zdesk::rdp_client::proto::info::ClientInfo;
+use zdesk::rdp_client::proto::share::{self, Pdu};
+use zdesk::rdp_client::proto::{license, mcs, tls};
+use zdesk::rdp_client::proto::x224::{
     ConfirmFlags, ConnectionConfirm, ConnectionRequest, Security, TPKT_HEADER, frame_length,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 
 /// Which target in `tmp/test_uat.toml` to dial — see the module docs.
-const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
+const TARGET_ENV: &str = "ZDESK_UAT_TARGET";
 
 /// How long the whole sequence gets. Generous: a Windows host that is asleep takes
 /// its time over the first packet.
@@ -153,9 +153,9 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             width: DESKTOP.0,
             height: DESKTOP.1,
             monitors: 1,
-            placement: remotex::config::Placement::Right,
+            placement: zdesk::config::Placement::Right,
             scale_percent: 0,
-            client_name: "remotex",
+            client_name: "zdesk",
             keyboard_layout: KEYBOARD_LAYOUT,
             selected_protocol: protocol.bits(),
             channels: &CHANNELS,
@@ -313,7 +313,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             display.caps.is_some(),
             "Display Control is not usable until its capabilities arrive"
         );
-        let layout = display::monitor_layout(&[(RESIZED.0.into(), RESIZED.1.into())], remotex::config::Placement::Right, &[100]);
+        let layout = display::monitor_layout(&[(RESIZED.0.into(), RESIZED.1.into())], zdesk::config::Placement::Right, &[100]);
         let pdu = dvc::data(control, &layout).unwrap();
         for chunk in channel::chunks(&pdu, demand.chunk, Channel::DYNAMIC.chunk_flags()).unwrap()
         {
@@ -899,7 +899,7 @@ fn our_monitor_layout_encodes_to_the_bytes_ironrdp_sends() {
         )),
     ];
     for (width, height, scale, theirs) in LAYOUTS {
-        let ours = display::monitor_layout(&[(width, height)], remotex::config::Placement::Right, &[scale]);
+        let ours = display::monitor_layout(&[(width, height)], zdesk::config::Placement::Right, &[scale]);
         assert_eq!(
             hex(&ours).replace(' ', ""),
             theirs,

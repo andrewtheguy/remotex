@@ -1,4 +1,4 @@
-name: Release remotex
+name: Release zdesk
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   packages: write
 
 env:
-  GHCR_IMAGE: ghcr.io/andrewtheguy/remotex
+  GHCR_IMAGE: ghcr.io/andrewtheguy/zdesk
 
 jobs:
   prepare:
@@ -82,7 +82,7 @@ jobs:
   build:
     needs: [prepare, frontend]
     env:
-      REMOTEX_PREBUILT_FRONTEND: frontend/dist
+      ZDESK_PREBUILT_FRONTEND: frontend/dist
     strategy:
       fail-fast: false
       matrix:
@@ -97,8 +97,8 @@ jobs:
             target-note: linux-arm64
           - runner: macos-latest
             target-note: macos-arm64
-          # The Windows native package is an MSI: the same tree under %ProgramFiles%\remotex,
-          # reading %ProgramData%\remotex\remotex.toml. No container image.
+          # The Windows native package is an MSI: the same tree under %ProgramFiles%\zdesk,
+          # reading %ProgramData%\zdesk\zdesk.toml. No container image.
           - runner: windows-latest
             target-note: windows-x86_64
     runs-on: ${{ matrix.runner }}
@@ -150,12 +150,12 @@ jobs:
 
       - name: Build feature-minimal container gateway (${{ matrix.target-note }})
         if: runner.os == 'Linux'
-        run: bash packaging/build-container-binary.sh "tmp/container-bin/remotex-container-${{ matrix.target-note }}"
+        run: bash packaging/build-container-binary.sh "tmp/container-bin/zdesk-container-${{ matrix.target-note }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: remotex-${{ matrix.target-note }}
+          name: zdesk-${{ matrix.target-note }}
           path: dist/*
           if-no-files-found: error
 
@@ -163,8 +163,8 @@ jobs:
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: remotex-container-${{ matrix.target-note }}
-          path: tmp/container-bin/remotex-container-${{ matrix.target-note }}
+          name: zdesk-container-${{ matrix.target-note }}
+          path: tmp/container-bin/zdesk-container-${{ matrix.target-note }}
           if-no-files-found: error
 
   release:
@@ -235,25 +235,25 @@ jobs:
       - name: Download the release tarball (${{ matrix.target-note }})
         uses: actions/download-artifact@v4
         with:
-          name: remotex-${{ matrix.target-note }}
+          name: zdesk-${{ matrix.target-note }}
           path: tmp/tarball
 
       - name: Download the feature-minimal gateway (${{ matrix.target-note }})
         uses: actions/download-artifact@v4
         with:
-          name: remotex-container-${{ matrix.target-note }}
+          name: zdesk-container-${{ matrix.target-note }}
           path: tmp/container-bin
 
       - name: Unpack the tarball into the build context
         run: |
           mkdir -p tmp/docker-context
-          # --strip-components=1 drops the remotex-<version>/ wrapper so the
+          # --strip-components=1 drops the zdesk-<version>/ wrapper so the
           # context root holds bin/ and share/ as packaging/Dockerfile expects.
-          tar -xzf "tmp/tarball/remotex-${{ needs.prepare.outputs.version }}-${{ matrix.target-note }}.tar.gz" \
+          tar -xzf "tmp/tarball/zdesk-${{ needs.prepare.outputs.version }}-${{ matrix.target-note }}.tar.gz" \
             -C tmp/docker-context --strip-components=1
-          cp "tmp/container-bin/remotex-container-${{ matrix.target-note }}" \
-            tmp/docker-context/bin/remotex
-          chmod +x tmp/docker-context/bin/remotex
+          cp "tmp/container-bin/zdesk-container-${{ matrix.target-note }}" \
+            tmp/docker-context/bin/zdesk
+          chmod +x tmp/docker-context/bin/zdesk
           ls -la tmp/docker-context tmp/docker-context/bin
 
       - uses: docker/login-action@v3
@@ -277,8 +277,8 @@ jobs:
           # match the release being published.
           got=$(docker run --rm "${GHCR_IMAGE}:${IMAGE_TAG}" --version)
           echo "image reports: ${got}"
-          [ "$got" = "remotex ${{ needs.prepare.outputs.version }}" ] || {
-            echo "::error::expected 'remotex ${{ needs.prepare.outputs.version }}'"
+          [ "$got" = "zdesk ${{ needs.prepare.outputs.version }}" ] || {
+            echo "::error::expected 'zdesk ${{ needs.prepare.outputs.version }}'"
             exit 1
           }
           help=$(docker run --rm "${GHCR_IMAGE}:${IMAGE_TAG}" --help)

@@ -16,17 +16,17 @@
 //
 //     cargo run -- serve --config tmp/test_uat.toml
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52888/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_STANDARD_TARGET=macvmstandard \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52888/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=… \
+//     ZDESK_PLAYWRIGHT_STANDARD_TARGET=macvmstandard \
 //     bunx playwright test '/standard-passthrough\.spec\.ts$'
 //
 // The resize case needs a target whose desktop follows the window, an `ard`
 // target with `virtual_display = true`, named by
-// REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET. The two-screen case needs an `ard`
+// ZDESK_PLAYWRIGHT_STANDARD_RESIZE_TARGET. The two-screen case needs an `ard`
 // target on a Mac with two screens of different densities, a 1x one beside a 2x
-// one, named by REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET.
+// one, named by ZDESK_PLAYWRIGHT_STANDARD_COMBINED_TARGET.
 import { expect, type Page, test, type Worker } from "@playwright/test";
 
 import {
@@ -42,9 +42,9 @@ import {
 const ADAPTIVE = { passthrough: "apple-adaptive" } as const;
 
 /// The opt-in, and the target name in one, as the other live specs have it.
-const STANDARD_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_TARGET;
-const RESIZE_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET;
-const COMBINED_TARGET = process.env.REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET;
+const STANDARD_TARGET = process.env.ZDESK_PLAYWRIGHT_STANDARD_TARGET;
+const RESIZE_TARGET = process.env.ZDESK_PLAYWRIGHT_STANDARD_RESIZE_TARGET;
+const COMBINED_TARGET = process.env.ZDESK_PLAYWRIGHT_STANDARD_COMBINED_TARGET;
 /// The id the Mac's combined view is named by on the wire, which a session of
 /// one screen at a time never lists.
 const COMBINED = 0xffffffff;
@@ -273,7 +273,7 @@ const rects = (seen: Session): Rect[] => seen.batches.flatMap((b) => b.rects);
 test.describe("a Standard Mac whose Adaptive picture is passed", () => {
   test.skip(
     !STANDARD_TARGET,
-    "set REMOTEX_PLAYWRIGHT_STANDARD_TARGET=<target> against a gateway with a live Mac",
+    "set ZDESK_PLAYWRIGHT_STANDARD_TARGET=<target> against a gateway with a live Mac",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
@@ -473,7 +473,7 @@ test.describe("a Standard Mac whose Adaptive picture is passed", () => {
 test.describe("a Standard Mac of two screens shown one at a time", () => {
   test.skip(
     !COMBINED_TARGET,
-    "set REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET=<target> against a gateway with a live Mac of a 1x and a 2x screen",
+    "set ZDESK_PLAYWRIGHT_STANDARD_COMBINED_TARGET=<target> against a gateway with a live Mac of a 1x and a 2x screen",
   );
 
   test.afterEach(async ({ page }) => {
@@ -544,7 +544,7 @@ test.describe("a Standard Mac of two screens shown one at a time", () => {
 test.describe("a Mac's virtual display whose Adaptive picture is passed", () => {
   test.skip(
     !RESIZE_TARGET,
-    "set REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET=<target> against a gateway with a live Mac on a virtual display",
+    "set ZDESK_PLAYWRIGHT_STANDARD_RESIZE_TARGET=<target> against a gateway with a live Mac on a virtual display",
   );
 
   test.afterEach(async ({ page }) => {

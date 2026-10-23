@@ -7,7 +7,7 @@
 # line matching `^version = "…"` out of this manifest to stamp the login screen,
 # so the package's `version` must stay the first such line.
 #
-# `crates/remotex-rdp-graphics` is the graphics half of the RDP client — the codecs,
+# `crates/zdesk-rdp-graphics` is the graphics half of the RDP client — the codecs,
 # the graphics pipeline's compositor and the framebuffer — as a crate of its own,
 # because the page runs it too: frontend/wasm/egfx is the WebAssembly binding around
 # it. It is a default member beside the gateway, so a plain `cargo clippy` and
@@ -17,13 +17,13 @@
 # Mac's Adaptive picture, which shares no crate with the gateway.
 [workspace]
 resolver = "3"
-members = ["crates/remotex-rdp-graphics"]
-default-members = [".", "crates/remotex-rdp-graphics"]
+members = ["crates/zdesk-rdp-graphics"]
+default-members = [".", "crates/zdesk-rdp-graphics"]
 exclude = ["frontend/wasm/egfx", "frontend/wasm/apple-adaptive"]
 
 [package]
-name = "remotex"
-version = "0.0.455"
+name = "zdesk"
+version = "0.0.456"
 license = "MIT"
 edition = "2024"
 
@@ -89,7 +89,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # kernels at run time, and the baseline build runs on any x86-64 and on arm64.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
 # The tiles of a round are coded on every core (src/tiles.rs). Already in the tree
-# through crates/remotex-rdp-graphics, so this costs no new dependency.
+# through crates/zdesk-rdp-graphics, so this costs no new dependency.
 rayon = "1"
 # Remote audio: resample redirected PCM and encode bare Opus packets, as wlshare
 # codes its own: sound-opus, the one crate that codes a desktop's sound as Opus
@@ -182,11 +182,11 @@ socket2 = { version = "0.6", features = ["all"] }
 # Server-side RDP engine (see docs/architecture.md): the gateway's own headless
 # client in src/rdp_client/, protocol and all — every PDU is encoded and decoded in
 # src/rdp_client/proto/ against [MS-RDPBCGR], so nothing below is an RDP library.
-# What the host draws with is decoded by crates/remotex-rdp-graphics, the client's
+# What the host draws with is decoded by crates/zdesk-rdp-graphics, the client's
 # graphics, which the page runs as well.
 # Pure Rust apart from `ring` and zlib, so the build needs no cmake, pkg-config,
 # OpenSSL or libclang.
-remotex-rdp-graphics = { path = "crates/remotex-rdp-graphics" }
+zdesk-rdp-graphics = { path = "crates/zdesk-rdp-graphics" }
 #
 # TLS is rustls with `ring`, and rustls needs that provider installed as the process
 # default before the first handshake: `tokio-rustls` is a direct dependency both for
@@ -226,7 +226,7 @@ hmac = "0.13"
 # `eax` and `sha2` above are; no `password-hash`, since nothing here is a PHC string.
 aes-gcm = "0.11"
 argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
-# `remotex password` writes those entries into the file somebody edits, keeping its
+# `zdesk password` writes those entries into the file somebody edits, keeping its
 # comments and layout, which a round trip through `toml` would not.
 toml_edit = "0.25"
 # The OS credential store the TUI keeps its master password in (src/keychain.rs),

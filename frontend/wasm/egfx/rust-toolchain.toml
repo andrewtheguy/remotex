@@ -1,7 +1,7 @@
 # The module's threads need the standard library built for shared memory, which
 # only a nightly Cargo does (`build-std`, in .cargo/config.toml). The pin is this
 # crate's alone: the gateway, and the graphics crate as the gateway builds it, stay
-# on stable, so crates/remotex-rdp-graphics uses nothing a stable compiler refuses.
+# on stable, so crates/zdesk-rdp-graphics uses nothing a stable compiler refuses.
 # A dated nightly, because how the compiler takes `atomics` is changing
 # (rust-lang/rust#162235). rustup installs it from this file on the first build.
 [toolchain]

@@ -1,7 +1,7 @@
 //! The browser client, compiled into the gateway.
 //!
 //! `build.rs` writes the bundle to Cargo's `OUT_DIR` and every file in it becomes
-//! bytes in the binary, so `remotex` is one file wherever it runs: no web root to
+//! bytes in the binary, so `zdesk` is one file wherever it runs: no web root to
 //! install beside it, no `[server]` key to point at one, and no launcher argument
 //! for a managed worker. The build refuses to continue without the bundle, which
 //! is where "the web UI will 404" used to be a warning at start-up.

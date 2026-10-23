@@ -19,7 +19,7 @@
 // not have.
 //
 // The config spelling is kept in the label rather than translated away. It is what
-// `subtype` is set to in `remotex.toml`, so somebody reading this can find the line
+// `subtype` is set to in `zdesk.toml`, so somebody reading this can find the line
 // that produced it, and a subtype this build has never heard of still names itself
 // instead of vanishing.
 export function connectionLabel(

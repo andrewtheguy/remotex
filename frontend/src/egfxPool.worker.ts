@@ -6,7 +6,7 @@
 // why it could not be. Taking the seat returns only once the pool is stopped
 // (`stopEgfx`), when it says so, to be ended: a worker ended while its thread
 // waits in the module is one iOS never frees.
-import init, { runPoolThread } from "../wasm/egfx/pkg/remotex_egfx.js";
+import init, { runPoolThread } from "../wasm/egfx/pkg/zdesk_egfx.js";
 
 /** What the paint worker's instance is, for this one to be of the same. */
 export interface PoolSeat {

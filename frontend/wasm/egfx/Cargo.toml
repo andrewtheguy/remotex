@@ -1,6 +1,6 @@
 # The page's compositor for an RDP host's graphics pipeline, passed through: the
 # gateway's own, compiled to WebAssembly. The compositor
-# is crates/remotex-rdp-graphics, which the gateway is built with too, so there is
+# is crates/zdesk-rdp-graphics, which the gateway is built with too, so there is
 # one, and this crate is the binding around it.
 #
 # Built by `bun run build:wasm` in frontend/, into pkg/. Not a member of the
@@ -9,7 +9,7 @@
 # here. The toolchain is a nightly (rust-toolchain.toml), for the threads the
 # module decodes on (.cargo/config.toml).
 [package]
-name = "remotex-egfx"
+name = "zdesk-egfx"
 version = "0.0.0"
 license = "MIT"
 edition = "2024"
@@ -19,7 +19,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-remotex-rdp-graphics = { path = "../../../crates/remotex-rdp-graphics" }
+zdesk-rdp-graphics = { path = "../../../crates/zdesk-rdp-graphics" }
 rayon = "1"
 wasm-bindgen = "0.2"
 

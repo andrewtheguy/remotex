@@ -5,7 +5,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 
-const PREBUILT_FRONTEND: &str = "REMOTEX_PREBUILT_FRONTEND";
+const PREBUILT_FRONTEND: &str = "ZDESK_PREBUILT_FRONTEND";
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed={PREBUILT_FRONTEND}");
@@ -66,8 +66,8 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "frontend/wasm/egfx/.cargo/config.toml",
         "frontend/wasm/egfx/rust-toolchain.toml",
         "frontend/wasm/egfx/src",
-        "crates/remotex-rdp-graphics/Cargo.toml",
-        "crates/remotex-rdp-graphics/src",
+        "crates/zdesk-rdp-graphics/Cargo.toml",
+        "crates/zdesk-rdp-graphics/src",
         // The page's decoder for a Mac's Adaptive picture, a module of its own
         // (frontend/wasm/apple-adaptive), named file by file for the same
         // reason.
@@ -82,7 +82,7 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
 
     let frontend_dir = root.join("frontend");
     let mut bun = Command::new("bun");
-    bun.args(["run", "build"]).current_dir(&frontend_dir).env("REMOTEX_FRONTEND_OUT_DIR", output);
+    bun.args(["run", "build"]).current_dir(&frontend_dir).env("ZDESK_FRONTEND_OUT_DIR", output);
     // The frontend's build runs Cargo for its WebAssembly modules, and that Cargo
     // must not take this one's for its own: the flags and wrappers this build was
     // given are for the gateway's target — under `cargo clippy` the wrapper *is*
