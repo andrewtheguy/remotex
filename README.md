@@ -1,7 +1,7 @@
-# zdesk
+# zDesk
 
 Remote desktop in a browser, for the remote desktop server each platform
-already has. zdesk is a small gateway you run next to your machines. It
+already has. zDesk is a small gateway you run next to your machines. It
 connects to:
 
 - **Windows 10 and 11's own Remote Desktop**, over RDP with its modern graphics
@@ -18,7 +18,7 @@ with a browser, on Windows, macOS, Linux, iOS or Android, reaches every one of
 them with no client to install either.
 
 ```text
-browser ── HTTPS or localhost ── zdesk ── RDP / VNC ── your desktops
+browser ── HTTPS or localhost ── zDesk ── RDP / VNC ── your desktops
 ```
 
 `zdesk serve` is single-user: one login, a list of your targets, and one
@@ -27,7 +27,7 @@ a local control plane that runs several independent gateway instances side by
 side.
 
 > [!WARNING]
-> **No backward compatibility.** zdesk is still settling its
+> **No backward compatibility.** zDesk is still settling its
 > [direction](docs/architecture.md#direction), and a release may change or
 > remove a configuration key, the WebSocket protocol or a feature, with nothing
 > that reads the old form. Check [`zdesk.example.toml`](zdesk.example.toml) against your config
@@ -110,7 +110,7 @@ https://github.com/user-attachments/assets/1b5dfc6f-8510-490b-bd88-d4c52c48b0a5
 
 ## Supported servers
 
-zdesk is built around the remote desktop servers native to each platform:
+zDesk is built around the remote desktop servers native to each platform:
 Windows' own Remote Desktop, macOS's built-in Screen Sharing, and on Linux
 [wlshare](https://github.com/andrewtheguy/wlshare), our own. Windows and macOS
 come first: they are what most people connect to, so features are tested and
@@ -218,13 +218,13 @@ docker run -d --name zdesk -p 52380:52380 \
   ghcr.io/andrewtheguy/zdesk:latest
 ```
 
-[Installing zdesk](docs/install.md) covers every platform, upgrades and
+[Installing zDesk](docs/install.md) covers every platform, upgrades and
 removal.
 
 ## Documentation
 
-- [Using zdesk](docs/guide.md): the browser client, starting a session, setting up Windows, Mac, wlshare and VNC targets, `zdesk tui`
-- [Installing zdesk](docs/install.md): packages, first configuration, upgrade, removal
+- [Using zDesk](docs/guide.md): the browser client, starting a session, setting up Windows, Mac, wlshare and VNC targets, `zdesk tui`
+- [Installing zDesk](docs/install.md): packages, first configuration, upgrade, removal
 - [`zdesk.example.toml`](zdesk.example.toml): every configuration key, annotated
 - [Known issues](docs/known-issues.md): faults worth recognising rather than re-investigating
 - [Roadmap](docs/roadmap.md): what is planned, and what is not
@@ -265,4 +265,4 @@ and the headless browser tests are described in
 
 ## Licence
 
-zdesk is under the MIT licence in [`LICENSE`](LICENSE).
+zDesk is under the MIT licence in [`LICENSE`](LICENSE).

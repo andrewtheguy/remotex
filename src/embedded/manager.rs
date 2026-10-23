@@ -51,7 +51,7 @@ pub const INSTANCE_TEMPLATE: &str = r#"# A zdesk local instance.
 # token. Only [branding] and [[targets]] belong here.
 
 # [branding]
-# text = "zdesk"
+# text = "zDesk"
 # logo = "/path/to/logo.png"
 
 # A target names its password; [passwords] keeps it encrypted under the
@@ -671,7 +671,7 @@ fn render(
         &mut frame,
         0,
         width,
-        &format!("zdesk {VERSION} local control plane"),
+        &format!("zDesk {VERSION} local control plane"),
         Some(Color::Cyan),
         true,
     )?;
@@ -1625,21 +1625,21 @@ async fn route_connection(
     }
 
     let Some(name) = host.strip_suffix(&format!(".{MASTER_HOST}")) else {
-        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown zdesk host\n", &[]).await?;
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown zDesk host\n", &[]).await?;
         return Ok(());
     };
     if valid_instance_name(name).is_err() {
-        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown zdesk instance\n", &[]).await?;
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown zDesk instance\n", &[]).await?;
         return Ok(());
     }
     let published = routes.inner.read().await.get(name).cloned();
     let Some(published) = published else {
-        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown zdesk instance\n", &[]).await?;
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown zDesk instance\n", &[]).await?;
         return Ok(());
     };
     let Some(target) = published.target else {
         let body = format!(
-            "instance {name} is {}; start it from the zdesk TUI\n",
+            "instance {name} is {}; start it from the zDesk TUI\n",
             published.status.label()
         );
         write_response(&mut client, "503 Service Unavailable", "text/plain; charset=utf-8", &body, &[]).await?;
@@ -1822,7 +1822,7 @@ fn landing_page(port: u16, instances: &BTreeMap<String, PublishedInstance>) -> S
         rows.push_str("<li>No instances. Press <kbd>n</kbd> in the TUI to create one.</li>");
     }
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"2\"><meta name=\"viewport\" content=\"width=device-width\"><title>zdesk instances</title><style>body{{font:16px system-ui;max-width:720px;margin:4rem auto;padding:0 1rem;background:#101014;color:#eee}}a{{color:#85b7ff}}span{{color:#999;margin-left:.5rem}}li{{margin:.8rem 0}}</style></head><body><h1>zdesk instances</h1><p>Start and stop gateways in the terminal control plane.</p><ul>{rows}</ul></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"2\"><meta name=\"viewport\" content=\"width=device-width\"><title>zDesk instances</title><style>body{{font:16px system-ui;max-width:720px;margin:4rem auto;padding:0 1rem;background:#101014;color:#eee}}a{{color:#85b7ff}}span{{color:#999;margin-left:.5rem}}li{{margin:.8rem 0}}</style></head><body><h1>zDesk instances</h1><p>Start and stop gateways in the terminal control plane.</p><ul>{rows}</ul></body></html>"
     )
 }
 

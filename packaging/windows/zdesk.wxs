@@ -23,7 +23,7 @@
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-  <Package Name="zdesk" Manufacturer="andrewtheguy" Version="$(var.Version)"
+  <Package Name="zDesk" Manufacturer="andrewtheguy" Version="$(var.Version)"
            UpgradeCode="ba40aaaf-cf03-4113-a1fc-6817e03b1439" Scope="perMachine">
     <SummaryInformation Description="Single-user browser remote desktop gateway" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of zdesk is already installed." />

@@ -39,7 +39,7 @@ C:\Program Files\zdesk\share\doc\zdesk\zdesk.example.toml
 C:\Program Files\zdesk\share\doc\zdesk\LICENSE
 ```
 
-Every artifact, container images included, carries zdesk's MIT `LICENSE`.
+Every artifact, container images included, carries zDesk's MIT `LICENSE`.
 
 There is no package wrapper, version directory, active-version symlink, or
 package-managed rollback. The package manager replaces and removes its files.

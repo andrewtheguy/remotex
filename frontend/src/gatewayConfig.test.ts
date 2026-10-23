@@ -44,7 +44,7 @@ test("an unreachable gateway answers with the fallback rather than rejecting", a
 
   const { gatewayConfig } = await import("./gatewayConfig.ts");
   const config = await gatewayConfig();
-  assert.equal(config.branding, "zdesk");
+  assert.equal(config.branding, "zDesk");
   assert.equal(
     config.logo,
     false,

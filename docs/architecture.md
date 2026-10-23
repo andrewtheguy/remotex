@@ -1,9 +1,9 @@
 # Architecture
 
-zdesk is a single-user gateway for RDP and VNC targets, including Macs reached
+zDesk is a single-user gateway for RDP and VNC targets, including Macs reached
 through their built-in Screen Sharing service. A Rust backend owns the remote
 protocol session and exposes one common HTTP/WebSocket interface to the React SPA,
-which is the only client. [Using zdesk](guide.md) is the operator's view of
+which is the only client. [Using zDesk](guide.md) is the operator's view of
 the same system.
 
 ## Data path
@@ -67,7 +67,7 @@ are experimental — see [Camera frames](#camera-frames) and
 
 ## Direction
 
-zdesk is still settling its direction. It has gone through many iterations,
+zDesk is still settling its direction. It has gone through many iterations,
 each replacing the last rather than building on it. The direction it now leans
 toward is a gateway with the browser as its only client, without a native
 client app, reaching the remote desktop server each platform already has:
@@ -90,7 +90,7 @@ area and points here; read the area's section before changing what it covers.
 - Remote credentials remain in the server-side TOML configuration, encrypted
   in its `[passwords]` under the account's master password, and never reach the
   browser. See [Target passwords](#target-passwords).
-- Clients speak only the zdesk protocol and never implement RDP or RFB.
+- Clients speak only the zDesk protocol and never implement RDP or RFB.
 - Protocol engines speak each protocol's baseline to every server, and the
   project prioritizes three: Windows' own Remote Desktop, macOS's built-in Screen
   Sharing and wlshare. Behavior specific to one of them is welcome, and when work
@@ -103,7 +103,7 @@ Screen Sharing in both of its modes, and wlshare on Linux. Windows and macOS
 come first: they are what most people connect to, so features are tested and
 optimized on them first. wlshare follows them, though it integrates the most
 seamlessly of the three, since what RFB lacks is added to it. The table compares
-how each integrates with zdesk and with its host's operating system: how its
+how each integrates with zDesk and with its host's operating system: how its
 displays are chosen and resized, whether it carries sound and the browser's
 camera and microphone, and how its picture reaches the browser.
 
@@ -1200,7 +1200,7 @@ Three controls with similar names therefore remain separate:
 |---|---|---|
 | Standard **Adaptive** / **Full** | Apple's viewer and the picker, in Standard mode only | Which RFB framebuffer encodings the viewer asks for |
 | High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder's target, within its fixed 20–60 Mbit/s range, by the gateway's reports |
-| `render_adaptive` | A zdesk target key, on by default, a `wlshare` target's alone | wlshare's VP9 walk; refused on both Apple subtypes, whose picture is never VP9 |
+| `render_adaptive` | A zDesk target key, on by default, a `wlshare` target's alone | wlshare's VP9 walk; refused on both Apple subtypes, whose picture is never VP9 |
 
 - **The browser says whether it can.** The page asks once, at load (`frontend/src/appleMedia.ts`),
   and states the answer as `apple_media=true|false` on every session socket,
@@ -2687,7 +2687,7 @@ output while it streams. See
 An **`ard`** engine carries no sound: Standard has no measured audio path, so
 the target has no audio bridge and offers no sound. Standard mode never
 touches the Mac's sound output either, which keeps playing where the Mac sends it
-— its speakers, or an AirPlay receiver outside zdesk.
+— its speakers, or an AirPlay receiver outside zDesk.
 
 A **`wlshare`** session started with sound has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and wlshare announces that it speaks it
@@ -3376,7 +3376,7 @@ ClientInit byte (the enhanced ServerInit, without the session-select exchange
 `0x40` asks for), and a cleartext `SetEncryption` prelude after which every byte in
 both directions rides inside an AES-128-CBC record layer keyed by a rekey message
 the server delivers, of all places, inside a framebuffer rectangle. Apple's viewer
-asks for that layer only under a preference that is off by default; zdesk always
+asks for that layer only under a preference that is off by default; zDesk always
 does. `src/vnc_record.rs` is that transport, exposed to the rest of the engine as
 an ordinary `AsyncRead` and a per-message sink; `src/vnc_apple.rs` is the message
 and payload layer above it. The Mac reads the pointer mask positionally on this
@@ -3400,7 +3400,7 @@ exception because the browser is sent 30 frames a second. Once connected, the re
 Mac's physical displays are disabled and all of its windows are placed on that
 virtual display. Apple's
 official macOS Screen Sharing client can choose up to two virtual displays, and so
-can a target: Zdesk requests one, or two with `virtual_displays = 2` (alpha). Every descriptor after the opening one enables
+can a target: zDesk requests one, or two with `virtual_displays = 2` (alpha). Every descriptor after the opening one enables
 dynamic resolution, so every fresh session turns it on. In a session started with resize, the window continuously drives the
 virtual display through Apple's dynamic-resolution feature: later viewport reports
 resend the same full descriptor with the requested mode, and the Mac's answering
@@ -3850,7 +3850,7 @@ beyond `max_records` are one transaction, ordered oldest first per target and
 socket. The default retention is one week of minute rows. Recording is best
 effort: the open timeframe is lost if the process stops, and a failed write is
 retried at the next close. Startup refuses a non-SQLite file, a database without
-the zdesk application ID, or an unsupported schema version before modifying it.
+the zDesk application ID, or an unsupported schema version before modifying it.
 
 #### APIs and source selection
 

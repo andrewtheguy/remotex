@@ -25,7 +25,7 @@ pub fn load() -> anyhow::Result<Option<MasterPassword>> {
     match entry()?.get_password() {
         Ok(password) => MasterPassword::new(password)
             .map(Some)
-            .context("the keychain's zdesk master password is empty"),
+            .context("the keychain's zDesk master password is empty"),
         Err(keyring_core::Error::NoEntry) => Ok(None),
         Err(error) => Err(error).context("cannot read the keychain"),
     }

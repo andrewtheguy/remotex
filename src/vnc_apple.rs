@@ -508,7 +508,7 @@ pub const DISPLAY_HZ: u8 = 30;
 /// follow it at [`MM_PER_PIXEL`], as native's serializer fills them: the Mac
 /// refuses to create a display whose physical or maximum size is zero. Each
 /// descriptor leads with its own length, which is how the Mac steps from one to
-/// the next. The 30 Hz refresh is Zdesk's sole intentional difference from
+/// the next. The 30 Hz refresh is zDesk's sole intentional difference from
 /// native's ordinary 60 Hz request: the browser is sent 30 frames per second and
 /// a 60 Hz virtual display only doubles the Mac's HEVC decoding work.
 pub fn set_display_configuration(modes: &[VirtualMode], dynamic: bool) -> Vec<u8> {
