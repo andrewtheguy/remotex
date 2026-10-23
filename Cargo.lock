@@ -1851,11 +1851,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
-name = "libflac-prebuilt-sys"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libflac-prebuilt?tag=v1.5.0-20261002034056-4ba69e8#4ba69e821e60fca68657abdb3968c21dab01e747"
-
-[[package]]
 name = "libopus-prebuilt-sys"
 version = "0.1.0"
 source = "git+https://github.com/andrewtheguy/libopus-prebuilt?tag=v1.6.1-20260906161304-8dd83e8#8dd83e865b4913df74b66199236346f9bfab2912"
@@ -3261,10 +3256,9 @@ dependencies = [
 
 [[package]]
 name = "sound-flac"
-version = "0.0.4"
-source = "git+https://github.com/andrewtheguy/sound-flac?tag=v0.0.4#94ee467d6b7439ee9ae152b7b864ecb08ebc0a7a"
+version = "0.0.5"
+source = "git+https://github.com/andrewtheguy/sound-flac?tag=v0.0.5#5cb53869630650757ff2fa9088482dfc6d41702d"
 dependencies = [
- "libflac-prebuilt-sys",
  "thiserror",
 ]
 
@@ -4317,7 +4311,7 @@ dependencies = [
 
 [[package]]
 name = "zdesk"
-version = "0.0.459"
+version = "0.0.460"
 dependencies = [
  "aes",
  "aes-gcm",

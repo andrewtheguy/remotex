@@ -23,7 +23,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/apple-adaptive"]
 
 [package]
 name = "zdesk"
-version = "0.0.459"
+version = "0.0.460"
 license = "MIT"
 edition = "2024"
 
@@ -115,13 +115,13 @@ opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libop
 # that is already there. `OpusHead` is still sent, built by sound-opus,
 # because a decoder needs it wherever it arrives from.
 # FLAC, for an RDP session started with its sound lossless, whose PCM is coded
-# lossless here (src/audio.rs). `sound-flac` is the one place libFLAC is spoken
-# to, for wlshare's encoder and for the one here, its own repository pinned at a
-# release tag by both. libFLAC is linked statically, from the prebuilt archive
-# its sys crate downloads, as libopus is, so no package carries or
-# depends on one. wlshare's own sound, FLAC or Opus, is passed as it came and needs
-# neither codec here (src/vnc_audio.rs).
-sound-flac = { git = "https://github.com/andrewtheguy/sound-flac", tag = "v0.0.4" }
+# lossless here (src/audio.rs). `sound-flac` is the one place a desktop's sound
+# is made FLAC, for wlshare's encoder and for the one here, its own repository
+# pinned at a release tag by both: its own encoder in plain Rust, encode only,
+# so nothing of libFLAC is compiled, downloaded or loaded, and a listener
+# decodes with a decoder of its own. wlshare's own sound, FLAC or Opus, is
+# passed as it came and needs neither codec here (src/vnc_audio.rs).
+sound-flac = { git = "https://github.com/andrewtheguy/sound-flac", tag = "v0.0.5" }
 # 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
 # the point: the naive interleaved interpolation blends left into right.
