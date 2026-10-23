@@ -129,7 +129,7 @@ test("a target the window cannot drive keeps one size, on every client", () => {
   const bitmap = { protocol: "rdp" as const, port: 3389 };
   for (const abilities of [ABLE, TABLET, PHONE]) {
     assert.deepEqual(sizes(target(bitmap), abilities), [
-      ["target", "1440×900"],
+      ["target", "1440×900 (default)"],
     ]);
     assert.deepEqual(sizes(target({ ...bitmap, size: SIZED }), abilities), [
       ["target", "1920×1080"],
@@ -171,10 +171,10 @@ test("a desktop browser and a tablet follow, beside a configured size", () => {
 });
 
 test("a phone is offered sizes the desktop keeps, never its window", () => {
-  assert.deepEqual(sizes(RDP, PHONE), [["target", "1440×900"]]);
+  assert.deepEqual(sizes(RDP, PHONE), [["target", "1440×900 (default)"]]);
   assert.deepEqual(sizes({ ...RDP, size: SIZED }, PHONE), [
     ["target", "1920×1080"],
-    ["default", "1440×900"],
+    ["default", "1440×900 (default)"],
   ]);
 });
 
