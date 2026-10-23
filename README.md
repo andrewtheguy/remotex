@@ -87,59 +87,42 @@ https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
 
 ## Features
 
-- **One browser client.** It needs a secure context, with WebCodecs for video
-  streams and sound, and nothing installed: Chrome, Edge or Safari on a desktop,
-  Chrome on Android, and Safari on an iPhone or iPad. Without WebCodecs, the
-  gateway's tiles, a Standard Mac's Adaptive picture and an RDP pipeline without
-  H.264 still work, with no sound.
-  Firefox runs it too, but its native decoders take neither a High Performance
-  Mac's HEVC nor its AAC-ELD, so there the Mac's picture is its H.264, or its
-  HEVC in the page's software decoder, with no sound. For desktop use, install the page as a Chrome or
-  Edge app.
-- **Remote-sized, density-aware display.** RDP with its default graphics
-  pipeline, wlshare and a Mac's virtual display can follow the browser window at
-  its screen density. A Mac's physical displays are shown at the density they
-  report. Standard VNC cannot report density and is shown at 1x.
-- **Two resizable virtual displays on a High Performance Mac (alpha).** Each
-  display has a browser tab of its own, and each tab's window sizes its
-  display. Apple's own viewer on macOS 26 does not offer this: with two virtual
-  displays it reports that dynamic resolution is not available.
+- **One browser client, nothing to install.** Chrome, Edge or Safari on a
+  desktop, Chrome on Android, and Safari on an iPhone or iPad. For desktop use,
+  install the page as an app from Chrome's or Edge's menu, so it opens in a
+  window of its own.
+- **Remote-sized, density-aware display.** The remote desktop follows the
+  browser window at its screen density, so it is sharp on a Retina or HiDPI
+  display and shown at its true size.
+- **Two displays at once (alpha).** On Windows, a High Performance Mac and
+  wlshare, the second display opens in a browser tab of its own, and each tab's
+  window sizes its display. Apple's own viewer on macOS 26 does not offer this:
+  with two virtual displays it reports that dynamic resolution is not available.
 - **The remote's own picture, decoded in the browser, or the gateway's tiles.**
   A Windows host's graphics pipeline is passed for the browser to compose, drawn
   in high quality for a LAN or, in alpha, as H.264 the host fits to the browser
-  link. A High Performance Mac's HEVC or its H.264 is always passed unchanged,
-  and neither adapts to the browser link: a still screen sends little, motion
-  much. The H.264 needs no HEVC decoder in the page, so every build serves a
-  High Performance Mac to any browser. A Standard Mac's own Adaptive picture is
-  passed (beta), decoded in the page, paced by the browser link, whose precision
-  stays the same while a slower link gets fewer updates and later refinement.
-  wlshare's passed VP9 follows the browser link too. Where the gateway codes the
-  picture, as for a plain VNC server or a Standard Mac's Full quality, lossless
-  zlib inflated here, it sends 64×64 tiles, exact as PNG where they hold few
-  colours and as JPEG where they move, sent again exactly once still, as fast as
-  the browser paints them, which settle to lossless.
-- **Remote sound in the browser, as adaptive Opus or lossless FLAC.** An RDP
-  or wlshare session plays the remote's sound here, as Opus at a bitrate that
-  follows the browser link or as FLAC, lossless for a LAN, which Safari's
-  decoder does not play and Safari is not offered. A High Performance
-  Mac always sends its AAC-ELD sound. Standard Screen Sharing and plain VNC
-  carry none.
-- **Clipboard text in both directions.** RDP and Apple Screen Sharing carry
-  Unicode. VNC carries Unicode with Extended Clipboard and otherwise falls back
-  to Latin-1. Automatic browser clipboard sync is used where the browser permits
-  it; the Clipboard panel remains available when it does not.
-- **Experimental camera and microphone redirection.** An RDP or wlshare session
-  started with them at the picker can receive the browser's devices for a call
-  or recording.
+  link. A High Performance Mac's HEVC or its H.264 is passed unchanged. A
+  Standard Mac's own Adaptive picture is passed (beta) and paced by the browser
+  link: a slower link gets fewer updates and later refinement at the same
+  precision. wlshare's passed VP9 follows the browser link too. Where the
+  gateway codes the picture, it sends 64×64 tiles, exact as PNG where they hold
+  few colours and as JPEG where they move, sent again exactly once still, as
+  fast as the browser paints them, which settle to lossless.
+- **Remote sound in the browser**, as Opus at a bitrate that follows the browser
+  link, as lossless FLAC for a LAN, or as a High Performance Mac's own AAC-ELD.
+- **Clipboard text in both directions**, synced automatically where the browser
+  permits it and through the Clipboard panel where it does not.
+- **Camera and microphone redirection (experimental).** An RDP or wlshare
+  session started with them at the picker receives the browser's devices for a
+  call or recording.
 - **Reattachment without losing the remote desktop.** The owning browser has a
   60-second grace period to reattach after a reload or dropped socket. A takeover
   or later connection starts a fresh gateway session, but the prioritized
   servers keep their desktop running, so reconnecting to the target returns to
   the windows left there.
-- **Mouse and keyboard input, with a touch-screen interface.** An installed
-  Chrome or Edge app receives the key chords a tab reserves. On a phone or
-  tablet, fingers act as a trackpad with pinch zoom and a soft keyboard; they
-  are not sent to the remote as touchscreen contacts.
+- **Mouse, keyboard and a touch-screen interface.** The page installed as a
+  Chrome or Edge app receives the key chords a tab keeps for the browser. On a phone or tablet, fingers act
+  as a trackpad with pinch zoom and a soft keyboard.
 
 ## Supported servers
 
@@ -179,6 +162,51 @@ baseline: one framebuffer at 1x, not resized, no sound, tiles from the gateway.
 Another RDP server may happen to work but is not tested against. See
 [Prioritized servers](docs/architecture.md#prioritized-servers) for the
 comparison table, what they share, and what each passes.
+
+## Limitations
+
+What each server and browser does not do, in one place.
+
+| | Windows Remote Desktop | Mac, High Performance | Mac, Standard | wlshare | Other VNC |
+|---|---|---|---|---|---|
+| Resizes to the browser window | ✅ with the graphics pipeline (default) | ✅ | ❌ physical displays at their own size | ✅ headless outputs only | ❌ the server's size |
+| Sharp at HiDPI/Retina density | ✅ | ✅ | ✅ at the density the Mac reports | ✅ | ❌ 1x only |
+| Second display in its own tab | ⚠️ alpha, with the graphics pipeline | ⚠️ alpha | ❌ all displays combined in one tab | ⚠️ alpha, with two outputs | ❌ |
+| Sound | ✅ Opus or FLAC | ✅ AAC-ELD, always | ❌ | ✅ Opus or FLAC | ❌ |
+| Camera and microphone | ⚠️ experimental | ❌ | ❌ | ⚠️ experimental | ❌ |
+| Unicode clipboard | ✅ | ✅ | ✅ | ✅ | ⚠️ with Extended Clipboard, else Latin-1 |
+| Picture paced to the browser link | ✅ | ❌ the Mac's own rate | ✅ | ✅ | ✅ |
+| Picture settles to lossless | ⚠️ only when the host's policy asks | ❌ | ✅ with Full quality | ⚠️ with *Tiles with motion* | ✅ |
+
+| | Chrome, Edge | Safari | Firefox |
+|---|---|---|---|
+| A High Performance Mac's HEVC | ✅ native; on Windows only where the GPU decodes HEVC 4:4:4, else hevc-wasm | ✅ native | ⚠️ hevc-wasm only |
+| A High Performance Mac's sound (AAC-ELD) | ✅ | ✅ except 16.4 to 18, which play no sound at all | ❌ |
+| Lossless FLAC sound | ✅ | ❌ Opus only | ✅ |
+| Key chords the browser keeps for itself (⌘W, ⌘T, ⌘N) | ✅ in an app window or Immersive full screen | ❌ | ❌ |
+
+hevc-wasm is the page's software HEVC decoder, served by a gateway with
+`[hevc_wasm]` set. Where neither it nor the browser decodes the HEVC, the
+picker offers the Mac's H.264.
+
+An app window is the page installed from the browser's menu: in Chrome, ⋮ →
+*Cast, save and share* → *Install page as app*; in Edge, ⋯ → *Apps* → *Install
+this site as an app*. It opens in a window of its own, without tabs or an address
+bar, and receives ⌘W, ⌘T, ⌘N and the like. *Menu → Immersive full screen* in a
+tab does the same and adds Alt+Tab and the Super key.
+
+- **A secure context is required:** HTTPS, or `localhost` directly or through an
+  SSH tunnel. A LAN address over plain HTTP is refused.
+- **WebCodecs carries video streams and sound.** Without it, only the gateway's
+  tiles, a Standard Mac's Adaptive picture and an RDP pipeline without H.264
+  work, with no sound.
+- **A High Performance Mac's picture does not adapt to the browser link:** a
+  still screen sends little, motion much.
+- **One active session per gateway.** A takeover ends it and starts at the
+  picker.
+- **Touch is a trackpad:** fingers are not sent to the remote as touchscreen
+  contacts.
+- **Other RDP servers** may work but are not tested against.
 
 ## Quick start
 
