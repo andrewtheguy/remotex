@@ -69,7 +69,7 @@ https://github.com/user-attachments/assets/cde4e192-340f-47dd-86db-3d2d89049007
 
 - Windows' own Remote Desktop shown at the Mac's Retina density, with the remote's sound playing in the browser.
 
-https://github.com/user-attachments/assets/0f6b272b-d3be-4bb1-8968-16072b382c49
+VIDEO_URL_WINDOWS_RETINA
 
 
 
@@ -77,7 +77,7 @@ https://github.com/user-attachments/assets/0f6b272b-d3be-4bb1-8968-16072b382c49
 
 - wlshare on Sway shown at the Mac's Retina density, with the remote's sound, and the remote desktop resizing to follow the browser into and out of immersive full screen.
 
-https://github.com/user-attachments/assets/494f262a-ddcd-4461-8217-8b248562df44
+VIDEO_URL_LINUX_RETINA
 
 
 
