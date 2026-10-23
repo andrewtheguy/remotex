@@ -10,10 +10,10 @@
 //
 //     cargo run -- serve --config tmp/qa_tiles.toml
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_TILES_TARGET=bitmap \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=… \
+//     ZDESK_PLAYWRIGHT_TILES_TARGET=bitmap \
 //     npx playwright test tiles
 import { expect, type Page, test } from "@playwright/test";
 
@@ -23,7 +23,7 @@ import { leaveSession, logInAndConnectTo } from "./support";
 /// Its presence is the claim that this gateway has a live target whose picture it
 /// codes; without one the spec would be asserting against a picture that never
 /// arrives.
-const TILES_TARGET = process.env.REMOTEX_PLAYWRIGHT_TILES_TARGET;
+const TILES_TARGET = process.env.ZDESK_PLAYWRIGHT_TILES_TARGET;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA: this spec
 /// is the independent check that the gateway and the client agree, and reading the
@@ -272,7 +272,7 @@ function assertTheEnvelopeHolds(seen: Session): void {
 test.describe("a target whose picture the gateway codes", () => {
   test.skip(
     !TILES_TARGET,
-    "set REMOTEX_PLAYWRIGHT_TILES_TARGET=<target> against a gateway with a live plain vnc or egfx = false target",
+    "set ZDESK_PLAYWRIGHT_TILES_TARGET=<target> against a gateway with a live plain vnc or egfx = false target",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.

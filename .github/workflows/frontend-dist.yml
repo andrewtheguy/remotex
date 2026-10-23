@@ -6,7 +6,7 @@ name: Frontend bundle
 # directory pins, and the decoder of a Mac's Adaptive picture
 # (frontend/wasm/apple-adaptive), with stable.
 # The release workflow calls this for the bundle every platform build stages
-# through REMOTEX_PREBUILT_FRONTEND, and a push that touches what the bundle is
+# through ZDESK_PREBUILT_FRONTEND, and a push that touches what the bundle is
 # built from builds it here on its own, so the module's toolchain and its build
 # are tried on a fresh runner before a release is.
 on:
@@ -14,7 +14,7 @@ on:
   push:
     paths:
       - frontend/**
-      - crates/remotex-rdp-graphics/**
+      - crates/zdesk-rdp-graphics/**
       - .github/workflows/frontend-dist.yml
 
 jobs:

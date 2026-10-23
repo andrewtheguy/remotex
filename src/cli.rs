@@ -27,7 +27,7 @@ pub fn features_line() -> String {
 
 #[derive(Parser)]
 #[command(
-    name = "remotex",
+    name = "zdesk",
     version,
     about = "Browser-based RDP client",
     after_help = format!("Features: {}", features_line())
@@ -51,27 +51,27 @@ pub enum Commands {
         /// 127.0.0.1:52380). Either host:port, bracketing an IPv6 literal
         /// ([::1]:52380), or unix:<path> for a socket a local reverse proxy
         /// connects to. A browser needs the host:port form
-        #[arg(short, long, env = "REMOTEX_LISTEN")]
+        #[arg(short, long, env = "ZDESK_LISTEN")]
         listen: Option<String>,
     },
 
     /// Run the local multi-instance control plane. The TUI supervises one gateway
     /// process per instance and serves every instance through one loopback port at
-    /// <instance>.remotex.localhost.
+    /// <instance>.zdesk.localhost.
     #[cfg(feature = "embedded-gateway")]
     Tui {
-        /// Loopback port shared by remotex.localhost and every instance
+        /// Loopback port shared by zdesk.localhost and every instance
         /// subdomain (default: 52380, the same port `serve` listens on — they
         /// are two ways to serve, never two servers)
         #[arg(
             long,
-            env = "REMOTEX_TUI_PORT",
+            env = "ZDESK_TUI_PORT",
             default_value_t = crate::config::DEFAULT_PORT,
             value_parser = clap::value_parser!(u16).range(1..),
         )]
         port: u16,
 
-        /// Directory whose immediate subdirectories are remotex instances
+        /// Directory whose immediate subdirectories are zdesk instances
         #[arg(long)]
         instances_dir: Option<PathBuf>,
     },
@@ -81,7 +81,7 @@ pub enum Commands {
     /// for the TUI that started it.
     ///
     /// Not for interactive use. It serves the one client it was started by, reads
-    /// only <instance-dir>/remotex.toml, and stops when its stdin closes — which
+    /// only <instance-dir>/zdesk.toml, and stops when its stdin closes — which
     /// is how it dies with its manager.
     #[cfg(feature = "embedded-gateway")]
     #[command(hide = true)]
@@ -164,13 +164,13 @@ mod tests {
         assert_eq!(FEATURES.contains(&"embedded-gateway"), cfg!(feature = "embedded-gateway"));
         assert_eq!(
             command.render_version(),
-            format!("remotex {}\n", env!("CARGO_PKG_VERSION"))
+            format!("zdesk {}\n", env!("CARGO_PKG_VERSION"))
         );
     }
 
     #[test]
     fn serve_parses_config() {
-        let cli = Cli::try_parse_from(["remotex", "serve", "-c", "/etc/x.toml"]).unwrap();
+        let cli = Cli::try_parse_from(["zdesk", "serve", "-c", "/etc/x.toml"]).unwrap();
         let Commands::Serve { config, .. } = cli.command else {
             panic!("expected the serve subcommand");
         };
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn serve_config_is_optional() {
-        let cli = Cli::try_parse_from(["remotex", "serve"]).unwrap();
+        let cli = Cli::try_parse_from(["zdesk", "serve"]).unwrap();
         let Commands::Serve { config, listen } = cli.command else {
             panic!("expected the serve subcommand");
         };
@@ -192,8 +192,8 @@ mod tests {
     #[test]
     fn serve_takes_one_listen_address() {
         for argv in [
-            vec!["remotex", "serve", "--listen", "0.0.0.0:8080"],
-            vec!["remotex", "serve", "-l", "0.0.0.0:8080"],
+            vec!["zdesk", "serve", "--listen", "0.0.0.0:8080"],
+            vec!["zdesk", "serve", "-l", "0.0.0.0:8080"],
         ] {
             let cli = Cli::try_parse_from(&argv).unwrap();
             let Commands::Serve { listen, .. } = cli.command else {
@@ -203,7 +203,7 @@ mod tests {
         }
         for gone in ["--host", "--port"] {
             assert!(
-                Cli::try_parse_from(["remotex", "serve", gone, "x"]).is_err(),
+                Cli::try_parse_from(["zdesk", "serve", gone, "x"]).is_err(),
                 "{gone} is half an address: the listen address is one option"
             );
         }
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn serve_rejects_the_removed_target_selector() {
         // Target selection is browser-side now: --target is gone.
-        assert!(Cli::try_parse_from(["remotex", "serve", "--target", "win"]).is_err());
+        assert!(Cli::try_parse_from(["zdesk", "serve", "--target", "win"]).is_err());
     }
 
     /// The managed worker takes the one path only its supervisor knows — the
@@ -221,7 +221,7 @@ mod tests {
     #[cfg(feature = "embedded-gateway")]
     #[test]
     fn serve_embedded_takes_the_one_path_the_launcher_knows() {
-        let cli = Cli::try_parse_from(["remotex", "serve-embedded", "--instance-dir", "/i"])
+        let cli = Cli::try_parse_from(["zdesk", "serve-embedded", "--instance-dir", "/i"])
             .unwrap();
         let Commands::ServeEmbedded { instance_dir } = cli.command else {
             panic!("expected the serve-embedded subcommand");
@@ -229,13 +229,13 @@ mod tests {
         assert_eq!(instance_dir, std::path::Path::new("/i"));
 
         assert!(
-            Cli::try_parse_from(["remotex", "serve-embedded"]).is_err(),
+            Cli::try_parse_from(["zdesk", "serve-embedded"]).is_err(),
             "the instance directory has no default: the launcher names it"
         );
         for rejected in ["--port", "--gateway", "--token", "--web-root"] {
             assert!(
                 Cli::try_parse_from([
-                    "remotex",
+                    "zdesk",
                     "serve-embedded",
                     "--instance-dir",
                     "/i",
@@ -254,13 +254,13 @@ mod tests {
     #[cfg(feature = "embedded-gateway")]
     #[test]
     fn the_tui_port_defaults_and_refuses_an_ephemeral_one() {
-        let cli = Cli::try_parse_from(["remotex", "tui"]).expect("the port has a default");
+        let cli = Cli::try_parse_from(["zdesk", "tui"]).expect("the port has a default");
         let Commands::Tui { port, .. } = cli.command else {
             panic!("expected the tui subcommand");
         };
         assert_eq!(port, crate::config::DEFAULT_PORT);
         assert!(
-            Cli::try_parse_from(["remotex", "tui", "--port", "0"]).is_err(),
+            Cli::try_parse_from(["zdesk", "tui", "--port", "0"]).is_err(),
             "0 is the kernel's choice, and nobody can be told it"
         );
     }
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn tui_takes_its_port_and_instances_dir() {
         let cli = Cli::try_parse_from([
-            "remotex",
+            "zdesk",
             "tui",
             "--port",
             "52380",
@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(port, 52380);
         assert_eq!(instances_dir.as_deref(), Some(std::path::Path::new("/instances")));
         assert!(
-            Cli::try_parse_from(["remotex", "tui", "--web-root", "/web"]).is_err(),
+            Cli::try_parse_from(["zdesk", "tui", "--web-root", "/web"]).is_err(),
             "the SPA is in the binary; there is no web root to name"
         );
     }
@@ -295,7 +295,7 @@ mod tests {
     #[cfg(feature = "embedded-gateway")]
     #[test]
     fn check_config_reads_stdin_by_default_and_takes_an_audience() {
-        let cli = Cli::try_parse_from(["remotex", "check-config"]).unwrap();
+        let cli = Cli::try_parse_from(["zdesk", "check-config"]).unwrap();
         let Commands::CheckConfig { config, embedded } = cli.command else {
             panic!("expected the check-config subcommand");
         };
@@ -303,25 +303,25 @@ mod tests {
         assert!(!embedded, "a served gateway's rules unless asked otherwise");
 
         let cli =
-            Cli::try_parse_from(["remotex", "check-config", "--embedded", "-c", "/i/remotex.toml"])
+            Cli::try_parse_from(["zdesk", "check-config", "--embedded", "-c", "/i/zdesk.toml"])
                 .unwrap();
         let Commands::CheckConfig { config, embedded } = cli.command else {
             panic!("expected the check-config subcommand");
         };
-        assert_eq!(config.as_deref(), Some(std::path::Path::new("/i/remotex.toml")));
+        assert_eq!(config.as_deref(), Some(std::path::Path::new("/i/zdesk.toml")));
         assert!(embedded);
     }
 
     #[cfg(not(feature = "embedded-gateway"))]
     #[test]
     fn embedded_cli_is_absent_without_the_feature() {
-        assert!(Cli::try_parse_from(["remotex", "serve-embedded"]).is_err());
-        assert!(Cli::try_parse_from(["remotex", "tui", "--port", "52380"]).is_err());
+        assert!(Cli::try_parse_from(["zdesk", "serve-embedded"]).is_err());
+        assert!(Cli::try_parse_from(["zdesk", "tui", "--port", "52380"]).is_err());
         assert!(
-            Cli::try_parse_from(["remotex", "check-config", "--embedded"]).is_err()
+            Cli::try_parse_from(["zdesk", "check-config", "--embedded"]).is_err()
         );
 
-        let cli = Cli::try_parse_from(["remotex", "check-config"]).unwrap();
+        let cli = Cli::try_parse_from(["zdesk", "check-config"]).unwrap();
         let Commands::CheckConfig { config } = cli.command else {
             panic!("expected the check-config subcommand");
         };
@@ -330,14 +330,14 @@ mod tests {
 
     #[test]
     fn gen_passwd_takes_a_username() {
-        let cli = Cli::try_parse_from(["remotex", "gen-passwd", "andrew"]).unwrap();
+        let cli = Cli::try_parse_from(["zdesk", "gen-passwd", "andrew"]).unwrap();
         let Commands::GenPasswd { username } = cli.command else {
             panic!("expected the gen-passwd subcommand");
         };
         assert_eq!(username, "andrew");
 
         // The username is required.
-        assert!(Cli::try_parse_from(["remotex", "gen-passwd"]).is_err());
+        assert!(Cli::try_parse_from(["zdesk", "gen-passwd"]).is_err());
     }
 
 }

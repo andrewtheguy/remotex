@@ -1,10 +1,10 @@
 //! The TUI's master password in the account's credential store.
 //!
-//! One entry per OS account — service `remotex`, account `master` — opens every
+//! One entry per OS account — service `zdesk`, account `master` — opens every
 //! local instance's config (see [`crate::vault`]): the Keychain on macOS,
 //! Credential Manager on Windows, the Secret Service (GNOME Keyring, KWallet) on
 //! Linux. Only the TUI reads it, so it is part of `embedded-gateway`: a served
-//! gateway and `remotex password` take theirs from a file or the terminal.
+//! gateway and `zdesk password` take theirs from a file or the terminal.
 //!
 //! A store can be there and still not answer: Credential Manager refuses a network
 //! logon (ssh) with `ERROR_NO_SUCH_LOGON_SESSION`, a locked macOS keychain refuses
@@ -16,7 +16,7 @@ use anyhow::Context as _;
 
 use crate::vault::MasterPassword;
 
-const SERVICE: &str = "remotex";
+const SERVICE: &str = "zdesk";
 const ACCOUNT: &str = "master";
 
 /// The master password the store keeps: `Ok(None)` when it keeps none, an error
@@ -25,7 +25,7 @@ pub fn load() -> anyhow::Result<Option<MasterPassword>> {
     match entry()?.get_password() {
         Ok(password) => MasterPassword::new(password)
             .map(Some)
-            .context("the keychain's remotex master password is empty"),
+            .context("the keychain's zdesk master password is empty"),
         Err(keyring_core::Error::NoEntry) => Ok(None),
         Err(error) => Err(error).context("cannot read the keychain"),
     }

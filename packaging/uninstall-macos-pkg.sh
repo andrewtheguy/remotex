@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # Remove the macOS gateway package installed with
-# `installer -pkg remotex-macos-arm64.pkg -target /`.
+# `installer -pkg zdesk-macos-arm64.pkg -target /`.
 #
 # The removal is driven by the installed receipt, not by a hardcoded file list:
 # `pkgutil --files` names exactly what this package put on disk, so an older
 # receipt removes that version's files. Directories are removed only when they
-# are the package's own (a `remotex` component in the path) and end up empty,
+# are the package's own (a `zdesk` component in the path) and end up empty,
 # which leaves the shared prefixes pkgbuild also records — /usr/local/bin,
 # /usr/local/share, /usr/local/share/doc — alone.
 #
 # The live config is not package-owned and is never touched. Delete
-# /usr/local/etc/remotex separately to remove the stored credentials.
+# /usr/local/etc/zdesk separately to remove the stored credentials.
 #
 #   --dry-run   print what would be removed, change nothing
 #
 # Run with sudo; the payload lives under a root-owned prefix.
 set -euo pipefail
 
-pkgid=com.andrewtheguy.remotex.gateway
-config=/usr/local/etc/remotex/remotex.toml
+pkgid=com.andrewtheguy.zdesk.gateway
+config=/usr/local/etc/zdesk/zdesk.toml
 dry_run=false
 
 case "${1:-}" in
@@ -94,7 +94,7 @@ done < <(pkgutil --only-files --files "$pkgid")
 while IFS= read -r relative; do
   [ -n "$relative" ] || continue
   under_prefix "$relative" || continue
-  case "/$relative/" in */remotex/*) ;; *) continue ;; esac
+  case "/$relative/" in */zdesk/*) ;; *) continue ;; esac
   path="$root/$relative"
   [ -d "$path" ] || continue
   if [ "$dry_run" = true ]; then

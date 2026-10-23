@@ -3,7 +3,7 @@
 //! In a session started with the pipeline passed the gateway passes its commands
 //! to the browser instead of composing them and encoding the picture. This is what
 //! composes them there: the gateway's own compositor and codecs, which are the
-//! `remotex-rdp-graphics` crate both are built with, behind the few calls the paint
+//! `zdesk-rdp-graphics` crate both are built with, behind the few calls the paint
 //! worker makes (`frontend/src/egfxCompositor.ts`).
 //!
 //! The framebuffer stays in this module's memory, which is shared with the threads
@@ -23,7 +23,7 @@
 //! module whose pool was never started composes on the thread that calls it.
 //!
 //! The pool is the module's own, named to the graphics crate
-//! ([`remotex_rdp_graphics::pool`]), not rayon's global one, so that it can be
+//! ([`zdesk_rdp_graphics::pool`]), not rayon's global one, so that it can be
 //! stopped ([`stop_pool`]): a thread waiting for work waits inside this module,
 //! and iOS frees nothing of a worker ended there — not its instance, not the
 //! memory it shares — until its tab is closed. Stopped, each thread returns from
@@ -34,8 +34,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 
 use rayon::{ThreadBuilder, ThreadPoolBuilder};
-use remotex_rdp_graphics::avc::{self, Picture, Plane, Samples, Scanned, Window};
-use remotex_rdp_graphics::{Compositor, GpuArea, Rect};
+use zdesk_rdp_graphics::avc::{self, Picture, Plane, Samples, Scanned, Window};
+use zdesk_rdp_graphics::{Compositor, GpuArea, Rect};
 use wasm_bindgen::prelude::*;
 
 /// The pool's threads on their way from the pool that makes them to the workers
@@ -82,7 +82,7 @@ pub fn start_pool(threads: usize) -> Result<(), JsError> {
         .spawn_handler(move |thread| offer.send(thread).map_err(|_| io::Error::other("the pool's seats are gone")))
         .build()
         .map_err(|e| JsError::new(&e.to_string()))?;
-    remotex_rdp_graphics::pool::set(Some(pool));
+    zdesk_rdp_graphics::pool::set(Some(pool));
     Ok(())
 }
 
@@ -90,7 +90,7 @@ pub fn start_pool(threads: usize) -> Result<(), JsError> {
 /// [`run_pool_thread`]. Compositors compose on the calling thread after.
 #[wasm_bindgen(js_name = stopPool)]
 pub fn stop_pool() {
-    remotex_rdp_graphics::pool::set(None);
+    zdesk_rdp_graphics::pool::set(None);
 }
 
 /// One pipeline's compositor. Made where a pipeline starts (`graphicsStart`) and

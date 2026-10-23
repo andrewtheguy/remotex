@@ -8,17 +8,17 @@ import { execFileSync } from "node:child_process";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 export const BASE_URL =
-  process.env.REMOTEX_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:52380/";
-export const TARGET = process.env.REMOTEX_PLAYWRIGHT_TARGET ?? "mac";
-const USERNAME = process.env.REMOTEX_PLAYWRIGHT_USERNAME;
-const PASSWORD = process.env.REMOTEX_PLAYWRIGHT_PASSWORD;
-const MAC_SSH = process.env.REMOTEX_PLAYWRIGHT_MAC_SSH;
+  process.env.ZDESK_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:52380/";
+export const TARGET = process.env.ZDESK_PLAYWRIGHT_TARGET ?? "mac";
+const USERNAME = process.env.ZDESK_PLAYWRIGHT_USERNAME;
+const PASSWORD = process.env.ZDESK_PLAYWRIGHT_PASSWORD;
+const MAC_SSH = process.env.ZDESK_PLAYWRIGHT_MAC_SSH;
 const SSH_TIMEOUT_MS = 10_000;
 const LEAVE_TIMEOUT_MS = 10_000;
 const REQUIRED_ENV: Record<string, string | undefined> = {
-  REMOTEX_PLAYWRIGHT_USERNAME: USERNAME,
-  REMOTEX_PLAYWRIGHT_PASSWORD: PASSWORD,
-  REMOTEX_PLAYWRIGHT_MAC_SSH: MAC_SSH,
+  ZDESK_PLAYWRIGHT_USERNAME: USERNAME,
+  ZDESK_PLAYWRIGHT_PASSWORD: PASSWORD,
+  ZDESK_PLAYWRIGHT_MAC_SSH: MAC_SSH,
 };
 export const MISSING_ENV = Object.entries(REQUIRED_ENV)
   .filter(([, value]) => !value)
@@ -35,9 +35,9 @@ export const MISSING_ENV = Object.entries(REQUIRED_ENV)
 /// browser-side equivalent of `#[ignore]` on the Rust e2e tests that need a
 /// container.
 ///
-///     REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING=... npx playwright test
+///     ZDESK_PLAYWRIGHT_MAC_SCREEN_SHARING=... npx playwright test
 export const SCREEN_SHARING_ENDPOINT =
-  process.env.REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING;
+  process.env.ZDESK_PLAYWRIGHT_MAC_SCREEN_SHARING;
 
 /// Whether something is listening at [`SCREEN_SHARING_ENDPOINT`].
 ///
@@ -76,7 +76,7 @@ export function skipUnlessLiveMac(): void {
   if (!SCREEN_SHARING_ENDPOINT) {
     test.skip(
       true,
-      "set REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING=host:port to run the live-Mac specs",
+      "set ZDESK_PLAYWRIGHT_MAC_SCREEN_SHARING=host:port to run the live-Mac specs",
     );
     return;
   }
@@ -106,7 +106,7 @@ export function setRemoteClipboard(text: string): void {
   execFileSync(
     "ssh",
     [
-      required("REMOTEX_PLAYWRIGHT_MAC_SSH", MAC_SSH),
+      required("ZDESK_PLAYWRIGHT_MAC_SSH", MAC_SSH),
       `printf '%s' '${encoded}' | base64 --decode | pbcopy`,
     ],
     { timeout: SSH_TIMEOUT_MS },
@@ -126,7 +126,7 @@ export function setRemoteClipboardBytes(bytes: number): void {
   execFileSync(
     "ssh",
     [
-      required("REMOTEX_PLAYWRIGHT_MAC_SSH", MAC_SSH),
+      required("ZDESK_PLAYWRIGHT_MAC_SSH", MAC_SSH),
       `head -c ${bytes} /dev/zero | tr '\\0' 'x' | pbcopy`,
     ],
     { timeout: SSH_TIMEOUT_MS },
@@ -136,7 +136,7 @@ export function setRemoteClipboardBytes(bytes: number): void {
 export function readRemoteClipboard(): string {
   return execFileSync(
     "ssh",
-    [required("REMOTEX_PLAYWRIGHT_MAC_SSH", MAC_SSH), "pbpaste"],
+    [required("ZDESK_PLAYWRIGHT_MAC_SSH", MAC_SSH), "pbpaste"],
     { encoding: "utf8", timeout: SSH_TIMEOUT_MS },
   ).replace(/\r?\n$/, "");
 }
@@ -380,10 +380,10 @@ export async function logIn(page: Page, search = ""): Promise<void> {
   await expect(page.getByText(/^v\d+\.\d+\.\d+$/)).toBeVisible();
   await page
     .getByLabel("Username")
-    .fill(required("REMOTEX_PLAYWRIGHT_USERNAME", USERNAME));
+    .fill(required("ZDESK_PLAYWRIGHT_USERNAME", USERNAME));
   await page
     .getByLabel("Password")
-    .fill(required("REMOTEX_PLAYWRIGHT_PASSWORD", PASSWORD));
+    .fill(required("ZDESK_PLAYWRIGHT_PASSWORD", PASSWORD));
   await page.getByRole("button", { name: "Log in" }).click();
 
   // A third landing, and the one that used to end a run before it started: the slot

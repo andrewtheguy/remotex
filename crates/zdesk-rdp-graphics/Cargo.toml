@@ -11,7 +11,7 @@
 # A default member of the workspace, so a plain `cargo clippy` and `cargo test`
 # check it beside the gateway.
 [package]
-name = "remotex-rdp-graphics"
+name = "zdesk-rdp-graphics"
 version = "0.0.0"
 license = "MIT"
 edition = "2024"

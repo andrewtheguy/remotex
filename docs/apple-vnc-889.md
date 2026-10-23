@@ -1,12 +1,12 @@
 # Apple RFB 003.889, as measured
 
-How a Mac's Screen Sharing behaves on the wire, as far as remotex depends on it.
+How a Mac's Screen Sharing behaves on the wire, as far as zdesk depends on it.
 None of this is documented by Apple. It was measured against macOS 26.5–26.6
 Apple Virtualization guests between July and September 2026, and read from the
 binaries those guests ship where the wire could not show a server's rules. A
 macOS update is free to invalidate any of it.
 
-This document states behaviour and the rules remotex follows because of it. The
+This document states behaviour and the rules zdesk follows because of it. The
 evidence behind it is archived outside the repository, in
 `apple-screensharing-audit-2026-09-28`:
 - function-level traces of Apple's viewer, `screensharingd` and
@@ -37,7 +37,7 @@ Mac's HEVC, or as the H.264 it sends where it is asked for that.
 picture and sound — the Mac's own, none — and takes the display from the other: the same
 `SetDisplayConfiguration` at setup and on every resize, with no media stream
 offered. Apple's viewer never offers a virtual display without the stream, so
-nothing but remotex exercises the Mac's side of this combination. It was tested
+nothing but zdesk exercises the Mac's side of this combination. It was tested
 against macOS 26 only, and a macOS update is free to break it while leaving both
 official modes alone.
 
@@ -47,7 +47,7 @@ official modes alone.
 |---|---|
 | Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for, or two. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
-| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
+| Corrected | Several published reverse-engineered descriptions are wrong on points zdesk depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density Combined Display view is composed at its points as Apple's viewer composes it: by the gateway for a 1x browser, by the browser for a 2x one. |
 | Picture and sound | `ard` inflates the Mac's Full quality and sends it as the gateway's tiles, or passes the Mac's own Adaptive picture where that was chosen, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Its ZRLE rectangles are stepped over unread and never shown, so a session that passes the stream builds no video encoder: until the stream is up and across display changes the page says the screen is not available and sends the Mac no input. |
 | Not implemented | Apple's fixed resolution presets; authentication types other than 30. |
@@ -74,12 +74,12 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 ```
 
 **VNC viewers may control screen with password** is for RFB security type 2.
-Remotex authenticates with type 30 and the account's own password, so it does not
+Zdesk authenticates with type 30 and the account's own password, so it does not
 need that setting.
 
 A Mac also offers other login types, and Apple's viewer tries some of them before
 type 30 (see [Other login types](#other-login-types)). Only type 30 has been
-exercised, so remotex offers nothing else.
+exercised, so zdesk offers nothing else.
 
 ## The two modes in Apple's viewer
 
@@ -114,7 +114,7 @@ encoder move between them. The viewer exposes no switch for it. See
   It has no fallback to RFB pixels, and `ard-high-performance` has none either (see
   [Liveness](#the-stream)).
 
-Remotex matches the split, on the same handshake: `ard` shares the physical
+Zdesk matches the split, on the same handshake: `ard` shares the physical
 displays, offers no resize and never creates a virtual display, and
 `ard-high-performance` creates one, the "1 Virtual Display" choice, or with
 `virtual_displays = 2` the "2 Virtual Displays" one
@@ -126,7 +126,7 @@ session on it, a combination the viewer never offers (above):
 - **Encryption.** Apple's viewer asks for the record layer only when its
   `encryptionLevel` preference is 2. The default is 0, which leaves the whole
   session in cleartext after authentication, keystrokes and the media stream's
-  keys included. Remotex always asks, in both modes.
+  keys included. Zdesk always asks, in both modes.
 - **Standard's picture.** A session started with the picker's Adaptive (beta),
   the first it offers, asks as Adaptive quality does, for the 8×8 tiles first
   ([private codecs](#apples-own-framebuffer-encodings)), and leaves out `0x3ea`
@@ -146,7 +146,7 @@ Both modes connect the same way until the record layer is up.
    `u16` key length, the prime and its public key; macOS 26 sends RFC 5054's
    4096-bit prime with generator 5, so both keys are 512 bytes, not the 1024-bit
    group with generator 2 a published description gives. Apple's viewer takes key
-   lengths from 64 to 1024 bytes and refuses any other; remotex takes the same.
+   lengths from 64 to 1024 bytes and refuses any other; zdesk takes the same.
    The viewer answers with
    the 128-byte credential block (username at 0, password at 64), then its public
    key. `MD5(shared secret)` is the AES-128 key that encrypts the block in **ECB**
@@ -154,7 +154,7 @@ Both modes connect the same way until the record layer is up.
    rekey is wrapped under. A refusal is the result word alone (see
    [Other login types](#other-login-types)).
 3. **ClientInit** `0x81`: `0x80` asks for Apple's extended ServerInit, and `0x40`,
-   never set, would ask for a session-select exchange remotex does not implement.
+   never set, would ask for a session-select exchange zdesk does not implement.
 4. **ServerInit**, extended (see below). High Performance ends here, before sending
    anything, when the Mac does not list `SetDisplayConfiguration`.
 5. **A cleartext prelude:** `ViewerInfo`, `SetMode(control)` and
@@ -169,7 +169,7 @@ Both modes connect the same way until the record layer is up.
 
 ### Other login types
 
-Remotex speaks only type 30. This is what the Mac's code does with the others;
+Zdesk speaks only type 30. This is what the Mac's code does with the others;
 only the list and type 30 were measured.
 
 **The list.** To an `RFB 003.889` viewer the Mac lists, in this order:
@@ -312,7 +312,7 @@ AES-128-CBC( u16 body_len || body || filler || 20-byte integrity )
 
 A message can span records: a full-screen zlib rectangle is about 400 KB
 against a record ceiling of 65,520 bytes, so records are reassembled by
-concatenation, never read one message per record. Remotex frames its own messages
+concatenation, never read one message per record. Zdesk frames its own messages
 the same way: a pasteboard archive past one record's 65,498-byte body goes out as
 full records and then the rest.
 
@@ -320,7 +320,7 @@ full records and then the rest.
 and zero geometry. Its body is a `u32` generation, then a wrapped key and a
 wrapped IV, each one AES-128 block decrypted under the wrap key. The Mac rotates
 keys only when the viewer asks with `SetEncryption` command 1, and it switches
-both of its ciphers the moment it sends a rekey. Remotex asks once, during setup.
+both of its ciphers the moment it sends a rekey. Zdesk asks once, during setup.
 It closes the session on any later rekey rather than follow it, because records
 it had already framed under the old key would fail the Mac's check.
 
@@ -328,10 +328,10 @@ it had already framed under the old key would fail the Mac's check.
 words:
 - **Command 1** is followed by a `u16`, a `u16` count of at most 100, and that
   many `u32` methods. One of them must be 1, and the Mac then draws a fresh random
-  key and IV and sends the rekey. Remotex sends `12 00 0001 0001 0001 00000001`.
+  key and IV and sends the rekey. Zdesk sends `12 00 0001 0001 0001 00000001`.
 - **Command 2** is followed by a `u16` and a pad. A 1 makes the Mac decrypt what
   it receives from then on; any other value turns that off. It does not stop the
-  Mac encrypting what it sends. Remotex sends `12 00 0002 0001 0000`.
+  Mac encrypting what it sends. Zdesk sends `12 00 0002 0001 0000`.
 
 A published description reads the two commands as start and stop.
 
@@ -366,7 +366,7 @@ one can be skipped without disturbing the next or the framebuffer's stream.
 tool that takes over the screen to let the user pick something gives the Mac's
 own cursor a new shape, and a remote session keeps showing the shape from before
 it. The tool itself still works: clicks and moves go in as usual. Apple's own
-viewer does the same, so this is not a remotex fault and there is nothing to fix.
+viewer does the same, so this is not a zdesk fault and there is nothing to fix.
 
 The cause is on the Mac. Its cursor changes as soon as the tool starts, but it
 sends no cursor shape while the tool is up. The new shape goes out only when the
@@ -392,7 +392,7 @@ every login, lock and user switch — as a one-rectangle framebuffer update.
 `AutoFrameBufferUpdate` after each one, or the pointer silently stops updating
 while the desktop keeps painting.
 
-**The layout is authoritative.** Remotex moves a display selection's checkmark
+**The layout is authoritative.** Zdesk moves a display selection's checkmark
 only when a layout confirms it.
 
 ### A layout's length counts what follows it
@@ -428,8 +428,8 @@ Each record is `0x38` bytes:
 | `+0x28` | 16-byte pixel format |
 
 Bounds are edges, not an origin and size: a size is a difference of edges.
-Members of a mirror set share an origin, and remotex offers the first. When the
-density field is 0.0, remotex derives the density from the two rects rather than
+Members of a mirror set share an origin, and zdesk offers the first. When the
+density field is 0.0, zdesk derives the density from the two rects rather than
 dropping the screen. For High Performance's single record, dropping it would end
 the session.
 
@@ -455,17 +455,17 @@ never sends a viewport size. It does honour a scale.
 before encoding it, and the answering layout reports the factor in each record's
 second `f64`.
 
-**What remotex asks for.** It asks for `min(1, browser density / screen density)`,
+**What zdesk asks for.** It asks for `min(1, browser density / screen density)`,
 as Apple's viewer does. A 1440×900 Retina screen (2880×1800 native) then reaches a
 1x browser as 1440×900 at effective density 1, and a 2x browser at native
 resolution. The Mac cannot enlarge, so a 1x screen reaches a 2x browser at 1x.
 
 **Pointer positions.** The Mac still reads pointer events in the *unscaled*
-framebuffer's pixels. So remotex divides each browser position by the factor in
+framebuffer's pixels. So zdesk divides each browser position by the factor in
 force; without that, the pointer lands at a fraction of its distance from the
 origin.
 
-**When remotex asks.** A browser density change or a new selection can send a new
+**When zdesk asks.** A browser density change or a new selection can send a new
 factor. Only an answering layout confirms it, and a request left unanswered for
 ten seconds is given up. The Mac handles the request at once, but its answer can
 take seconds to arrive behind a display switch.
@@ -488,7 +488,7 @@ each window drawing one screen out of the same framebuffer.
 least one that is not. Screens that are all HiDPI, whatever their densities, are not
 mixed.
 
-Remotex matches it, in the Combined Display session it is chosen for at the
+Zdesk matches it, in the Combined Display session it is chosen for at the
 picker; a session of one screen at a time asks for the main screen over the
 combined view the Mac opens on, and never shows it. For a mixed combined layout
 the gateway asks for factor 1.0, which it takes in the Mac's Full quality and
@@ -519,7 +519,7 @@ whatever its screens come to.
 ### The High Performance virtual display
 
 High Performance hides the Mac's physical screens and moves every window to a
-virtual display. Like Apple's client, Remotex first creates every requested
+virtual display. Like Apple's client, Zdesk first creates every requested
 display at the same canonical 1920×1080-point, 2x mode, without dynamic
 resolution. Once that layout has arrived and the Mac has answered the media
 stream's offer for those displays, it sends a second configuration, with
@@ -529,7 +529,7 @@ its window (the full size of the browser's screen until the window has
 reported), at that screen's density either way. This stable creation phase lets macOS restore the displays'
 saved arrangement and window placement before their live sizes are applied: on
 the virtual Mac, a window left on the second display under Apple's viewer came
-back there under remotex. In a session started with resize, each later viewport report asks for a new size,
+back there under zdesk. In a session started with resize, each later viewport report asks for a new size,
 and the next layout confirms it. Everything in this section and the next holds as well
 for the unofficial `virtual_display = true` under `ard`, which sends the same
 messages, its second configuration following the first layout since no media
@@ -539,7 +539,7 @@ that is the only macOS it was tried on.
 `SetDisplayConfiguration` (`0x1d`) carries a display count and, for each display,
 one descriptor with five modes:
 
-| Descriptor field | Value remotex sends |
+| Descriptor field | Value zdesk sends |
 |---|---|
 | name | 120 bytes, UTF-8 and zero-filled: `Screen Sharing Virtual Display`, and `Screen Sharing Virtual Display #2` for the second, which are the names Apple's viewer's displays have. It is what the Mac calls the display, in its Displays settings and to its applications; left empty, the displays have no name and the Mac lists them as ` (1)` and ` (2)`. |
 | display flags | 0 in the opening configuration, then 1: dynamic resolution. Bit 1, never sent, tells the Mac to leave the refresh rate alone and ignore the mode's. |
@@ -560,7 +560,7 @@ Mode 0 is the requested dynamic mode. The remaining table matches Apple's
 viewer and stays fixed across setup and resize: 2880×1800 over 1440×900,
 3840×2160 over 1920×1080, 2880×1620 over 1440×810, and 2624×1696 over
 1312×848. A backing size twice the logical one makes a 2x display. Native asks
-for 60 Hz unless its preference or display capability says otherwise; Remotex's
+for 60 Hz unless its preference or display capability says otherwise; Zdesk's
 30 Hz in all five modes is the one deliberate virtual-display request difference.
 
 **Rules that follow from the measurements:**
@@ -575,7 +575,7 @@ for 60 Hz unless its preference or display capability says otherwise; Remotex's
   dynamic resolution only once its media stream is set up, so the stream is
   offered first for the canonical displays, and the size goes out when the Mac
   answers that offer. Its change then stops the stream, which is offered again
-  for the new displays once they have settled. Remotex waits 5 s for that
+  for the new displays once they have settled. Zdesk waits 5 s for that
   answer: an offer still out then holds the size until it is answered anyway,
   so the wait only bounds a session whose offer never went. A login at the Mac
   during the wait ends it, and the size goes out to the new agent at once.
@@ -591,7 +591,7 @@ for 60 Hz unless its preference or display capability says otherwise; Remotex's
   refused the heights too low for four strips ([In strips](#in-strips)). At 2x
   it answered with a display of its own choosing, 800×600 points for 320×30
   and 960×600 for 640×400, and after the first of those its screen capture
-  lost the display and no picture came at all, with no encoder error. Remotex's
+  lost the display and no picture came at all, with no encoder error. Zdesk's
   gateway asks a Mac for no display under 800×600 points, so neither is asked
   for: a window or a client's screen under it is raised to it side by side,
   and a smaller window scrolls the display. A configured `size` under it fails
@@ -603,7 +603,7 @@ for 60 Hz unless its preference or display capability says otherwise; Remotex's
   shrunk to fit.
 - **Every descriptor after the opening one is dynamic,** even in a session
   started without resize, so a reconnect re-enables the Mac's Dynamic resolution
-  setting, as Apple's viewer's does. Resize controls only whether Remotex acts on
+  setting, as Apple's viewer's does. Resize controls only whether Zdesk acts on
   later viewport reports.
 - **The display outlives its session briefly.** A reconnect within a few seconds
   finds it still there with the same id; after about 45 seconds the Mac is back on
@@ -617,11 +617,11 @@ changes, as read from Apple's viewer and daemon and as macOS 26 answered:
 
 - **The Mac says how many it creates.** Its ServerInit flags carry the count
   above bit 4: 2, unless a managed preference holds the Mac to 1. It holds a
-  configuration that names more to that many without saying so. Remotex refuses
+  configuration that names more to that many without saying so. Zdesk refuses
   a session that asks for more than the Mac states, before it sends one.
 - **One configuration names both.** The display count is 2 and the descriptors
   follow back to back, each led by its own length, which is how the Mac steps
-  from one to the next. Remotex sends the five-mode descriptor above for each
+  from one to the next. Zdesk sends the five-mode descriptor above for each
   display, in the opening configuration and in every resize, the second's at
   the density of the screen its tab's window is on once that tab has reported
   one, and at the first's until then. The Mac creates the
@@ -652,14 +652,14 @@ changes, as read from Apple's viewer and daemon and as macOS 26 answered:
   right, that is the first: asked for 1366×768 beside 1024×700, each leg's
   pictures were its own display's size. With the second dragged to the left of
   the first or above it, in the Mac's Displays settings, video 1 carried the
-  second display's pictures, and remotex reads each leg as the display the
+  second display's pictures, and zdesk reads each leg as the display the
   layout places there (`MediaStream::arrange`). A diagonal arrangement has not
   been tried. Each leg has its own keys, SSRC, reports, rate feedback and
   keyframe requests, and the offers carry the session's one call id, as Apple's
   viewer's do. The legs are offered, answered, stopped by a display change and
   offered again together, in one message each time, so the rule of one offer at
   a time is unchanged.
-- **Remotex shows one display on a page.** The picker lists `Display 1`,
+- **Zdesk shows one display on a page.** The picker lists `Display 1`,
   `Display 2` and *All Displays*, which two displays start on and which keeps the first on the session's page
   and shows the second in a browser tab of its own, where Apple's viewer opens a
   window for each. The choice is answered in the gateway: the Mac sends both legs
@@ -680,16 +680,16 @@ a physical Mac, and what Apple's viewer does beside it have not been.
 
 ### Resizing a High Performance display, as measured
 
-Three behaviours of the Mac shape how remotex resizes:
+Three behaviours of the Mac shape how zdesk resizes:
 
 - **A display change stops the Mac's media stream.** The Mac restarts nothing until
   it is offered again, so there is no picture until the new display's stream
-  delivers: remotex sends `screenUnavailable`, and the page says the screen is
+  delivers: zdesk sends `screenUnavailable`, and the page says the screen is
   not available — see [Display changes](#display-changes).
 - **A read racing a shrink crashes the Mac's capture agent.** Serving a pixel read
   sized for the old display after the display shrank crashes `ScreensharingAgent`.
   The session then loses its virtual display, and often its connection. The update
-  arming counts as such a read. So remotex:
+  arming counts as such a read. So zdesk:
   - sends a change only at the end of an update, with no full-size request
     outstanding;
   - first re-arms updates for the single pixel at the origin, which every mode
@@ -721,7 +721,7 @@ combination is posted as buttons: a wheel bit with a button held becomes Back or
 Forward, and the horizontal bits `0x20`/`0x40` become clicks on buttons 5 and 6.
 
 Apple's viewer sends a scroll in a message of its own instead, the scroll-wheel
-event of the second event message (`0x17`), and so does remotex, in both modes
+event of the second event message (`0x17`), and so does zdesk, in both modes
 (`vnc_apple::scroll_wheel`). It is 58 bytes, numbers big-endian:
 
 | Bytes | |
@@ -742,7 +742,7 @@ event of the second event message (`0x17`), and so does remotex, in both modes
 
 Each group of three is horizontal, vertical, then a third axis, and a scroll up or
 to the left is positive, the opposite of the DOM's. The agent copies every field
-into the `CGEvent` it posts, so an application receives what was sent: remotex
+into the `CGEvent` it posts, so an application receives what was sent: zdesk
 sends the distance as the point delta, a tenth of it as the line delta, the
 continuous flag, and no phase, which an application reads as a precise scroll
 with no gesture around it. Checked on macOS 26.6 in both modes with a window that
@@ -751,7 +751,7 @@ pointer.
 
 Apple's viewer sends this message only to a Mac whose ServerInit lists `0x17`
 ([the command bitmap](#serverinits-name-field-is-not-a-name)), and falls back to
-wheel bits otherwise. Remotex has no such fallback: an Apple subtype refuses the
+wheel bits otherwise. Zdesk has no such fallback: an Apple subtype refuses the
 session on a Mac that does not list it.
 
 ### Keys
@@ -766,7 +766,7 @@ session on a Mac that does not list it.
 - **Modifier keysyms.** The agent maps modifiers by its own table, in both modes.
   `Meta_L`/`Meta_R` land on Option. `Alt_L`/`Alt_R`, `Super_L`/`Super_R` and
   `Hyper_L`/`Hyper_R` all land on Command. Each keeps its side. A by-the-book Alt
-  therefore arrives as Command, so remotex sends a keyboard's Alt keys as Meta
+  therefore arrives as Command, so zdesk sends a keyboard's Alt keys as Meta
   (`keymap::apple_keysym`, and [VNC](architecture.md#vnc)).
 
 ### Double-click is chained by the Mac, at a login-time threshold
@@ -775,9 +775,9 @@ An RFB pointer event carries no click count, so the Mac decides which presses
 chain into a double-click. They chain when they land on the same spot within its
 double-click interval. That interval is read once at login: changing the
 preference has no effect on a live session until logout or reboot. A Mac that
-double-clicks in Apple's client but not through remotex has a stale or very short
+double-clicks in Apple's client but not through zdesk has a stale or very short
 threshold. Set `defaults write -g com.apple.mouse.doubleClickThreshold -float 0.5`
-on the Mac and reboot. Remotex forwards clicks as they happened, with no
+on the Mac and reboot. Zdesk forwards clicks as they happened, with no
 compensation.
 
 ## Other messages
@@ -841,7 +841,7 @@ for the length of the animation. On a Mac playing a video, input went unread for
 35–104 s at a time and then arrived as hundreds of queued events in one second.
 Apple's viewer never meets this in High Performance mode: it takes the picture
 from the media stream (encoding `0x3f2`), and the daemon's framebuffer sender
-skips such a viewer. Remotex does too once the stream is up, and then arms and
+skips such a viewer. Zdesk does too once the stream is up, and then arms and
 polls one pixel — see [RFB while the stream runs](#rfb-while-the-stream-runs).
 
 A client that decodes each update meets it at 0. A gateway that decoded
@@ -871,7 +871,7 @@ stream carries the picture.
 **`ViewerInfo` (`0x21`) is 66 bytes of numbers.** The published description
 implies version strings; the body is two numeric version triples:
 
-| Field | Value remotex sends |
+| Field | Value zdesk sends |
 |---|---|
 | application class | 1 |
 | application id | 2 |
@@ -908,7 +908,7 @@ A published description says it reads bit 20 alone.
 
 A published description has 12 as the heartbeat and 11 as the user session
 changing. The heartbeat is 4, 11 is the pointer hiding, and the session change is
-17 (`0x11`). Remotex acts on 2 and 3 and steps over the rest.
+17 (`0x11`). Zdesk acts on 2 and 3 and steps over the rest.
 
 **`SetMode` (`0x0a`)** is a type, a pad byte and a `u16` mode:
 - **0:** observe;
@@ -918,7 +918,7 @@ changing. The heartbeat is 4, 11 is the pointer hiding, and the session change i
 
 The Mac refuses a mode above 2, and ignores 1 and 2 on a connection limited to
 observing. The mode also sets how the Mac's Screen Sharing menu shows the session:
-observed, assisted or controlled. Remotex sends 1.
+observed, assisted or controlled. Zdesk sends 1.
 
 **The pasteboard.** `AutoPasteboard` (`0x15`) is eight bytes with a `u16` at
 byte 2: 1 starts the agent watching the Mac's pasteboard, 2 stops it, and any
@@ -931,7 +931,7 @@ display's layout. The Mac then signals with `MiscStatus`:
 
 Contents travel as a zlib archive (level 9, one sync flush, capped at 100 MB) of
 every flavor of every item. A short text selection can therefore arrive inside
-megabytes of other flavors. Remotex streams the archive, keeps only the text, and
+megabytes of other flavors. Zdesk streams the archive, keeps only the text, and
 sends empty text as an item with no flavors, which clears the Mac's pasteboard.
 
 - **The fetch** (`0x0b`) is eight bytes. Bit 0 of byte 1 asks for promises only,
@@ -955,14 +955,14 @@ sends empty text as an item with no flavors, which clears the Mac's pasteboard.
   items, each holding one flavor.
 
 **Polling pauses behind a fetch.** Framebuffer and pasteboard replies share one
-ordered stream. While a pasteboard fetch is pending, remotex pauses incremental
+ordered stream. While a pasteboard fetch is pending, zdesk pauses incremental
 polling, so the fetch is not stuck behind a stream of updates.
 
 **Metadata arrives only as rectangles.** The layout, keyboard source, vendor
 keysyms and device information are each a one-rectangle framebuffer update.
 Apple's viewer closes the connection on a server message type it does not know,
 so a reader that falls out of step sees "messages" that are really fragments of
-these. Remotex reads two of them only to step over them:
+these. Zdesk reads two of them only to step over them:
 - **Vendor keysyms** (`0x453`) are a fixed table: `u16` 20, then a `u16` version
   (1), a `u16` count (4), and the keysyms `0x1008FD00` to `0x1008FD03`.
 - **Keyboard source** (`0x455`) is a `u16` giving the name's length plus 8, then
@@ -971,7 +971,7 @@ these. Remotex reads two of them only to step over them:
   flag is 1 while the Mac's keyboard focus is in a secure text field, such as a
   password prompt.
 
-### Messages remotex does not use
+### Messages zdesk does not use
 
 Read from the daemon, for a reader of Apple's viewer's captures:
 - **`DeviceInfo` (`0x456`)** is a metadata rectangle of zero geometry. It holds,
@@ -1002,11 +1002,11 @@ Read from the daemon, for a reader of Apple's viewer's captures:
 ### Apple's own framebuffer encodings
 
 Adaptive quality lists `0x3f3` and `0x3ea` first, so a capture of Apple's
-viewer is full of them, and remotex lists `0x3f3` in a session started with the
+viewer is full of them, and zdesk lists `0x3f3` in a session started with the
 picker's Adaptive, whose page decodes it. This is read from the Mac's encoders
 and the viewer's decoders, and
 [what the Mac sends](#what-a-mac-sends-a-viewer-that-lists-them) from a probe's
-captures of a virtual Mac, every rectangle of which remotex's decoder
+captures of a virtual Mac, every rectangle of which zdesk's decoder
 (`frontend/wasm/apple-adaptive`) decodes with each stream ending on its mark.
 
 **The Mac sends one codec.** Of the encodings a `SetEncodings` lists, it takes
@@ -1173,7 +1173,7 @@ socket no faster than a set rate. The same was run listing ZRLE alone.
   when the refinement comes.
 - **ZRLE on the same links** moved a sixteenth of the pixels at 2 Mbit/s, and at
   500 kbit/s delivered its first picture and nothing more in 20 s.
-- **Through remotex, paced by a browser's painting,** the same: behind a
+- **Through zdesk, paced by a browser's painting,** the same: behind a
   300 kbit/s browser, a screen in constant motion came as about one and a half
   updates a second, full ones with their refinement among them, where the same
   screen read freely came as seventy
@@ -1195,7 +1195,7 @@ virtual Mac sent, on its physical display and on a virtual one across a resize.
   the ones before it left, so a viewer that missed one cannot go on.
 - **It inflates to the client's pixel format.** Row after row of the rectangle,
   four bytes a pixel in the format the session set: blue, green, red and an
-  unused byte, for remotex's little-endian 32-bit one.
+  unused byte, for zdesk's little-endian 32-bit one.
 - **A resize does not restart it.** On the virtual display, the rectangles of the
   new size went on inflating where the old size's left the stream.
 - **Nothing in it adapts to the link.** zlib is lossless, so the Mac has nothing
@@ -1204,7 +1204,7 @@ virtual Mac sent, on its physical display and on a virtual one across a resize.
 ### The numbers, in both forms
 
 Apple writes its encodings in hex, while the wire and RFB's registry use decimal,
-so remotex logs an unexpected encoding as `1105 (0x451)`.
+so zdesk logs an unexpected encoding as `1105 (0x451)`.
 
 | Encoding | Hex | Decimal | |
 |---|---|---|---|
@@ -1238,7 +1238,7 @@ In High Performance mode Apple's viewer takes neither its picture nor its sound
 from RFB. RFB only negotiates a media stream: the viewer sends an offer, and
 `ScreensharingAgent` then sends the screen and the system audio through
 AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with SRTP,
-straight to the viewer. Remotex does the same on an `ard-high-performance` target
+straight to the viewer. Zdesk does the same on an `ard-high-performance` target
 (`src/vnc_apple_media.rs`). The stream alone is the picture. The Mac's ZRLE
 rectangles are stepped over by their length, never inflated and never coded,
 so a session codes no tile. Until the stream
@@ -1250,7 +1250,7 @@ picture of the display. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
-Remotex passes the picture to the browser in every session, as the Mac's HEVC,
+Zdesk passes the picture to the browser in every session, as the Mac's HEVC,
 which the picker offers a browser that decodes it, in its own decoder or the
 page's software one where the gateway serves it, or as its H.264, offered to
 any browser with a `VideoDecoder`: each access unit goes to the browser as it came, described by the stream's
@@ -1265,7 +1265,7 @@ page says the screen is not available, and the stream comes back at an IDR. See
 
 Apple's viewer lists encoding 1010 (`0x3f2`) first in the `SetEncodings` it
 sends right behind its `SetDisplayConfiguration`, and sends the same list again
-when the session is ready and once more when its media stream is up. Remotex opens without it and sends the list
+when the session is ready and once more when its media stream is up. Zdesk opens without it and sends the list
 naming it after the first layout. The Mac answers the first `SetEncodings`
 naming 1010 with message 1, below, naming its ports, and the viewer makes its
 offer only then. The Mac itself does not wait for message 1: it answers an offer
@@ -1295,7 +1295,7 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
   `u16` port and `u32` flags for audio at `+8`/`+10`, video 1 at `+14`/`+16`,
   and video 2 at `+20`/`+22`, followed by ten reserved zero bytes. Bit 0 enables
   a leg. Apple's viewer requires it on audio and video 1, and takes video 2's as
-  the Mac having two displays to send; remotex requires video 2 on exactly when the
+  the Mac having two displays to send; zdesk requires video 2 on exactly when the
   session asked for two. The measured ports were always
   5900 and 5901, the RFB port and the next, and 5902 for a second display. The viewer receives on the same
   numbers. The Mac sends message 1 once a stream, for the first `SetEncodings`
@@ -1305,7 +1305,7 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
   offer.
 - **message 2**, AVConference's answer: the common eight-byte header, `u16`
   lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
-  those blobs. Remotex checks that their lengths describe the whole body and
+  those blobs. Zdesk checks that their lengths describe the whole body and
   that video 2 has a blob exactly when it was offered. The answer sometimes comes twice for one offer.
   Apple's viewer disregards an answer that comes before message 1.
 - **message 3**, a 16-byte error: the common header, then `u32` type and `u32`
@@ -1313,14 +1313,14 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
   from. Type 1 with sub-code 1 answers a `SetEncodings` naming 1010 from a
   second viewer: the Mac gives the stream to one viewer at a time, and ignores
   the display configurations of any other while it runs, so that viewer's
-  layouts go on showing the first one's display. Remotex ends the session on
+  layouts go on showing the first one's display. Zdesk ends the session on
   either and names the other viewer for the second.
 
 Each offer is a binary property list of four keys around a deflated
-AVConference protobuf. Remotex rebuilds Apple's offers field by field and changes
+AVConference protobuf. Zdesk rebuilds Apple's offers field by field and changes
 one field, and others in a session that passes the picture:
 
-| Field | Apple's viewer | Remotex | Why |
+| Field | Apple's viewer | Zdesk | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. It sets the frame rate the stream is configured for, which is 30 or 60 and nothing above: 60 with it, for a display the Mac's encoder can take at 60, judged from its pixel rate over the display's pixels, and 30 without it or for a larger display. The virtual display's refresh rate does not enter it. That rate is what the encoder spaces four strips by ([Rate control](#rate-control)). |
 | `tilesPerFrame` (video stream field 6) | 4 | 4 for the HEVC, whatever the display's size; 1 for the H.264, and for an HEVC session a probe asked it of | Four tiles split a frame into strips, each coded as a separate picture ([In strips](#in-strips)), which the page puts together. One tile is one picture of the whole display on the one SSRC. |
@@ -1340,7 +1340,7 @@ HEVC. Read from AVConference, which both ends negotiate with:
 - **The codec does not enter the tile count.** Apple's viewer offers four tiles
   whatever the codec, and the count is negotiated without it
   ([In strips](#in-strips)). Where Apple's viewer is sent H.264, it is sent it in
-  four strips, the layout remotex no longer asks for (below). Whether Apple's
+  four strips, the layout zdesk no longer asks for (below). Whether Apple's
   viewer then sees the strips stay busy on a still screen, as below, has not
   been tried.
 
@@ -1352,7 +1352,7 @@ stream's colours: Display P3 primaries, sRGB transfer, BT.709 matrix. Its
 parameter sets do not come as NAL units of their own. A keyframe's first packet
 is a unit of type 18 (first byte `0x92`), four bytes and then an MP4 `avc1`
 sample description holding them in its `avcC` box, and the IDR follows as FU-A
-fragments; the pictures after it come a packet each. Remotex asks for it, with
+fragments; the pictures after it come a packet each. Zdesk asks for it, with
 one tile, in a session started with the H.264 passthrough, and passes it to the
 browser ([The Mac's H.264](architecture.md#the-macs-h264)).
 
@@ -1368,7 +1368,7 @@ at 1600×1000 with one tile, for 20 s a run:
   ([Rate control](#rate-control)).
 
 Passed through the gateway, which sends the rate reports, sessions were run
-with no input at 1440×900 in four strips, before remotex offered the H.264 one
+with no input at 1440×900 in four strips, before zdesk offered the H.264 one
 tile, and what reached the browser counted
 for 40 s from 25 s into the session. Two pages in full screen held what the
 screen showed: one drawn once and never again, and one with a quarter of the
@@ -1397,7 +1397,7 @@ screen in a 4 s loop, bars sliding across it.
   kept to a rate would, which was not tested.
 
 Offered 123 alone with `tilesPerFrame` 4, the Mac sends the H.264 in four
-strips. Remotex no longer offers it so (see the last point below), and what
+strips. Zdesk no longer offers it so (see the last point below), and what
 follows is what the Mac sends when it is. The strips are laid out as the
 HEVC's are ([In strips](#in-strips)). At 1600×1000 each was a 1600×256 picture, High profile, level 3.2, under the display's SSRC plus
 the strip's number, a frame's strips sharing its timestamp.
@@ -1446,7 +1446,7 @@ the strip's number, a frame's strips sharing its timestamp.
   rate unchanged. Only a host-side encoder property changes the mode; no path
   from an offer or an RTCP packet sets it. A host-only preference can instead
   select the legacy software H.264 encoder, which uses the ordinary token, but
-  its behavior in strips was not read and a viewer cannot select it. Remotex
+  its behavior in strips was not read and a viewer cannot select it. Zdesk
   consequently cannot acknowledge or request an acknowledged-reference
   refresh of H.264, so a loss costs a keyframe.
 - **A refresh request brings no cheaper H.264 keyframe.** In one tile, at
@@ -1457,7 +1457,7 @@ the strip's number, a frame's strips sharing its timestamp.
   the next 3 s. The totals matched, about 1.29 MB, in each of six rounds, and
   no picture carried the refresh bit. The HEVC's IDR after the same request is
   the smaller one ([The stream](#the-stream)); the H.264's is the larger
-  burst, so remotex asks for an H.264 keyframe with a PLI.
+  burst, so zdesk asks for an H.264 keyframe with a PLI.
 - **On a detailed still picture the strips never settle.** At 1440×900, a
   full-screen photograph in Chrome on macvm, with the rate target at 58.4
   Mbit/s throughout, the Mac sent about 17 frames a second in four strips, each
@@ -1468,13 +1468,13 @@ the strip's number, a frame's strips sharing its timestamp.
   ([Repeats of a still screen](#repeats-of-a-still-screen)). The HEVC's strips
   repeat too, at about 3.7 Mbit/s, until acknowledged. With one tile the H.264
   came about a picture a second, settling at pictures under 1 KB, about 0.1
-  Mbit/s, and so remotex offers the H.264 one tile
+  Mbit/s, and so zdesk offers the H.264 one tile
   ([The Mac's H.264](architecture.md#the-macs-h264)). This is not macvm's
   software encoder alone: a physical Mac's recorded long H.264 strip session
   averaged 27 Mbit/s and never had a second below 5 Mbit/s, while its HEVC strip
   session averaged 0.5 Mbit/s.
 
-Seen at 1600×1000 and 2880×1800. Passed through remotex, Chrome on Linux
+Seen at 1600×1000 and 2880×1800. Passed through zdesk, Chrome on Linux
 decoded it in its software decoder, and Chrome and Safari on a Mac decoded it;
 a second display and whether the H.264 obeys the rate reports have not been
 tried.
@@ -1483,10 +1483,10 @@ The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
 sets its bits and then byte-swaps the word before sending it. A published
 description has the word in host order, which would move every bit to another
 byte. Two other bits exist:
-- bit 1 is bit 0 for the second video stream, which remotex sets beside it in an
+- bit 1 is bit 0 for the second video stream, which zdesk sets beside it in an
   offer for two displays;
 - bit 3 names Apple Remote Desktop, rather than Screen Sharing, as the video
-  client, and remotex never sets it.
+  client, and zdesk never sets it.
 
 **The picture and the sound go together.** A configuration with an empty audio
 offer is refused (`unable to create audio config`, error type 2), and one with an
@@ -1496,20 +1496,20 @@ output device muted as the stream starts, and the Mac's speakers were measured
 silent. So an `ard-high-performance` session always carries sound and the
 picker offers no choice of it. The stream takes over the Mac's sound, AirPlay included. Standard
 mode never touches the sound output, so a Mac there plays to its speakers or to
-an AirPlay receiver outside remotex as usual; in a High Performance session it
+an AirPlay receiver outside zdesk as usual; in a High Performance session it
 plays nothing to one, which was confirmed on a physical Mac.
 
 **Ports first.** The Mac sends message 1 and the answer from separate paths, so
 an offer sent before message 1 can be answered before it, and the Mac names its
 ports once for the `SetEncodings` and once per display change, never again for an
-offer made in its place. Remotex therefore offers as Apple's viewer does: once
+offer made in its place. Zdesk therefore offers as Apple's viewer does: once
 for each message 1, and only once its display has settled.
 
 **One offer at a time.** A second `0x1c` sent while the first one's capture was
 still starting left the capture failed (`didStart: 0 error: 32000`). When the
 virtual display was deallocated at the end of that session, WindowServer aborted
 in `WSSelectiveSharingUpdateDisplayStreamSurface` and logged the console user
-out. Remotex therefore has one offer out at a time, and sends no display change
+out. Zdesk therefore has one offer out at a time, and sends no display change
 while an offer is unanswered. An offer left unanswered ends the session with the
 other failures (see [Liveness](#the-stream)).
 
@@ -1519,7 +1519,7 @@ other failures (see [Liveness](#the-stream)).
   `0x9301` or `0x9311` holding the picture's packet count and a frame counter.
   Its second byte is bits: `0x01` when the count and the counter follow, `0x10`
   on a picture the Mac keeps for an acknowledgement, and `0x20` on a refresh
-  picture (below), as in `0x9331`. The refresh bit is all remotex reads of it. The marker bit ends a picture. RFC 7798 packetization:
+  picture (below), as in `0x9331`. The refresh bit is all zdesk reads of it. The marker bit ends a picture. RFC 7798 packetization:
   single NAL units, aggregation packets, fragmentation units. A stream of
   four tiles differs: see [In strips](#in-strips).
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
@@ -1540,7 +1540,7 @@ other failures (see [Liveness](#the-stream)).
   Mac logged `viewer set refreshRate 60` either way, and `encode frame rate 60`,
   its encoder's capability rather than the stream's setting.
   A 30 Hz mode sent 30.0, across resizes, and logged `viewer set refreshRate 30`.
-  Remotex asks for 30 Hz, because the browser is sent 30 frames a second and
+  Zdesk asks for 30 Hz, because the browser is sent 30 frames a second and
   every picture has to be decoded whether it is shown or not. A still screen
   sends repeats for some 20 s after each change, as many as the stream does not
   drop, and then nothing
@@ -1553,7 +1553,7 @@ other failures (see [Liveness](#the-stream)).
   56% of a decoded one's, keyframe fragments among them, until a display never had
   its first picture and the session ended. A receiver on a thread of its own,
   apart from the RFB connection's, still lost 16–23% and ended the same way, so
-  the burst outruns the buffer however promptly it is read. Remotex asks for 4 MB
+  the burst outruns the buffer however promptly it is read. Zdesk asks for 4 MB
   on the video's socket, and with it granted the same runs lost none, the receiver
   sharing the engine's thread. Linux grants no more than `net.core.rmem_max`, and
   the log warns when it grants less.
@@ -1579,7 +1579,7 @@ other failures (see [Liveness](#the-stream)).
     round-trip time it holds for the picture leg is under 200 ms, and that time
     stays at the 250 ms it starts from. Neither `RCTL` nor receiver reports with
     report blocks moved it. Nine NACKs of 17 packets each, in a session of four
-    strips, brought no packet a second time. Remotex sends no NACK.
+    strips, brought no packet a second time. Zdesk sends no NACK.
   - **The Mac drops a keyframe request made too soon.** It keeps the time of the
     last keyframe it made, which starts at the stream's own start, and discards
     a PLI or FIR that comes sooner after it than a least gap: 1 s for a stream
@@ -1612,7 +1612,7 @@ other failures (see [Liveness](#the-stream)).
     PLI's and an RFC 5104 FIR's came at about 110 KB, on a 1600×1000 display
     the encoder had spent seconds refining. The request is subject to the
     least gap above. A PLI and a FIR bring an IDR whatever was acknowledged.
-  - **Remotex acknowledges every HEVC picture that it hands on,** a strip's by
+  - **Zdesk acknowledges every HEVC picture that it hands on,** a strip's by
     its decoding order number
     ([Repeats of a still screen](#repeats-of-a-still-screen)), and in a stream
     of one tile, after lost packets, asks for a refresh and drops pictures
@@ -1621,7 +1621,7 @@ other failures (see [Liveness](#the-stream)).
     the Mac's encoder logged three refreshes and no IDR after the stream's
     first, and no picture failed to decode. A browser decoding a passed stream
     across a refresh has not been watched.
-  - **Remotex sends a PLI** where whoever is shown the stream has nothing left
+  - **Zdesk sends a PLI** where whoever is shown the stream has nothing left
     to predict from: when a stream starts without an IDR (the first packets
     can arrive before the socket is bound), when a display comes back into
     view, when the browser's link falls 15 behind, which it warns about, and
@@ -1685,7 +1685,7 @@ four strips do not fit it sends no picture at all (below).
   counter, and the marker bit ends each strip's picture.
 - **Displays below the supported minimum can get no picture.** Every height
   here is under 180 rows, far below the least display Apple's viewer and
-  remotex ask for, 800×600 points, 600 rows at 1x
+  zdesk ask for, 800×600 points, 600 rows at 1x
   ([The High Performance virtual display](#the-high-performance-virtual-display)),
   and below any minimum near it: 640×480 would be 480 rows. Such displays are
   not supported. The gateway raises a size under 800×600 points to it, so they never
@@ -1720,7 +1720,7 @@ four strips do not fit it sends no picture at all (below).
   (type 201), which is what a sender that has sent nothing sends. A working
   stream reports as a receiver too, behind a still screen, but only after its
   first picture.
-- **Remotex takes the Mac's word.** It offers four tiles at every size and
+- **Zdesk takes the Mac's word.** It offers four tiles at every size and
   holds no list of heights. A receiver's report on a display's leg, from a
   stream that has brought no picture of the display since its offer and has
   not reported as a sender since it either, is the Mac withholding it. A
@@ -1765,7 +1765,7 @@ four strips do not fit it sends no picture at all (below).
   predicts from in a stream of one tile. A PLI sent as SRTCP brought the
   keyframe above in 28 ms; one sent in the clear, in another run, brought
   nothing.
-- **Remotex takes any gap as the loss of everything since the last keyframe.**
+- **Zdesk takes any gap as the loss of everything since the last keyframe.**
   A packet missing from one strip's sequence, or a picture missing from the
   decoding order, drops every strip's pictures until strip 0's next IDR, and a
   PLI asks for it. It asks for no refresh, and acknowledges each picture it
@@ -1848,7 +1848,7 @@ encoder's statistics, which the Mac logs once a second:
   list names that picture. A repeat is so coded mostly intra. The feature
   string, offer fields 7 and 2, and every RTCP request tested leave the encoder
   mode unchanged; one whole H.264 picture is the viewer-side escape.
-- **Remotex acknowledges each HEVC strip picture it hands on by its decoding
+- **Zdesk acknowledges each HEVC strip picture it hands on by its decoding
   order number,** as it acknowledges a picture of one tile by its timestamp.
 
 ### Rate control
@@ -1940,10 +1940,10 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   that changes everywhere (a terminal flood) the stream ran at about twice its
   target: 15 Mbit/s under an 8 Mbit/s cap, 30 under 15, and 90–99 against a
   58.4 Mbit/s target. One tile held its target: 5.7–8.2 Mbit/s under 8, and
-  56–59 against 58.4. With bit 0 set, as remotex sends it, the frame rate is
+  56–59 against 58.4. With bit 0 set, as zdesk sends it, the frame rate is
   60, the strips span 12.5 ms, and four strips held their target under the same
   flood: 7.8–8.2 Mbit/s under 8, and 51–55 against 58.4.
-- **Remotex.** It offers Apple's entries unchanged and reports as Apple's viewer
+- **Zdesk.** It offers Apple's entries unchanged and reports as Apple's viewer
   does: `RCTL` every 50 ms once a picture packet has arrived, the delay
   estimated as above from when the receiver reads each picture packet, loss 0
   and a bandwidth estimate of 60000 kbit/s, and the count and the delay starting
@@ -1974,7 +1974,7 @@ link to a physical Mac has not been observed.
   - **The payloads.** The codec list does not choose the payload; field 4 of the
     offer's audio stream does. That field is a bitmask of the RTP payload types
     the viewer takes, one bit each. `0x1000` is 101, and the Mac's screen-sharing
-    sound prefers 101. Apple's viewer sends `0x5E7F` (24191), and so does remotex.
+    sound prefers 101. Apple's viewer sends `0x5E7F` (24191), and so does zdesk.
   - **Not the rate.** The rate is the Mac's own: its screen-sharing sound
     configuration sets 320,000 bit/s whatever the offer says.
   - **A published description** reads field 4 as a bitrate the Mac picks a tier
@@ -2016,7 +2016,7 @@ link to a physical Mac has not been observed.
   on across it.
 - **The virtual Mac's sound fails on its own.** On the Apple Virtualization guest,
   a looping tone at a 2x display went distorted after about a minute and then
-  silent, and it did the same under Apple's own viewer. Remotex decoded it as it
+  silent, and it did the same under Apple's own viewer. Zdesk decoded it as it
   came: 100 units a second, none concealed, the RMS falling while the peak held,
   then exact digital silence. That guest is laggy whenever it plays sound, so
   judge sound quality and performance on a physical Mac.
@@ -2026,7 +2026,7 @@ link to a physical Mac has not been observed.
 The Mac keeps answering `FramebufferUpdateRequest`s with RFB pixels for the region
 asked for, and pushes them unrequested inside the armed `AutoFrameBufferUpdate`
 region.
-Once a picture of the current size has arrived, remotex polls and arms one pixel.
+Once a picture of the current size has arrived, zdesk polls and arms one pixel.
 That still brings every cursor shape and layout: 11 cursor shapes in 20 s of
 moving over a TextEdit window, with 123 bytes of zlib. A login once pushed a whole
 screen unasked, which is stepped over like every rectangle of such a session.
@@ -2043,7 +2043,7 @@ each at once fails the record layer's integrity check and ends the session, the
 answer carrying the trailer of the record before it. `SetEncodings` is acted on
 under that lock, so an update being written is out before the first offer is
 read, and none follows it or any later offer, across display changes too.
-From that list on remotex asks for and arms one pixel, so the Mac is left
+From that list on zdesk asks for and arms one pixel, so the Mac is left
 holding no request for a display that may have shrunk,
 and a resize goes out as it falls due: the update a resize otherwise waits for
 never comes from a Mac that sends no pixels.
@@ -2065,7 +2065,7 @@ went unread for 5–19 s at a time
 Every display change stops both legs, so the sound drops out with the picture
 until the new stream starts. The Mac then re-sends message 1 on its own,
 with no stream behind it. The offer it allows starts a new stream on the same
-ports, under a new SSRC, with an IDR at the new size. Remotex offers once message
+ports, under a new SSRC, with an IDR at the new size. Zdesk offers once message
 1 has come and the display has settled. The resize's cover comes down when the
 display settles, and `screenUnavailable` holds the page at "Screen not
 available", with no input sent to the Mac, until that IDR is on its way to
@@ -2088,9 +2088,9 @@ display is 1280×800, with sessions asking for 1600×1000 or 1440×900:
   came then or for the rest of the session, but an offer was answered and
   streamed the physical display on the ports named at the start. In the other 4,
   half a second after the login, the login window's agent closed the viewers it
-  served as it went, and the daemon exited. Remotex sessions were closed 3 times
+  served as it went, and the daemon exited. Zdesk sessions were closed 3 times
   in 4, and a probe 1 time in 10. The probe was closed once and switched twice
-  when it sent remotex's opening messages and asked for remotex's stream, so
+  when it sent zdesk's opening messages and asked for zdesk's stream, so
   nothing a viewer sends was found to decide it.
 - **A new `SetDisplayConfiguration` brings a virtual display back.** It came
   11 s later, under a new id and with the flags `0x5`, and again with no message
@@ -2113,10 +2113,10 @@ display is 1280×800, with sessions asking for 1600×1000 or 1440×900:
   controls. It offers only on message 1, which does not come.
 
 A published description saw the same switch on a 5K Mac, after "a login or
-unlock at the Mac, the Mac waking". Remotex asks again as Apple's viewer does,
+unlock at the Mac, the Mac waking". Zdesk asks again as Apple's viewer does,
 on the layout rather than the status: a layout with bit 0 clear after one with
 it set is not its desktop, and is not applied. The page is told the screen is
-not available, and remotex asks for its display again at the size it had. The
+not available, and zdesk asks for its display again at the size it had. The
 virtual display that comes back is a display change like any other, and is
 offered the stream on the ports named at the start, with no message 1. Without
 one within 30 s the session ends. Run through a logout and a login on the
@@ -2130,7 +2130,7 @@ The Mac sends from its own address to the viewer's address on the TCP connection
 from each port it named to the same port number at the viewer, so a NAT between
 them has to pass it. The viewer's reports go out from the same
 ports every second, which opens a port-preserving NAT's mapping. Every Mac uses the
-same port numbers, so remotex binds them with address and port reuse and connects
+same port numbers, so zdesk binds them with address and port reuse and connects
 each socket to its Mac. Several gateways on one host can then share the numbers,
 unless one of them bound without reuse, as v0.0.249 did. Nothing arriving within
 5 s of message 1 is logged, and the session ends when the offer's first picture

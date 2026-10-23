@@ -16,7 +16,7 @@ use std::io::{BufRead as _, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use remotex::embedded::transport;
+use zdesk::embedded::transport;
 
 /// A running embedded gateway, its handshake already read.
 struct Embedded {
@@ -40,7 +40,7 @@ impl Embedded {
     /// its handshake.
     fn start(config: &str) -> Self {
         let dir = common::ScratchDir::new("embedded");
-        dir.write("remotex.toml", config);
+        dir.write("zdesk.toml", config);
         let (child, endpoint, token) = launch(dir.path());
         Self {
             child,
@@ -70,7 +70,7 @@ impl Embedded {
             None => String::new(),
         };
         let req = format!(
-            "GET {path} HTTP/1.1\r\nHost: embedded.remotex.localhost\r\n{header}Connection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: embedded.zdesk.localhost\r\n{header}Connection: close\r\n\r\n"
         );
         let (status, _head, body) = endpoint_http_request(&self.endpoint, &req).await;
         (status, body)
@@ -79,7 +79,7 @@ impl Embedded {
     /// The cookie the master listener seeds, spelled the way a browser sends it
     /// back to the child.
     fn cookie(&self) -> String {
-        format!("remotex_session={}", self.token)
+        format!("zdesk_session={}", self.token)
     }
 
     async fn get_authorized(&self, path: &str) -> (u16, String) {
@@ -114,7 +114,7 @@ fn launch(dir: &std::path::Path) -> (Child, String, String) {
 /// [`launch`], handing the gateway `key` as its key line, as the control plane
 /// does for a config that names passwords.
 fn launch_keyed(dir: &std::path::Path, key: &str) -> (Child, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_remotex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zdesk"))
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(dir)
@@ -222,8 +222,8 @@ async fn nothing_but_the_token_gets_past_the_guard() {
 
     for cookie in [
         None,
-        Some("remotex_session="),
-        Some("remotex_session=not-the-token"),
+        Some("zdesk_session="),
+        Some("zdesk_session=not-the-token"),
         // The right value under the wrong name.
         Some(&format!("session={}", embedded.token) as &str),
     ] {
@@ -239,7 +239,7 @@ async fn nothing_but_the_token_gets_past_the_guard() {
 
     // A bearer header is not another spelling of the cookie credential.
     let req = format!(
-        "GET /api/targets HTTP/1.1\r\nHost: embedded.remotex.localhost\r\nAuthorization: Bearer {}\r\n\
+        "GET /api/targets HTTP/1.1\r\nHost: embedded.zdesk.localhost\r\nAuthorization: Bearer {}\r\n\
          Connection: close\r\n\r\n",
         embedded.token
     );
@@ -256,7 +256,7 @@ async fn the_login_routes_refuse_rather_than_vanish() {
 
     let body = r#"{"username":"admin","password":"hunter2"}"#;
     let req = format!(
-        "POST /api/auth/login HTTP/1.1\r\nHost: embedded.remotex.localhost\r\nConnection: close\r\n\
+        "POST /api/auth/login HTTP/1.1\r\nHost: embedded.zdesk.localhost\r\nConnection: close\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
@@ -298,7 +298,7 @@ async fn the_status_route_answers_for_the_token() {
 #[tokio::test]
 async fn the_socket_upgrade_takes_the_cookie() {
     let embedded = Embedded::start(one_target());
-    let url = "ws://embedded.remotex.localhost/ws?session=not-a-claim&apple_media=false&page_hevc=false&rdp_graphics=false&rdp_h264=false&vp9_444=false";
+    let url = "ws://embedded.zdesk.localhost/ws?session=not-a-claim&apple_media=false&page_hevc=false&rdp_graphics=false&rdp_h264=false&vp9_444=false";
 
     let stream = transport::connect(&embedded.endpoint).await.unwrap();
     let err = tokio_tungstenite::client_async(url, stream)
@@ -326,7 +326,7 @@ async fn the_socket_upgrade_takes_the_cookie() {
     assert_eq!(response.status(), 101);
 }
 
-/// This gateway serves the same SPA as `remotex serve`, out of the same binary:
+/// This gateway serves the same SPA as `zdesk serve`, out of the same binary:
 /// real files as themselves, unknown paths as the index, and — the part worth
 /// pinning — the document itself without any credential, because the browser has
 /// to be able to load the page before its own scripts can present the cookie to
@@ -395,9 +395,9 @@ async fn closing_the_liveness_pipe_stops_the_gateway() {
 }
 
 /// A config that names passwords, with the key that opens them.
-fn vaulted_target() -> (String, remotex::vault::Key) {
-    let master = remotex::vault::MasterPassword::new("correct horse".to_owned()).unwrap();
-    let (section, key) = remotex::vault::Key::create(&master).unwrap();
+fn vaulted_target() -> (String, zdesk::vault::Key) {
+    let master = zdesk::vault::MasterPassword::new("correct horse".to_owned()).unwrap();
+    let (section, key) = zdesk::vault::Key::create(&master).unwrap();
     let text = format!(
         "{}vnc_password_ref = \"pi\"\n\n[master]\nsalt = \"{}\"\ncheck = \"{}\"\n\n\
          [passwords]\npi = \"{}\"\n",
@@ -416,17 +416,17 @@ fn vaulted_target() -> (String, remotex::vault::Key) {
 async fn a_config_naming_passwords_starts_on_the_key_it_is_handed() {
     let (text, key) = vaulted_target();
     let dir = common::ScratchDir::new("embedded-vaulted");
-    dir.write("remotex.toml", &text);
+    dir.write("zdesk.toml", &text);
     let (mut child, endpoint, token) = launch_keyed(dir.path(), &key.to_line());
     let request = format!(
-        "GET /api/health HTTP/1.1\r\nHost: x\r\nCookie: remotex_session={token}\r\nConnection: close\r\n\r\n"
+        "GET /api/health HTTP/1.1\r\nHost: x\r\nCookie: zdesk_session={token}\r\nConnection: close\r\n\r\n"
     );
     let (status, _, _) = endpoint_http_request(&endpoint, &request).await;
     assert_eq!(status, 200);
     let _ = child.kill();
     let _ = child.wait();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_remotex"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zdesk"))
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(dir.path())
@@ -447,7 +447,7 @@ async fn a_second_gateway_for_the_same_instance_is_refused() {
 
     // No stdin to hold it: were it let through, it would stop by itself rather
     // than hang the test.
-    let second = Command::new(env!("CARGO_BIN_EXE_remotex"))
+    let second = Command::new(env!("CARGO_BIN_EXE_zdesk"))
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(embedded.dir.path())
@@ -489,11 +489,11 @@ async fn a_config_with_no_targets_still_serves() {
 fn a_server_block_refuses_the_start() {
     let dir = common::ScratchDir::new("embedded-server-block");
     dir.write(
-        "remotex.toml",
+        "zdesk.toml",
         &format!("[server]\nlisten = \"0.0.0.0:1234\"\n{}", one_target()),
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_remotex"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zdesk"))
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(dir.path())
@@ -523,7 +523,7 @@ fn a_server_block_refuses_the_start() {
 #[test]
 fn check_config_agrees_with_what_the_gateway_would_do() {
     let check = |text: &str, embedded: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_remotex"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_zdesk"));
         command.arg("check-config");
         if embedded {
             command.arg("--embedded");

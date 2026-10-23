@@ -17,10 +17,10 @@
 //
 //     cargo run -- serve --config tmp/qa_egfx.toml
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52890/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_EGFX_TARGET=win \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52890/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=… \
+//     ZDESK_PLAYWRIGHT_EGFX_TARGET=win \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'
 //
 // ALPHA: a session started with the picker's adaptive choice tells the host it may
@@ -29,7 +29,7 @@
 // host draws everything in: by region it draws H.264 only for what moves like
 // video, which needs one playing.
 //
-//     REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=win-h264 \
+//     ZDESK_PLAYWRIGHT_EGFX_H264_TARGET=win-h264 \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'
 import { expect, type Page, test, type Worker } from "@playwright/test";
 
@@ -43,9 +43,9 @@ import {
 import { Zgfx } from "./zgfx";
 
 /// The opt-in, and the target name in one, as the video spec has it.
-const EGFX_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_TARGET;
+const EGFX_TARGET = process.env.ZDESK_PLAYWRIGHT_EGFX_TARGET;
 /// The same for a target to start with adaptive H.264.
-const EGFX_H264_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET;
+const EGFX_H264_TARGET = process.env.ZDESK_PLAYWRIGHT_EGFX_H264_TARGET;
 
 /// What every session here is started with: nothing chosen, the pipeline passed
 /// as it is in every session.
@@ -291,7 +291,7 @@ const runs = (seen: Session): number[] => seen.batches.flatMap((b) => b.runs);
 test.describe("a target that passes its graphics pipeline", () => {
   test.skip(
     !EGFX_TARGET,
-    "set REMOTEX_PLAYWRIGHT_EGFX_TARGET=<target> against a gateway with a live RDP host",
+    "set ZDESK_PLAYWRIGHT_EGFX_TARGET=<target> against a gateway with a live RDP host",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
@@ -584,7 +584,7 @@ test.describe("a target that passes its graphics pipeline", () => {
 test.describe("a target whose passed pipeline may carry H.264", () => {
   test.skip(
     !EGFX_H264_TARGET,
-    "set REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=<target> against a gateway with a live RDP host",
+    "set ZDESK_PLAYWRIGHT_EGFX_H264_TARGET=<target> against a gateway with a live RDP host",
   );
 
   test.afterEach(async ({ page }) => {

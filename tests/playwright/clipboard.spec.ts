@@ -69,7 +69,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   await logInAndConnect(page);
 
   // Unsolicited remote changes retain the established automatic-sync path.
-  const remoteValue = `remotex-ui-remote-${Date.now()}`;
+  const remoteValue = `zdesk-ui-remote-${Date.now()}`;
   setRemoteClipboard(remoteValue);
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
@@ -79,7 +79,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   // A repeated remote announcement can follow a guest paste even though the
   // guest clipboard content did not change. It is activity for metadata, but
   // must not replace a newer local clipboard value.
-  const localSentinel = `remotex-ui-local-${Date.now()}`;
+  const localSentinel = `zdesk-ui-local-${Date.now()}`;
   await page.evaluate(
     (text) => navigator.clipboard.writeText(text),
     localSentinel,
@@ -129,7 +129,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
     .toBe(remoteValue);
 
   // The same revealed textarea remains the send surface.
-  const webValue = `remotex-ui-web-${Date.now()}`;
+  const webValue = `zdesk-ui-web-${Date.now()}`;
   await input.fill(webValue);
   await expect(
     page.getByText(`${Buffer.byteLength(webValue)} / 524288 bytes`),
@@ -153,7 +153,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
   // Some remote clipboard bridges re-announce host-provided text when the
   // guest pastes it. That echo is not a guest copy/cut and must not travel
   // back over a newer host clipboard.
-  const echoSentinel = `remotex-ui-after-send-${Date.now()}`;
+  const echoSentinel = `zdesk-ui-after-send-${Date.now()}`;
   await page.evaluate(
     (text) => navigator.clipboard.writeText(text),
     echoSentinel,

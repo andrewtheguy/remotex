@@ -20,7 +20,7 @@ export function displayTabUrl(tab: number): string {
 
 /** The window name the tab showing display `tab` is opened under. */
 export function displayTabName(tab: number): string {
-  return `remotex-display-${tab}`;
+  return `zdesk-display-${tab}`;
 }
 
 /** As much of a window as finding a display's tab takes. */

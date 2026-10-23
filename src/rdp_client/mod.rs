@@ -36,7 +36,7 @@
 //!
 //! [`Connect::egfx`] chooses. With the graphics pipeline (MS-RDPEGFX), the server
 //! draws through surfaces on a dynamic channel, whose commands are handed on
-//! whole ([`Event::Graphics`]) for a [`remotex_rdp_graphics::Compositor`] somewhere
+//! whole ([`Event::Graphics`]) for a [`zdesk_rdp_graphics::Compositor`] somewhere
 //! else — the page's — to compose; it marks its frames ([`Event::Frame`]), and
 //! answers a monitor layout with a graphics reset, which surfaces here as one
 //! [`Event::Resize`]. Without it, the server sends plain bitmap updates on the
@@ -103,6 +103,6 @@ pub use microphone::{MicrophoneFeed, MicrophoneSink};
 pub use error::Error;
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};
 pub use pointer::{Cursor, CursorImage};
-pub use remotex_rdp_graphics::fidelity::Fidelity;
-pub use remotex_rdp_graphics::{Composed, Compositor, Frame, Framebuffer, Rect};
+pub use zdesk_rdp_graphics::fidelity::Fidelity;
+pub use zdesk_rdp_graphics::{Composed, Compositor, Frame, Framebuffer, Rect};
 pub use session::{AudioSink, Connect, Event, Placed, Session};

@@ -16,7 +16,7 @@ jobs:
     needs: frontend
     runs-on: windows-latest
     env:
-      REMOTEX_PREBUILT_FRONTEND: frontend/dist
+      ZDESK_PREBUILT_FRONTEND: frontend/dist
     steps:
       - uses: actions/checkout@v4
 

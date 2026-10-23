@@ -1,13 +1,13 @@
 //! A managed local gateway: one browser instance, one private socket, one token.
 //!
-//! `remotex serve-embedded --instance-dir <dir>` is not a deployment. It is
+//! `zdesk serve-embedded --instance-dir <dir>` is not a deployment. It is
 //! started by an instance manager, serves that browser instance alone, and dies
 //! with its parent. Everything that makes a `serve` gateway configurable is
 //! therefore decided here instead: it listens on its private transport —
 //! `<instance-dir>/gateway.sock`, or a named pipe on Windows, see [`transport`] —
 //! and there is no login to offer — see [`crate::config::Audience::Embedded`].
 //!
-//! The SPA it serves is the same browser client as `remotex serve`. The token below
+//! The SPA it serves is the same browser client as `zdesk serve`. The token below
 //! stands in for the login: the master listener seeds it with an `HttpOnly` response
 //! cookie before proxying the browser to the child, so the page authenticates itself
 //! the way any logged-in browser does and the manager needs no session protocol of
@@ -65,7 +65,7 @@ pub struct Handshake {
     /// The private endpoint the control plane proxies to: the Unix socket's path,
     /// or the named pipe's name on Windows.
     pub endpoint: String,
-    /// The token the master listener seeds in the browser's `remotex_session`
+    /// The token the master listener seeds in the browser's `zdesk_session`
     /// cookie, which then carries it to every request and `/ws` upgrade.
     pub token: String,
 }
@@ -114,9 +114,9 @@ impl Instance {
         Self { dir: dir.into() }
     }
 
-    /// `<dir>/remotex.toml` — the one file a user edits.
+    /// `<dir>/zdesk.toml` — the one file a user edits.
     pub fn config_path(&self) -> PathBuf {
-        self.dir.join("remotex.toml")
+        self.dir.join("zdesk.toml")
     }
 
     /// Read and check this instance's config.
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn a_handshake_is_one_parseable_line() {
         let handshake = Handshake {
-            endpoint: "/tmp/remotex/gateway.sock".to_owned(),
+            endpoint: "/tmp/zdesk/gateway.sock".to_owned(),
             token: "abc-123".to_owned(),
         };
         let line = handshake.line().unwrap();
@@ -358,14 +358,14 @@ mod tests {
         );
         // The field names the parent reads, spelled out so renaming one here fails
         // here rather than at launch.
-        assert!(line.contains("\"endpoint\":\"/tmp/remotex/gateway.sock\""), "{line}");
+        assert!(line.contains("\"endpoint\":\"/tmp/zdesk/gateway.sock\""), "{line}");
         assert!(line.contains("\"token\":\"abc-123\""), "{line}");
     }
 
     #[test]
     fn an_instance_names_its_config_beside_itself() {
         let instance = Instance::new("/tmp/inst");
-        assert_eq!(instance.config_path(), Path::new("/tmp/inst").join("remotex.toml"));
+        assert_eq!(instance.config_path(), Path::new("/tmp/inst").join("zdesk.toml"));
     }
 
     /// An embedded config is `[branding]` and `[[targets]]`, and an empty one is a

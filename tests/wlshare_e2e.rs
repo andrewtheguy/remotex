@@ -2,7 +2,7 @@
 //! which lists wlshare's extensions, and as a plain `vnc` one, which lists none.
 //!
 //! Builds wlshare from its checkout — `../wlshare` beside this repository, or
-//! wherever `REMOTEX_TEST_WLSHARE_DIR` names — and starts it on a headless sway
+//! wherever `ZDESK_TEST_WLSHARE_DIR` names — and starts it on a headless sway
 //! (`tests/wlshare-dummy/`) with one output, HEADLESS-1 at 1024x768 and scale 1;
 //! the `wlshare` target asks for two virtual displays, so wlshare has sway make
 //! HEADLESS-2, at 1280x800 and scale 2 by sway's configuration, before the desk
@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, Subtype, TargetConfig};
-use remotex::server;
+use zdesk::config::{AppConfig, Protocol, Subtype, TargetConfig};
+use zdesk::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -35,7 +35,7 @@ const TARGET: &str = "wlshare-dummy";
 const PLAIN_TARGET: &str = "wlshare-dummy-plain";
 
 /// Where the wlshare checkout to build is, when not beside this repository.
-const WLSHARE_DIR_ENV: &str = "REMOTEX_TEST_WLSHARE_DIR";
+const WLSHARE_DIR_ENV: &str = "ZDESK_TEST_WLSHARE_DIR";
 
 /// Wait until wlshare answers RFB on the published port: rootless podman's
 /// forwarder accepts a connection before anything listens inside.
@@ -72,9 +72,9 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         ..wlshare.clone()
     };
     let config = AppConfig {
-        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
+        listen: zdesk::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         auth: common::test_auth(),
-        branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
+        branding: zdesk::config::Branding { text: "zdesk".to_owned(), logo: None },
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
@@ -566,7 +566,7 @@ async fn start_wlshare() -> (Arc<common::Container>, u16) {
     );
     let (container, vnc_port) = common::start_server_image(
         runtime,
-        "remotex-e2e-wlshare",
+        "zdesk-e2e-wlshare",
         &manifest.join("tests/wlshare-dummy"),
         &wlshare,
         5900,
@@ -652,7 +652,7 @@ fn tone_frames(count: usize) -> Vec<Vec<u8>> {
                     ((t * TONE_HZ * std::f64::consts::TAU).sin() * 0.5) as f32
                 })
                 .collect();
-            let mut frame = vec![remotex::protocol::mic::FRAME_KIND];
+            let mut frame = vec![zdesk::protocol::mic::FRAME_KIND];
             frame.extend(encoder.encode_vec_float(&pcm, 4000).unwrap());
             frame
         })
@@ -889,7 +889,7 @@ async fn wlshare_lends_the_desktop_the_browsers_camera() {
             tokio::select! {
                 _ = tick.tick(), if streaming => {
                     let unit = &units[next % units.len()];
-                    let mut frame = vec![remotex::protocol::camera::FRAME_KIND, u8::from(unit.keyframe)];
+                    let mut frame = vec![zdesk::protocol::camera::FRAME_KIND, u8::from(unit.keyframe)];
                     frame.extend_from_slice(&unit.data);
                     camera.send(Message::binary(frame)).await.unwrap();
                     next += 1;

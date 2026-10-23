@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Capture a High Performance Mac's media stream as the gateway receives it.
 #
-# Builds the gateway, serves CONFIG with REMOTEX_HP_DUMP set,
+# Builds the gateway, serves CONFIG with ZDESK_HP_DUMP set,
 # drives one session through tests/ws_probe.py with its audio socket open, stops the
 # gateway and summarises the capture:
 #
@@ -24,7 +24,7 @@
 # settled, and a resize in flight on a slow Mac can outlast the session. Play
 # something on the Mac first if the capture should carry motion and sound.
 #
-#   REMOTEX_PROBE_PASSWORD=... tests/hp_capture.sh \
+#   ZDESK_PROBE_PASSWORD=... tests/hp_capture.sh \
 #       [--config tmp/test_uat_hp.toml] [--port 52888] [--target macvmhighperf] \
 #       [--user admin] [--seconds 45] [--display 1440x900@200] [--out tmp/hp-capture] \
 #       [--whole]
@@ -56,8 +56,8 @@ while [[ $# -gt 0 ]]; do
   shift 2
 done
 
-if [[ -z "${REMOTEX_PROBE_PASSWORD:-}" ]]; then
-  echo "set REMOTEX_PROBE_PASSWORD to the gateway's password for $user" >&2
+if [[ -z "${ZDESK_PROBE_PASSWORD:-}" ]]; then
+  echo "set ZDESK_PROBE_PASSWORD to the gateway's password for $user" >&2
   exit 2
 fi
 if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -70,8 +70,8 @@ cargo build --profile qa
 mkdir -p "$out"
 rm -f "$out/video.h265" "$out/audio.eld"
 cp tests/hp_decode/index.html tests/hp_decode/probe.js "$out/"
-REMOTEX_HP_DUMP="$out" RUST_LOG=info,remotex=debug \
-  ./target/qa/remotex serve --config "$config" --listen "127.0.0.1:$port" >"$out/gateway.log" 2>&1 &
+ZDESK_HP_DUMP="$out" RUST_LOG=info,zdesk=debug \
+  ./target/qa/zdesk serve --config "$config" --listen "127.0.0.1:$port" >"$out/gateway.log" 2>&1 &
 gateway=$!
 trap 'kill "$gateway" 2>/dev/null || true; wait "$gateway" 2>/dev/null || true' EXIT
 

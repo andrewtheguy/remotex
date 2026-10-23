@@ -8,10 +8,10 @@ gateway binary.
 
 ```sh
 bun install --cwd frontend
-cp remotex.example.toml remotex.toml
+cp zdesk.example.toml zdesk.toml
 cargo run -- gen-passwd admin
-# Paste the generated credential into remotex.toml, then:
-cargo run -- serve -c remotex.toml
+# Paste the generated credential into zdesk.toml, then:
+cargo run -- serve -c zdesk.toml
 ```
 
 Open <http://localhost:52380>. Use `RUST_LOG=info` or `RUST_LOG=debug` for
@@ -19,7 +19,7 @@ backend logs. Use `cargo build` when you only need to compile without starting
 the gateway.
 
 The built frontend is embedded in the binary at compile time (`src/assets.rs`),
-so `target/release/remotex` runs on its own with no `frontend/dist` beside it,
+so `target/release/zdesk` runs on its own with no `frontend/dist` beside it,
 and the gateway is the only thing that serves the page. `build.rs` runs
 `bun run build` into Cargo's private output directory before the crate compiles
 and fails the build if `index.html` is missing afterwards. The frontend's build
@@ -32,7 +32,7 @@ The main directories are:
 |---|---|
 | `src/` | gateway, session management, and RDP/VNC engines |
 | `src/rdp_client/` | the RDP client, down to the wire format |
-| `crates/remotex-rdp-graphics/` | the RDP graphics pipeline's codecs and compositor, which the page runs too |
+| `crates/zdesk-rdp-graphics/` | the RDP graphics pipeline's codecs and compositor, which the page runs too |
 | `frontend/` | React SPA, and its WebAssembly modules under `frontend/wasm/` |
 | `tests/` | protocol and engine end-to-end tests |
 | `packaging/` | release, install, and container scripts |
@@ -60,21 +60,21 @@ cargo test --test vnc_e2e --test wlshare_e2e -- --ignored
 ```
 
 `wlshare_e2e` builds wlshare from the `../wlshare` checkout, or the one
-`REMOTEX_TEST_WLSHARE_DIR` names, and asks it for its VP9 stream and its
+`ZDESK_TEST_WLSHARE_DIR` names, and asks it for its VP9 stream and its
 tiles with motion.
-`REMOTEX_TEST_CONTAINER_RUNTIME` forces Docker
+`ZDESK_TEST_CONTAINER_RUNTIME` forces Docker
 or Podman when both work.
 
 For a remote Podman connection:
 
 ```sh
 CONTAINER_CONNECTION=workstation-wsl \
-REMOTEX_TEST_CONTAINER_HOST=<engine-host> \
+ZDESK_TEST_CONTAINER_HOST=<engine-host> \
 cargo test --test vnc_e2e -- --ignored
 ```
 
 `CONTAINER_CONNECTION` is the Podman system connection name.
-`REMOTEX_TEST_CONTAINER_HOST` is the engine host's IP address or DNS name as
+`ZDESK_TEST_CONTAINER_HOST` is the engine host's IP address or DNS name as
 reachable from the machine running the tests; an SSH config alias is not
 resolved for the tests' direct VNC connections.
 
@@ -88,7 +88,7 @@ examples run on demand, each with the cases named on its command line, under
 `examples/`:
 
 ```sh
-REMOTEX_UAT_TARGET=windows-ent-sandbox \
+ZDESK_UAT_TARGET=windows-ent-sandbox \
 cargo run --example rdp_client_probe -- a_real_host_paints_and_resizes
 ```
 
@@ -125,7 +125,7 @@ that it built earlier:
 
 ```sh
 bun run --cwd frontend build
-REMOTEX_PREBUILT_FRONTEND=frontend/dist cargo build --release
+ZDESK_PREBUILT_FRONTEND=frontend/dist cargo build --release
 ```
 
 A gateway for QA is built with `cargo build --profile qa` into `target/qa`:

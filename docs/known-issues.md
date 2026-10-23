@@ -3,11 +3,11 @@
 Reproducible limitations and defects that a user may encounter in a supported
 configuration. Each entry describes the symptom, the evidence collected so far,
 and the available workaround or condition that changes it. Entries can cover the
-remote server, the browser, or remotex itself; knowing which component is at fault
+remote server, the browser, or zdesk itself; knowing which component is at fault
 does not make the user-visible issue disappear.
 
 Remove an entry when the symptom is fixed or no longer applies to a supported
-configuration. If a confirmed remotex defect has separate tracking, keep the
+configuration. If a confirmed zdesk defect has separate tracking, keep the
 user-facing description here until the fix ships, with a link to that tracking
 when it is public.
 
@@ -20,7 +20,7 @@ browser window's edge to resize it can leave the desktop's text blurry. It does
 not clear on its own: the text stays blurry until the connection to the host is
 ended and made again.
 
-**What has been ruled out.** That it is remotex's. Microsoft's own Remote Desktop
+**What has been ruled out.** That it is zdesk's. Microsoft's own Remote Desktop
 client on a Mac, the Windows App, shows the same blurry text when its window is
 dragged to a new size against the same kind of host, so the picture is what the
 host sends for a desktop resized that way and not something this client's
@@ -47,7 +47,7 @@ The tool still works in both: a click takes the screenshot or starts the
 recording. Cursors that change on hover, such as the hand over a link, are
 unaffected.
 
-**What has been ruled out.** That it is remotex's. Apple's own Screen Sharing
+**What has been ruled out.** That it is zdesk's. Apple's own Screen Sharing
 viewer keeps the arrow in both cases too. The Mac's cursor changes as soon as the
 tool starts, and the Mac sends no cursor shape for as long as the tool is up: the
 camera goes out only when the tool ends, with the ordinary shape right behind it,

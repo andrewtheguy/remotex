@@ -808,7 +808,7 @@ function blockedReason(
 // Remembered per target, in this browser, as lasting choices about how each
 // desktop is used from this machine: localStorage rather than sessionStorage, so
 // they survive a new tab.
-const CHOICES_KEY = "remotex.targetChoices";
+const CHOICES_KEY = "zdesk.targetChoices";
 
 /** Every target's remembered choices, by name. Empty where nothing can be read. */
 export function readRememberedChoices(): Record<string, Partial<Choices>> {

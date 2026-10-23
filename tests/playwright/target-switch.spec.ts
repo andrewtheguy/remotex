@@ -21,13 +21,13 @@
 //
 //     cargo run -- serve --config tmp/qa_switch.toml
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52893/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_SWITCH_RDP_TARGET=windows-arm \
-//     REMOTEX_PLAYWRIGHT_SWITCH_RDP_BITMAP_TARGET=windows-bitmap \
-//     REMOTEX_PLAYWRIGHT_SWITCH_MAC_TARGET=macvmstd \
-//     REMOTEX_PLAYWRIGHT_SWITCH_HEVC_TARGET=macvmhighperf \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52893/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=… \
+//     ZDESK_PLAYWRIGHT_SWITCH_RDP_TARGET=windows-arm \
+//     ZDESK_PLAYWRIGHT_SWITCH_RDP_BITMAP_TARGET=windows-bitmap \
+//     ZDESK_PLAYWRIGHT_SWITCH_MAC_TARGET=macvmstd \
+//     ZDESK_PLAYWRIGHT_SWITCH_HEVC_TARGET=macvmhighperf \
 //     bunx playwright test '/target-switch\.spec\.ts$'
 import { expect, type Page, test, type Worker } from "@playwright/test";
 
@@ -41,11 +41,11 @@ import {
   startTarget,
 } from "./support";
 
-const RDP_TARGET = process.env.REMOTEX_PLAYWRIGHT_SWITCH_RDP_TARGET;
+const RDP_TARGET = process.env.ZDESK_PLAYWRIGHT_SWITCH_RDP_TARGET;
 const RDP_BITMAP_TARGET =
-  process.env.REMOTEX_PLAYWRIGHT_SWITCH_RDP_BITMAP_TARGET;
-const MAC_TARGET = process.env.REMOTEX_PLAYWRIGHT_SWITCH_MAC_TARGET;
-const HEVC_TARGET = process.env.REMOTEX_PLAYWRIGHT_SWITCH_HEVC_TARGET;
+  process.env.ZDESK_PLAYWRIGHT_SWITCH_RDP_BITMAP_TARGET;
+const MAC_TARGET = process.env.ZDESK_PLAYWRIGHT_SWITCH_MAC_TARGET;
+const HEVC_TARGET = process.env.ZDESK_PLAYWRIGHT_SWITCH_HEVC_TARGET;
 
 /// The HEVC decoder's module, as the gateway names it.
 const HEVC_MODULE = /^\/hevc\/[\w-]+\.wasm$/;
@@ -169,7 +169,7 @@ async function session(
 test.describe("a Mac's and an RDP host's targets on one page", () => {
   test.skip(
     !RDP_TARGET || !RDP_BITMAP_TARGET || !MAC_TARGET || !HEVC_TARGET,
-    "set the REMOTEX_PLAYWRIGHT_SWITCH_* targets against a gateway with a live RDP host and a live Mac",
+    "set the ZDESK_PLAYWRIGHT_SWITCH_* targets against a gateway with a live RDP host and a live Mac",
   );
 
   test.afterEach(async ({ page }) => {

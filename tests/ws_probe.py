@@ -6,9 +6,9 @@
 """Drive a local gateway WebSocket and print the control messages a browser sees.
 
 This is a manual probe for display selection and dynamic-resolution behavior. Start
-``remotex serve`` separately, then run, for example:
+``zdesk serve`` separately, then run, for example:
 
-    REMOTEX_PROBE_PASSWORD=... uv run tests/ws_probe.py \
+    ZDESK_PROBE_PASSWORD=... uv run tests/ws_probe.py \
         --port 52675 --target sandbox2highperf --user admin --resize \
         --viewport 1366x768 --viewport 1920x1080
 
@@ -155,8 +155,8 @@ async def main() -> int:
     parser.add_argument("--user", required=True)
     parser.add_argument(
         "--password",
-        default=os.environ.get("REMOTEX_PROBE_PASSWORD"),
-        help="gateway password (prefer REMOTEX_PROBE_PASSWORD)",
+        default=os.environ.get("ZDESK_PROBE_PASSWORD"),
+        help="gateway password (prefer ZDESK_PROBE_PASSWORD)",
     )
     parser.add_argument("--seconds", type=float, default=25.0)
     parser.add_argument(
@@ -444,7 +444,7 @@ async def main() -> int:
         timeout=10,
     )
     login.raise_for_status()
-    cookie = session.cookies.get("remotex_session")
+    cookie = session.cookies.get("zdesk_session")
     claim = session.post(f"{base}/api/session", json={}, timeout=10)
     claim.raise_for_status()
     token = claim.json()["sessionId"]
@@ -474,7 +474,7 @@ async def main() -> int:
         "microphone": args.microphone,
     }
     # A display socket carries no token: the login cookie is what lets it in.
-    headers = {"Cookie": f"remotex_session={cookie}"}
+    headers = {"Cookie": f"zdesk_session={cookie}"}
 
     def display_url(display: int) -> str:
         return f"ws://127.0.0.1:{args.port}/ws/display?display={display}"
@@ -536,7 +536,7 @@ async def main() -> int:
             try:
                 async with websockets.connect(
                     audio_url,
-                    additional_headers={"Cookie": f"remotex_session={cookie}"},
+                    additional_headers={"Cookie": f"zdesk_session={cookie}"},
                 ) as audio_socket:
                     async for message in audio_socket:
                         if isinstance(message, bytes):

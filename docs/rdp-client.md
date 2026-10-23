@@ -8,7 +8,7 @@ engine that consumes those events — damage into tiles, `ClientMsg` into scanco
 — is `src/rdp.rs`, and the boundary between the two is the point of this document:
 everything below it is protocol, everything above it is this gateway's.
 
-What a host draws with is a crate of its own, `crates/remotex-rdp-graphics`: the
+What a host draws with is a crate of its own, `crates/zdesk-rdp-graphics`: the
 graphics pipeline's PDUs and bulk compression, the codecs, the compositor and the
 framebuffer. It is this client's all the same — `rdp_client` names the framebuffer
 and that part of the wire as its own — and is apart because the page runs it too,
@@ -221,7 +221,7 @@ Progressive, and about 32 a second at 9 KB each where H.264 is taken:
     and ClearCodec, which this does not rate-control: 81% of Progressive first
     passes were at quality 25 either way.
   - **On `windows-ent-sandbox`, a page 150 ms away and unlimited, with
-    whole-desktop H.264** (`REMOTEX_UAT_ACK_DELAY_MS=150` in the link probe).
+    whole-desktop H.264** (`ZDESK_UAT_ACK_DELAY_MS=150` in the link probe).
     With round trips answered at once the host concluded a base round trip of
     0 to 2 ms and drew 10.5 frames a second at 6.8 KB. Held for the page's
     distance, it concluded 151 ms and drew 20.2 frames a second at 6.3 KB, a
@@ -579,7 +579,7 @@ mappings, which this client ignores, and only 10.7 has a flag to say so. Version
 bytes of flags, in the advertise and in a confirmation of it. `AVC_THINCLIENT`,
 which asks for the whole desktop in AVC444 (MS-RDPEGFX 2.2.3.6), is set only by
 `H264::WholeDesktop`, on every set from 10.3; `examples/rdp_link_probe.rs` asks
-for it with `REMOTEX_UAT_H264=whole`. Measured against a
+for it with `ZDESK_UAT_H264=whole`. Measured against a
 Windows 11 host without a GPU: it confirms 10.7 and goes on drawing with
 ClearCodec, Progressive and the caches, and draws what moves like video with
 AVC420 in the same frames — a Main-profile stream for the surface, about fifteen
@@ -931,7 +931,7 @@ Session Host role never creates it, and Microsoft's own client gets no camera
 against such a host either. On it the client asks for version 2, the host answers
 with the highest it speaks that is not higher, and nothing more is said until the
 browser enables its camera. That plug is what sends the Device Added Notification —
-a display name, `Remotex Camera`, and the name of a device channel — and the host
+a display name, `Zdesk Camera`, and the name of a device channel — and the host
 then opens that channel by name. A version the client does not speak ends the
 protocol on that channel, as MS-RDPECAM 3.2.5.2 requires.
 
@@ -993,8 +993,8 @@ sink becomes `CameraBridge` signals, and the bridge's control becomes the sessio
 feed.
 
 `examples/rdp_client_probe.rs` plugs a camera into a real host and, under
-`REMOTEX_UAT_CAMERA=1`, asserts that the host agreed version 2 and opened the
-announced device's channel; `RUST_LOG=remotex=debug` shows the host's device queries
+`ZDESK_UAT_CAMERA=1`, asserts that the host agreed version 2 and opened the
+announced device's channel; `RUST_LOG=zdesk=debug` shows the host's device queries
 and this end's answers.
 
 ## Microphone (MS-RDPEAI)
@@ -1027,7 +1027,7 @@ audio, so a later Open begins with a fresh stream. The protocol state machine is
 `rdp_client/proto/rdpeai.rs`; `src/rdp_mic.rs` is its bridge adapter.
 
 `examples/rdp_client_probe.rs` drives a real host's Recording panel in
-`a_real_host_records_the_microphone`. With `REMOTEX_UAT_MICROPHONE=1` it asserts
+`a_real_host_records_the_microphone`. With `ZDESK_UAT_MICROPHONE=1` it asserts
 version negotiation, then feeds a tone for the host's level meter while the
 device is open. Like the camera probe it runs only when named on the probe's
 command line, and does not automatically inspect what the remote application
@@ -1066,7 +1066,7 @@ The measured part: a Windows host negotiates nothing until something plays. A
 session opened onto a quiet desktop shows the dynamic channel opened and not a byte
 on it, for as long as the desktop stays quiet, and a probe that asserts on the
 format list fails there through no fault in the client. `examples/rdp_client_probe.rs`
-asserts the negotiation only under `REMOTEX_UAT_AUDIO=1`, which is the run's word
+asserts the negotiation only under `ZDESK_UAT_AUDIO=1`, which is the run's word
 that a sound is playing on the remote; without it the counts are printed.
 
 ## What a host will not tell you

@@ -3,7 +3,7 @@
 // Not built with anything of the gateway's: the PDUs below are transcribed from
 // [MS-RDPEGFX] 2.2.2, so what is checked is the module's reading of the protocol
 // and not its agreement with its own writer. The codecs have their tests where
-// they are written (crates/remotex-rdp-graphics); what is pinned here is the
+// they are written (crates/zdesk-rdp-graphics); what is pinned here is the
 // boundary — that the module loads and starts its threads, composes a pipeline from
 // its first command, says what it painted, and hands back the picture where a
 // texture takes it from.
@@ -15,7 +15,7 @@ import { test } from "node:test";
 import { loadEgfx } from "./egfxCompositor.ts";
 
 const module = readFileSync(
-  new URL("../wasm/egfx/pkg/remotex_egfx_bg.wasm", import.meta.url),
+  new URL("../wasm/egfx/pkg/zdesk_egfx_bg.wasm", import.meta.url),
 );
 
 const u16 = (n: number) => [n & 0xff, (n >> 8) & 0xff];

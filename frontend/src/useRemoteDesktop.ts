@@ -147,11 +147,11 @@ export interface RemoteSize {
 // without the takeover prompt (sessionStorage is per-tab, so two tabs of the
 // same browser still contend like two browsers — as intended). Exported so
 // logout (App.tsx) can drop it.
-export const SESSION_KEY = "remotex.sessionId";
+export const SESSION_KEY = "zdesk.sessionId";
 // This tab's name for itself on the sockets of a display it shows in a tab of
 // its own, per tab like the claim: a reload keeps it, so the gateway lets the
 // tab back in, and another tab has another.
-const TAB_KEY = "remotex.displayTab";
+const TAB_KEY = "zdesk.displayTab";
 
 // How long a page waits for the lock on a name it found in its storage: a
 // reload's last document may not have let go of it yet, and a duplicated tab's
@@ -225,7 +225,7 @@ function tabId(): Promise<string> {
 // The Mac-host Command-to-Control preference, default on. localStorage rather
 // than sessionStorage: unlike the session identity this is a lasting choice about
 // how this machine's keyboard behaves, and it should survive a new tab.
-const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
+const MAC_KEYS_KEY = "zdesk.macKeyboardOverrides";
 // What this tab last chose for the session it is on, Mute or Unmute. Whether a
 // session carries the remote's sound is chosen at the picker and held by the
 // gateway; this is only whether this tab is listening to it, which the menu's
@@ -233,14 +233,14 @@ const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
 // sessionStorage, like the session identity: it belongs to this tab's session, so
 // a reload or a dropped socket comes back as it was left, and every Start clears
 // it. Exported so a display's tab (App.tsx) can drop the copy it was opened with.
-export const MUTED_KEY = "remotex.muted";
+export const MUTED_KEY = "zdesk.muted";
 // The touchscreen preference: fingers forwarded to the remote as touch contacts
 // rather than read as trackpad gestures. Remembered like the Mac-keys one, and
 // for the same reason — it describes the device in hand, not a session — and
 // off unless set, since the trackpad gestures work against every target and a
 // touchscreen only against a host that has one to offer. Acted on only once
 // the host has said so (`touchReady`) and only on a device with a touchscreen.
-const TOUCHSCREEN_KEY = "remotex.touchscreen";
+const TOUCHSCREEN_KEY = "zdesk.touchscreen";
 // Evaluated once: the host OS cannot change under a running tab, and the input
 // effect must not pay for it per keystroke.
 const IS_MAC_HOST = isMacHost();

@@ -225,16 +225,16 @@ for the Mac target:
 
 ```sh
 cd tests/playwright
-REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:<port>/' \
-REMOTEX_PLAYWRIGHT_USERNAME='<username>' \
-REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
-REMOTEX_PLAYWRIGHT_TARGET='mac' \
-REMOTEX_PLAYWRIGHT_MAC_SSH='<ssh-user>@<mac-host>' \
-REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING='<mac-host>:5900' \
+ZDESK_PLAYWRIGHT_BASE_URL='http://127.0.0.1:<port>/' \
+ZDESK_PLAYWRIGHT_USERNAME='<username>' \
+ZDESK_PLAYWRIGHT_PASSWORD='<password>' \
+ZDESK_PLAYWRIGHT_TARGET='mac' \
+ZDESK_PLAYWRIGHT_MAC_SSH='<ssh-user>@<mac-host>' \
+ZDESK_PLAYWRIGHT_MAC_SCREEN_SHARING='<mac-host>:5900' \
 bun run test
 ```
 
-`REMOTEX_PLAYWRIGHT_MAC_SCREEN_SHARING` opts into the specs that need a live Mac
+`ZDESK_PLAYWRIGHT_MAC_SCREEN_SHARING` opts into the specs that need a live Mac
 target; without it they skip, so a plain `bun run test` never assumes a VM
 is up. The helper checks that the Mac's Screen Sharing service is listening at
 that address before starting, rather than failing later inside the browser and
@@ -244,7 +244,7 @@ the Rust e2e tests make with `#[ignore]`.
 The tiles spec needs a local gateway config with a live plain `vnc` target or an
 `rdp` one with `egfx = false`. Put that gitignored config under `tmp/` (for
 example, `tmp/qa_tiles.toml`) and name the target with
-`REMOTEX_PLAYWRIGHT_TILES_TARGET`:
+`ZDESK_PLAYWRIGHT_TILES_TARGET`:
 
 ```sh
 cargo run -- serve --config tmp/qa_tiles.toml
@@ -252,10 +252,10 @@ cargo run -- serve --config tmp/qa_tiles.toml
 
 ```sh
 cd tests/playwright
-REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
-REMOTEX_PLAYWRIGHT_USERNAME='admin' \
-REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
-REMOTEX_PLAYWRIGHT_TILES_TARGET='bitmap' \
+ZDESK_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
+ZDESK_PLAYWRIGHT_USERNAME='admin' \
+ZDESK_PLAYWRIGHT_PASSWORD='<password>' \
+ZDESK_PLAYWRIGHT_TILES_TARGET='bitmap' \
 bun run test:tiles
 ```
 
@@ -264,60 +264,60 @@ after a frontend change and restart it; a stale bundle is exactly what these
 specs cannot see.
 
 The passthrough spec needs a live RDP host, in a target with the pipeline on
-named by `REMOTEX_PLAYWRIGHT_EGFX_TARGET`, whose sessions pass it unasked:
+named by `ZDESK_PLAYWRIGHT_EGFX_TARGET`, whose sessions pass it unasked:
 
 ```sh
 cd tests/playwright
-REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
-REMOTEX_PLAYWRIGHT_USERNAME='admin' \
-REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
-REMOTEX_PLAYWRIGHT_EGFX_TARGET='win' \
+ZDESK_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
+ZDESK_PLAYWRIGHT_USERNAME='admin' \
+ZDESK_PLAYWRIGHT_PASSWORD='<password>' \
+ZDESK_PLAYWRIGHT_EGFX_TARGET='win' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
 Its H.264 case, ALPHA, starts a target with the pipeline on, named by
-`REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET`, with the picker's Adaptive and H.264 over
+`ZDESK_PLAYWRIGHT_EGFX_H264_TARGET`, with the picker's Adaptive and H.264 over
 the full screen, which the host draws everything in; by region it would need a
 video playing:
 
 ```sh
-REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET='win-h264' \
+ZDESK_PLAYWRIGHT_EGFX_H264_TARGET='win-h264' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
 The Standard passthrough spec needs a live Mac in an `ard` target, named by
-`REMOTEX_PLAYWRIGHT_STANDARD_TARGET`. Its resize case needs one whose
+`ZDESK_PLAYWRIGHT_STANDARD_TARGET`. Its resize case needs one whose
 desktop follows the window, an `ard` target with `virtual_display = true`, named
-by `REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET`:
+by `ZDESK_PLAYWRIGHT_STANDARD_RESIZE_TARGET`:
 
 ```sh
-REMOTEX_PLAYWRIGHT_STANDARD_TARGET='mac' \
-REMOTEX_PLAYWRIGHT_STANDARD_RESIZE_TARGET='mac-virtual' \
+ZDESK_PLAYWRIGHT_STANDARD_TARGET='mac' \
+ZDESK_PLAYWRIGHT_STANDARD_RESIZE_TARGET='mac-virtual' \
 bunx playwright test '/standard-passthrough\.spec\.ts$'
 ```
 
 Its two-screen case, and the Combined Display spec, need an `ard` target on a Mac
 with a 1x screen beside a 2x one, named by
-`REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET`:
+`ZDESK_PLAYWRIGHT_STANDARD_COMBINED_TARGET`:
 
 ```sh
-REMOTEX_PLAYWRIGHT_STANDARD_COMBINED_TARGET='mac' \
+ZDESK_PLAYWRIGHT_STANDARD_COMBINED_TARGET='mac' \
 bunx playwright test '/standard-(passthrough|combined)\.spec\.ts$'
 ```
 
 The two-display spec needs the same kind of host, in a target with
-`virtual_displays = 2`, named by `REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET`:
+`virtual_displays = 2`, named by `ZDESK_PLAYWRIGHT_EGFX_DISPLAYS_TARGET`:
 
 ```sh
-REMOTEX_PLAYWRIGHT_EGFX_DISPLAYS_TARGET='win2' \
+ZDESK_PLAYWRIGHT_EGFX_DISPLAYS_TARGET='win2' \
 bunx playwright test '/egfx-two-displays\.spec\.ts$'
 ```
 
 The cross-display drag spec accepts either an RDP or High Performance target
-with two virtual displays. Name it with `REMOTEX_PLAYWRIGHT_DRAG_TARGET`:
+with two virtual displays. Name it with `ZDESK_PLAYWRIGHT_DRAG_TARGET`:
 
 ```sh
-REMOTEX_PLAYWRIGHT_DRAG_TARGET='win2' \
+ZDESK_PLAYWRIGHT_DRAG_TARGET='win2' \
 bunx playwright test '/display-drag\.spec\.ts$'
 ```
 
@@ -326,7 +326,7 @@ The software HEVC specs need Google Chrome installed, Playwright's Firefox
 `ard-high-performance` target, with the pinned
 release archive beside the config (where a gateway run from a Cargo build looks
 for it), and names that target with
-`REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
+`ZDESK_PLAYWRIGHT_HEVC_TARGET`:
 
 ```sh
 gh release download v0.0.17 --repo andrewtheguy/hevc-wasm-archives \
@@ -336,14 +336,14 @@ cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 
 ```sh
 cd tests/playwright
-REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
-REMOTEX_PLAYWRIGHT_USERNAME='admin' \
-REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
-REMOTEX_PLAYWRIGHT_HEVC_TARGET='macvmhevc' \
+ZDESK_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
+ZDESK_PLAYWRIGHT_USERNAME='admin' \
+ZDESK_PLAYWRIGHT_PASSWORD='<password>' \
+ZDESK_PLAYWRIGHT_HEVC_TARGET='macvmhevc' \
 bun run test:hevc
 ```
 
-Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`.
+Against a gateway without the archive, add `ZDESK_PLAYWRIGHT_HEVC_WASM=0`.
 
 The audio and picker specs use the test-tone gateway instead of a live target:
 
@@ -355,18 +355,18 @@ Against the URL it prints, run:
 
 ```sh
 cd tests/playwright
-REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:<port>/' \
-REMOTEX_PLAYWRIGHT_USERNAME='admin' \
-REMOTEX_PLAYWRIGHT_PASSWORD='hunter2' \
-REMOTEX_PLAYWRIGHT_AUDIO_TARGET='test-tone' \
-REMOTEX_PLAYWRIGHT_PICKER_TARGET='test-tone' \
+ZDESK_PLAYWRIGHT_BASE_URL='http://127.0.0.1:<port>/' \
+ZDESK_PLAYWRIGHT_USERNAME='admin' \
+ZDESK_PLAYWRIGHT_PASSWORD='hunter2' \
+ZDESK_PLAYWRIGHT_AUDIO_TARGET='test-tone' \
+ZDESK_PLAYWRIGHT_PICKER_TARGET='test-tone' \
 bunx playwright test '/(audio-socket|picker-options)\.spec\.ts$'
 ```
 
 The notice spec runs against the same gateway, as the run's target:
 
 ```sh
-REMOTEX_PLAYWRIGHT_TARGET='test-tone' \
+ZDESK_PLAYWRIGHT_TARGET='test-tone' \
 bunx playwright test '/input-held\.spec\.ts$'
 ```
 
@@ -388,7 +388,7 @@ bun run typecheck
 ```
 
 The defaults are `http://127.0.0.1:52380/`, the gateway's built-in port, and
-target `mac`. Override the URL with `REMOTEX_PLAYWRIGHT_BASE_URL` when the
+target `mac`. Override the URL with `ZDESK_PLAYWRIGHT_BASE_URL` when the
 gateway's config names another port.
 Live-target groups are skipped with a message naming their missing opt-in when
 their configuration is absent. The specs always run headless with one worker,

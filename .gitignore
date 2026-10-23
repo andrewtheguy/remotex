@@ -7,7 +7,7 @@ tmp/
 .env
 .DS_Store
 CLAUDE.local.md
-/remotex.toml
+/zdesk.toml
 # Editor scaffolding, written by whichever one is open. Nothing here is shared.
 .vscode/
 .claude/worktrees

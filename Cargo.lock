@@ -2688,78 +2688,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "remotex"
-version = "0.0.455"
-dependencies = [
- "aes",
- "aes-gcm",
- "anyhow",
- "apple-native-keyring-store",
- "argon2",
- "axum",
- "base64",
- "bcrypt",
- "bytes",
- "clap",
- "crossterm",
- "des 0.8.1",
- "eax",
- "env_logger",
- "flate2",
- "futures-util",
- "hmac",
- "jpeg-encoder",
- "keyring-core",
- "libc",
- "log",
- "md-5",
- "num-bigint 0.4.8",
- "opus-prebuilt",
- "png",
- "rand 0.10.2",
- "rayon",
- "remotex-rdp-graphics",
- "rpassword",
- "rsa",
- "rubato",
- "rusqlite",
- "rust-embed",
- "serde",
- "serde_json",
- "sha1 0.11.0",
- "sha2",
- "socket2",
- "sound-flac",
- "sound-opus",
- "sspi",
- "tar",
- "tempfile",
- "thiserror",
- "tikv-jemalloc-sys",
- "tikv-jemallocator",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "toml",
- "toml_edit",
- "tower",
- "uuid",
- "windows-native-keyring-store",
- "windows-sys 0.61.2",
- "zbus-secret-service-keyring-store",
-]
-
-[[package]]
-name = "remotex-rdp-graphics"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "log",
- "rayon",
- "thiserror",
-]
-
-[[package]]
 name = "rfc6979"
 version = "0.6.0-pre.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4385,6 +4313,78 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1afec51604565183aeb5c54c20aeab286120d4e4460f7f76e3e8bb8c0d99473"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "zdesk"
+version = "0.0.455"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "anyhow",
+ "apple-native-keyring-store",
+ "argon2",
+ "axum",
+ "base64",
+ "bcrypt",
+ "bytes",
+ "clap",
+ "crossterm",
+ "des 0.8.1",
+ "eax",
+ "env_logger",
+ "flate2",
+ "futures-util",
+ "hmac",
+ "jpeg-encoder",
+ "keyring-core",
+ "libc",
+ "log",
+ "md-5",
+ "num-bigint 0.4.8",
+ "opus-prebuilt",
+ "png",
+ "rand 0.10.2",
+ "rayon",
+ "rpassword",
+ "rsa",
+ "rubato",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2",
+ "socket2",
+ "sound-flac",
+ "sound-opus",
+ "sspi",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "toml",
+ "toml_edit",
+ "tower",
+ "uuid",
+ "windows-native-keyring-store",
+ "windows-sys 0.61.2",
+ "zbus-secret-service-keyring-store",
+ "zdesk-rdp-graphics",
+]
+
+[[package]]
+name = "zdesk-rdp-graphics"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "rayon",
+ "thiserror",
 ]
 
 [[package]]

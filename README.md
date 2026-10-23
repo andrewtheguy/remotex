@@ -1,7 +1,7 @@
-# remotex
+# zdesk
 
 Remote desktop in a browser, for the remote desktop server each platform
-already has. remotex is a small gateway you run next to your machines. It
+already has. zdesk is a small gateway you run next to your machines. It
 connects to:
 
 - **Windows 10 and 11's own Remote Desktop**, over RDP with its modern graphics
@@ -18,18 +18,18 @@ with a browser, on Windows, macOS, Linux, iOS or Android, reaches every one of
 them with no client to install either.
 
 ```text
-browser ── HTTPS or localhost ── remotex ── RDP / VNC ── your desktops
+browser ── HTTPS or localhost ── zdesk ── RDP / VNC ── your desktops
 ```
 
-`remotex serve` is single-user: one login, a list of your targets, and one
-active session. Native installs also include [`remotex tui`](docs/guide.md#local-instances),
+`zdesk serve` is single-user: one login, a list of your targets, and one
+active session. Native installs also include [`zdesk tui`](docs/guide.md#local-instances),
 a local control plane that runs several independent gateway instances side by
 side.
 
 > [!WARNING]
 > **No backward compatibility.** A release may change or remove a configuration
 > key, the WebSocket protocol or a feature, with nothing that reads the old
-> form. Check [`remotex.example.toml`](remotex.example.toml) against your config
+> form. Check [`zdesk.example.toml`](zdesk.example.toml) against your config
 > when you upgrade. The page and the gateway are one release too: a tab left
 > open across an upgrade names both versions and asks to be reloaded.
 
@@ -109,7 +109,7 @@ https://github.com/user-attachments/assets/1b5dfc6f-8510-490b-bd88-d4c52c48b0a5
 
 ## Supported servers
 
-remotex is built around the remote desktop servers native to each platform:
+zdesk is built around the remote desktop servers native to each platform:
 Windows' own Remote Desktop, macOS's built-in Screen Sharing, and on Linux
 [wlshare](https://github.com/andrewtheguy/wlshare), our own. Windows and macOS
 come first: they are what most people connect to, so features are tested and
@@ -148,24 +148,24 @@ comparison table, what they share, and what each passes.
 ## Quick start
 
 Install the package for your platform from the
-[latest release](https://github.com/andrewtheguy/remotex/releases/latest). On
+[latest release](https://github.com/andrewtheguy/zdesk/releases/latest). On
 Debian 13 or Ubuntu 24.04 and later:
 
 ```sh
-curl -fsSLO https://github.com/andrewtheguy/remotex/releases/latest/download/remotex-linux-amd64.deb
-sudo apt install ./remotex-linux-amd64.deb
+curl -fsSLO https://github.com/andrewtheguy/zdesk/releases/latest/download/zdesk-linux-amd64.deb
+sudo apt install ./zdesk-linux-amd64.deb
 ```
 
 Create the config from the shipped example and generate a login:
 
 ```sh
-sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/remotex /var/lib/remotex
+sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/zdesk /var/lib/zdesk
 sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
-  /usr/share/doc/remotex/remotex.example.toml /etc/remotex/remotex.toml
-remotex gen-passwd admin
+  /usr/share/doc/zdesk/zdesk.example.toml /etc/zdesk/zdesk.toml
+zdesk gen-passwd admin
 ```
 
-Put the generated value and a target in `/etc/remotex/remotex.toml`, with the
+Put the generated value and a target in `/etc/zdesk/zdesk.toml`, with the
 file the gateway reads its master password from:
 
 ```toml
@@ -188,15 +188,15 @@ a `[master]` block for the config, and `password encrypt` prints the value to
 add as `workstation = "…"` under `[passwords]`.
 
 ```sh
-(umask 077; trap 'stty echo' EXIT; trap 'exit 1' INT HUP TERM; stty -echo; printf 'Master password: '; IFS= read -r pw; echo; printf '%s' "$pw" > /etc/remotex/master-password)
-remotex password master
-remotex password encrypt
+(umask 077; trap 'stty echo' EXIT; trap 'exit 1' INT HUP TERM; stty -echo; printf 'Master password: '; IFS= read -r pw; echo; printf '%s' "$pw" > /etc/zdesk/master-password)
+zdesk password master
+zdesk password encrypt
 ```
 
 Start it and open <http://localhost:52380>:
 
 ```sh
-remotex serve
+zdesk serve
 ```
 
 The page needs a secure context, so from another machine put the gateway behind
@@ -204,27 +204,27 @@ a TLS-terminating reverse proxy; `localhost` works as it is.
 
 There are also `.rpm`, macOS `.pkg` and Windows `.msi` packages, and a container
 image. Its config sets
-`[server].master_password_file = "/run/secrets/remotex_master"` and the master
+`[server].master_password_file = "/run/secrets/zdesk_master"` and the master
 password is mounted there; [Container](docs/install.md#container) shows how to
 create that file and print the config's `[master]` and `[passwords]` with the
 image:
 
 ```sh
-docker run -d --name remotex -p 52380:52380 \
-  -e REMOTEX_LISTEN=0.0.0.0:52380 \
-  -v ./remotex.toml:/opt/remotex/etc/remotex.toml:ro \
-  -v ./remotex_master:/run/secrets/remotex_master:ro \
-  ghcr.io/andrewtheguy/remotex:latest
+docker run -d --name zdesk -p 52380:52380 \
+  -e ZDESK_LISTEN=0.0.0.0:52380 \
+  -v ./zdesk.toml:/opt/zdesk/etc/zdesk.toml:ro \
+  -v ./zdesk_master:/run/secrets/zdesk_master:ro \
+  ghcr.io/andrewtheguy/zdesk:latest
 ```
 
-[Installing remotex](docs/install.md) covers every platform, upgrades and
+[Installing zdesk](docs/install.md) covers every platform, upgrades and
 removal.
 
 ## Documentation
 
-- [Using remotex](docs/guide.md): the browser client, starting a session, setting up Windows, Mac, wlshare and VNC targets, `remotex tui`
-- [Installing remotex](docs/install.md): packages, first configuration, upgrade, removal
-- [`remotex.example.toml`](remotex.example.toml): every configuration key, annotated
+- [Using zdesk](docs/guide.md): the browser client, starting a session, setting up Windows, Mac, wlshare and VNC targets, `zdesk tui`
+- [Installing zdesk](docs/install.md): packages, first configuration, upgrade, removal
+- [`zdesk.example.toml`](zdesk.example.toml): every configuration key, annotated
 - [Known issues](docs/known-issues.md): faults worth recognising rather than re-investigating
 - [Roadmap](docs/roadmap.md): what is planned, and what is not
 - [Architecture](docs/architecture.md): the design and its constraints, the client protocol, the engines
@@ -238,10 +238,10 @@ You need Rust with rustup and [Bun](https://bun.sh).
 
 ```sh
 bun install --cwd frontend
-cp remotex.example.toml remotex.toml
+cp zdesk.example.toml zdesk.toml
 cargo run -- gen-passwd admin
-# Paste the generated credential into remotex.toml, then:
-cargo run -- serve -c remotex.toml
+# Paste the generated credential into zdesk.toml, then:
+cargo run -- serve -c zdesk.toml
 ```
 
 Cargo builds the frontend and compiles it into the binary, so the gateway is
@@ -264,4 +264,4 @@ and the headless browser tests are described in
 
 ## Licence
 
-remotex is under the MIT licence in [`LICENSE`](LICENSE).
+zdesk is under the MIT licence in [`LICENSE`](LICENSE).

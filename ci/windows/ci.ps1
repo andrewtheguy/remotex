@@ -50,7 +50,7 @@ Invoke-Step 'frontend' {
         if ($LASTEXITCODE -eq 0) { & bun run build }
     } finally { Pop-Location }
 }
-$env:REMOTEX_PREBUILT_FRONTEND = 'frontend\dist'
+$env:ZDESK_PREBUILT_FRONTEND = 'frontend\dist'
 Invoke-Step 'clippy' { & cargo clippy --all-targets -- -D warnings }
 Invoke-Step 'cargo test' { & cargo test }
 if (-not $Package) {

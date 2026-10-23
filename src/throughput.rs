@@ -661,7 +661,7 @@ impl ThroughputStore {
     /// Check the database is this module's, creating the schema when `created` says the
     /// file is the one [`Self::open`] just made.
     fn adopt(connection: &mut Connection, path: &Path, created: bool) -> anyhow::Result<()> {
-        let not_ours = || format!("{} is not a remotex throughput database", path.display());
+        let not_ours = || format!("{} is not a zdesk throughput database", path.display());
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .with_context(not_ours)?;
@@ -1166,20 +1166,20 @@ mod tests {
         let text = dir.path().join("notes.txt");
         std::fs::write(&text, b"not a database, but somebody's").unwrap();
         let error = ThroughputStore::open(&config(text.clone(), 1)).expect_err("not SQLite");
-        assert!(format!("{error:#}").contains("is not a remotex throughput database"), "{error:#}");
+        assert!(format!("{error:#}").contains("is not a zdesk throughput database"), "{error:#}");
         assert_eq!(std::fs::read(&text).unwrap(), b"not a database, but somebody's");
 
         let empty = dir.path().join("empty.sqlite3");
         std::fs::write(&empty, b"").unwrap();
         let error = ThroughputStore::open(&config(empty.clone(), 1)).expect_err("an existing empty file");
-        assert!(format!("{error:#}").contains("is not a remotex throughput database"), "{error:#}");
+        assert!(format!("{error:#}").contains("is not a zdesk throughput database"), "{error:#}");
         assert_eq!(std::fs::read(&empty).unwrap(), b"");
 
         let other = dir.path().join("other.sqlite3");
         Connection::open(&other).unwrap().execute_batch("CREATE TABLE throughput (x INTEGER)").unwrap();
         let before = std::fs::read(&other).unwrap();
         let error = ThroughputStore::open(&config(other.clone(), 1)).expect_err("another program's SQLite");
-        assert!(format!("{error:#}").contains("is not a remotex throughput database"), "{error:#}");
+        assert!(format!("{error:#}").contains("is not a zdesk throughput database"), "{error:#}");
         assert_eq!(std::fs::read(&other).unwrap(), before);
 
         let older = dir.path().join("older.sqlite3");

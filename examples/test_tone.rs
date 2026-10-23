@@ -40,10 +40,10 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::error::TryRecvError;
 
-use remotex::audio::{AudioBridge, PCM_CD_QUALITY};
-use remotex::config::{Protocol, TargetConfig};
-use remotex::protocol::{ServerMsg, UNSCALED};
-use remotex::session::SessionManager;
+use zdesk::audio::{AudioBridge, PCM_CD_QUALITY};
+use zdesk::config::{Protocol, TargetConfig};
+use zdesk::protocol::{ServerMsg, UNSCALED};
+use zdesk::session::SessionManager;
 
 #[tokio::main]
 async fn main() {
@@ -135,7 +135,7 @@ async fn main() {
                     // buffer every 20 ms. A session that dropped its input is gone.
                     loop {
                         match input_rx.try_recv() {
-                            Ok(remotex::protocol::ClientMsg::Refresh) => {
+                            Ok(zdesk::protocol::ClientMsg::Refresh) => {
                                 if frame_tx.blocking_send(size.clone()).is_err() {
                                     return;
                                 }
@@ -154,16 +154,16 @@ async fn main() {
         },
     ));
 
-    let config = remotex::config::AppConfig {
-        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
+    let config = zdesk::config::AppConfig {
+        listen: zdesk::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         targets: vec![target],
-        auth: remotex::auth::GatewayAuth::Login(
-            remotex::auth::SitePasswd::parse(
-                &remotex::auth::generate("admin", "hunter2", 4).unwrap(),
+        auth: zdesk::auth::GatewayAuth::Login(
+            zdesk::auth::SitePasswd::parse(
+                &zdesk::auth::generate("admin", "hunter2", 4).unwrap(),
             )
             .unwrap(),
         ),
-        branding: remotex::config::Branding {
+        branding: zdesk::config::Branding {
             text: "audio tone harness".to_owned(),
             logo: None,
         },
@@ -174,7 +174,7 @@ async fn main() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = remotex::server::router_with_sessions(config, sessions, remotex::throughput::Throughput::default(), None);
+    let app = zdesk::server::router_with_sessions(config, sessions, zdesk::throughput::Throughput::default(), None);
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });

@@ -32,9 +32,9 @@ type AuthState = "checking" | "unauthenticated" | "authenticated";
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   // Deployment branding (login screen, interstitials, tab title). Defaults to
-  // "remotex" and stays there until GET /api/config answers — a public route,
+  // "zdesk" and stays there until GET /api/config answers — a public route,
   // so it resolves before login.
-  const [branding, setBranding] = useState("remotex");
+  const [branding, setBranding] = useState("zdesk");
 
   useEffect(() => {
     let cancelled = false;

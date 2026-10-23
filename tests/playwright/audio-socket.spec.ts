@@ -15,10 +15,10 @@
 //
 // then, against the address it prints:
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:PORT/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=hunter2 \
-//     REMOTEX_PLAYWRIGHT_AUDIO_TARGET=test-tone \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:PORT/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=hunter2 \
+//     ZDESK_PLAYWRIGHT_AUDIO_TARGET=test-tone \
 //     npx playwright test audio-socket
 import { expect, type Page, test } from "@playwright/test";
 
@@ -33,7 +33,7 @@ const AUDIO_FRAME_KIND = 0x03;
 /// The opt-in, and the target name in one. Its presence is the claim that this
 /// gateway has a target which produces sound; without one the spec would be asserting
 /// against silence and would pass for the wrong reason.
-const AUDIO_TARGET = process.env.REMOTEX_PLAYWRIGHT_AUDIO_TARGET;
+const AUDIO_TARGET = process.env.ZDESK_PLAYWRIGHT_AUDIO_TARGET;
 
 interface Traffic {
   url: string;
@@ -86,7 +86,7 @@ const pending = (traffic: Traffic[], path: string): string[] =>
 test.describe("the audio socket", () => {
   test.skip(
     !AUDIO_TARGET,
-    "set REMOTEX_PLAYWRIGHT_AUDIO_TARGET=<target> against a gateway that serves audio",
+    "set ZDESK_PLAYWRIGHT_AUDIO_TARGET=<target> against a gateway that serves audio",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.

@@ -29,7 +29,7 @@
 //! - [`display`] — the dynamic channel a desktop is resized over.
 //! - [`gfx`] — the graphics pipeline's own PDUs: surfaces, frames, and the codecs
 //!   that fill them. Those codecs and the pipeline's bulk compression are beside it
-//!   in [`remotex_rdp_graphics::proto`].
+//!   in [`zdesk_rdp_graphics::proto`].
 //! - [`cliprdr`] — the clipboard, on a static channel of its own.
 //! - [`rdpsnd`] — the remote's sound, as PCM, on a static channel or the dynamic one
 //!   a current Windows host prefers.
@@ -104,4 +104,4 @@ pub mod x224;
 
 // What a host draws with is a crate of its own, which the page runs too. What of it
 // the rest of the client is written with is named here, as the rest of the wire is.
-pub use remotex_rdp_graphics::proto::{bitmap, gfx, wire};
+pub use zdesk_rdp_graphics::proto::{bitmap, gfx, wire};

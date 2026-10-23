@@ -17,10 +17,10 @@
 //
 // then, against the address it prints:
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:PORT/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=hunter2 \
-//     REMOTEX_PLAYWRIGHT_PICKER_TARGET=test-tone \
+//     ZDESK_PLAYWRIGHT_BASE_URL=http://127.0.0.1:PORT/ \
+//     ZDESK_PLAYWRIGHT_USERNAME=admin \
+//     ZDESK_PLAYWRIGHT_PASSWORD=hunter2 \
+//     ZDESK_PLAYWRIGHT_PICKER_TARGET=test-tone \
 //     bunx playwright test '/picker-options\.spec\.ts$'
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
@@ -34,7 +34,7 @@ import {
 } from "./support";
 
 /// The opt-in, and the target name in one, as the other specs have it.
-const PICKER_TARGET = process.env.REMOTEX_PLAYWRIGHT_PICKER_TARGET;
+const PICKER_TARGET = process.env.ZDESK_PLAYWRIGHT_PICKER_TARGET;
 
 interface Choices {
   size: "target" | "default" | "window";
@@ -98,7 +98,7 @@ const PASSED =
 test.describe("the picker's options", () => {
   test.skip(
     !PICKER_TARGET,
-    "set REMOTEX_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
+    "set ZDESK_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
@@ -286,7 +286,7 @@ function watchAudioFormats(page: Page): string[] {
 test.describe("lossless sound", () => {
   test.skip(
     !PICKER_TARGET,
-    "set REMOTEX_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
+    "set ZDESK_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
   );
 
   test.afterEach(async ({ page }) => {
@@ -382,7 +382,7 @@ test.describe("lossless sound", () => {
 test.describe("a browser with no audio decoder", () => {
   test.skip(
     !PICKER_TARGET,
-    "set REMOTEX_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
+    "set ZDESK_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
   );
 
   test.afterEach(async ({ page }) => {
@@ -420,7 +420,7 @@ test.describe("a browser with no audio decoder", () => {
 test.describe("the picker on a phone", () => {
   test.skip(
     !PICKER_TARGET,
-    "set REMOTEX_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
+    "set ZDESK_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
   );
 
   // A phone as the page tells one: a screen whose short side is a phone's, and,

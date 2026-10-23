@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDockedHeight, useIsDesktop } from "./dockedPanel.ts";
 import { MAX_CLIPBOARD_BYTES, type RemoteClipboard } from "./protocol.ts";
 
-// Deliberately follows tmp/remotex-old's clipboard state machine: the remote
+// Deliberately follows tmp/zdesk-old's clipboard state machine: the remote
 // value starts as a metadata card, revealing it turns that same slot into the
 // editable textarea, and closing the panel throws the manual state away. The
-// difference is storage — the plaintext snapshot came from remotex on Fetch;
+// difference is storage — the plaintext snapshot came from zdesk on Fetch;
 // it is not encrypted into localStorage by this browser.
 
 const NOTICE_MS = 1800;
@@ -104,7 +104,7 @@ export function ClipboardPanel({
     return () => clearTimeout(timer);
   }, [notice]);
 
-  // As in remotex-old, only an already-manual/empty input gets focus. The
+  // As in zdesk-old, only an already-manual/empty input gets focus. The
   // metadata card remains the first deliberate action for a fetched snapshot.
   useEffect(() => {
     if (!isRemoteMetadataMode) {

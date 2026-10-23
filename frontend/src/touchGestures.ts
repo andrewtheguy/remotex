@@ -19,7 +19,7 @@
 //                         at the scale the desktop is shown at
 //
 // The state machine keeps its thresholds local to this file. The output layer
-// sends remotex ClientMsg JSON (a scroll tick is one wheel message carrying the
+// sends zdesk ClientMsg JSON (a scroll tick is one wheel message carrying the
 // remote distance it stands for, in points), and the view transform is owned by
 // useRemoteDesktop's applyCanvasCss, reached through GestureDeps.
 

@@ -15,17 +15,17 @@ gateway at.
 Linux package managers own the conventional FHS paths directly:
 
 ```text
-/usr/bin/remotex
-/usr/share/doc/remotex/remotex.example.toml
-/usr/share/doc/remotex/LICENSE
+/usr/bin/zdesk
+/usr/share/doc/zdesk/zdesk.example.toml
+/usr/share/doc/zdesk/LICENSE
 ```
 
 The macOS package owns the corresponding local prefix:
 
 ```text
-/usr/local/bin/remotex
-/usr/local/share/doc/remotex/remotex.example.toml
-/usr/local/share/doc/remotex/LICENSE
+/usr/local/bin/zdesk
+/usr/local/share/doc/zdesk/zdesk.example.toml
+/usr/local/share/doc/zdesk/LICENSE
 ```
 
 By default the Windows package (`.msi`) owns the same tree under the 64-bit Program
@@ -33,30 +33,30 @@ Files directory and puts its `bin` on the machine `PATH`; its install wizard can
 select another directory:
 
 ```text
-C:\Program Files\remotex\bin\remotex.exe
-C:\Program Files\remotex\VERSION
-C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
-C:\Program Files\remotex\share\doc\remotex\LICENSE
+C:\Program Files\zdesk\bin\zdesk.exe
+C:\Program Files\zdesk\VERSION
+C:\Program Files\zdesk\share\doc\zdesk\zdesk.example.toml
+C:\Program Files\zdesk\share\doc\zdesk\LICENSE
 ```
 
-Every artifact, container images included, carries remotex's MIT `LICENSE`.
+Every artifact, container images included, carries zdesk's MIT `LICENSE`.
 
 There is no package wrapper, version directory, active-version symlink, or
 package-managed rollback. The package manager replaces and removes its files.
 
 The live config is deliberately outside the manifests:
-`/etc/remotex/remotex.toml` on Linux,
-`/usr/local/etc/remotex/remotex.toml` on macOS and
-`%ProgramData%\remotex\remotex.toml` on Windows. The operator creates it from the
+`/etc/zdesk/zdesk.toml` on Linux,
+`/usr/local/etc/zdesk/zdesk.toml` on macOS and
+`%ProgramData%\zdesk\zdesk.toml` on Windows. The operator creates it from the
 example with mode `0600` and ownership of the account that runs the gateway.
 That keeps both upgrades and removals away from stored credentials.
 
 What the gateway keeps between runs — today only the `[meter]` database — is
 outside the manifests for the same reason, in a state directory the gateway
-creates when it first needs it: `/var/lib/remotex` on Linux,
-`/usr/local/var/remotex` on macOS and `%ProgramData%\remotex` on Windows. The
+creates when it first needs it: `/var/lib/zdesk` on Linux,
+`/usr/local/var/zdesk` on macOS and `%ProgramData%\zdesk` on Windows. The
 account that runs the gateway must be able to create or write it. The container
-uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
+uses `/opt/zdesk/var`, which wants a volume for the records to outlive it.
 
 ## Scripts
 
@@ -64,9 +64,9 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 |---|---|
 | `build-tarball.sh` | build the gateway and assemble the common release payload |
 | `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
-| `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
+| `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/zdesk.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
-| `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
+| `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `ZDESK_CONTAINER_FEATURES` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -81,10 +81,10 @@ bash packaging/build-native-packages.sh
 The frontend's
 build compiles two WebAssembly modules: one from the gateway's graphics crate
 (`frontend/wasm/egfx` around
-`crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline),
+`crates/zdesk-rdp-graphics`, the page's compositor for a passed RDP pipeline),
 and the page's decoder for a Mac's Adaptive picture (`frontend/wasm/apple-adaptive`),
 which the stable toolchain builds. So wherever the frontend is built — `bun run build`, or a
-Cargo build without `REMOTEX_PREBUILT_FRONTEND` — the compositor's module is built by the nightly
+Cargo build without `ZDESK_PREBUILT_FRONTEND` — the compositor's module is built by the nightly
 toolchain `frontend/wasm/egfx/rust-toolchain.toml` pins, which its threads need and
 nothing else is built with. rustup installs it on the first build, unless
 `RUSTUP_AUTO_INSTALL=0` turns that off; `rustup toolchain install` in that
@@ -100,10 +100,10 @@ pwsh -File packaging\verify-windows-msi.ps1   # elevated: installs and removes i
 Outputs are:
 
 ```text
-dist/remotex-linux-amd64.deb
-dist/remotex-linux-amd64.rpm
-dist/remotex-macos-arm64.pkg
-dist/remotex-windows-x86_64.msi
+dist/zdesk-linux-amd64.deb
+dist/zdesk-linux-amd64.rpm
+dist/zdesk-macos-arm64.pkg
+dist/zdesk-windows-x86_64.msi
 ```
 
 Arm Linux runners use `arm64` in the asset names. The tarballs keep versioned
@@ -133,11 +133,11 @@ Performance Mac's passed HEVC, whose licence keeps it out: an operator
 downloads the release that `src/hevc_wasm.rs` pins by version and SHA-256 from
 the private `andrewtheguy/hevc-wasm-archives` through `gh`, and every build
 serves it when it finds it. Every release target looks for it by its release
-name in `share/remotex`, beside the `share/doc/remotex` it installs, unless
+name in `share/zdesk`, beside the `share/doc/zdesk` it installs, unless
 `[hevc_wasm].archive` names another file:
-`/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
-the `.pkg`, `share\remotex` under the `.msi`'s install directory, and
-`/opt/remotex/versions/<version>/share/remotex` in the
+`/usr/share/zdesk` for the `.deb` and `.rpm`, `/usr/local/share/zdesk` for
+the `.pkg`, `share\zdesk` under the `.msi`'s install directory, and
+`/opt/zdesk/versions/<version>/share/zdesk` in the
 container image. No package owns or makes that directory: the operator does. A
 container can be given it from outside the image, as the private image
 `ghcr.io/andrewtheguy/hevc-wasm-archives` that hevc-wasm's `publish-image.sh`
@@ -182,7 +182,7 @@ arm64, and the MSI for Windows x86-64. The release is published only after the p
 succeed.
 
 Container images take their layout from the Linux tarballs, then replace
-`bin/remotex` with the separately built container gateway. The build
+`bin/zdesk` with the separately built container gateway. The build
 script, release smoke test, and Dockerfile all reject a binary that exposes
 `tui`, `serve-embedded`, or `check-config --embedded`. The tarballs are build
 plumbing between the workflow's jobs and are not published: the native packages

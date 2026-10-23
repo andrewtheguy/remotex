@@ -5,7 +5,7 @@
 //! codecs and a graphics reset, or bitmap updates at the opening size — is that
 //! host's behaviour. So it
 //! borrows a target from the operator's `tmp/test_uat.toml`, named by
-//! [`TARGET_ENV`] rather than written here, and drives [`remotex::rdp_client`]
+//! [`TARGET_ENV`] rather than written here, and drives [`zdesk::rdp_client`]
 //! directly with no gateway in front of it.
 //!
 //! It connects, waits for a painted desktop, under the pipeline asks for a new size
@@ -30,7 +30,7 @@
 //! acknowledged, that every frame the session marked was in what it passed, and that
 //! the session itself drew nothing. Which codecs and commands the host chose is
 //! still the measurement, said at the end of the session at `info`: run with
-//! `RUST_LOG=remotex=info` to read it, and set [`DUMP_ENV`] to a directory to get
+//! `RUST_LOG=zdesk=info` to read it, and set [`DUMP_ENV`] to a directory to get
 //! the picture as PNG at each stage, for the check only eyes can make.
 //!
 //! ## The clipboard
@@ -67,10 +67,10 @@
 //! negotiation and the device channel are asserted only under [`CAMERA_ENV`], set
 //! against a host that offers cameras; otherwise what happened is printed. Nothing
 //! on the host opens the camera there, so no stream starts — run with
-//! `RUST_LOG=remotex=debug` to read the host's device queries and this end's answers.
+//! `RUST_LOG=zdesk=debug` to read the host's device queries and this end's answers.
 //!
 //! ```sh
-//! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> REMOTEX_UAT_AUDIO=1 REMOTEX_UAT_CAMERA=1 \
+//! ZDESK_UAT_TARGET=<rdp target in tmp/test_uat.toml> ZDESK_UAT_AUDIO=1 ZDESK_UAT_CAMERA=1 \
 //!   cargo run --example rdp_client_probe -- a_real_host_paints_and_resizes \
 //!     a_real_host_round_trips_the_clipboard a_real_host_records_the_microphone
 //! ```
@@ -87,7 +87,7 @@
 //! ffmpeg -f lavfi -i testsrc=size=640x480:rate=30 -t 20 -c:v libx264 -profile:v baseline \
 //!   -pix_fmt yuv420p -g 30 -bf 0 -x264-params aud=1:repeat-headers=1 \
 //!   -bsf:v h264_mp4toannexb -f h264 tmp/camera_probe_640x480.h264
-//! REMOTEX_UAT_TARGET=<rdp target> REMOTEX_UAT_CAMERA_STREAM=tmp/camera_probe_640x480.h264 \
+//! ZDESK_UAT_TARGET=<rdp target> ZDESK_UAT_CAMERA_STREAM=tmp/camera_probe_640x480.h264 \
 //!   cargo run --example rdp_client_probe -- a_real_host_streams_the_camera
 //! ```
 //!
@@ -104,7 +104,7 @@
 //! rectangles left as they were.
 //!
 //! ```sh
-//! REMOTEX_UAT_TARGET=<rdp target> \
+//! ZDESK_UAT_TARGET=<rdp target> \
 //!   cargo run --example rdp_client_probe -- a_real_host_draws_video_with_h264
 //! ```
 
@@ -117,43 +117,43 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::proto::gfx::H264;
-use remotex::rdp_client::proto::{rdpeai, rdpecam, rdpsnd};
-use remotex::rdp_client::{
+use zdesk::rdp_client::proto::gfx::H264;
+use zdesk::rdp_client::proto::{rdpeai, rdpecam, rdpsnd};
+use zdesk::rdp_client::{
     AudioSink, Camera, CameraSink, Compositor, Connect, Event, Fed, Fidelity, Framebuffer, Input, MicrophoneSink,
     Session,
 };
-use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
-use remotex_rdp_graphics::avc::{Scanned, scan};
+use zdesk::rdp_clipboard::{self, CF_UNICODETEXT};
+use zdesk_rdp_graphics::avc::{Scanned, scan};
 use tokio::sync::mpsc::Receiver;
 
 /// Which target in `tmp/test_uat.toml` to drive — see the module docs.
-const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
+const TARGET_ENV: &str = "ZDESK_UAT_TARGET";
 
 /// Whether to offer the graphics pipeline: anything but `0` or `false` does, and so
 /// does leaving it unset.
-const EGFX_ENV: &str = "REMOTEX_UAT_EGFX";
+const EGFX_ENV: &str = "ZDESK_UAT_EGFX";
 
 /// Whether a sound is playing on the remote for this run — set it to `1` when one is.
 /// A Windows host sends its format list only once something plays, so the
 /// negotiation is asserted only when this says it can be, and printed otherwise.
-const AUDIO_ENV: &str = "REMOTEX_UAT_AUDIO";
+const AUDIO_ENV: &str = "ZDESK_UAT_AUDIO";
 
 /// Whether the target's host offers camera redirection — set it to `1` against a Windows
 /// workstation, or a Server with the Remote Desktop Session Host role. The host's
 /// negotiation and its opening of the device channel are asserted only when this says
 /// it will, and printed otherwise.
-const CAMERA_ENV: &str = "REMOTEX_UAT_CAMERA";
+const CAMERA_ENV: &str = "ZDESK_UAT_CAMERA";
 
 /// Whether the target's host offers microphone redirection — set it to `1` against a
 /// Windows host that allows it. A policy can turn audio input off, so the negotiation
 /// is asserted only when this says it will be, and printed otherwise.
-const MICROPHONE_ENV: &str = "REMOTEX_UAT_MICROPHONE";
+const MICROPHONE_ENV: &str = "ZDESK_UAT_MICROPHONE";
 
 /// Whether the probe asks for sound at all: anything but `0` or `false` does. Off, it
 /// shows that the host opens audio input without it — measured against a Windows
 /// Enterprise host, it does.
-const SOUND_ENV: &str = "REMOTEX_UAT_SOUND";
+const SOUND_ENV: &str = "ZDESK_UAT_SOUND";
 
 /// The camera the probe plugs: what a browser's webcam typically announces.
 const PROBE_CAMERA: rdpecam::Format =
@@ -162,7 +162,7 @@ const PROBE_CAMERA: rdpecam::Format =
 /// An Annex B H.264 file for [`stream_camera`] to play, in [`PROBE_CAMERA`]'s geometry
 /// and rate, written with an access unit delimiter before every picture and the
 /// parameter sets before every keyframe — the module docs have the ffmpeg line.
-const CAMERA_STREAM_ENV: &str = "REMOTEX_UAT_CAMERA_STREAM";
+const CAMERA_STREAM_ENV: &str = "ZDESK_UAT_CAMERA_STREAM";
 
 /// What the Run dialog is given to open something that records: the Recording tab of
 /// Sound, whose level meters open every capture device it lists.
@@ -188,7 +188,7 @@ const RESIZE_RETRY: Duration = Duration::from_secs(2);
 /// What this end puts on the remote's clipboard. Non-ASCII on purpose: the payload is
 /// UTF-16 and a host that mangles it says so in the bytes that come back. One line,
 /// because the round trip below pastes it into a single-line box on the remote.
-const COPIED: &str = "remotex probe — 画面 ☕ round trip";
+const COPIED: &str = "zdesk probe — 画面 ☕ round trip";
 
 /// The scancodes the round trip needs. Driving the remote's own clipboard is the one
 /// thing this end cannot do for itself, and a keystroke is all it has to do it with.
@@ -346,7 +346,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         height: OPENING.1,
         scale_percent: 0,
         monitors: 1,
-        placement: remotex::config::Placement::Right,
+        placement: zdesk::config::Placement::Right,
         // A resize is the pipeline's graphics reset; the bitmap path has none.
         resize: egfx(),
         egfx: egfx(),
@@ -355,7 +355,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         multitransport: false,
         paced: false,
         audio: sound().then(|| Box::new(Listen(Arc::clone(&ear))) as Box<dyn AudioSink>),
-        camera: Some(Camera { name: "Remotex Probe Camera".to_owned(), sink: Box::new(Watch(Arc::clone(&eye))) }),
+        camera: Some(Camera { name: "Zdesk Probe Camera".to_owned(), sink: Box::new(Watch(Arc::clone(&eye))) }),
         microphone: Some(Box::new(Speak(Arc::clone(&voice)))),
     });
     (session, events, ear, eye, voice)
@@ -609,7 +609,7 @@ async fn pump(
 
 /// Directory to write the framebuffer to as PNG at each stage, for eyes to check
 /// what the counts cannot: that the decoded desktop looks like a desktop.
-const DUMP_ENV: &str = "REMOTEX_UAT_DUMP";
+const DUMP_ENV: &str = "ZDESK_UAT_DUMP";
 
 /// The desktop as it stands: the page's picture under the pipeline, the session's
 /// framebuffer on the bitmap path.
@@ -1107,7 +1107,7 @@ async fn pass_h264() {
         height: OPENING.1,
         scale_percent: 0,
         monitors: 1,
-        placement: remotex::config::Placement::Right,
+        placement: zdesk::config::Placement::Right,
         resize: false,
         egfx: true,
         h264: H264::ByRegion,
@@ -1191,7 +1191,7 @@ async fn a_real_host_round_trips_the_clipboard() {
     round_trip().await;
 }
 
-/// A case: Drives a real RDP host named in tmp/test_uat.toml, its Camera app, and a stream in REMOTEX_UAT_CAMERA_STREAM.
+/// A case: Drives a real RDP host named in tmp/test_uat.toml, its Camera app, and a stream in ZDESK_UAT_CAMERA_STREAM.
 async fn a_real_host_streams_the_camera() {
     stream_camera().await;
 }

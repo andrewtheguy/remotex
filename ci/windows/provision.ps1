@@ -1,13 +1,13 @@
 # Turn the Windows CI box (already carrying the VS Build Tools and rustup that the
 # sibling repos' provision scripts install) into one that can also build the frontend
 # (bun) and the installer (the .NET SDK, and WiX as a dotnet tool). The C libraries
-# remotex links come as prebuilt archives, so nothing here compiles C.
+# zdesk links come as prebuilt archives, so nothing here compiles C.
 #
 # Runs *on the VM*, elevated, deployed and started as a SYSTEM scheduled task by
 # ../devtools/ci/windows/remote.ps1 (`remote.ps1 provision`), so a dropped connection
 # cannot kill an installer half way. Every step is guarded, so re-running it after
 # adding a step is a no-op for everything already installed. Progress goes to
-# C:\ci-workspaces\provision\remotex-provision.log; the last line is DONE-OK or
+# C:\ci-workspaces\provision\zdesk-provision.log; the last line is DONE-OK or
 # DONE-FAIL.
 #
 # What is *not* installed here, and why:
@@ -26,7 +26,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 $Root = 'C:\ci-workspaces\provision'
 # remote.ps1 tails C:\provision\<repo>-provision.log for DONE-OK / DONE-FAIL.
-$LogFile = 'C:\provision\remotex-provision.log'
+$LogFile = 'C:\provision\zdesk-provision.log'
 New-Item -ItemType Directory -Force -Path $Root, 'C:\provision' | Out-Null
 
 function Log($m) { "[{0:HH:mm:ss}] {1}" -f (Get-Date), $m | Tee-Object -FilePath $LogFile -Append }

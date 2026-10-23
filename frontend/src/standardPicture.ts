@@ -1,7 +1,7 @@
 import init, {
   type InitInput,
   Standard,
-} from "../wasm/apple-adaptive/pkg/remotex_apple_adaptive.js";
+} from "../wasm/apple-adaptive/pkg/zdesk_apple_adaptive.js";
 
 // A Mac's Adaptive picture, decoded in the page: the rectangles of a session
 // started with Standard's Adaptive quality, which the gateway passes as the Mac

@@ -102,25 +102,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "remotex-egfx"
-version = "0.0.0"
-dependencies = [
- "rayon",
- "remotex-rdp-graphics",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "remotex-rdp-graphics"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "log",
- "rayon",
- "thiserror",
-]
-
-[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -206,4 +187,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "zdesk-egfx"
+version = "0.0.0"
+dependencies = [
+ "rayon",
+ "wasm-bindgen",
+ "zdesk-rdp-graphics",
+]
+
+[[package]]
+name = "zdesk-rdp-graphics"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "rayon",
+ "thiserror",
 ]

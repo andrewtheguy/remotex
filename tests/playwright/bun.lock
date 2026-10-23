@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "remotex-playwright-e2e",
+      "name": "zdesk-playwright-e2e",
       "devDependencies": {
         "@playwright/test": "1.62.0",
         "@types/node": "^26.1.1",
