@@ -75,9 +75,9 @@ https://github.com/user-attachments/assets/3dfd0dc2-dc7d-4d41-b99e-1340f685390c
 
 
 
-### Mac -> Linux (wlshare on Sway) at Retina Density with Audio
+### Mac -> Linux (wlshare on Sway) at Retina/HiDPI Density with Audio
 
-- wlshare on Sway shown at the Mac's Retina density, with the remote's sound, and the remote desktop resizing to follow the browser into and out of immersive full screen.
+- wlshare on Sway shown at the Mac's Retina/HiDPI density, with the remote's sound, and the remote desktop resizing to follow the browser into and out of immersive full screen.
 
 https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
 

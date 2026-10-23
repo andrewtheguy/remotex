@@ -57,9 +57,9 @@ https://github.com/user-attachments/assets/3dfd0dc2-dc7d-4d41-b99e-1340f685390c
 
 
 
-### Mac -> Linux（Sway 上的 wlshare），Retina 密度并带声音
+### Mac -> Linux（Sway 上的 wlshare），Retina/HiDPI 密度并带声音
 
-- 以 Mac 的 Retina 密度显示 Sway 上的 wlshare，带远程的声音，进入和退出沉浸式全屏时远程桌面会随浏览器调整大小。
+- 以 Mac 的 Retina/HiDPI 密度显示 Sway 上的 wlshare，带远程的声音，进入和退出沉浸式全屏时远程桌面会随浏览器调整大小。
 
 https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
 
