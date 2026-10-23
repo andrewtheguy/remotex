@@ -33,11 +33,18 @@ function presentsPlanes(widePrimaries: boolean): boolean {
  * Whether the page runs shared-memory SIMD WebAssembly, which is a module and
  * its threads, and presents the pictures. `widePrimaries` for a stream that may
  * state primaries other than sRGB's, as a Mac's does.
+ *
+ * The stream reaches the module as WebCodecs' `EncodedVideoChunk`s, as it would
+ * the browser's own decoder (videoDecoder.ts), so a browser without WebCodecs
+ * runs none of it.
  */
 export function runsSoftwareDecoder(options: {
   widePrimaries: boolean;
 }): boolean {
   try {
+    if (typeof EncodedVideoChunk === "undefined") {
+      return false;
+    }
     // Every gateway isolates the page; a proxy that drops the headers does not,
     // and says so first.
     if (globalThis.crossOriginIsolated !== true) {

@@ -355,7 +355,7 @@ const NO_APPLE_PICTURE =
  */
 function noHevc(target: TargetInfo): string {
   return target.software
-    ? "This browser does not decode the Mac's HEVC, and this page cannot decode it itself: that needs WebGL 2 with Display P3, WebAssembly SIMD and a cross-origin isolated page."
+    ? "This browser does not decode the Mac's HEVC, and this page cannot decode it itself: that needs WebCodecs, WebGL 2 with Display P3, WebAssembly SIMD and a cross-origin isolated page."
     : "This browser does not decode the Mac's HEVC, and this gateway serves no decoder for this page to decode it with.";
 }
 

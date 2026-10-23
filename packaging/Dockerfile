@@ -12,9 +12,11 @@
 #   bash packaging/build-container-binary.sh tmp/docker-context/bin/zdesk
 #   docker build -f packaging/Dockerfile --build-arg VERSION=0.0.145 tmp/docker-context
 #
-# The base has to be at least as new as the builder: the release binaries are
-# built on the ubuntu-24.04 runners (glibc 2.39), and trixie's 2.41 runs them
-# fine — a base with an *older* glibc would not.
+# The base must provide every glibc symbol the binary needs. Release CI builds
+# on ubuntu-26.04 runners and smoke-tests the result on this base; the runner's
+# glibc version alone does not determine the binary's minimum. The v0.0.458
+# amd64 and arm64 binaries require symbols through GLIBC_2.39, within trixie's
+# 2.41. Keep the smoke test when changing the builder or the base.
 FROM debian:trixie-slim
 
 LABEL org.opencontainers.image.source=https://github.com/andrewtheguy/zdesk

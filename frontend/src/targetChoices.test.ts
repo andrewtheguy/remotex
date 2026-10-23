@@ -753,7 +753,7 @@ test("a Mac's picture only this page decodes can be passed", () => {
   // for any browser that cannot take it, with which is missing.
   for (const [offered, abilities, reason] of [
     [HIGH_PERFORMANCE, NEEDS_PAGE, /this gateway serves no decoder/],
-    [MAC_PAGE, { ...NEEDS_PAGE, runsHevc: false }, /needs WebGL 2/],
+    [MAC_PAGE, { ...NEEDS_PAGE, runsHevc: false }, /needs WebCodecs, WebGL 2/],
   ] as const) {
     const greyed = targetOptions(
       offered,
