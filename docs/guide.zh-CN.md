@@ -81,7 +81,7 @@ workstation = "$ZD;1;AES-256-GCM;…"
 
 `password encrypt` 会要求输入两次密码，或从管道读取一行，并用配置中已有的 `[master]` 加密，它只读取配置。名称在粘贴时由你决定，也就是 `password_ref` 写的名称。`vnc_password_ref` 以同样方式引用 VNC 服务器自己的密码。两个输出中都没有机密信息，因此可以放在任何组装配置的地方：编辑器、Helm values 文件、模板化的 ConfigMap。本地实例的配置由 TUI 负责写入：它的 `p` 会询问名称和密码，并自己写入两个表。
 
-值也可以留空，`workstation = ""`，作为尚未设置的密码的占位符：在粘贴真实的值之前，目标使用空密码应答；如果配置中的名称全是占位符，就不需要 `[master]` 或主密码。
+值也可以留空，`workstation = ""`，作为尚未设置的密码的占位符：在粘贴真实的值之前，目标使用空密码应答；如果 `[passwords]` 中的值全是这样的占位符，配置就不需要 `[master]` 或主密码。
 
 其他所有值都用 AES-256-GCM 加密，密钥由你的**主密码**和配置自己的 salt 派生。提供服务的网关从 `[server].master_password_file` 指定的文件读取主密码：可以是容器的 secret、systemd 的 credential，或只有网关账户能读的文件。该文件只包含主密码；末尾的换行会被忽略。TUI 把自己的主密码保存在钥匙串中（macOS 钥匙串、Windows 凭据管理器，或 Linux 桌面的 Secret Service：GNOME Keyring、KWallet），首次需要时生成，因此你从不需要输入。除 TUI 外没有任何东西读取钥匙串。
 
