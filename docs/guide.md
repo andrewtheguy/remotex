@@ -1,5 +1,7 @@
 # Using zDesk
 
+English | [简体中文](guide.zh-CN.md)
+
 What an operator and a user need to know once the gateway is
 [installed](install.md): how the page is reached, what a session is started
 with, how each kind of target is set up, and the local multi-instance control

@@ -1,5 +1,7 @@
 # zDesk
 
+English | [简体中文](README.zh-CN.md)
+
 Remote desktop in a browser, for the remote desktop server each platform
 already has. zDesk is a small gateway you run next to your machines. It
 connects to:
