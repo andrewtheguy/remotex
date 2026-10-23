@@ -27,9 +27,10 @@ a local control plane that runs several independent gateway instances side by
 side.
 
 > [!WARNING]
-> **No backward compatibility.** A release may change or remove a configuration
-> key, the WebSocket protocol or a feature, with nothing that reads the old
-> form. Check [`zdesk.example.toml`](zdesk.example.toml) against your config
+> **No backward compatibility.** zdesk is still settling its
+> [direction](docs/architecture.md#direction), and a release may change or
+> remove a configuration key, the WebSocket protocol or a feature, with nothing
+> that reads the old form. Check [`zdesk.example.toml`](zdesk.example.toml) against your config
 > when you upgrade. The page and the gateway are one release too: a tab left
 > open across an upgrade names both versions and asks to be reloaded.
 
