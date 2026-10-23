@@ -5,9 +5,10 @@ what it has, and how the browser's display picker comes to name those outputs â€
 so a two-screen session is a choice in the floating menu rather than a second
 target on a second port.
 
-One RFB framebuffer is one output. wlshare captures one at a time and never
+One RFB framebuffer is one output. wlshare captures one per connection and never
 composes several into one picture, so the second monitor is not somewhere off the
-edge of the desktop: it is not in the session at all until the client asks for it.
+edge of that framebuffer: the client switches to it or opens a second connection
+to show it beside the first, as described under [Two outputs at once](#two-outputs-at-once).
 Standard RFB has no way to ask. `ExtendedDesktopSize` describes screens *inside*
 one framebuffer, which is a different thing entirely, and a plain VNC server has
 nothing else to say. So this is a private extension beside

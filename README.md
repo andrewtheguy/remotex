@@ -87,8 +87,11 @@ https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
 
 ## Features
 
-- **One browser client.** It needs a secure context and WebCodecs, nothing
-  installed: Chrome, Edge or Safari on a desktop, Chrome on Android, and Safari on an iPhone or iPad.
+- **One browser client.** It needs a secure context, with WebCodecs for video
+  streams and sound, and nothing installed: Chrome, Edge or Safari on a desktop,
+  Chrome on Android, and Safari on an iPhone or iPad. Without WebCodecs, the
+  gateway's tiles, a Standard Mac's Adaptive picture and an RDP pipeline without
+  H.264 still work, with no sound.
   Firefox runs it too, but its native decoders take neither a High Performance
   Mac's HEVC nor its AAC-ELD, so there the Mac's picture is its H.264, or its
   HEVC in the page's software decoder. For desktop use, install the page as a Chrome or
@@ -167,8 +170,9 @@ seamlessly of the three, since what RFB lacks is added to it.
   at its density, carries Opus or FLAC sound and the browser's camera and
   microphone, and codes its own VP9 for the gateway to pass through, adapting
   to the browser's link — or, for a link with room to spare, its own exact
-  tiles with a video stream for each region that moves, VP9 or the host's hardware H.264. Two outputs can be shown at once, the second in a
-  browser tab of its own (alpha).
+  tiles with a video stream for each region that moves, H.264 from hardware or
+  libx264, with VP9 as the fallback. Two outputs can be shown at once, the second
+  in a browser tab of its own (alpha).
 
 Every other VNC server is a plain `vnc` target reached through the RFB
 baseline: one framebuffer at 1x, not resized, no sound, tiles from the gateway.
@@ -271,9 +275,15 @@ You need Rust with rustup and [Bun](https://bun.sh).
 bun install --cwd frontend
 cp zdesk.example.toml zdesk.toml
 cargo run -- gen-passwd admin
-# Paste the generated credential into zdesk.toml, then:
+# Set [server].site_passwd, configure a target and its passwords (see below), then:
 cargo run -- serve -c zdesk.toml
 ```
+
+The copied example names `[passwords].example` but leaves it for you to add.
+Set up the target's encrypted password and master-password file as described in
+[Target passwords](docs/guide.md#target-passwords). For a target with an empty
+password, add `example = ""` under `[passwords]` instead; it needs no master
+password.
 
 Cargo builds the frontend and compiles it into the binary, so the gateway is
 the only thing that serves the page. The checks are:
@@ -284,8 +294,9 @@ cargo test --lib
 bun run --cwd frontend check
 ```
 
-The end-to-end tests under `tests/` are ignored by default: the VNC and wlshare
-ones need Docker or Podman (`cargo test --test vnc_e2e --test wlshare_e2e --
+The self-contained integration tests under `tests/` run with `cargo test --tests`.
+The container-backed VNC and wlshare tests are ignored by default because they
+need Docker or Podman (`cargo test --test vnc_e2e --test wlshare_e2e --
 --ignored`). The RDP probes borrow a real Windows host, so they are examples run
 on demand rather than tests (`cargo run --example rdp_client_probe -- <case>`),
 and the headless browser tests are described in

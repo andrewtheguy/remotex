@@ -109,7 +109,7 @@ camera and microphone, and how its picture reaches the browser.
 
 | Server | Target | Displays | Sound | Camera and microphone | Picture |
 |---|---|---|---|---|---|
-| Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, lossless or adaptive H.264; tiles from the gateway on the bitmap path |
+| Windows 10 and 11's Remote Desktop | `rdp` | one desktop spanning the host's screens, following the window at its density; or up to two virtual displays, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | Opus or FLAC | yes, experimental | the graphics pipeline passed through, high quality or adaptive H.264; lossless when the host's policy requests it; tiles from the gateway on the bitmap path |
 | macOS Screen Sharing, High Performance | `vnc`, `subtype = "ard-high-performance"` | one virtual display, following the window at its density; or two, switched from the picker or, on *All Displays*, the second shown in a browser tab of its own (alpha) | AAC-ELD, always | no | the Mac's HEVC or its H.264, passed through |
 | macOS Screen Sharing, Standard | `vnc`, `subtype = "ard"`, the unofficial `virtual_display = true` included | the Mac's physical displays, one or all, at their own size and density; the unofficial virtual display follows the window | none | no | tiles from the gateway of the Mac's lossless Full quality, which settle to lossless; or the Mac's Adaptive picture, passed through (beta) |
 | wlshare on Linux | `vnc`, `subtype = "wlshare"` | the compositor's outputs, switched from the picker or, on *All Displays* over two of them, the second shown in a browser tab of its own (alpha); a headless one follows the window at its density | Opus or FLAC | yes, experimental | its own VP9, passed through, adapting to the browser's link |
@@ -1820,19 +1820,18 @@ the pipeline.
 
 ### Decoded in the page
 
-The page has one software video decoder of its own, in WebAssembly, for the
-one stream a browser's `VideoDecoder` may not take and that has no other form
-to be sent in: a High Performance Mac's passed HEVC, decoded by
-[hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), served at `/hevc/`,
-wherever the browser's own decoder does not take it, on a gateway that read the
-release archive
+The page has one software video decoder of its own, in WebAssembly:
+[hevc-wasm](https://github.com/andrewtheguy/hevc-wasm), for a High Performance
+Mac's passed HEVC wherever the browser's `VideoDecoder` does not take it. The
+gateway serves it at `/hevc/` when it has loaded the release archive. Without
+either HEVC decoder, the picker offers the Mac's H.264
 ([Apple's media stream, passed through](#apples-media-stream-passed-through)).
 It is written for the one shape of stream it decodes and compiled with SIMD128
 and threads. The VP9 has none: it is sent at a chroma the browser's own decoder
 takes ([the codec](#the-codec)).
 
-A third stream is decoded in the page in every session that passes it, since no
-browser's decoder takes it: a Standard Mac's Adaptive picture, in
+A Standard Mac's Adaptive picture is decoded in the page in every session that
+passes it, since no browser's decoder takes it. Its decoder is
 `frontend/wasm/apple-adaptive`, with no threads
 ([A Standard Mac's own picture, passed through](#a-standard-macs-own-picture-passed-through)).
 
@@ -2715,8 +2714,8 @@ by its container test; RDP has no container host.
 `examples/rdp_client_probe.rs` checks against a real host that the camera is
 negotiated and its device opened, and its `a_real_host_streams_the_camera` opens
 the host's Camera app and carries H.264 frames from a file to it. Like every real-host
-probe it is ignored by default, and it checks that the host started the stream
-and took samples, not the pixels the host displays. The displayed picture is
+probe it runs only when explicitly invoked, and it checks that the host started
+the stream and took samples, not the pixels the host displays. The displayed picture is
 verified by hand against a Windows host, and a change here needs a hand check.
 
 The browser's camera goes the other way, on a fourth socket, in a session started
@@ -3727,7 +3726,7 @@ the same machine: the socket is created `0660` so the filesystem decides who may
 connect, a leftover from a killed gateway is taken over on the next start, one
 that something is still serving refuses the start, and the file is removed when
 the gateway stops. No client addresses that form directly — the page reaches its
-gateway over one HTTP origin and up to four WebSockets, all of which need a host
+gateway over one HTTP origin and up to five WebSockets, all of which need a host
 and a port, so whatever terminates the proxy is what a browser talks to. An embedded
 gateway is that arrangement in one process tree: the worker listens on its
 private endpoint — `<instance>/gateway.sock`, or a named pipe on Windows — and
@@ -3815,8 +3814,10 @@ the gateway.
 
 #### Scope and configuration
 
-`[meter]` records traffic on the browser-to-gateway hop for the session, audio,
-camera and microphone WebSockets. It does not measure the separate connection
+`[meter]` records traffic on the browser-to-gateway hop for the session, display,
+audio, camera and microphone WebSockets. `/ws` and every `/ws/display` connection
+share the `session` socket category, so its totals include the picture traffic.
+It does not measure the separate connection
 between an engine and its remote server. `enabled` explicitly controls recording;
 the remaining settings are validated even while it is false, so a bad database
 path is found before the meter is enabled.

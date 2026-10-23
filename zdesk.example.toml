@@ -48,11 +48,12 @@
 #DwAEhQGAhKmMIQAAAABJRU5ErkJggg==
 #"""
 
-# Throughput of the browser's WebSockets (/ws, /ws/audio, /ws/camera, /ws/mic),
-# kept in an SQLite database and shown by the page's "Throughput" view, which
-# reads it when opened. Only the hop between the browser and this gateway is
+# Throughput of the browser's WebSockets (/ws, /ws/display, /ws/audio,
+# /ws/camera, /ws/mic), kept in an SQLite database and shown by the page's
+# "Throughput" view, which reads it when opened. Only the hop between the browser and this gateway is
 # counted: the bytes of every text and binary frame, WebSocket headers included,
 # written to the browser (sent) and read from it (received).
+# /ws and /ws/display count together under the "session" socket category.
 #
 # Bytes are grouped by the target the session had selected when they moved, and
 # by "no target" while the browser sits on the picker. The meter reads the
@@ -85,7 +86,7 @@
 # The page's software HEVC decoder, for a browser whose own
 # VideoDecoder refuses a High Performance Mac's 4:4:4 picture passed through
 # — Chrome on a GPU without HEVC Range Extensions, for one. A gateway that
-# serves it lets such a browser tick the passthrough of such a target, and its
+# serves it lets such a browser choose HEVC for that target, and its
 # page then decodes the picture with it; a browser whose own decoder takes the
 # picture keeps decoding it there. Nothing at the picker chooses it. It is
 # andrewtheguy/hevc-wasm's decoder compiled to WebAssembly, whose licence keeps
@@ -120,7 +121,7 @@
 # [master]. Neither table is typed: each is printed for you to paste here.
 #
 #   zdesk password master -c zdesk.toml    # prints the [master] block
-#   zdesk password encrypt -c zdesk.toml   # prints a value: example = "…"
+#   zdesk password encrypt -c zdesk.toml   # prints the ciphertext to paste as example = "…"
 #
 # A served gateway reads the master password from the file
 # [server].master_password_file names; `password` reads it there too, or asks
@@ -156,7 +157,7 @@
 # start; one that something is still serving refuses the start instead.
 #
 # A browser cannot use this form. The client addresses its gateway by URL — one
-# HTTP origin and up to four WebSockets — so whatever terminates the proxy is what it
+# HTTP origin and up to five WebSockets — so whatever terminates the proxy is what it
 # talks to.
 # Web login (required): username:bcrypt_hash guarding the whole surface.
 # Generate with:  zdesk gen-passwd <username>
@@ -205,9 +206,9 @@ site_passwd = ""
 #
 # What a session is started with is not a key here. Whoever starts it chooses it
 # at the picker: picking a target opens it, its options show under it, and Start
-# connects with what is chosen. They hold for the life of the session — a browser
-# that takes it over gets it as it was started — and the browser remembers them
-# per target for the next time. Which a target shows is its type's to say:
+# connects with what is chosen. They hold for the life of the session; a browser
+# that takes over ends it and lands on the picker to choose its own. The browser
+# remembers them per target for the next time. Which a target shows is its type's to say:
 #
 #   target                           window   sound            passthrough   graphics   camera, microphone
 #   rdp                              yes      shown            always        shown      shown
@@ -269,9 +270,9 @@ site_passwd = ""
 # tiles with motion; an "ard" Mac's Adaptive picture; or an "rdp" host's graphics
 # pipeline for the page to compose, which is no choice: with `egfx` on every
 # session passes it, and a browser that cannot compose it cannot start the
-# target. Each is described with its target below. A browser that cannot take a
-# session somebody else started is shown why and offered End session, not a
-# different session.
+# target. Each is described with its target below. An owning browser that comes
+# back unable to take the session's picture ends that session and lands on the
+# picker. A takeover ends it before the new browser chooses its own session.
 #
 # Camera and Microphone, EXPERIMENTAL, offer the remote this browser's devices, on
 # an "rdp" target over MS-RDPECAM and MS-RDPEAI and on a "wlshare" target over
@@ -415,9 +416,11 @@ password_ref = "example"
 # The remote's sound, in a session started with it as Opus, is sent in 20 ms
 # packets. The channel has to be negotiated when the connection is made, so such
 # a session asks the server to redirect from the moment it connects and throws
-# the sound away while nobody is listening. Nothing about it depends on how the
-# page is reached: the client refuses to start at all without a secure context
-# and a pair of WebCodecs decoders.
+# the sound away while nobody is listening. The page needs a secure context.
+# WebCodecs is required for sound and video streams; without AudioDecoder the
+# picker disables sound, and without VideoDecoder the picture paths that need
+# it are unavailable. The gateway's tiles, a Standard Mac's Adaptive picture and
+# an RDP pipeline without H.264 do not need WebCodecs.
 #
 # Its bitrate is not a key, and neither is whether it adapts: Opus always
 # follows the audio socket's own backpressure, with 320 kbit/s as its ceiling.
@@ -431,10 +434,11 @@ password_ref = "example"
 # every adaptive stream, so there is no floor to set: 32 kbit/s, degraded but
 # continuous, which is the point of giving bitrate up.
 
-# A plain VNC target needs host and, usually, one of the two passwords; domain is
-# refused, and it is asked once for `size`, or 1440×900, as above.
-# `vnc_password_ref` names the server's own password, which and is all a server without user
-# accounts takes. It is the RFB baseline: the picture comes as ZRLE and is sent as
+# A plain VNC target needs host and, usually, credentials; domain and size are
+# refused, and the server's framebuffer is shown at its own size.
+# `vnc_password_ref` names a classic VncAuth password. RSA-AES takes password_ref,
+# with username when the server asks for an account, or alone when it asks only
+# for a password. It is the RFB baseline: the picture comes as ZRLE and is sent as
 # tiles, shown at 1x, with no sound, camera or microphone.
 # [[targets]]
 # name = "workstation-vnc"
@@ -449,9 +453,11 @@ password_ref = "example"
 # output list; its sound, in a session started with it; and, in a session started
 # with them at the picker, the camera and the microphone.
 # Without the subtype the same server is a plain target, read as any VNC server
-# is. With a username and password, wlshare checks the account it runs as through
-# PAM over RSA-AES, encrypting the session; a password_file on the server is its
-# VNC password instead, which vnc_password_ref names. See docs/wlshare-density.md.
+# is. With its [pam] table, wlshare checks the account it runs as through PAM over
+# RSA-AES, using this target's username and password_ref. With its [password]
+# table instead, use password_ref alone and omit username; RSA-AES encrypts
+# either session. wlshare offers no classic VncAuth, so vnc_password_ref does not
+# apply to it. See docs/wlshare-density.md.
 # [[targets]]
 # name = "workstation-wayland"
 # protocol = "vnc"

@@ -67,7 +67,7 @@ https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
 
 ## 功能
 
-- **单一的浏览器客户端。** 只需要安全上下文（secure context）和 WebCodecs，无需安装任何东西：桌面上的 Chrome、Edge 或 Safari，Android 上的 Chrome，以及 iPhone 或 iPad 上的 Safari。Firefox 也能运行，但它的原生解码器既不支持高性能模式 Mac 的 HEVC，也不支持其 AAC-ELD，因此在 Firefox 中 Mac 的画面使用其 H.264，或在页面的软件解码器中使用其 HEVC。桌面使用时，建议将页面安装为 Chrome 或 Edge 应用。
+- **单一的浏览器客户端。** 需要安全上下文（secure context），视频流和声音还需要 WebCodecs，无需安装任何东西：桌面上的 Chrome、Edge 或 Safari，Android 上的 Chrome，以及 iPhone 或 iPad 上的 Safari。没有 WebCodecs 时，网关的图块、标准模式 Mac 的 Adaptive 画面以及不含 H.264 的 RDP 管道仍可使用，但没有声音。Firefox 也能运行，但它的原生解码器既不支持高性能模式 Mac 的 HEVC，也不支持其 AAC-ELD，因此在 Firefox 中 Mac 的画面使用其 H.264，或在页面的软件解码器中使用其 HEVC。桌面使用时，建议将页面安装为 Chrome 或 Edge 应用。
 - **按远程尺寸、感知像素密度的显示。** 使用默认图形管道的 RDP、wlshare 以及 Mac 的虚拟显示器可以按屏幕像素密度跟随浏览器窗口改变尺寸。Mac 的物理显示器按其报告的密度显示。标准 VNC 无法报告密度，按 1x 显示。
 - **高性能模式 Mac 上两个可调整尺寸的虚拟显示器（alpha）。** 每个显示器有自己的浏览器标签页，每个标签页的窗口决定其显示器的尺寸。macOS 26 上 Apple 自己的查看器不提供这一功能：有两个虚拟显示器时，它会提示动态分辨率不可用。
 - **远程自己的画面在浏览器中解码，或使用网关的图块。** Windows 主机的图形管道直通给浏览器合成，在局域网下以高质量绘制，或（alpha）以主机按浏览器链路调整的 H.264 绘制。高性能模式 Mac 的 HEVC 或 H.264 始终原样直通，两者都不随浏览器链路自适应：静止画面数据量很小，运动画面则很大。H.264 不需要页面中的 HEVC 解码器，因此任何构建都能让任意浏览器访问高性能模式 Mac。标准模式 Mac 自己的 Adaptive 画面直通（beta），在页面中解码，并按浏览器链路调节节奏：精度保持不变，较慢的链路只是更新更少、细化更晚。wlshare 直通的 VP9 同样跟随浏览器链路。由网关编码画面时，例如普通 VNC 服务器，或标准模式 Mac 的 Full 质量（在网关解压的无损 zlib），网关发送 64×64 图块：颜色少的图块用精确的 PNG，运动区域用 JPEG，静止后再精确地重发一次，发送速度与浏览器的绘制速度一致，最终收敛到无损。
@@ -84,7 +84,7 @@ zDesk 围绕各平台原生的远程桌面服务器构建：Windows 自带的远
 - **Windows 10 和 11 的远程桌面**（`rdp`）。按密度跟随窗口，传输 Opus 或 FLAC 声音，同时支持摄像头和麦克风。画面是其图形管道，直通给浏览器，可以是高质量，或（alpha）自适应 H.264。
 - **Mac 的高性能屏幕共享**（`vnc`，`subtype = "ard-high-performance"`）。按密度跟随窗口，支持一个或两个虚拟显示器，始终传输 AAC-ELD 声音。画面是直通的 HEVC 或 H.264，由 Mac 按自己的速率而非浏览器链路发送：静止画面数据很少，运动时很多。H.264 无需任何额外组件，HEVC 则需要能解码它的浏览器或页面的软件解码器。
 - **Mac 的标准屏幕共享**（`vnc`，`subtype = "ard"`）。Mac 的物理显示器，单个或全部，按其自身尺寸和密度显示，画面是网关对 Mac 无损 Full 质量编码的图块，或直通的 Mac 自己的 Adaptive 画面（beta）；不支持声音、摄像头和麦克风。
-- **Linux 上的 wlshare**（`vnc`，`subtype = "wlshare"`）。由于服务器是我们自己的，RFB 缺少的功能都加到了它里面：它可以切换输出、按密度跟随窗口、传输 Opus 或 FLAC 声音以及浏览器的摄像头和麦克风，并自行编码 VP9 供网关直通，随浏览器链路自适应；或者在链路带宽充裕时，使用它自己的精确图块，并为每个运动区域提供一路视频流，VP9 或主机的硬件 H.264。可以同时显示两个输出，第二个在单独的浏览器标签页中（alpha）。
+- **Linux 上的 wlshare**（`vnc`，`subtype = "wlshare"`）。由于服务器是我们自己的，RFB 缺少的功能都加到了它里面：它可以切换输出、按密度跟随窗口、传输 Opus 或 FLAC 声音以及浏览器的摄像头和麦克风，并自行编码 VP9 供网关直通，随浏览器链路自适应；或者在链路带宽充裕时，使用它自己的精确图块，并为每个运动区域提供一路视频流，使用硬件或 libx264 编码的 H.264，必要时回退到 VP9。可以同时显示两个输出，第二个在单独的浏览器标签页中（alpha）。
 
 其他所有 VNC 服务器都是普通的 `vnc` 目标，通过 RFB 基础功能访问：一个 1x 帧缓冲，不调整尺寸，没有声音，由网关发送图块。其他 RDP 服务器可能碰巧能用，但未经测试。对比表、它们的共同点以及各自直通的内容，见 [Prioritized servers](docs/architecture.md#prioritized-servers)（英文）。
 
@@ -172,9 +172,11 @@ docker run -d --name zdesk -p 52380:52380 \
 bun install --cwd frontend
 cp zdesk.example.toml zdesk.toml
 cargo run -- gen-passwd admin
-# 把生成的凭据粘贴到 zdesk.toml，然后：
+# 设置 [server].site_passwd，配置目标及其密码（见下文），然后：
 cargo run -- serve -c zdesk.toml
 ```
+
+复制的示例引用了 `[passwords].example`，但需要你自己添加该值。按[目标密码](docs/guide.zh-CN.md#目标密码)设置目标的加密密码和主密码文件。如果目标使用空密码，可在 `[passwords]` 下添加 `example = ""`，此时无需主密码。
 
 Cargo 会构建前端并将其编译进二进制文件，因此网关是唯一提供页面的程序。检查命令：
 
@@ -184,7 +186,7 @@ cargo test --lib
 bun run --cwd frontend check
 ```
 
-`tests/` 下的端到端测试默认被忽略：VNC 和 wlshare 的测试需要 Docker 或 Podman（`cargo test --test vnc_e2e --test wlshare_e2e -- --ignored`）。RDP 探针借用一台真实的 Windows 主机，因此它们是按需运行的示例而不是测试（`cargo run --example rdp_client_probe -- <case>`），无头浏览器测试见 [`tests/playwright`](tests/playwright/README.md)。详情见 [Development](docs/development.md)，发布构建见 [Packaging](packaging/README.md)。
+`tests/` 下自包含的集成测试用 `cargo test --tests` 运行。依赖容器的 VNC 和 wlshare 测试默认被忽略，需要 Docker 或 Podman（`cargo test --test vnc_e2e --test wlshare_e2e -- --ignored`）。RDP 探针借用一台真实的 Windows 主机，因此它们是按需运行的示例而不是测试（`cargo run --example rdp_client_probe -- <case>`），无头浏览器测试见 [`tests/playwright`](tests/playwright/README.md)。详情见 [Development](docs/development.md)，发布构建见 [Packaging](packaging/README.md)。
 
 ## 许可证
 

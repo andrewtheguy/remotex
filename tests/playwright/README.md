@@ -201,16 +201,17 @@ one.
 
 ## Run
 
-Install Chromium once:
+Install the pinned dependencies and Chromium once:
 
 ```sh
 cd tests/playwright
+bun run deps
 bunx playwright install chromium
 ```
 
-The runner itself needs no separate step: every `bun run` script here installs the
-pinned dependencies first if `node_modules` is missing, which it is in a fresh
-clone.
+The test and typecheck scripts also run `bun run deps` automatically. Run it
+before a direct `bunx playwright` command in a fresh clone so that command uses
+the repository's pinned Playwright version.
 
 Start the gateway from the repository root. It serves the page the specs open,
 the bundle compiled into it, so a frontend change is in a run only after the
@@ -373,8 +374,9 @@ bunx playwright test '/input-held\.spec\.ts$'
 The picker spec also runs against a live RDP host, named the same way.
 
 `bun run test` runs all specs. `bun run test:clipboard`,
-`bun run test:oversized`, `bun run test:tiles` and `bun run test:hevc` run one
-each; their filters are anchored (`'/clipboard\.spec\.ts$'`) because a
+`bun run test:oversized` and `bun run test:tiles` each select one spec;
+`bun run test:hevc` selects the Chrome, Firefox and faked software-HEVC specs.
+Their filters are anchored (`'/clipboard\.spec\.ts$'`) because a
 positional argument is a regex matched against the whole path, and the bare name `clipboard.spec.ts` also matches
 `oversized-clipboard.spec.ts`.
 

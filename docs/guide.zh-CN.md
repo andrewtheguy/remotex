@@ -46,7 +46,7 @@ defaults write -g NSConvolutionOverride1 -float 1
 - **图形（Graphics）。** RDP 主机如何绘制其管道。*High quality*（默认）使用管道中除 H.264 以外的编码，适用于局域网：慢速链路只会得到更少的帧，而不会更粗糙。*Adaptive*（alpha）是主机按浏览器链路调整的 H.264：慢速链路更粗糙，快速链路更精细。其下，*H.264 full screen*（默认）用 H.264 绘制整个桌面，*H.264 region* 只对像视频那样运动的部分使用 H.264，其余部分按 High quality 的方式绘制，文字因此保持清晰，但自适应较少。在 `VideoDecoder` 无法解码主机 H.264 的浏览器中，Adaptive 会被置灰。要让主机无损绘制，见[精确画面](#精确画面)。
 - **摄像头（Camera）** 和 **麦克风（Microphone）**（实验性）。在 `rdp` 或 `wlshare` 目标上，这两个勾选项向远程提供本浏览器的设备，之后在会话的菜单中打开：见[摄像头和麦克风](#摄像头和麦克风)。
 
-一个网关只持有一个会话。重新加载或连接断开通常会恢复会话；启用图形管道的 RDP 会话则会重新连接引擎，因为浏览器的合成器状态已经丢失。另一个浏览器若发现所有者仍连接着，会被询问是否接管；在所有者重新连接的宽限期内到达的浏览器可以直接占用该槽位。两种情况都从选择器开始，使用它自己的选项。远程会保留自己的桌面，因此再次启动该目标会回到相同的窗口。
+一个网关只持有一个会话。重新加载或连接断开通常会恢复会话；启用图形管道的 RDP 会话以及标准模式 Mac 的 Adaptive 会话则会重新连接引擎，因为浏览器的合成器或解码器状态已经丢失。另一个浏览器若发现所有者仍连接着，会被询问是否接管；在所有者重新连接的宽限期内到达的浏览器可以直接占用该槽位。两种情况都从选择器开始，使用它自己的选项。远程会保留自己的桌面，因此再次启动该目标会回到相同的窗口。
 
 见 [What a session is started with](architecture.md#what-a-session-is-started-with)。
 
@@ -178,11 +178,11 @@ password_ref = "wayland"
 
 [wlshare](https://github.com/andrewtheguy/wlshare) 是本项目自己的 VNC 服务器，面向基于 wlroots 的 Wayland 桌面。这个子类型让网关列出 wlshare 的私有 RFB 扩展：它的 VP9 流，原样直通并随浏览器链路自适应；像素密度；输出列表；声音；以及在勾选后启动的会话中，作为桌面上 PipeWire 设备的浏览器摄像头和麦克风。不设置子类型时，同一服务器按任何 VNC 服务器的方式读取。
 
-- **画面（Picture）。** 选择器的 Picture 组为 *Video, passed through*（默认）：wlshare 对整个桌面编码的 VP9，按浏览器的链路调整。或 *Tiles with motion, passed through*：静止的部分为精确的 PNG，每个运动区域有自己的一路 VP9 流，停下后再精确地重发。图块适用于带宽充裕的链路：wlshare 花在图块上的时间只是 VP9 的一小部分，最终画面是精确的，代价是数倍的字节数，大面积运动时达每秒数十 Mbit。其运动区域按 `video_quality` 编码，`render_adaptive` 对它们不起作用。
+- **画面（Picture）。** 选择器的 Picture 组为 *Video, passed through*（默认）：wlshare 对整个桌面编码的 VP9，按浏览器的链路调整。或 *Tiles with motion, passed through*：静止的部分为精确的 PNG，每个运动区域有自己的一路视频流，使用主机硬件编码器或 libx264 编码的 H.264，必要时回退到 VP9，停下后再精确地重发。图块适用于带宽充裕的链路：wlshare 花在图块上的时间只是 VP9 的一小部分，最终画面是精确的，代价是数倍的字节数，大面积运动时达每秒数十 Mbit。其运动区域按 `video_quality` 编码，`render_adaptive` 对它们不起作用。
 
 - **Alpha：** 恰好有两个输出（显示器或无头输出）的桌面会列出 *All Displays* 并从它开始：第一个留在此处，第二个在同一浏览器的新标签页中打开 `/display/2`，有自己的指针和键盘，与有两个虚拟显示器的 `rdp` 目标一样。`virtual_displays = 2` 请求 wlshare 提供两个，就像请求 Windows 主机或 Mac 那样：在 sway 上，wlshare 会让合成器创建第二个无头输出，以两个启动的会话在请求一个（默认）时保持一个；在其他合成器上，输出就是合成器已有的那些。
 
-示例使用 wlshare 运行所用的账户，通过 RSA-AES 上的 PAM 校验。如果 wlshare 改用 `password_file`，请把该服务器密码放在 `vnc_password_ref` 下，并省略 `username` 和 `password_ref`。
+示例使用 wlshare 运行所用的账户，通过 RSA-AES 上的 PAM 校验。如果 wlshare 改用 `[password]` 表，请用 `password_ref` 引用该密码，并省略 `username`，RSA-AES 此时只发送密码。wlshare 不提供经典 VNC 认证，因此不使用 `vnc_password_ref`。
 
 见 [密度](wlshare-density.md)、[输出](wlshare-outputs.md)、[音频](wlshare-audio.md)、[摄像头](wlshare-camera.md) 和 [麦克风](wlshare-microphone.md)。
 
@@ -196,7 +196,7 @@ host = "192.0.2.13"
 vnc_password_ref = "workstation-vnc"
 ```
 
-普通目标用 `vnc_password_ref` 进行经典 VNC 认证，或用 `username` 和 `password_ref` 进行 RSA-AES 认证。网关请求 ZRLE，所有现行的 VNC 服务器都支持它，除此之外只读取 Raw；较老的标准编码、Tight 以及其他厂商的或有损的编码都不在列表中。目标按服务器自身的尺寸、以 1x 显示，不传输声音、摄像头或麦克风。标准 RFB 无法表明其像素是 HiDPI；见 [HiDPI over standard RFB](standard-rfb-hidpi.md)。
+普通目标用 `vnc_password_ref` 进行经典 VNC 认证，或用 `username` 和 `password_ref` 进行 RSA-AES 认证。仅要求密码的 RSA-AES 服务器使用 `password_ref`，不设置 `username`。网关请求 ZRLE，所有现行的 VNC 服务器都支持它，除此之外只读取 Raw；较老的标准编码、Tight 以及其他厂商的或有损的编码都不在列表中。目标按服务器自身的尺寸、以 1x 显示，不传输声音、摄像头或麦克风。标准 RFB 无法表明其像素是 HiDPI；见 [HiDPI over standard RFB](standard-rfb-hidpi.md)。
 
 ## 摄像头和麦克风
 

@@ -139,8 +139,9 @@ config key.
   then turns on: see [Camera and microphone](#camera-and-microphone).
 
 One gateway holds one session. A reload or a dropped connection normally
-resumes it; an RDP session with the graphics pipeline on instead reconnects the engine,
-because the browser's compositor state is gone. A different browser that finds
+resumes it; an RDP session with the graphics pipeline on or a Standard Mac's
+Adaptive session instead reconnects the engine, because the browser's compositor
+or decoder state is gone. A different browser that finds
 the owner attached is asked whether to take over; one arriving during the
 owner's reattach grace may claim the slot directly. Either starts at the picker
 with its own choices. The remote keeps its own desktop, so starting the target
@@ -430,9 +431,10 @@ server is read as any VNC server is.
 - **Picture.** The picker's Picture group is *Video, passed through*, the
   default: wlshare's VP9 of the whole desktop, which it fits to the browser's
   link. Or *Tiles with motion, passed through*: what is still as exact PNG, and a
-  VP9 stream of its own for each region that moves, sent exact again once it
-  stops. The tiles are for a link with room to spare: wlshare spends a fraction
-  of the VP9's time on them and the picture ends exact, for several times the
+  video stream of its own for each region that moves, sent exact again once it
+  stops. wlshare uses H.264 from the host's hardware encoder or libx264, with
+  VP9 as the fallback. The tiles are for a link with room to spare: wlshare
+  spends a fraction of the VP9's time on them and the picture ends exact, for several times the
   bytes — tens of Mbit/s while something large moves. Their regions are held at
   `video_quality`, which `render_adaptive` does not reach.
 
@@ -446,8 +448,10 @@ server is read as any VNC server is.
   are what the compositor has.
 
 The example uses the account wlshare runs as, checked through PAM over
-RSA-AES. If wlshare instead has a `password_file`, keep that server password
-under `vnc_password_ref` and omit `username` and `password_ref`.
+RSA-AES. If wlshare instead uses its `[password]` table, keep that password
+under `password_ref` and omit `username`: RSA-AES then sends the password alone.
+wlshare does not offer classic VNC authentication, so `vnc_password_ref` does
+not apply to it.
 
 See [density](wlshare-density.md), [outputs](wlshare-outputs.md),
 [audio](wlshare-audio.md), [camera](wlshare-camera.md) and
@@ -464,7 +468,8 @@ vnc_password_ref = "workstation-vnc"
 ```
 
 A plain target takes `vnc_password_ref` for classic VNC authentication, or
-`username` and `password_ref` for RSA-AES. The gateway asks for ZRLE, which every
+`username` and `password_ref` for RSA-AES. For a password-only RSA-AES server,
+use `password_ref` without `username`. The gateway asks for ZRLE, which every
 current VNC server has, and reads nothing else but Raw; the older standard
 encodings, Tight and the other vendor or lossy ones are not listed. The target is shown at its
 server's own size, at 1x, and carries no sound, camera or microphone. Standard RFB cannot say

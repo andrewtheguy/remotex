@@ -10,9 +10,15 @@ gateway binary.
 bun install --cwd frontend
 cp zdesk.example.toml zdesk.toml
 cargo run -- gen-passwd admin
-# Paste the generated credential into zdesk.toml, then:
+# Set [server].site_passwd, configure a target and its passwords (see below), then:
 cargo run -- serve -c zdesk.toml
 ```
+
+The copied example references `[passwords].example` without defining it.
+Configure the target's encrypted password and `[server].master_password_file`
+using [Target passwords](guide.md#target-passwords). If the target has an empty
+password, add `example = ""` under `[passwords]`; no master password is needed
+for that placeholder.
 
 Open <http://localhost:52380>. Use `RUST_LOG=info` or `RUST_LOG=debug` for
 backend logs. Use `cargo build` when you only need to compile without starting
@@ -51,6 +57,11 @@ cd ..
 ```
 
 ## End-to-end tests
+
+The self-contained HTTP/WebSocket, scripted-protocol and local control-plane
+integration tests run with `cargo test --tests`. They need no remote desktop
+host or container runtime. The platform-specific tests run on their respective
+platforms.
 
 The container-backed VNC and wlshare tests use Docker or Podman and do not
 start a browser. They are ignored by default; run them explicitly with:
