@@ -472,22 +472,25 @@ function sizeOptions(
       },
     ];
   }
-  const kept = (size: Points, value: Sizing, what: string): SizeOption => ({
+  // The default says so in its label, where it is seen without asking.
+  const kept = (
+    size: Points,
+    value: Sizing,
+    fallback: boolean,
+  ): SizeOption => ({
     value,
-    label: `${size.w}×${size.h}`,
-    note: `${what} The desktop stays at it.`,
+    label: `${size.w}×${size.h}${fallback ? " (default)" : ""}`,
+    note: `${fallback ? "The default size." : "The size set for this target."} The desktop stays at it.`,
   });
-  const configured = target.size
-    ? [kept(target.size, "target", "The size set for this target.")]
-    : [];
+  const configured = target.size ? [kept(target.size, "target", false)] : [];
   if (target.resize && follows) {
     return [...configured, FOLLOWS[follows]];
   }
   if (target.size === null) {
-    return [kept(target.defaultSize, "target", "The default size.")];
+    return [kept(target.defaultSize, "target", true)];
   }
   return target.resize
-    ? [...configured, kept(target.defaultSize, "default", "The default size.")]
+    ? [...configured, kept(target.defaultSize, "default", true)]
     : configured;
 }
 
