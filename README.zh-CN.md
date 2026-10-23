@@ -49,6 +49,22 @@ https://github.com/user-attachments/assets/cde4e192-340f-47dd-86db-3d2d89049007
 
 
 
+### Mac -> Windows，Retina/HiDPI 密度并带声音
+
+- 以 Mac 的 Retina/HiDPI 密度显示 Windows 自带的远程桌面，并在浏览器中播放远程的声音。
+
+https://github.com/user-attachments/assets/3dfd0dc2-dc7d-4d41-b99e-1340f685390c
+
+
+
+### Mac -> Linux（Sway 上的 wlshare），Retina/HiDPI 密度并带声音
+
+- 以 Mac 的 Retina/HiDPI 密度显示 Sway 上的 wlshare，带远程的声音，进入和退出沉浸式全屏时远程桌面会随浏览器调整大小。
+
+https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
+
+
+
 ## 功能
 
 - **单一的浏览器客户端。** 只需要安全上下文（secure context）和 WebCodecs，无需安装任何东西：桌面上的 Chrome、Edge 或 Safari，Android 上的 Chrome，以及 iPhone 或 iPad 上的 Safari。Firefox 也能运行，但它的原生解码器既不支持高性能模式 Mac 的 HEVC，也不支持其 AAC-ELD，因此在 Firefox 中 Mac 的画面使用其 H.264，或在页面的软件解码器中使用其 HEVC。桌面使用时，建议将页面安装为 Chrome 或 Edge 应用。
