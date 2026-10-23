@@ -552,9 +552,9 @@ selects the picture, or a key or a choice that selects its chroma. See
 - The sound's format is part of that choice, Opus or lossless, and not a config
   key. Lossless is FLAC: a `wlshare` target is asked for FLAC frames,
   passed as they came like its Opus, and an `rdp` target's PCM is coded as FLAC
-  here by libFLAC; the browser's own `AudioDecoder` decodes either, under a
-  stream header the page writes, and a browser whose decoder does not is not
-  offered it.
+  here by `sound-flac`'s own encoder; the browser's own `AudioDecoder` decodes
+  either, under a stream header the page writes, and a browser whose decoder
+  does not is not offered it.
   No other target offers it: `ard-high-performance` passes the Mac's
   AAC-ELD and nothing else, and `ard` and a plain `vnc` target carry no sound.
   Do not transcode a passed frame, add a third format, give the FLAC a rate
@@ -2656,8 +2656,8 @@ them.
   way, and makes a frame of every 882, each a FLAC stream of its own as
   wlshare's are (`sound-flac`'s encoder). What does not fill a block waits for
   the next buffer, and is dropped with a buffer the queue dropped, so no frame
-  joins samples that were never neighbours. libFLAC is linked into the gateway
-  statically, so the host needs none installed.
+  joins samples that were never neighbours. The encoder is `sound-flac`'s own,
+  in plain Rust, so the host needs no FLAC library installed.
 - **The browser decodes it.** Each frame goes to the browser's `AudioDecoder`
   as Opus does, configured with `flac` and a `description` the page writes from
   `audioFormat` (`frontend/src/flacSound.ts`): "fLaC" and a STREAMINFO of the

@@ -50,9 +50,9 @@ echo ">> building release binary"
 # ZDESK_PREBUILT_FRONTEND=frontend/dist so each target stages the one
 # platform-independent bundle built by the frontend job instead of running Bun.
 # No env coaxing here for any prebuilt C library. Remote audio links
-# `opus-prebuilt` and `libflac-prebuilt` — each pulls a prebuilt static archive
-# rather than compiling vendored C, so neither needs
-# cmake, pkg-config, a system library or a `*_STATIC` variable set. The RDP client's TLS is rustls over
+# `opus-prebuilt`, which pulls a prebuilt static archive rather than compiling
+# vendored C, so it needs no cmake, pkg-config, system library or `*_STATIC`
+# variable set; its FLAC encoder, `sound-flac`, is plain Rust. The RDP client's TLS is rustls over
 # `ring`, so there is no libssl to find either. The binary runs on
 # debian:trixie-slim, and there is no cmake_minimum_required for CMake 4 to reject.
 cargo build --release

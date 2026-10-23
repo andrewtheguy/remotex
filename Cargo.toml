@@ -242,8 +242,8 @@ anyhow = "1"
 # glibc arenas and keep the system allocator.
 #
 # Unprefixed, so jemalloc is `malloc` itself and not only Rust's allocator: libopus
-# and libFLAC call `malloc`, and with Rust alone on jemalloc the gateway grew faster
-# than it did on glibc.
+# calls `malloc`, and with Rust alone on jemalloc the gateway grew faster than it
+# did on glibc.
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = "0.7"
 tikv-jemalloc-sys = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }

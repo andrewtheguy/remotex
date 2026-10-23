@@ -145,9 +145,9 @@ announces late is still taken.
   possible FLAC frame or proof that the server lost framing.
 
 So the gateway needs no codec for wlshare's sound.
-wlshare's FLAC encoder is libFLAC, through
-[sound-flac](https://github.com/andrewtheguy/sound-flac), which the gateway
-pins too, for the FLAC it codes of an RDP host's sound.
+wlshare's FLAC encoder is
+[sound-flac](https://github.com/andrewtheguy/sound-flac)'s own, in plain Rust,
+which the gateway pins too, for the FLAC it codes of an RDP host's sound.
 
 Audio shares the TCP stream with the pixels, which is the one cost of carrying
 it in band. wlshare drains its capture queue before every framebuffer update, so

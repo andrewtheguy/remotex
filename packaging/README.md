@@ -112,21 +112,24 @@ filenames, which the container build selects by release version.
 ## x86-64 CPU compatibility
 
 An x86-64 gateway is built for the baseline x86-64 ISA: nothing sets
-`target-cpu`, and SIMD is chosen at run time. The prebuilt archives the sys
-crates download keep that baseline, with their hand-written kernels selected by
-CPUID: opus's `MAY_HAVE` dispatch and libFLAC's own CPU detection, as the tile
-coder's JPEG encoder picks its AVX2 kernels at run time. The sys crates fetch each dependency repository's latest release, so
-that release's archives—not the tag pinned in this repository's
-`Cargo.toml`—set the effective CPU floor.
+`target-cpu`, and SIMD is chosen at run time. The prebuilt libopus archive its
+sys crate downloads keeps that baseline, with its hand-written kernels selected
+by CPUID through opus's `MAY_HAVE` dispatch, as the tile coder's JPEG encoder
+picks its AVX2 kernels at run time; the FLAC encoder, `sound-flac`'s own in
+plain Rust, is compiled for the baseline like the rest of the gateway. The sys
+crate fetches its dependency repository's latest release, so that release's
+archive—not the tag pinned in this repository's `Cargo.toml`—sets the
+effective CPU floor.
 
 ## Prebuilt native dependencies
 
-Release builds link `opus-prebuilt` and, under
-[sound-flac](https://github.com/andrewtheguy/sound-flac), `libflac-prebuilt`.
-Their sys crates download static archives instead of building vendored C and
-C++, so this project needs no CMake, assembler, pkg-config, libclang, vcpkg, or
-system copies of those libraries, and no artifact carries or depends on one.
-`LIBOPUS_PREBUILT_DIR` and `LIBFLAC_PREBUILT_DIR` select locally built archives.
+Release builds link `opus-prebuilt`. Its sys crate downloads a static archive
+instead of building vendored C, so this project needs no CMake, assembler,
+pkg-config, libclang, vcpkg, or a system copy of libopus, and no artifact
+carries or depends on one. `LIBOPUS_PREBUILT_DIR` selects a locally built
+archive. The FLAC encoder,
+[sound-flac](https://github.com/andrewtheguy/sound-flac), is plain Rust:
+nothing is compiled, downloaded or linked for it.
 
 No artifact holds the software HEVC decoder, the page's decoder of a High
 Performance Mac's passed HEVC, whose licence keeps it out: an operator
@@ -152,7 +155,7 @@ libopus build in `build-tarball.sh`.
 The C libraries built from source are SQLite, for `[meter]`, through `rusqlite`'s
 `bundled` feature, and jemalloc, through `tikv-jemallocator`.
 jemalloc is the global allocator on Linux and is linked with unprefixed `malloc` symbols,
-so allocations in libopus and libFLAC use it as well as Rust allocations. The build
+so allocations in libopus use it as well as Rust allocations. The build
 environment must provide a C compiler and `make`. macOS and Windows, which have no
 glibc arenas, keep their system allocators.
 
