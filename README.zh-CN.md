@@ -53,7 +53,7 @@ https://github.com/user-attachments/assets/cde4e192-340f-47dd-86db-3d2d89049007
 
 - 以 Mac 的 Retina 密度显示 Windows 自带的远程桌面，并在浏览器中播放远程的声音。
 
-https://github.com/user-attachments/assets/52dae40b-05ce-4621-b680-8fe035ea6a47
+https://github.com/user-attachments/assets/0f6b272b-d3be-4bb1-8968-16072b382c49
 
 
 

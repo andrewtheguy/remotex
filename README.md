@@ -69,7 +69,7 @@ https://github.com/user-attachments/assets/cde4e192-340f-47dd-86db-3d2d89049007
 
 - Windows' own Remote Desktop shown at the Mac's Retina density, with the remote's sound playing in the browser.
 
-https://github.com/user-attachments/assets/52dae40b-05ce-4621-b680-8fe035ea6a47
+https://github.com/user-attachments/assets/0f6b272b-d3be-4bb1-8968-16072b382c49
 
 
 
