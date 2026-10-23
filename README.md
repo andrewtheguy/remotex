@@ -95,8 +95,9 @@ https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
   browser window at its screen density, so it is sharp on a Retina or HiDPI
   display and shown at its true size.
 - **Two displays at once (alpha).** On Windows, a High Performance Mac and
-  wlshare, the second display opens in a browser tab of its own, and each tab's
-  window sizes its display. Apple's own viewer on macOS 26 does not offer this:
+  wlshare, the second display opens in a browser tab of its own. In a session
+  that follows the window, each tab's window sizes its display if it is virtual
+  or headless; a physical monitor keeps its own mode. Apple's own viewer on macOS 26 does not offer this:
   with two virtual displays it reports that dynamic resolution is not available.
 - **The remote's own picture, decoded in the browser, or the gateway's tiles.**
   A Windows host's graphics pipeline is passed for the browser to compose, drawn
@@ -324,8 +325,13 @@ bun run --cwd frontend check
 
 The self-contained integration tests under `tests/` run with `cargo test --tests`.
 The container-backed VNC and wlshare tests are ignored by default because they
-need Docker or Podman (`cargo test --test vnc_e2e --test wlshare_e2e --
---ignored`). The RDP probes borrow a real Windows host, so they are examples run
+need Docker or Podman:
+
+```sh
+cargo test --test vnc_e2e --test wlshare_e2e -- --ignored
+```
+
+The RDP probes borrow a real Windows host, so they are examples run
 on demand rather than tests (`cargo run --example rdp_client_probe -- <case>`),
 and the headless browser tests are described in
 [`tests/playwright`](tests/playwright/README.md).
