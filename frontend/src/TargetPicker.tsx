@@ -684,7 +684,9 @@ function StatedChoice({
 
 // The (i) beside an option: its note, shown over what follows while the button
 // is hovered or after it is tapped, and closed by another tap, a tap elsewhere
-// or Escape. The note stays in the page, hidden, as its option's description.
+// or Escape. A note closed under the pointer stays closed until the pointer
+// leaves the button, which hovering would otherwise show it again. The note
+// stays in the page, hidden, as its option's description.
 function InfoTip({
   id,
   about,
@@ -695,6 +697,7 @@ function InfoTip({
   note: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
   const root = useRef<HTMLSpanElement>(null);
   useEffect(() => {
     if (!open) {
@@ -708,6 +711,7 @@ function InfoTip({
     const onEscape = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setOpen(false);
+        setDismissed(true);
       }
     };
     document.addEventListener("pointerdown", outside);
@@ -725,7 +729,12 @@ function InfoTip({
         aria-label={`About ${about}`}
         aria-expanded={open}
         aria-controls={id}
-        onClick={() => setOpen((was) => !was)}
+        data-dismissed={dismissed || undefined}
+        onClick={() => {
+          setOpen(!open);
+          setDismissed(open);
+        }}
+        onPointerLeave={() => setDismissed(false)}
       >
         i
       </button>

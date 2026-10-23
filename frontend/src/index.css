@@ -669,7 +669,7 @@ body {
 }
 
 @media (hover: hover) {
-  .picker-info-button:hover + .picker-tip {
+  .picker-info-button:hover:not([data-dismissed]) + .picker-tip {
     display: block;
   }
 }
