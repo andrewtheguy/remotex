@@ -65,6 +65,23 @@ Opus decoded to the 16-bit PCM an RDP host or wlshare records. Both redirections
 are experimental — see [Camera frames](#camera-frames) and
 [Microphone frames](#microphone-frames).
 
+## Direction
+
+zdesk is still settling its direction. It has gone through many iterations,
+each replacing the last rather than building on it. The direction it now leans
+toward is a gateway with the browser as its only client, without a native
+client app, reaching the remote desktop server each platform already has:
+modern Windows' own Remote Desktop, macOS's built-in Screen Sharing, and
+[wlshare](https://github.com/andrewtheguy/wlshare) on Linux, with other RDP and
+VNC servers as the lower-priority targets described under
+[Prioritized servers](#prioritized-servers). Windows and macOS hosts are
+agentless: nothing is installed on them, only their own sharing switched on.
+
+That is why there is no backward compatibility. While the direction is still
+moving, a path kept for an earlier form would hold an abandoned iteration in
+place and make the next change harder, so a release replaces a configuration
+key, the WebSocket protocol or a feature outright.
+
 ## Constraints
 
 The rules every change keeps, by area. [AGENTS.md](../AGENTS.md) names each
