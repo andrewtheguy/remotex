@@ -91,9 +91,11 @@ https://github.com/user-attachments/assets/68b73718-9406-4003-a374-2829f2536395
   desktop, Chrome on Android, and Safari on an iPhone or iPad. For desktop use,
   install the page as an app from Chrome's or Edge's menu, so it opens in a
   window of its own.
-- **Remote-sized, density-aware display.** The remote desktop follows the
-  browser window at its screen density, so it is sharp on a Retina or HiDPI
-  display and shown at its true size.
+- **Remote-sized, density-aware display.** Windows with its graphics pipeline,
+  a High Performance Mac and wlshare's headless outputs follow the browser
+  window at its screen density, so they are sharp on a Retina or HiDPI display
+  and shown at their true size. A Standard Mac's physical displays are shown at
+  the density they report.
 - **Two displays at once (alpha).** On Windows, a High Performance Mac and
   wlshare, the second display opens in a browser tab of its own. In a session
   that follows the window, each tab's window sizes its display if it is virtual
@@ -186,8 +188,9 @@ What each server and browser does not do, in one place.
 | Lossless FLAC sound | ✅ | ❌ Opus only | ✅ |
 | Key chords the browser keeps for itself (⌘W, ⌘T, ⌘N) | ✅ in an app window or Immersive full screen | ❌ | ❌ |
 
-hevc-wasm is the page's software HEVC decoder, served by a gateway with
-`[hevc_wasm]` set. Where neither it nor the browser decodes the HEVC, the
+hevc-wasm is the page's software HEVC decoder, served by a gateway that finds
+its release archive in its install's `share/zdesk`, or where `[hevc_wasm]`
+names one kept elsewhere. Where neither it nor the browser decodes the HEVC, the
 picker offers the Mac's H.264.
 
 An app window is the page installed from the browser's menu: in Chrome, ⋮ →
