@@ -23,7 +23,7 @@ exclude = ["frontend/wasm/egfx", "frontend/wasm/apple-adaptive"]
 
 [package]
 name = "zdesk"
-version = "0.0.460"
+version = "0.0.461"
 license = "MIT"
 edition = "2024"
 
@@ -121,7 +121,7 @@ opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libop
 # so nothing of libFLAC is compiled, downloaded or loaded, and a listener
 # decodes with a decoder of its own. wlshare's own sound, FLAC or Opus, is
 # passed as it came and needs neither codec here (src/vnc_audio.rs).
-sound-flac = { git = "https://github.com/andrewtheguy/sound-flac", tag = "v0.0.5" }
+sound-flac = { git = "https://github.com/andrewtheguy/sound-flac", tag = "v0.0.6" }
 # 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
 # the point: the naive interleaved interpolation blends left into right.
