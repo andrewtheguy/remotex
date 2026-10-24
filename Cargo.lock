@@ -3256,8 +3256,8 @@ dependencies = [
 
 [[package]]
 name = "sound-flac"
-version = "0.0.6"
-source = "git+https://github.com/andrewtheguy/sound-flac?tag=v0.0.6#2ae603752b803bc7513a4ecc45359d2d2f4ad4b5"
+version = "0.0.7"
+source = "git+https://github.com/andrewtheguy/sound-flac?tag=v0.0.7#246cf1f665af7dd08954ac344a6ef632d8d4dd42"
 dependencies = [
  "thiserror",
 ]
@@ -4311,7 +4311,7 @@ dependencies = [
 
 [[package]]
 name = "zdesk"
-version = "0.0.461"
+version = "0.0.462"
 dependencies = [
  "aes",
  "aes-gcm",
